@@ -32,6 +32,34 @@ is revisited, strike it here and add the replacement — don't rewrite history.
 - **Escape hatch:** contracts are JSON-Schema-first (exported from Pydantic), so SDKs
   in other languages implement against the schema, not against Python.
 
+### D-001a · Scaling addendum (2026-09-03): Python is not the bottleneck
+
+Considered deliberately early, at the user's request. Where load actually lands,
+in order:
+
+1. **Store first.** SQLite's single writer caps out long before Python does
+   (~1–3k req/s per uvicorn worker ≈ tens of millions of claims/day per pod).
+   Remedy is the D-008 store swap (Postgres/Neo4j) — no language change.
+2. **Replicas second.** With a server-backed store, stateless engine pods scale
+   horizontally on k8s. The request path is I/O-bound, where replicas beat a
+   faster language; the GIL only penalizes CPU-bound work we don't do in-process.
+3. **Enrichment is LLM-bound** and *wants* Python's ML/MCP ecosystem; vector
+   math runs in C (sqlite-vec/numpy) regardless.
+
+Python becomes wrong only outside the project charter (>~10k events/sec/node
+sustained, sub-ms p99, heavy per-request CPU). The plan then is a **partial**
+rewrite — the ingest gateway alone in Go/Rust against the same JSON contracts —
+never a whole-system port.
+
+**Guardrails that keep that option cheap (enforce from now on):**
+- Contracts and wire/storage formats stay language-neutral: JSON + SQL only,
+  never pickle, never Python-typed blobs, no framework types leaking into
+  responses.
+- Business logic stays out of surface adapters (HTTP/MCP/CLI remain thin), so
+  a replacement gateway re-implements transport, not semantics.
+- Before claiming capacity numbers (e.g. at the conference), measure with a
+  load test rather than citing this addendum.
+
 ## D-002 · Default store: SQLite (+ sqlite-vec later), behind a `GraphStore` interface
 
 - **Why:** single-file, zero-ops, trivially Dockerized, handles millions of
