@@ -1,0 +1,36 @@
+services:
+  loom:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - loom-data:/data
+    environment:
+      LOOM_DB: /data/loom.db
+
+  test:
+    build: .
+    profiles: ["test"]
+    environment:
+      LOOM_DB: /tmp/loom-test.db
+    volumes:
+      - ./tests:/app/tests:ro
+    command: pytest -q
+
+  # Optional GraphStore backend for teams wanting Cypher / visual exploration.
+  # Requires the (not yet written) Neo4jStore implementation — see docs/decisions.md
+  # D-002 and docs/roadmap.md phase 5. Enable with: docker compose --profile neo4j up
+  # neo4j:
+  #   image: neo4j:5-community
+  #   profiles: ["neo4j"]
+  #   environment:
+  #     NEO4J_AUTH: neo4j/change-me
+  #   ports:
+  #     - "7474:7474"
+  #     - "7687:7687"
+  #   volumes:
+  #     - neo4j-data:/data
+
+volumes:
+  loom-data:
+  # neo4j-data:

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.db
+.pytest_cache/
+dist/
+*.egg-info/
+schemas.json

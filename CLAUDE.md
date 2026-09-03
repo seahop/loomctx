@@ -1,0 +1,28 @@
+# Loom (working name) — context engine for AI agents
+
+Absorbs data about entities over time (structured claims + documents) and serves
+agents token-budgeted, cited, question-scoped "context packs".
+
+## Orientation order for a fresh session
+
+1. `docs/roadmap.md` — what is done / stubbed / next (keep its status markers updated)
+2. `docs/decisions.md` — constraints and choices (append new decisions there)
+3. `docs/architecture.md` — the design
+4. Code: `src/loom/contracts.py` → `src/loom/store/sqlite.py` → `src/loom/api/http.py`
+
+## Hard rules
+
+- **Docker-only.** Never install packages or run project code on the host. Build and
+  run everything via `docker compose ...` (tests: `docker compose run --rm test`).
+- Contracts in `src/loom/contracts.py` are the API; all surfaces serialize exactly
+  those shapes. Contract changes get a decisions.md entry.
+- Persistence only through the `GraphStore` interface (`src/loom/store/`). No SQL
+  outside that package.
+- Observations are append-only; reads always take a token budget; every derived fact
+  carries citations. Domain specifics go in the schema registry, never core code.
+
+## Verify
+
+```bash
+docker compose build && docker compose run --rm test
+```
