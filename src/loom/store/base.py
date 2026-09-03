@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..contracts import ClaimIn, Entity, EntityRef, Observation
+from ..contracts import Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation
 
 
 class GraphStore(ABC):
@@ -29,6 +29,14 @@ class GraphStore(ABC):
         self, namespace: str, ref: EntityRef, limit: int = 100
     ) -> list[Observation]:
         """Observations where ref is subject OR object, newest observed first."""
+
+    @abstractmethod
+    def store_artifact(self, doc: DocumentIn) -> Artifact:
+        """Persist a document verbatim; extraction happens asynchronously later."""
+
+    @abstractmethod
+    def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
+        """Fetch a stored document by id."""
 
     @abstractmethod
     def close(self) -> None:

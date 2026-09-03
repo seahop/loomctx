@@ -62,7 +62,14 @@ observation was extracted from a document.
 `{id, namespace, type, key, aliases, provisional, created_at}` — canonical node.
 `provisional: true` marks an unresolved document mention awaiting merge.
 
-## Read side (phase 2 shapes, already defined)
+## Artifact (stored document)
+
+The 202 response to a document ingest carries an `artifact_id`; fetch the
+verbatim content at `GET /v1/artifacts/{id}`. Artifacts carry an
+`extraction_status` (`pending | done | failed`) that the phase-4 workers will
+advance as they mine claims out of the text.
+
+## Read side (live: /v1/ask and /v1/expand)
 
 **AskRequest:** `{subject, question, budget (tokens, mandatory), as_of?}`
 

@@ -26,3 +26,18 @@ agents token-budgeted, cited, question-scoped "context packs".
 ```bash
 docker compose build && docker compose run --rm test
 ```
+
+## Demo rehearsal (deterministic seed data)
+
+```bash
+docker compose up -d --build loom
+docker compose exec loom python -m loom.seed load
+# then POST /v1/ask — planted demo moments: ip 10.0.4.7 lease reassignment,
+# web-01 runs_os conflict, initech contract_owner conflict (src/loom/seed.py)
+```
+
+## Deadline
+
+Conference demo + presentation end of October 2026. Repo is public
+(github.com/seahop/Loom) — keep `main` green and presentable. k8s manifests in
+`deploy/k8s`; CI publishes the image to ghcr.io/seahop/loom on main.

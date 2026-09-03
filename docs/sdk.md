@@ -30,11 +30,12 @@ Everything else is built on this. v1 routes:
 
 ```
 GET  /healthz
-POST /v1/ingest                                  # ClaimIn | DocumentIn envelope
-GET  /v1/entities/{type}/{key}/observations      # raw, paginated (debug/audit)
-POST /v1/ask                                     # phase 2
-POST /v1/expand                                  # phase 2
-POST /v1/schemas                                 # register entity types/predicates
+POST /v1/ingest                                  # ClaimIn -> 200; DocumentIn -> 202 (artifact stored, extraction pending)
+GET  /v1/entities/{type}/{key}/observations      # raw, for debug/audit
+GET  /v1/artifacts/{id}                          # stored document, verbatim
+POST /v1/ask                                     # AskRequest -> ContextPack
+POST /v1/expand                                  # ExpandRequest -> ContextPack
+POST /v1/schemas                                 # register entity types/predicates (phase 1 remainder)
 ```
 
 Conventions: JSON everywhere; namespace via `X-Loom-Namespace` header (default
@@ -60,8 +61,8 @@ loom.claim(
     observed_at="2026-09-01T14:03:00Z",
     source="auth-log",
 )
-loom.document(content=pdf_bytes, content_type="application/pdf",
-              source="ir-pipeline", filename="IR-4432.pdf")
+loom.document(text=report_text, source="ir-pipeline", filename="IR-4432.txt",
+              observed_at="2026-09-02T09:00:00Z")
 
 # read side — an app or agent framework without MCP
 pack = loom.ask(("host", "web-01"), "who logged in this week?", budget=800)

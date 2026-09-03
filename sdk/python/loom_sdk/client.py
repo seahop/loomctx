@@ -1,7 +1,7 @@
 """Thin Python client for Loom. Typed transport only — no logic (docs/sdk.md).
 
 Deliberately stdlib-only (urllib) so pipeline devices can vendor it with zero
-dependencies. Read-side methods raise until phase 2 lands server-side.
+dependencies.
 """
 
 from __future__ import annotations
@@ -54,8 +54,30 @@ class Loom:
             },
         )
 
-    def document(self, **kwargs: Any) -> dict:
-        raise NotImplementedError("document ingestion lands with phase 1 completion")
+    def document(
+        self,
+        source: str,
+        observed_at: str,
+        text: str | None = None,
+        content_b64: str | None = None,
+        content_type: str = "text/plain",
+        filename: str | None = None,
+        attrs: dict[str, Any] | None = None,
+    ) -> dict:
+        return self._post(
+            "/v1/ingest",
+            {
+                "kind": "document",
+                "namespace": self.namespace,
+                "text": text,
+                "content_b64": content_b64,
+                "content_type": content_type,
+                "filename": filename,
+                "source": source,
+                "observed_at": observed_at,
+                "attrs": attrs or {},
+            },
+        )
 
     # -------------------------------------------------------------- read side
 
@@ -64,11 +86,26 @@ class Loom:
             f"/v1/entities/{subject[0]}/{subject[1]}/observations?limit={limit}"
         )
 
-    def ask(self, subject: EntityTuple, question: str, budget: int = 800) -> dict:
-        raise NotImplementedError("context packs land in phase 2 (docs/roadmap.md)")
+    def ask(
+        self,
+        subject: EntityTuple,
+        question: str,
+        budget: int = 800,
+        as_of: str | None = None,
+    ) -> dict:
+        return self._post(
+            "/v1/ask",
+            {
+                "namespace": self.namespace,
+                "subject": {"type": subject[0], "key": subject[1]},
+                "question": question,
+                "budget": budget,
+                "as_of": as_of,
+            },
+        )
 
-    def expand(self, handle_id: str) -> dict:
-        raise NotImplementedError("context packs land in phase 2 (docs/roadmap.md)")
+    def expand(self, handle_id: str, budget: int = 800) -> dict:
+        return self._post("/v1/expand", {"handle": handle_id, "budget": budget})
 
     # --------------------------------------------------------------- plumbing
 

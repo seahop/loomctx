@@ -10,8 +10,9 @@ is revisited, strike it here and add the replacement — don't rewrite history.
    This keeps the host sanitary and is a standing project rule.
 2. **Small-resource posture.** Target: large *context*, not big data. One or two
    containers, volume-backed state, runs on a laptop or a $10 VPS. No Kafka, no
-   Elasticsearch, no managed-cloud dependencies in the core. Cloud deployment must
-   work but only as "the same compose stack, elsewhere."
+   Elasticsearch, no managed-cloud dependencies in the core. Two deployment
+   shapes only: local Docker Compose, and the k8s manifests in `deploy/k8s`
+   (D-008) — same image, same behavior.
 3. **Provenance is mandatory.** Every observation names its source; every context-pack
    item cites its observations. No uncited derived facts.
 4. **Observations are append-only.** Corrections supersede; nothing is edited in place.
@@ -58,7 +59,9 @@ infrastructure.
 ## D-005 · Working name "Loom"
 
 Provisional; chosen for the weaving metaphor and a short CLI name. Known collision
-with loom.com — fine for a working name, revisit before any public release.
+with loom.com — acceptable since there is no website planned for this project
+(2026-09-03), but revisit the name before the conference for slide/branding
+purposes. Repo is public at github.com/seahop/Loom.
 Python package: `loom` internally; PyPI-safe name TBD (e.g. `loom-ctx`) if published.
 
 ## D-006 · API surface order: HTTP first, MCP second, SDK third, CLI alongside
@@ -72,6 +75,23 @@ over HTTP. See `docs/sdk.md`.
 Enrichers depend on an `LLMClient` protocol (default: Anthropic API via env-provided
 key), so teams can point at whatever provider or local model they have. The core
 never imports a provider SDK outside the default adapter.
+
+## D-008 · Kubernetes deployment: single replica + PVC now, scale via store swap (2026-09-03)
+
+`deploy/k8s` ships a Deployment (replicas: 1, Recreate), PVC, and Service.
+One replica is the *correct* shape for the SQLite store (single writer on an
+RWO volume), not a stopgap — it comfortably serves the target workload. The
+scale-out path is swapping `GraphStore` for a server-backed implementation
+(Postgres or Neo4j, phase 5); then replicas scale horizontally with no API,
+image, or manifest-structure changes. No ingress in-repo (environment-specific;
+requires auth first, OQ-3). Local Compose remains the primary dev/demo shape.
+
+## D-009 · CI + image publishing via GitHub Actions → GHCR (2026-09-03)
+
+Every push/PR runs the Docker test suite; pushes to `main` publish
+`ghcr.io/seahop/loom:latest` and a per-SHA tag, which the k8s manifests
+consume. The repo is public, so `main` must always be green and presentable
+(conference: end of October 2026).
 
 ## Open questions (decide when the use case firms up)
 

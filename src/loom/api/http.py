@@ -1,8 +1,7 @@
 """HTTP surface — the substrate all other surfaces build on (decision D-006).
 
-Implemented: /healthz, claim ingestion, raw observation reads.
-Honest 501s: document ingestion (phase 1 completion) and /v1/ask (phase 2) —
-see docs/roadmap.md.
+Implemented: /healthz, claim + document ingestion, raw observation reads,
+artifact reads, and the phase-2 read path (/v1/ask, /v1/expand).
 """
 
 from __future__ import annotations
@@ -12,8 +11,17 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
-from ..contracts import ClaimIn, EntityRef, IngestEnvelope
+from ..context import build_pack, expand_pack
+from ..contracts import (
+    AskRequest,
+    ClaimIn,
+    ContextPack,
+    EntityRef,
+    ExpandRequest,
+    IngestEnvelope,
+)
 from ..store.sqlite import SqliteStore
 
 
@@ -33,14 +41,18 @@ def healthz() -> dict:
 
 
 @app.post("/v1/ingest")
-def ingest(envelope: IngestEnvelope, request: Request) -> dict:
+def ingest(envelope: IngestEnvelope, request: Request):
     if isinstance(envelope, ClaimIn):
         obs = request.app.state.store.record_claim(envelope)
         return {"status": "recorded", "observation_id": obs.id}
-    raise HTTPException(
-        status_code=501,
-        detail="document ingestion (artifact storage) is not implemented yet; "
-        "see docs/roadmap.md phase 1",
+    artifact = request.app.state.store.store_artifact(envelope)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "artifact_id": artifact.id,
+            "extraction": artifact.extraction_status,
+        },
     )
 
 
@@ -63,9 +75,26 @@ def entity_observations(
     }
 
 
-@app.post("/v1/ask")
-def ask() -> dict:
-    raise HTTPException(
-        status_code=501,
-        detail="context packs land in phase 2; see docs/roadmap.md",
-    )
+@app.get("/v1/artifacts/{artifact_id}")
+def get_artifact(
+    artifact_id: str,
+    request: Request,
+    namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+) -> dict:
+    artifact = request.app.state.store.get_artifact(namespace, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="unknown artifact")
+    return artifact.model_dump(mode="json")
+
+
+@app.post("/v1/ask", response_model=ContextPack)
+def ask(req: AskRequest, request: Request) -> ContextPack:
+    return build_pack(request.app.state.store, req)
+
+
+@app.post("/v1/expand", response_model=ContextPack)
+def expand(req: ExpandRequest, request: Request) -> ContextPack:
+    try:
+        return expand_pack(request.app.state.store, req.handle, req.budget)
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid expansion handle")

@@ -13,7 +13,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..contracts import ClaimIn, Entity, EntityRef, Observation, Provenance
+from ..contracts import (
+    Artifact,
+    ClaimIn,
+    DocumentIn,
+    Entity,
+    EntityRef,
+    Observation,
+    Provenance,
+)
 from .base import GraphStore
 
 _SCHEMA = """
@@ -49,6 +57,20 @@ CREATE TABLE IF NOT EXISTS observations (
     confidence       REAL NOT NULL,
     provenance_json  TEXT,
     attrs_json       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id                TEXT PRIMARY KEY,
+    namespace         TEXT NOT NULL,
+    filename          TEXT,
+    content_type      TEXT NOT NULL,
+    text              TEXT,
+    content_b64       TEXT,
+    source            TEXT NOT NULL,
+    observed_at       TEXT NOT NULL,
+    recorded_at       TEXT NOT NULL,
+    extraction_status TEXT NOT NULL DEFAULT 'pending',
+    attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
@@ -173,6 +195,61 @@ class SqliteStore(GraphStore):
             (namespace, entity.id, entity.id, limit),
         ).fetchall()
         return [self._row_to_observation(row) for row in rows]
+
+    def store_artifact(self, doc: DocumentIn) -> Artifact:
+        artifact = Artifact(
+            id=uuid.uuid4().hex,
+            namespace=doc.namespace,
+            filename=doc.filename,
+            content_type=doc.content_type,
+            text=doc.text,
+            content_b64=doc.content_b64,
+            source=doc.source,
+            observed_at=doc.observed_at,
+            recorded_at=_now(),
+            attrs=doc.attrs,
+        )
+        self._conn.execute(
+            "INSERT INTO artifacts (id, namespace, filename, content_type, text,"
+            " content_b64, source, observed_at, recorded_at, extraction_status,"
+            " attrs_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                artifact.id,
+                artifact.namespace,
+                artifact.filename,
+                artifact.content_type,
+                artifact.text,
+                artifact.content_b64,
+                artifact.source,
+                _iso(artifact.observed_at),
+                _iso(artifact.recorded_at),
+                artifact.extraction_status,
+                json.dumps(artifact.attrs),
+            ),
+        )
+        self._conn.commit()
+        return artifact
+
+    def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
+        row = self._conn.execute(
+            "SELECT * FROM artifacts WHERE namespace = ? AND id = ?",
+            (namespace, artifact_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return Artifact(
+            id=row["id"],
+            namespace=row["namespace"],
+            filename=row["filename"],
+            content_type=row["content_type"],
+            text=row["text"],
+            content_b64=row["content_b64"],
+            source=row["source"],
+            observed_at=_parse(row["observed_at"]),
+            recorded_at=_parse(row["recorded_at"]),
+            extraction_status=row["extraction_status"],
+            attrs=json.loads(row["attrs_json"]),
+        )
 
     def close(self) -> None:
         self._conn.close()

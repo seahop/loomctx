@@ -90,6 +90,22 @@ class Observation(BaseModel):
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
+class Artifact(BaseModel):
+    """A stored document: verbatim content plus extraction lifecycle status."""
+
+    id: str
+    namespace: str
+    filename: str | None = None
+    content_type: str
+    text: str | None = None
+    content_b64: str | None = None
+    source: str
+    observed_at: datetime
+    recorded_at: datetime
+    extraction_status: Literal["pending", "done", "failed"] = "pending"
+    attrs: dict[str, Any] = Field(default_factory=dict)
+
+
 class Entity(BaseModel):
     """Canonical graph node produced by entity resolution."""
 
@@ -133,6 +149,11 @@ class AskRequest(BaseModel):
     question: str
     budget: int = Field(default=800, gt=0, description="token budget; mandatory cap")
     as_of: datetime | None = None
+
+
+class ExpandRequest(BaseModel):
+    handle: str
+    budget: int = Field(default=800, gt=0)
 
 
 class ContextPack(BaseModel):

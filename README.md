@@ -40,9 +40,10 @@ with citations."*
 | `docs/decisions.md` | Language/tech choices with rationale, and the constraints we hold |
 | `docs/roadmap.md` | Phased execution plan with current status |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP, Python SDK, CLI |
-| `src/loom/` | The engine: contracts as code, store interface, SQLite store, HTTP API |
+| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, seed data |
 | `sdk/python/` | Thin Python client SDK (mirrors the HTTP/MCP surface) |
-| `tests/` | Contract and store tests |
+| `deploy/` | Kubernetes manifests + deployment guide (local Compose stays primary) |
+| `tests/` | Contract, store, context-pack, seed, and API tests |
 
 ## Quickstart (Docker only — nothing installs on the host)
 
@@ -50,23 +51,33 @@ with citations."*
 # Run the test suite
 docker compose run --rm test
 
-# Start the engine (HTTP API on :8000)
-docker compose up loom
+# Start the engine (HTTP API on :8000) and load the demo dataset
+docker compose up -d loom
+docker compose exec loom python -m loom.seed load   # ~580 claims + 5 documents
 
-# Poke it
-curl -s localhost:8000/healthz
-curl -s -X POST localhost:8000/v1/ingest -H 'content-type: application/json' -d '{
-  "kind": "claim",
-  "subject": {"type": "host", "key": "web-01"},
-  "predicate": "logged_in_by",
-  "object": {"type": "user", "key": "jdoe"},
-  "observed_at": "2026-09-01T14:03:00Z",
-  "source": "auth-log"
+# Ask a focused, budgeted question about an entity
+curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
+  "namespace": "netsec",
+  "subject": {"type": "ip", "key": "10.0.4.7"},
+  "question": "which host was assigned this ip?",
+  "budget": 600
 }'
-curl -s 'localhost:8000/v1/entities/host/web-01/observations'
 ```
+
+That last call answers with the IP's full lease timeline — it belonged to
+`web-01` until 2026-08-10, then `laptop-17` — each fact cited to `dhcp-log`.
+Ask about `host web-01`'s OS instead and the pack *leads with a conflict item*
+(two sources disagree), plus expansion handles like
+`"69 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
+pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
+`document` envelope (see `docs/contracts.md`).
+
+Deploying beyond a laptop: `kubectl apply -k deploy/k8s` — see
+[deploy/README.md](deploy/README.md).
 
 ## Status
 
-Phases 0–1 scaffolded (contracts, ingestion of claims, SQLite store, HTTP skeleton).
-See `docs/roadmap.md` for what is real, stubbed, and next.
+Phases 0–2 working: contracts, SQLite store, claim + document ingestion,
+context packs (`/v1/ask`, `/v1/expand`), deterministic seed corpus, k8s
+manifests, CI. Next: MCP server, then LLM enrichment.
+See `docs/roadmap.md` for the milestone plan (conference: end of October 2026).
