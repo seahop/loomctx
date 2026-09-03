@@ -121,9 +121,43 @@ Every push/PR runs the Docker test suite; pushes to `main` publish
 consume. The repo is public, so `main` must always be green and presentable
 (conference: end of October 2026).
 
+## D-010 · Ingestion tier: Go gateway + standard load balancing, two deployment shapes (2026-09-03)
+
+Direction set by the user: the ingestion point should be Go or Rust, and the
+design must accommodate load balancing, multiple ingestion nodes, and a
+built-in proxy story. Decisions:
+
+- **Language: Go** for the ingest gateway. Tiny static binaries, trivial
+  concurrency for an I/O fan-in workload, JSON Schema validation against the
+  exported contracts (the D-001a language-neutral payoff), and the easiest
+  contributor story for infra-minded teams. Rust remains the fallback if
+  profiling ever demands it; nothing else changes since the boundary is the
+  wire contract.
+- **The gateway is stateless**: authenticate, validate the envelope, rate-limit,
+  batch, forward. All semantics (entity resolution, storage) stay in the core.
+  Stateless is what makes "multiple ingestion nodes" free.
+- **Proxy/LB = boring, shipped, not invented.** We do not write a custom proxy.
+  "Built in" means the repo ships working configs: on k8s, a Service +
+  HorizontalPodAutoscaler over gateway replicas (round-robin LB is native);
+  locally, a compose `scale` profile with nginx in front of N gateways.
+- **Two shapes, one contract.** Default shape: single engine container, no
+  gateway, no queue — unchanged. Scale shape: N Go gateways → durable buffer
+  (NATS JetStream: one small container, chosen over Kafka-class infra per hard
+  constraint 2) → writer consumer(s) → server-backed GraphStore (D-008). The
+  buffer absorbs bursts, gives backpressure and at-least-once delivery, and
+  reconciles many ingestion nodes with the store's write path.
+- `POST /v1/ingest` is identical at every boundary; SDKs and pipeline devices
+  cannot tell which shape is deployed.
+
+Build order: design now (this entry + architecture.md), build post-conference
+unless demo load requires it sooner (roadmap phase 5). Resolves OQ-1's shape:
+the queue exists only in the scale profile.
+
 ## Open questions (decide when the use case firms up)
 
-- **OQ-1:** Real-time requirements on ingestion → do we need a queue sooner (D-004)?
+- **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~
+  Shape resolved by D-010 (queue exists only in the scale profile); remaining
+  question is *when* demo/adopter volume forces the scale shape.
 - **OQ-2:** One shared deployment with namespaces vs. per-team stacks as the primary
   story? (Both work; affects auth priority.)
 - **OQ-3:** AuthN/Z on the HTTP surface — API keys per namespace is the likely v1.

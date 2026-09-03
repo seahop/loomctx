@@ -129,6 +129,41 @@ Everything is scoped by **namespace** (present in every contract from day one).
 Different teams either share a deployment with isolated namespaces or run their own
 compose stack — both work because the deployment is one small container plus a volume.
 
+## Ingestion tier — two shapes, one contract (D-010)
+
+`POST /v1/ingest` is the same envelope everywhere; which shape sits behind it
+is a deployment choice invisible to senders.
+
+**Default shape** (laptop, small team, the demo): one engine container does
+everything. The k8s Service or compose port mapping is the only "proxy".
+
+**Scale shape** (many pipeline devices, bursty ingestion): a dedicated
+ingestion tier in front of the core —
+
+```
+ pipeline devices / SDKs
+        |
+        v
+  load balancer            (k8s Service + HPA; nginx locally — shipped
+        |                   config, never a custom proxy)
+        v
+  ingest gateways x N      (Go; stateless: authn, JSON Schema validation,
+        |                   rate limits, batching)
+        v
+  durable buffer           (NATS JetStream, one small container:
+        |                   backpressure, burst absorption, at-least-once)
+        v
+  writer consumers  ->  server-backed GraphStore (Postgres/Neo4j, D-008)
+                              ^
+  Python core (retrieval, ---+
+  enrichment, MCP) scales as separate stateless replicas
+```
+
+The gateway is Go because the hot path deserves it (D-001a/D-010); everything
+stateful or LLM-adjacent stays in the Python core. Gateways being stateless is
+what makes multi-node ingestion free — add replicas, the LB spreads load, the
+buffer serializes writes toward the store.
+
 ## Deployment posture
 
 - Single engine container + volume-backed state (SQLite default). Optional Neo4j

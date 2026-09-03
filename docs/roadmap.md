@@ -62,8 +62,14 @@ presentable.
 ## Phase 5 — Hardening & spread ⬜
 
 - Per-namespace API keys; retention policies; Neo4j/Postgres `GraphStore`
-  (the k8s scale-out path, D-008); TypeScript SDK from JSON Schema; real
-  queue if volume demands.
+  (the k8s scale-out path, D-008); TypeScript SDK from JSON Schema.
+- **Scale-shape ingestion tier (designed 2026-09-03, D-010):** Go ingest
+  gateway (stateless; validates against exported JSON Schema), nginx compose
+  profile + k8s HPA for load-balanced multi-node ingestion, NATS JetStream
+  buffer + writer consumers. Build post-conference unless demo load demands
+  it sooner; the `/v1/ingest` contract does not change.
+- Load test before the conference (early-Oct milestone) so quoted capacity
+  numbers are measured, not assumed (D-001a).
 
 ## Deployment & CI (2026-09-03)
 
