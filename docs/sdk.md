@@ -4,25 +4,41 @@ Four surfaces, one core. All of them speak the shapes in `src/loom/contracts.py`
 (exported as JSON Schema for non-Python consumers). Behavior can never diverge
 because each surface is a thin shell over the same internal service functions.
 
-## 1. MCP server — the surface for agents (phase 3)
+## 1. MCP server — the surface for agents (live, phase 3)
 
-The primary way AI systems tap in. Tools (names are contract, keep stable):
+The primary way AI systems tap in: `src/loom/mcp_server.py` wraps the same
+core functions the HTTP API uses (no drift possible). Entity handles are
+`"type:key"` strings.
 
-| Tool | Signature (conceptual) | Purpose |
-| --- | --- | --- |
-| `find_entity` | (query, namespace?) → [EntityMatch] | Resolve a name/key/description to entity handles |
-| `get_brief` | (entity, budget?) → ContextPack | The dossier brief — the cheap "who is this?" call |
-| `ask` | (entity, question, budget, as_of?) → ContextPack | Question-scoped context; the main event |
-| `expand` | (handle, budget?) → ContextPack fragment | Progressive disclosure — pull one thread deeper |
-| `record_observation` | (Claim) → ObservationRef | Agents write back what they learn |
+| Tool | Purpose |
+| --- | --- |
+| `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
+| `ask(subject, question, budget, as_of?)` | Budgeted, cited context on one entity |
+| `ask_scope(subjects, question, expand_predicates?, depth?)` | Several entities, or an anchor + contents ("domain:corp.local" over `member_of`) |
+| `expand(handle, budget)` | Progressive disclosure — pull one thread deeper |
+| `record_claim(subject, predicate, ..., object_ref \| object_value)` | Agents write back facts they learn |
+| `get_observations(subject)` | Raw audit view |
+| `answer(question, subject?)` | Server-side LLM synthesis (guides to `ask` when no LLM is configured) |
+
+Hook up a local agent (stdio, spawned per session — nothing on the host):
+
+```bash
+claude mcp add loom -- docker compose run --rm -T loom python -m loom.mcp_server
+```
+
+Remote agents use streamable HTTP:
+
+```bash
+docker compose --profile mcp up -d mcp     # MCP endpoint at :8300/mcp
+```
 
 Design rules:
 - Every tool result fits the budget and carries citations — an agent can quote Loom
   with sources without extra calls.
 - `expand` is how we keep first responses small: the default `ask` budget is ~800
   tokens; anything more is an explicit agent decision.
-- The MCP server runs in-process with the engine (same container, compose profile
-  `mcp`), stdio or SSE.
+- Server `instructions` teach the loop (find → ask small → expand → write back)
+  and that conflict items must never be silently resolved.
 
 ## 2. HTTP API — the substrate
 

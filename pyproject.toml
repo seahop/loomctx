@@ -25,6 +25,9 @@ scale = [
 postgres = [
     "psycopg[binary]>=3.2",
 ]
+mcp = [
+    "mcp>=2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

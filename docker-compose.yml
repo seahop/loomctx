@@ -71,6 +71,24 @@ services:
     depends_on:
       - nats
 
+  # MCP over streamable HTTP for remote agents (phase 3). Local agents spawn
+  # stdio instead: claude mcp add loom -- docker compose run --rm -T loom
+  #   python -m loom.mcp_server
+  mcp:
+    build: .
+    profiles: ["mcp"]
+    command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
+    ports:
+      - "8300:8300"
+    volumes:
+      - loom-data:/data
+    environment:
+      LOOM_DB: ${LOOM_DB:-/data/loom.db}
+      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
+      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
+      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
+      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
+
   # Server-backed store for the database-scaling lane (D-011).
   postgres:
     image: postgres:17-alpine

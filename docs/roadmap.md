@@ -60,11 +60,16 @@ presentable.
 - ⬜ Live end-to-end run against a real provider (needs an API key or local
   model — do this before the conference demo)
 
-## Phase 3 — MCP server ⬜ ← next
+## Phase 3 — MCP server ✅ (2026-09-04)
 
-- Tools wrapping the core in-process: `find_entity`, `get_brief`, `ask`,
-  `expand`, `record_observation`, `answer`. Same container, compose profile
-  `mcp`.
+- ✅ `src/loom/mcp_server.py` on MCP SDK v2 (`MCPServer`): `find_entity`,
+  `ask`, `ask_scope`, `expand`, `record_claim`, `get_observations`,
+  `answer` — same core functions as HTTP, `type:key` handles, server
+  instructions teaching the find → ask small → expand → write-back loop.
+- ✅ stdio for local agents (`claude mcp add loom -- docker compose run --rm
+  -T loom python -m loom.mcp_server`) and streamable HTTP via compose
+  profile `mcp` (:8300/mcp, boot-verified).
+- ⬜ Exercise from a real agent session end-to-end (part of demo hardening).
 
 ## Phase 4 — Async enrichment ⬜
 
