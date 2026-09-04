@@ -84,6 +84,22 @@ CREATE TABLE IF NOT EXISTS tombstones (
     reason         TEXT NOT NULL,
     recorded_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    ref_id    TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    vector    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dossiers (
+    namespace         TEXT NOT NULL,
+    entity_id         TEXT NOT NULL,
+    brief             TEXT NOT NULL,
+    observation_count INTEGER NOT NULL,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (namespace, entity_id)
+);
 """
 
 _INDEXES = """
@@ -143,7 +159,70 @@ class SqliteStore(GraphStore):
 
     def get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
         with self._lock:
-            return self._get_entity(namespace, ref)
+            return self._resolve_entity(namespace, ref)
+
+    def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
+        with self._lock:
+            target = self._get_entity(namespace, into)
+            if target is None:
+                return
+            self._conn.execute(
+                "INSERT OR REPLACE INTO aliases (namespace, alias, entity_id)"
+                " VALUES (?, ?, ?)",
+                (namespace, f"{alias.type}:{alias.key}", target.id),
+            )
+            self._conn.commit()
+
+    def merge_entities(
+        self, namespace: str, from_ref: EntityRef, into_ref: EntityRef
+    ) -> bool:
+        with self._lock:
+            src = self._get_entity(namespace, from_ref)
+            dst = self._get_entity(namespace, into_ref)
+            if src is None or dst is None or src.id == dst.id:
+                return False
+            self._conn.execute(
+                "UPDATE observations SET subject_id = ? WHERE subject_id = ?",
+                (dst.id, src.id),
+            )
+            self._conn.execute(
+                "UPDATE observations SET object_entity_id = ?"
+                " WHERE object_entity_id = ?",
+                (dst.id, src.id),
+            )
+            # existing aliases pointing at the source follow it to the target
+            self._conn.execute(
+                "UPDATE aliases SET entity_id = ? WHERE entity_id = ?",
+                (dst.id, src.id),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO aliases (namespace, alias, entity_id)"
+                " VALUES (?, ?, ?)",
+                (namespace, f"{src.type}:{src.key}", dst.id),
+            )
+            self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
+            self._conn.commit()
+            return True
+
+    def merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT namespace, key FROM entities"
+                + (" WHERE namespace = ?" if namespace else "")
+                + " GROUP BY namespace, key HAVING COUNT(DISTINCT type) > 1"
+                " LIMIT ?",
+                ((namespace, limit) if namespace else (limit,)),
+            ).fetchall()
+            groups = []
+            for row in rows:
+                members = self._conn.execute(
+                    "SELECT * FROM entities WHERE namespace = ? AND key = ?",
+                    (row["namespace"], row["key"]),
+                ).fetchall()
+                groups.append([common.row_to_entity(m) for m in members])
+        return groups
 
     def search_entities(
         self, namespace: str, query: str, limit: int = 10
@@ -170,7 +249,7 @@ class SqliteStore(GraphStore):
         self, namespace: str, ref: EntityRef, limit: int = 100
     ) -> list[Observation]:
         with self._lock:
-            entity = self._get_entity(namespace, ref)
+            entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
             rows = self._conn.execute(
@@ -221,6 +300,123 @@ class SqliteStore(GraphStore):
             return True
         except sqlite3.Error:
             return False
+
+    # ----------------------------------------------------- enrichment (D-018)
+
+    def put_embeddings(
+        self, namespace: str, model: str,
+        items: list[tuple[str, list[float]]],
+    ) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO embeddings (ref_id, namespace, model,"
+                " vector) VALUES (?, ?, ?, ?)",
+                [(ref_id, namespace, model, json.dumps(vec))
+                 for ref_id, vec in items],
+            )
+            self._conn.commit()
+
+    def embeddings_for(
+        self, namespace: str, ref_ids: list[str], model: str
+    ) -> dict[str, list[float]]:
+        result: dict[str, list[float]] = {}
+        with self._lock:
+            for start in range(0, len(ref_ids), 500):
+                chunk = ref_ids[start:start + 500]
+                rows = self._conn.execute(
+                    "SELECT ref_id, vector FROM embeddings"
+                    f" WHERE namespace = ? AND model = ?"
+                    f" AND ref_id IN ({','.join('?' * len(chunk))})",
+                    (namespace, model, *chunk),
+                ).fetchall()
+                for row in rows:
+                    result[row["ref_id"]] = json.loads(row["vector"])
+        return result
+
+    def observations_without_embeddings(
+        self, model: str, limit: int = 128
+    ) -> list[Observation]:
+        with self._lock:
+            rows = self._conn.execute(
+                _OBS_SELECT
+                + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
+                "   WHERE em.ref_id = o.id AND em.model = ?)"
+                + _NOT_TOMBSTONED
+                + " ORDER BY o.recorded_at LIMIT ?",
+                (model, limit),
+            ).fetchall()
+            return [common.row_to_observation(r) for r in rows]
+
+    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
+                " ORDER BY recorded_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [common.row_to_artifact(r) for r in rows]
+
+    def set_extraction_status(
+        self, namespace: str, artifact_id: str, status: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE artifacts SET extraction_status = ?"
+                " WHERE namespace = ? AND id = ?",
+                (status, namespace, artifact_id),
+            )
+            self._conn.commit()
+
+    def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
+        with self._lock:
+            entity = self._get_entity(namespace, ref)
+            if entity is None:
+                return None
+            row = self._conn.execute(
+                "SELECT brief, observation_count, updated_at FROM dossiers"
+                " WHERE namespace = ? AND entity_id = ?",
+                (namespace, entity.id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"brief": row["brief"],
+                "observation_count": row["observation_count"],
+                "updated_at": row["updated_at"]}
+
+    def put_dossier(
+        self, namespace: str, ref: EntityRef, brief: str,
+        observation_count: int,
+    ) -> None:
+        with self._lock:
+            entity = self._upsert_entity(namespace, ref)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO dossiers (namespace, entity_id, brief,"
+                " observation_count, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (namespace, entity.id, brief, observation_count,
+                 common.iso(common.now())),
+            )
+            self._conn.commit()
+
+    def dossier_candidates(
+        self, min_new: int = 20, min_total: int = 5, limit: int = 4
+    ) -> list[tuple[str, EntityRef, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS n,"
+                "       d.observation_count AS have"
+                " FROM entities e"
+                " JOIN observations o ON o.subject_id = e.id"
+                " LEFT JOIN dossiers d ON d.namespace = e.namespace"
+                "   AND d.entity_id = e.id"
+                " GROUP BY e.id"
+                " HAVING (have IS NULL AND n >= ?) OR (n - have >= ?)"
+                " ORDER BY n DESC LIMIT ?",
+                (min_total, min_new, limit),
+            ).fetchall()
+        return [
+            (r["namespace"], EntityRef(type=r["type"], key=r["key"]), r["n"])
+            for r in rows
+        ]
 
     # ------------------------------------------------------ lifecycle (D-016)
 
@@ -328,8 +524,8 @@ class SqliteStore(GraphStore):
 
     def wipe(self) -> None:
         with self._lock:
-            for table in ("tombstones", "observations", "aliases", "artifacts",
-                          "entities"):
+            for table in ("tombstones", "embeddings", "dossiers",
+                          "observations", "aliases", "artifacts", "entities"):
                 self._conn.execute(f"DELETE FROM {table}")
             self._conn.commit()
 
@@ -340,9 +536,23 @@ class SqliteStore(GraphStore):
     # ------------------------------------------------- internals (no commit)
 
     def _get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
+        """Exact (type, key) match only — used by writes and merges."""
         row = self._conn.execute(
             "SELECT * FROM entities WHERE namespace = ? AND type = ? AND key = ?",
             (namespace, ref.type, ref.key),
+        ).fetchone()
+        return common.row_to_entity(row) if row else None
+
+    def _resolve_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
+        """Exact match, else follow an alias record from a prior merge —
+        so a query for a merged-away ref still finds the canonical entity."""
+        direct = self._get_entity(namespace, ref)
+        if direct is not None:
+            return direct
+        row = self._conn.execute(
+            "SELECT e.* FROM aliases a JOIN entities e ON e.id = a.entity_id"
+            " WHERE a.namespace = ? AND a.alias = ?",
+            (namespace, f"{ref.type}:{ref.key}"),
         ).fetchone()
         return common.row_to_entity(row) if row else None
 
@@ -408,6 +618,7 @@ class SqliteStore(GraphStore):
             recorded_at=common.now(),
             source=claim.source,
             confidence=claim.confidence,
+            provenance=claim.provenance,
             attrs=claim.attrs,
         )
         self._conn.execute(
@@ -420,7 +631,8 @@ class SqliteStore(GraphStore):
                 object_json, object_entity_id, common.iso(obs.observed_at),
                 common.iso(obs.valid_from), common.iso(obs.valid_to),
                 common.iso(obs.recorded_at), obs.source, obs.confidence,
-                None, json.dumps(obs.attrs),
+                json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
+                json.dumps(obs.attrs),
             ),
         )
         return obs

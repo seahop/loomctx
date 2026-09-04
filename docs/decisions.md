@@ -318,6 +318,56 @@ remain for audit — deletion without falsified history). Stores migrate
 in-place at startup (capability-checked column/table adds), so existing
 database files survive upgrades.
 
+## D-018 · Phase 4 enrichment: embeddings, extraction, dossiers (2026-09-04)
+
+Async worker `python -m loom.enrich` (compose profile `enrich`, or `--once`
+for a cron/k8s Job), all three jobs idempotent and each skipped-not-failed
+when unconfigured:
+
+- **Embeddings** — pluggable `Embedder` (OpenAI-compatible `/embeddings`:
+  OpenAI/Mistral/Together/Ollama/self-hosted via `LOOM_EMBED_*`), plus a
+  dependency-free `HashingEmbedder` for offline/CI. Vectors stored per model;
+  the pack builder ranks by cosine when vectors exist and silently falls back
+  to keyword overlap otherwise, so nothing breaks unconfigured. Verified: on
+  the seed corpus, a semantic query surfaces the relevant fact into the top
+  slot ahead of higher-recency noise.
+- **Claim extraction** — the pending-artifact backlog is mined by the LLM into
+  ordinary observations with `Provenance{artifact_id, span}`; the quote is
+  located back in the source text for a real character span. Each claim's
+  `event_id="extract:<artifact>:<n>"` makes re-extraction idempotent (reuses
+  D-014). Bad JSON → status `failed`; body-less artifacts → `skipped`. Live
+  run extracted 24 claims from the 5 seed documents with correct spans.
+- **Dossiers** — rolling per-entity briefs, rebuilt when `min_new`
+  observations accumulate since the last build; served by the pack builder as
+  a `brief` item (the cheap orientation layer). Live briefs synthesized real
+  seed data well (e.g. web-01's logins, alert, and peer communications in 3
+  sentences).
+
+Extracted entities use the LLM's own keys/types (`ip_address:10.0.4.7`);
+reconciling them with structured entities is D-019. The quality scorecard
+(D-015) guards the structured-ranking baseline against regressions from the
+embedding swap.
+
+## D-019 · Entity resolution: same-key/cross-type merge with reversible aliases (2026-09-04)
+
+The enrichment worker's `resolve_entities` pass folds entities that share a
+natural key across differing types — the drift LLM extraction produces
+(`ip_address:10.0.4.7` beside the structured `ip:10.0.4.7`) — into one node.
+
+- **Canonical choice:** the most-connected member (most observations), ties
+  broken by earliest creation — the established structured entity absorbs the
+  stray extracted one, not the reverse.
+- **Reversible & lossless:** `merge_entities` repoints the folded entity's
+  observations onto the canonical, records the old `type:key` as an **alias**,
+  and deletes only the now-empty node. Entity lookups (`get_entity`,
+  `observations_for`) follow alias records, so a query for a merged-away ref
+  still resolves — nothing 404s after a merge.
+- **Scope of v1:** exact-key/cross-type only (deterministic, safe to
+  auto-run). Embedding/typo matching (`web-01` vs `web01`) and LLM
+  adjudication for genuinely ambiguous cases are the next increment
+  (roadmap) — deliberately deferred because loose auto-merging is worse than
+  none. Both stores implement it; the parametrized contract tests cover both.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

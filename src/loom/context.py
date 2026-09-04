@@ -78,17 +78,38 @@ def _citation(obs: Observation) -> Citation:
     )
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
 def _score(
-    obs: Observation, question_tokens: set[str], rank: int, total: int
+    obs: Observation,
+    question_tokens: set[str],
+    rank: int,
+    total: int,
+    cos: float | None = None,
 ) -> float:
     recency = 1.0 - (rank / total) if total > 1 else 1.0
-    if not question_tokens:
+    if not question_tokens and cos is None:
         return 0.6 * recency + 0.4 * obs.confidence
     haystack = _tokens(
         f"{obs.predicate} {_object_text(obs)} {obs.subject.key} "
         f"{json.dumps(obs.attrs)}"
     )
-    sim = len(question_tokens & haystack) / len(question_tokens)
+    sim = (
+        len(question_tokens & haystack) / len(question_tokens)
+        if question_tokens else 0.0
+    )
+    if cos is not None:
+        # semantic similarity leads once embeddings exist (phase 4, D-018);
+        # keyword overlap stays as a tie-breaking signal
+        return (0.5 * (cos + 1) / 2 + 0.15 * sim
+                + 0.25 * recency + 0.1 * obs.confidence)
     return 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
 
 
@@ -192,7 +213,9 @@ def resolve_scope(
     return resolved
 
 
-def build_pack(store: GraphStore, req: AskRequest) -> ContextPack:
+def build_pack(
+    store: GraphStore, req: AskRequest, embedder=None
+) -> ContextPack:
     if req.scope is not None:
         subjects = resolve_scope(store, req.namespace, req.scope)
     else:
@@ -205,6 +228,28 @@ def build_pack(store: GraphStore, req: AskRequest) -> ContextPack:
                 seen_ids.add(obs.id)
                 observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
+
+    # Semantic ranking (D-018): cosine against precomputed observation
+    # vectors; observations not yet embedded fall back to keyword scoring.
+    cos_map: dict[str, float] = {}
+    if embedder is not None and req.question and observations:
+        vectors = store.embeddings_for(
+            req.namespace, [o.id for o in observations], embedder.model
+        )
+        if vectors:
+            query_vec = embedder.embed([req.question])[0]
+            cos_map = {
+                oid: _cosine(query_vec, vec) for oid, vec in vectors.items()
+            }
+
+    # Dossier briefs: the cheap orientation layer, when the enrichment
+    # worker has built one for a subject.
+    briefs = []
+    for ref in subjects[:3]:
+        dossier = store.get_dossier(req.namespace, ref)
+        if dossier:
+            briefs.append((ref, dossier["brief"]))
+
     return _pack(
         namespace=req.namespace,
         subjects=subjects,
@@ -212,6 +257,8 @@ def build_pack(store: GraphStore, req: AskRequest) -> ContextPack:
         as_of=req.as_of,
         budget=req.budget,
         observations=observations,
+        cos_map=cos_map,
+        briefs=briefs,
     )
 
 
@@ -243,7 +290,10 @@ def _pack(
     budget: int,
     observations: list[Observation],
     with_handles: bool = True,
+    cos_map: dict[str, float] | None = None,
+    briefs: list[tuple[EntityRef, str]] | None = None,
 ) -> ContextPack:
+    cos_map = cos_map or {}
     if as_of is not None:
         as_of = _aware(as_of)
         observations = [
@@ -257,7 +307,7 @@ def _pack(
     total = len(observations)
     scored = sorted(
         (
-            (_score(obs, question_tokens, rank, total), obs)
+            (_score(obs, question_tokens, rank, total, cos_map.get(obs.id)), obs)
             for rank, obs in enumerate(observations)
         ),
         key=lambda pair: pair[0],
@@ -274,6 +324,14 @@ def _pack(
             if cost <= remaining:
                 items.append(item)
                 remaining -= cost
+
+    # Then dossier briefs — the orientation layer (phase 4).
+    for ref, brief in briefs or []:
+        text = f"{ref.type}:{ref.key} — {brief}"
+        cost = est_tokens(text)
+        if cost <= remaining:
+            items.append(ContextItem(kind="brief", text=text, score=0.99))
+            remaining -= cost
 
     included: set[str] = set()
     skipped: dict[tuple[str, str, str], int] = {}  # (subj type, key, predicate)

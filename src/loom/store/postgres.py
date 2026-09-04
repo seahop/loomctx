@@ -80,6 +80,22 @@ CREATE TABLE IF NOT EXISTS tombstones (
     recorded_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS embeddings (
+    ref_id    TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    vector    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dossiers (
+    namespace         TEXT NOT NULL,
+    entity_id         TEXT NOT NULL,
+    brief             TEXT NOT NULL,
+    observation_count INTEGER NOT NULL,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (namespace, entity_id)
+);
+
 ALTER TABLE observations ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS event_id TEXT;
 
@@ -140,7 +156,64 @@ class PostgresStore(GraphStore):
 
     def get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
         with self._lock:
-            return self._get_entity(namespace, ref)
+            return self._resolve_entity(namespace, ref)
+
+    def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
+        with self._lock:
+            target = self._get_entity(namespace, into)
+            if target is None:
+                return
+            self._x(
+                "INSERT INTO aliases (namespace, alias, entity_id)"
+                " VALUES (%s, %s, %s) ON CONFLICT (namespace, alias)"
+                " DO UPDATE SET entity_id = EXCLUDED.entity_id",
+                (namespace, f"{alias.type}:{alias.key}", target.id),
+            )
+            self._conn.commit()
+
+    def merge_entities(
+        self, namespace: str, from_ref: EntityRef, into_ref: EntityRef
+    ) -> bool:
+        with self._lock:
+            src = self._get_entity(namespace, from_ref)
+            dst = self._get_entity(namespace, into_ref)
+            if src is None or dst is None or src.id == dst.id:
+                return False
+            self._x("UPDATE observations SET subject_id = %s WHERE subject_id = %s",
+                    (dst.id, src.id))
+            self._x("UPDATE observations SET object_entity_id = %s"
+                    " WHERE object_entity_id = %s", (dst.id, src.id))
+            self._x("UPDATE aliases SET entity_id = %s WHERE entity_id = %s",
+                    (dst.id, src.id))
+            self._x(
+                "INSERT INTO aliases (namespace, alias, entity_id)"
+                " VALUES (%s, %s, %s) ON CONFLICT (namespace, alias)"
+                " DO UPDATE SET entity_id = EXCLUDED.entity_id",
+                (namespace, f"{src.type}:{src.key}", dst.id),
+            )
+            self._x("DELETE FROM entities WHERE id = %s", (src.id,))
+            self._conn.commit()
+            return True
+
+    def merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        with self._lock:
+            rows = self._q(
+                "SELECT namespace, key FROM entities"
+                + (" WHERE namespace = %s" if namespace else "")
+                + " GROUP BY namespace, key HAVING COUNT(DISTINCT type) > 1"
+                " LIMIT %s",
+                ((namespace, limit) if namespace else (limit,)),
+            )
+            groups = []
+            for row in rows:
+                members = self._q(
+                    "SELECT * FROM entities WHERE namespace = %s AND key = %s",
+                    (row["namespace"], row["key"]),
+                )
+                groups.append([common.row_to_entity(m) for m in members])
+        return groups
 
     def search_entities(
         self, namespace: str, query: str, limit: int = 10
@@ -167,7 +240,7 @@ class PostgresStore(GraphStore):
         self, namespace: str, ref: EntityRef, limit: int = 100
     ) -> list[Observation]:
         with self._lock:
-            entity = self._get_entity(namespace, ref)
+            entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
             rows = self._q(
@@ -218,6 +291,126 @@ class PostgresStore(GraphStore):
             return True
         except self._psycopg.Error:
             return False
+
+    # ----------------------------------------------------- enrichment (D-018)
+
+    def put_embeddings(
+        self, namespace: str, model: str,
+        items: list[tuple[str, list[float]]],
+    ) -> None:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO embeddings (ref_id, namespace, model, vector)"
+                    " VALUES (%s, %s, %s, %s)"
+                    " ON CONFLICT (ref_id) DO UPDATE SET model ="
+                    " EXCLUDED.model, vector = EXCLUDED.vector",
+                    [(ref_id, namespace, model, json.dumps(vec))
+                     for ref_id, vec in items],
+                )
+            self._conn.commit()
+
+    def embeddings_for(
+        self, namespace: str, ref_ids: list[str], model: str
+    ) -> dict[str, list[float]]:
+        if not ref_ids:
+            return {}
+        with self._lock:
+            rows = self._q(
+                "SELECT ref_id, vector FROM embeddings"
+                " WHERE namespace = %s AND model = %s AND ref_id = ANY(%s)",
+                (namespace, model, ref_ids),
+            )
+        return {r["ref_id"]: json.loads(r["vector"]) for r in rows}
+
+    def observations_without_embeddings(
+        self, model: str, limit: int = 128
+    ) -> list[Observation]:
+        with self._lock:
+            rows = self._q(
+                _OBS_SELECT
+                + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
+                "   WHERE em.ref_id = o.id AND em.model = %s)"
+                + _NOT_TOMBSTONED
+                + " ORDER BY o.recorded_at LIMIT %s",
+                (model, limit),
+            )
+            return [common.row_to_observation(r) for r in rows]
+
+    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
+        with self._lock:
+            rows = self._q(
+                "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
+                " ORDER BY recorded_at LIMIT %s",
+                (limit,),
+            )
+        return [common.row_to_artifact(r) for r in rows]
+
+    def set_extraction_status(
+        self, namespace: str, artifact_id: str, status: str
+    ) -> None:
+        with self._lock:
+            self._x(
+                "UPDATE artifacts SET extraction_status = %s"
+                " WHERE namespace = %s AND id = %s",
+                (status, namespace, artifact_id),
+            )
+            self._conn.commit()
+
+    def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
+        with self._lock:
+            entity = self._get_entity(namespace, ref)
+            if entity is None:
+                return None
+            rows = self._q(
+                "SELECT brief, observation_count, updated_at FROM dossiers"
+                " WHERE namespace = %s AND entity_id = %s",
+                (namespace, entity.id),
+            )
+        if not rows:
+            return None
+        return {"brief": rows[0]["brief"],
+                "observation_count": rows[0]["observation_count"],
+                "updated_at": rows[0]["updated_at"]}
+
+    def put_dossier(
+        self, namespace: str, ref: EntityRef, brief: str,
+        observation_count: int,
+    ) -> None:
+        with self._lock:
+            entity = self._upsert_entity(namespace, ref)
+            self._x(
+                "INSERT INTO dossiers (namespace, entity_id, brief,"
+                " observation_count, updated_at) VALUES (%s, %s, %s, %s, %s)"
+                " ON CONFLICT (namespace, entity_id) DO UPDATE SET"
+                " brief = EXCLUDED.brief,"
+                " observation_count = EXCLUDED.observation_count,"
+                " updated_at = EXCLUDED.updated_at",
+                (namespace, entity.id, brief, observation_count,
+                 common.iso(common.now())),
+            )
+            self._conn.commit()
+
+    def dossier_candidates(
+        self, min_new: int = 20, min_total: int = 5, limit: int = 4
+    ) -> list[tuple[str, EntityRef, int]]:
+        with self._lock:
+            rows = self._q(
+                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS n"
+                " FROM entities e"
+                " JOIN observations o ON o.subject_id = e.id"
+                " LEFT JOIN dossiers d ON d.namespace = e.namespace"
+                "   AND d.entity_id = e.id"
+                " GROUP BY e.id, d.observation_count"
+                " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s)"
+                "     OR (COUNT(o.id) - d.observation_count >= %s)"
+                " ORDER BY COUNT(o.id) DESC LIMIT %s",
+                (min_total, min_new, limit),
+            )
+        return [
+            (r["namespace"], EntityRef(type=r["type"], key=r["key"]), r["n"])
+            for r in rows
+        ]
 
     # ------------------------------------------------------ lifecycle (D-016)
 
@@ -327,8 +520,8 @@ class PostgresStore(GraphStore):
 
     def wipe(self) -> None:
         with self._lock:
-            for table in ("tombstones", "observations", "aliases", "artifacts",
-                          "entities"):
+            for table in ("tombstones", "embeddings", "dossiers",
+                          "observations", "aliases", "artifacts", "entities"):
                 self._x(f"DELETE FROM {table}")
             self._conn.commit()
 
@@ -339,10 +532,23 @@ class PostgresStore(GraphStore):
     # ------------------------------------------------- internals (no commit)
 
     def _get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
+        """Exact (type, key) match only — used by writes and merges."""
         rows = self._q(
             "SELECT * FROM entities"
             " WHERE namespace = %s AND type = %s AND key = %s",
             (namespace, ref.type, ref.key),
+        )
+        return common.row_to_entity(rows[0]) if rows else None
+
+    def _resolve_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
+        """Exact match, else follow an alias record from a prior merge."""
+        direct = self._get_entity(namespace, ref)
+        if direct is not None:
+            return direct
+        rows = self._q(
+            "SELECT e.* FROM aliases a JOIN entities e ON e.id = a.entity_id"
+            " WHERE a.namespace = %s AND a.alias = %s",
+            (namespace, f"{ref.type}:{ref.key}"),
         )
         return common.row_to_entity(rows[0]) if rows else None
 
@@ -409,6 +615,7 @@ class PostgresStore(GraphStore):
             recorded_at=common.now(),
             source=claim.source,
             confidence=claim.confidence,
+            provenance=claim.provenance,
             attrs=claim.attrs,
         )
         self._x(
@@ -422,7 +629,8 @@ class PostgresStore(GraphStore):
                 object_json, object_entity_id, common.iso(obs.observed_at),
                 common.iso(obs.valid_from), common.iso(obs.valid_to),
                 common.iso(obs.recorded_at), obs.source, obs.confidence,
-                None, json.dumps(obs.attrs),
+                json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
+                json.dumps(obs.attrs),
             ),
         )
         return obs

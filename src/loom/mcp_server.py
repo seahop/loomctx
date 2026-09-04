@@ -27,9 +27,20 @@ from mcp.server.mcpserver import MCPServer
 from .answer import UnresolvedQuestionError, build_answer
 from .context import build_pack, expand_pack
 from .contracts import AnswerRequest, AskRequest, ClaimIn, EntityRef, ScopeSpec
-from .llm import LLMError, llm_from_env
+from .llm import LLMError, embedder_from_env, llm_from_env
 from .store.base import GraphStore
 from .store.factory import store_from_env
+
+_embedder_loaded = False
+_embedder = None
+
+
+def _get_embedder():
+    global _embedder_loaded, _embedder
+    if not _embedder_loaded:
+        _embedder = embedder_from_env()
+        _embedder_loaded = True
+    return _embedder
 
 mcp = MCPServer(
     "loom",
@@ -106,7 +117,9 @@ def ask(
         budget=budget,
         as_of=_parse_time(as_of),
     )
-    return build_pack(_get_store(), req).model_dump(mode="json")
+    return build_pack(
+        _get_store(), req, embedder=_get_embedder()
+    ).model_dump(mode="json")
 
 
 def ask_scope(
@@ -133,7 +146,9 @@ def ask_scope(
         budget=budget,
         as_of=_parse_time(as_of),
     )
-    return build_pack(_get_store(), req).model_dump(mode="json")
+    return build_pack(
+        _get_store(), req, embedder=_get_embedder()
+    ).model_dump(mode="json")
 
 
 def expand(handle: str, budget: int = 800) -> dict:
@@ -213,7 +228,7 @@ def answer(
         budget=budget,
     )
     try:
-        resp = build_answer(_get_store(), llm, req)
+        resp = build_answer(_get_store(), llm, req, embedder=_get_embedder())
     except UnresolvedQuestionError as exc:
         return {"error": str(exc)}
     except LLMError as exc:

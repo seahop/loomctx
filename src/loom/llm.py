@@ -119,8 +119,96 @@ class AnthropicClient(LLMClient):
             raise LLMError(f"unexpected provider response shape: {exc}") from exc
 
 
+# ------------------------------------------------------------- embeddings #
+
+class Embedder(ABC):
+    """Text -> vector, for semantic ranking (phase 4, D-018)."""
+
+    model: str
+
+    @abstractmethod
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class OpenAICompatEmbedder(Embedder):
+    """POST {base}/embeddings — OpenAI, Mistral, Together, Ollama, vLLM..."""
+
+    def __init__(self, base_url: str, model: str, api_key: str | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        headers = {}
+        if self.api_key:
+            headers["authorization"] = f"Bearer {self.api_key}"
+        data = _post_json(
+            self.base_url + "/embeddings",
+            {"model": self.model, "input": texts},
+            headers,
+        )
+        try:
+            rows = sorted(data["data"], key=lambda r: r["index"])
+            return [r["embedding"] for r in rows]
+        except (KeyError, TypeError) as exc:
+            raise LLMError(f"unexpected embeddings response shape: {exc}") from exc
+
+
+class HashingEmbedder(Embedder):
+    """Deterministic offline fallback: hashed token/bigram bag vectors.
+
+    Not semantic — it captures token overlap, roughly matching the keyword
+    ranker — but it exercises the full embedding pipeline with zero deps and
+    zero network, which keeps tests and air-gapped deployments honest.
+    """
+
+    def __init__(self, dim: int = 256):
+        self.dim = dim
+        self.model = f"hashing-{dim}"
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        import hashlib
+        import re
+
+        out = []
+        for text in texts:
+            vec = [0.0] * self.dim
+            tokens = re.findall(r"[a-z0-9]+", text.lower())
+            grams = tokens + [f"{a}_{b}" for a, b in zip(tokens, tokens[1:])]
+            for gram in grams:
+                h = int.from_bytes(
+                    hashlib.blake2b(gram.encode(), digest_size=4).digest(), "big"
+                )
+                vec[h % self.dim] += 1.0
+            norm = sum(v * v for v in vec) ** 0.5 or 1.0
+            out.append([v / norm for v in vec])
+        return out
+
+
 def _env(name: str) -> str | None:
     return os.environ.get(name, "").strip() or None
+
+
+def embedder_from_env() -> Embedder | None:
+    """None when unconfigured — ranking then falls back to keyword overlap.
+
+    LOOM_EMBED_PROVIDER: hashing | openai | mistral | together | ollama | ...
+    LOOM_EMBED_BASE_URL: custom/self-hosted endpoint (overrides shortcut)
+    LOOM_EMBED_MODEL:    required for API providers
+    LOOM_EMBED_API_KEY:  when the endpoint needs one
+    """
+    provider = (_env("LOOM_EMBED_PROVIDER") or "").lower() or None
+    base_url = _env("LOOM_EMBED_BASE_URL")
+    model = _env("LOOM_EMBED_MODEL")
+    api_key = _env("LOOM_EMBED_API_KEY")
+
+    if provider == "hashing":
+        return HashingEmbedder()
+    if base_url is None and provider is not None:
+        base_url = OPENAI_COMPAT_BASES.get(provider)
+    if base_url is None or model is None:
+        return None
+    return OpenAICompatEmbedder(base_url=base_url, model=model, api_key=api_key)
 
 
 def llm_from_env() -> LLMClient | None:

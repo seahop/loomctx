@@ -80,6 +80,7 @@ def build_answer(
     llm: LLMClient,
     req: AnswerRequest,
     allowed_types: tuple[str, ...] | None = None,
+    embedder=None,
 ) -> AnswerResponse:
     if req.subject is not None or req.scope is not None:
         subject, scope = req.subject, req.scope
@@ -103,6 +104,7 @@ def build_answer(
             budget=req.budget,
             as_of=req.as_of,
         ),
+        embedder=embedder,
     )
     text = llm.complete(
         SYSTEM_PROMPT,

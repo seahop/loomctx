@@ -20,7 +20,30 @@ class GraphStore(ABC):
 
     @abstractmethod
     def get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
-        """Deterministic resolution by natural key; None if unknown."""
+        """Resolve by natural key, following alias records from prior merges;
+        None if unknown."""
+
+    # ------------------------------------------- entity resolution (D-019)
+
+    @abstractmethod
+    def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
+        """Record that `alias` (type:key) refers to the canonical `into`."""
+
+    @abstractmethod
+    def merge_entities(
+        self, namespace: str, from_ref: EntityRef, into_ref: EntityRef
+    ) -> bool:
+        """Fold `from_ref` into `into_ref`: repoint its observations, record
+        it as an alias, delete the now-empty node. Reversible via the alias
+        record; no observation is ever lost. False if either side is unknown
+        or they are the same entity."""
+
+    @abstractmethod
+    def merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        """Groups of entities that share a natural key across differing types
+        (the drift LLM extraction produces, e.g. ip vs ip_address)."""
 
     @abstractmethod
     def record_claim(self, claim: ClaimIn) -> Observation:
@@ -55,6 +78,53 @@ class GraphStore(ABC):
     @abstractmethod
     def ping(self) -> bool:
         """Cheap liveness probe of the backing database (/readyz)."""
+
+    # ------------------------------------------------- enrichment (D-018)
+
+    @abstractmethod
+    def put_embeddings(
+        self, namespace: str, model: str,
+        items: list[tuple[str, list[float]]],
+    ) -> None:
+        """Store (observation_id, vector) pairs for one embedding model."""
+
+    @abstractmethod
+    def embeddings_for(
+        self, namespace: str, ref_ids: list[str], model: str
+    ) -> dict[str, list[float]]: ...
+
+    @abstractmethod
+    def observations_without_embeddings(
+        self, model: str, limit: int = 128
+    ) -> list[Observation]:
+        """Backlog for the enrichment worker (tombstoned rows excluded)."""
+
+    @abstractmethod
+    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
+        """Artifacts still awaiting claim extraction."""
+
+    @abstractmethod
+    def set_extraction_status(
+        self, namespace: str, artifact_id: str, status: str
+    ) -> None: ...
+
+    @abstractmethod
+    def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
+        """{'brief', 'observation_count', 'updated_at'} or None."""
+
+    @abstractmethod
+    def put_dossier(
+        self, namespace: str, ref: EntityRef, brief: str,
+        observation_count: int,
+    ) -> None: ...
+
+    @abstractmethod
+    def dossier_candidates(
+        self, min_new: int = 20, min_total: int = 5, limit: int = 4
+    ) -> list[tuple[str, EntityRef, int]]:
+        """(namespace, entity, current observation count) for entities whose
+        dossier is missing (>= min_total observations) or stale (>= min_new
+        observations since the last build)."""
 
     # ------------------------------------------------- lifecycle (D-016)
 

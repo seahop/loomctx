@@ -29,7 +29,7 @@ from ..contracts import (
     ExpandRequest,
     IngestEnvelope,
 )
-from ..llm import LLMError, llm_from_env
+from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..store.factory import store_from_env
 
 
@@ -37,6 +37,7 @@ from ..store.factory import store_from_env
 async def _lifespan(app: FastAPI):
     app.state.store = store_from_env()
     app.state.llm = llm_from_env()
+    app.state.embedder = embedder_from_env()
     app.state.auth = AuthConfig.from_env()
     if not app.state.auth.enabled:
         logging.getLogger("loom.auth").warning(
@@ -174,7 +175,10 @@ def ask(req: AskRequest, request: Request) -> ContextPack:
     for subject in [req.subject] if req.subject else req.scope.subjects:
         _gate_entity_type(grant, subject.type)
     with metrics.PACK_SECONDS.time():
-        return build_pack(request.app.state.store, req)
+        return build_pack(
+            request.app.state.store, req,
+            embedder=request.app.state.embedder,
+        )
 
 
 @app.post("/v1/expand", response_model=ContextPack)
@@ -236,6 +240,7 @@ def answer(req: AnswerRequest, request: Request) -> AnswerResponse:
         result = build_answer(
             request.app.state.store, llm, req,
             allowed_types=grant.entity_types if grant else None,
+            embedder=request.app.state.embedder,
         )
     except UnresolvedQuestionError as exc:
         metrics.ANSWERS.labels(outcome="unresolved").inc()

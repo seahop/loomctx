@@ -98,6 +98,17 @@
             "title": "Confidence",
             "type": "number"
           },
+          "provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "attrs": {
             "additionalProperties": true,
             "title": "Attrs",
@@ -221,6 +232,44 @@
           "key"
         ],
         "title": "EntityRef",
+        "type": "object"
+      },
+      "Provenance": {
+        "description": "Where an extracted observation came from: an artifact and a character span.",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "title": "Provenance",
         "type": "object"
       }
     },

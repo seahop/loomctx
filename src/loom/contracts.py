@@ -25,6 +25,14 @@ Scalar = Union[str, int, float, bool]
 ObjectValue = Union[EntityRef, Scalar]
 
 
+class Provenance(BaseModel):
+    """Where an extracted observation came from: an artifact and a character span."""
+
+    artifact_id: str
+    span_start: int | None = None
+    span_end: int | None = None
+
+
 class ClaimIn(BaseModel):
     """Structured, entity-addressed ingestion payload. Maps ~1:1 to an Observation."""
 
@@ -44,6 +52,7 @@ class ClaimIn(BaseModel):
     valid_to: datetime | None = None
     source: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    provenance: Provenance | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -69,14 +78,6 @@ class DocumentIn(BaseModel):
 
 
 IngestEnvelope = Annotated[Union[ClaimIn, DocumentIn], Field(discriminator="kind")]
-
-
-class Provenance(BaseModel):
-    """Where an extracted observation came from: an artifact and a character span."""
-
-    artifact_id: str
-    span_start: int | None = None
-    span_end: int | None = None
 
 
 class Observation(BaseModel):
@@ -111,7 +112,7 @@ class Artifact(BaseModel):
     source: str
     observed_at: datetime
     recorded_at: datetime
-    extraction_status: Literal["pending", "done", "failed"] = "pending"
+    extraction_status: Literal["pending", "done", "failed", "skipped"] = "pending"
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -106,11 +106,13 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 
 ## Status
 
-Phases 0–3 working: contracts, SQLite/Postgres stores, claim + document
+Phases 0–4 working: contracts, SQLite/Postgres stores, claim + document
 ingestion (with an autoscaling Go gateway tier), context packs with scopes
 (`/v1/ask`, `/v1/expand`), provider-flexible answering (`/v1/answer`), an
-MCP server for agents, deterministic seed corpus, k8s shapes, CI. Next: LLM
-enrichment (embeddings, document claim extraction, dossiers).
+MCP server for agents, and async enrichment (`python -m loom.enrich`:
+semantic embeddings, document claim extraction with span provenance, rolling
+dossiers, and entity resolution that folds extracted entities into their
+structured counterparts). Deterministic seed corpus, k8s shapes, CI.
 See `docs/roadmap.md` for the milestone plan (conference: end of October 2026).
 
 Agents connect natively over MCP:

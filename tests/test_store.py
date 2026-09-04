@@ -124,6 +124,54 @@ def test_search_entities_exact_and_prefix(store):
     assert store.search_entities("other-ns", "web-01") == []
 
 
+def test_merge_folds_and_aliases_resolve(store):
+    # ip:10.0.4.7 (structured) and ip_address:10.0.4.7 (extracted drift)
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="ip", key="10.0.4.7"), predicate="assigned_to",
+        object=EntityRef(type="host", key="web-01"),
+        observed_at=OBSERVED, source="dhcp"))
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="ip_address", key="10.0.4.7"),
+        predicate="mentioned_in", object="IR-4432",
+        observed_at=OBSERVED, source="doc:ir"))
+
+    assert store.merge_entities(
+        "default", EntityRef(type="ip_address", key="10.0.4.7"),
+        EntityRef(type="ip", key="10.0.4.7")) is True
+
+    # both facts now hang off the canonical ip entity...
+    canon = store.observations_for("default", EntityRef(type="ip", key="10.0.4.7"))
+    assert {o.predicate for o in canon} == {"assigned_to", "mentioned_in"}
+    # ...and a query for the merged-away ref still resolves via its alias
+    via_alias = store.observations_for(
+        "default", EntityRef(type="ip_address", key="10.0.4.7"))
+    assert len(via_alias) == 2
+    # the stray node is gone
+    assert store.get_entity(
+        "default", EntityRef(type="ip_address", key="10.0.4.7")).type == "ip"
+
+
+def test_merge_candidates_finds_cross_type_keys(store):
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="ip", key="10.0.4.7"), predicate="p",
+        object="x", observed_at=OBSERVED, source="s"))
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="ip_address", key="10.0.4.7"), predicate="p",
+        object="x", observed_at=OBSERVED, source="s"))
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="host", key="web-01"), predicate="p",
+        object="x", observed_at=OBSERVED, source="s"))
+    groups = store.merge_candidates("default")
+    assert len(groups) == 1
+    assert {e.type for e in groups[0]} == {"ip", "ip_address"}
+
+
+def test_merge_unknown_is_false(store):
+    assert store.merge_entities(
+        "default", EntityRef(type="ip", key="nope"),
+        EntityRef(type="ip", key="also-nope")) is False
+
+
 def test_wipe_clears_everything(store):
     store.record_claim(login_claim())
     store.wipe()

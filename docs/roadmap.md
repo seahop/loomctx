@@ -89,12 +89,25 @@ presentable.
   embedding swap must beat
 - ✅ Compose services now share one engine image (kills stale-image drift)
 
-## Phase 4 — Async enrichment ⬜
+## Phase 4 — Async enrichment ✅ (2026-09-04, D-018/D-019)
 
-- In-process workers (D-004): chunking, embeddings (sqlite-vec) replacing the
-  keyword scorer, LLM claim extraction with span provenance
-  (artifacts already carry `extraction_status`), dossiers, fuzzy entity
-  resolution, provisional-entity merges. `LLMClient` protocol (D-007).
+- ✅ `python -m loom.enrich` worker (compose profile `enrich` / `--once` Job)
+- ✅ Embeddings: pluggable `Embedder` (OpenAI-compatible + offline hashing
+  fallback), cosine ranking in the pack builder with keyword fallback
+- ✅ LLM claim extraction from document artifacts, with located span
+  provenance and event_id idempotency; live-verified (24 claims from 5 docs)
+- ✅ Dossiers: rolling per-entity briefs, served as the `brief` pack item
+- ✅ **Entity resolution (D-019, 2026-09-04):** the enrichment worker folds
+  same-key/cross-type duplicates (ip vs ip_address) into the most-connected
+  canonical entity; merges are reversible (recorded as aliases), observations
+  are repointed never dropped, and a query for a merged-away ref still
+  resolves via its alias. Live-verified: doc-extracted facts reconcile onto
+  the structured `ip:10.0.4.7`.
+- ⬜ Deeper resolution: embedding/fuzzy key matching (web-01 vs web01) and
+  LLM adjudication for ambiguous cases — exact-key-cross-type covers the
+  common extraction drift; typo/alias matching is the next increment.
+- ⬜ Optional: sqlite-vec / pgvector for ANN search once embedded row counts
+  outgrow the current exact in-memory cosine (fine at seed/demo scale).
 
 ## Phase 5 — Hardening & spread 🔨
 
