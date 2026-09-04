@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -50,8 +51,9 @@ func newValidator(schemasPath string) (*jsonschema.Schema, error) {
 // --------------------------------------------------------------- forwarders
 
 type forwarder interface {
-	// forward relays a validated envelope; kind is "claim" or "document".
-	forward(ctx context.Context, kind string, payload []byte) (status int, body []byte, err error)
+	// forward relays a validated envelope; kind is "claim" or "document";
+	// apiKey travels with it in HTTP mode so the engine re-authenticates.
+	forward(ctx context.Context, kind, apiKey string, payload []byte) (status int, body []byte, err error)
 	close()
 }
 
@@ -64,13 +66,16 @@ func newHTTPForwarder(url string) *httpForwarder {
 	return &httpForwarder{url: url, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (f *httpForwarder) forward(ctx context.Context, _ string, payload []byte) (int, []byte, error) {
+func (f *httpForwarder) forward(ctx context.Context, _, apiKey string, payload []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		f.url+"/v1/ingest", bytes.NewReader(payload))
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-Loom-Key", apiKey)
+	}
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -112,7 +117,7 @@ func newNATSForwarder(url string) (*natsForwarder, error) {
 	return &natsForwarder{nc: nc, js: js}, nil
 }
 
-func (f *natsForwarder) forward(ctx context.Context, kind string, payload []byte) (int, []byte, error) {
+func (f *natsForwarder) forward(ctx context.Context, kind, _ string, payload []byte) (int, []byte, error) {
 	if _, err := f.js.Publish(ctx, "loom.ingest."+kind, payload); err != nil {
 		return 0, nil, err
 	}
@@ -123,59 +128,123 @@ func (f *natsForwarder) close() { f.nc.Close() }
 
 // ------------------------------------------------------------------- server
 
-func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder) http.Handler {
-	var limiter *rate.Limiter
-	if cfg.ratePerSec > 0 {
-		limiter = rate.NewLimiter(rate.Limit(cfg.ratePerSec), int(cfg.ratePerSec))
+// limiterPool hands out one token bucket per API key (or one shared bucket
+// for the empty key when auth is off), so a misbehaving sender exhausts its
+// own budget without starving the others.
+type limiterPool struct {
+	mu      sync.Mutex
+	rate    float64
+	buckets map[string]*rate.Limiter
+}
+
+func newLimiterPool(perSec float64) *limiterPool {
+	if perSec <= 0 {
+		return nil
 	}
+	return &limiterPool{rate: perSec, buckets: map[string]*rate.Limiter{}}
+}
+
+func (p *limiterPool) allow(key string) bool {
+	if p == nil {
+		return true
+	}
+	p.mu.Lock()
+	lim, ok := p.buckets[key]
+	if !ok {
+		lim = rate.NewLimiter(rate.Limit(p.rate), int(p.rate))
+		p.buckets[key] = lim
+	}
+	p.mu.Unlock()
+	return lim.Allow()
+}
+
+func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authConfig) http.Handler {
+	limiters := newLimiterPool(cfg.ratePerSec)
+	m := &gwMetrics{}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /metrics", m.handler)
 
 	mux.HandleFunc("POST /v1/ingest", func(w http.ResponseWriter, r *http.Request) {
-		if limiter != nil && !limiter.Allow() {
+		m.requests.Add(1)
+		apiKey := extractKey(r)
+
+		// Cheapest rejections first: no key (when required), then the
+		// per-key rate limit — both before the body is even read, so abusive
+		// or misconfigured senders cost almost nothing.
+		if auth.enabled() && apiKey == "" {
+			m.rejectedAuth.Add(1)
+			writeJSON(w, http.StatusUnauthorized,
+				map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+			return
+		}
+		if !limiters.allow(apiKey) {
+			m.rejectedRate.Add(1)
+			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests,
 				map[string]string{"detail": "rate limit exceeded"})
 			return
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes))
 		if err != nil {
+			m.rejectedBad.Add(1)
 			writeJSON(w, http.StatusRequestEntityTooLarge,
 				map[string]string{"detail": "body too large"})
 			return
 		}
 		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
 		if err != nil {
+			m.rejectedBad.Add(1)
 			writeJSON(w, http.StatusBadRequest,
 				map[string]string{"detail": "invalid JSON"})
 			return
 		}
 		if err := schema.Validate(doc); err != nil {
+			m.rejectedBad.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity,
 				map[string]string{"detail": fmt.Sprintf("contract violation: %v", err)})
 			return
 		}
 		kind := extractKind(doc)
 		if kind == "" {
+			m.rejectedBad.Add(1)
 			writeJSON(w, http.StatusUnprocessableEntity,
 				map[string]string{"detail": "envelope must carry an explicit 'kind'"})
 			return
 		}
-		status, respBody, err := fwd.forward(r.Context(), kind, body)
+		if !auth.allows(apiKey, extractNamespace(doc), "w") {
+			m.rejectedAuth.Add(1)
+			writeJSON(w, http.StatusForbidden,
+				map[string]string{"detail": "key not authorized to write this namespace"})
+			return
+		}
+		status, respBody, err := fwd.forward(r.Context(), kind, apiKey, body)
 		if err != nil {
+			m.upstreamErr.Add(1)
 			writeJSON(w, http.StatusBadGateway,
 				map[string]string{"detail": "upstream unavailable"})
 			return
 		}
+		m.queued.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(respBody)
 	})
 
 	return mux
+}
+
+func extractNamespace(doc any) string {
+	if obj, ok := doc.(map[string]any); ok {
+		if ns, ok := obj["namespace"].(string); ok && ns != "" {
+			return ns
+		}
+	}
+	return "default"
 }
 
 func extractKind(doc any) string {

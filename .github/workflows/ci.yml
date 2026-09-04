@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Build engine image
-        run: docker compose build test loom
+      - name: Build engine image (shared by loom/test/consumer/mcp)
+        run: docker compose build loom
       - name: Run Python test suite
         run: docker compose run --rm test
       - name: Contracts in sync (schemas.json regenerates identically)

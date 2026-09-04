@@ -7,6 +7,8 @@ No code outside src/loom/store/ may touch a database directly. New backends
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Iterator
 
 from ..contracts import Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation
 
@@ -49,6 +51,40 @@ class GraphStore(ABC):
     @abstractmethod
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
         """Fetch a stored document by id."""
+
+    @abstractmethod
+    def ping(self) -> bool:
+        """Cheap liveness probe of the backing database (/readyz)."""
+
+    # ------------------------------------------------- lifecycle (D-016)
+
+    @abstractmethod
+    def redact(self, namespace: str, observation_id: str, reason: str) -> bool:
+        """Tombstone one observation: it stops appearing in reads but the
+        append-only record (and the tombstone itself) remains auditable.
+        Returns False if the observation doesn't exist."""
+
+    @abstractmethod
+    def purge_older_than(self, namespace: str, before: datetime) -> int:
+        """Retention sweep: hard-delete observations and artifacts observed
+        before the cutoff. Returns rows removed."""
+
+    @abstractmethod
+    def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
+        """Every observation (tombstoned included — export is a backup)."""
+
+    @abstractmethod
+    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]: ...
+
+    @abstractmethod
+    def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]: ...
+
+    @abstractmethod
+    def restore_observation(self, obs: Observation) -> None:
+        """Insert an exported observation verbatim (import/migration path)."""
+
+    @abstractmethod
+    def restore_artifact(self, artifact: Artifact) -> None: ...
 
     @abstractmethod
     def wipe(self) -> None:

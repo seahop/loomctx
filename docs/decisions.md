@@ -226,6 +226,66 @@ matches only — auto-resolution must never guess; unresolvable => 422.
 Registry-declared containment predicates (so scopes expand without the
 caller naming predicates) land with schema-registry persistence.
 
+## D-013 · Auth & abuse resistance: per-namespace API keys, cheap rejection first (2026-09-04)
+
+One env var configures the engine AND the Go gateway identically:
+`LOOM_API_KEYS="key:namespace:perms,..."` (perms r/w/rw, namespace `*` = all).
+Unset ⇒ open dev mode with a logged warning. Keys arrive as `X-Loom-Key` or
+`Authorization: Bearer`; comparison is constant-time. Enforcement: writes
+check the envelope's namespace, reads check the queried namespace (expand
+decodes the handle's namespace before touching the store). `/healthz`,
+`/readyz`, `/metrics` stay open for probes and scrapes.
+
+Bad traffic is shed in cost order at the gateway — missing key (when auth is
+on) and the **per-key token bucket** both reject before the body is even
+read; then size cap, JSON parse, schema validation, then namespace authz —
+so abusive or misconfigured senders never reach the queue or the store, and
+one noisy key can't starve the others (429 carries Retry-After). Contracts
+cap question length (2k chars) and budgets (32k tokens). MCP stdio is
+local-trust by design; the MCP http profile should sit behind cluster policy
+until it grows its own auth (open item).
+
+## D-014 · Idempotent ingest via sender event_id (2026-09-04)
+
+The scale shape is at-least-once (NATS redelivery after a consumer crash
+would duplicate observations — and the conflict detector would then treat
+copies as corroboration). Envelopes therefore carry an optional `event_id`
+(≤128 chars); both stores dedupe on a partial unique index over
+`(namespace, event_id)` and return the original observation. Applies to
+claims and documents; envelopes without an event_id are never deduped.
+Verified end-to-end through lb → gateway → NATS → consumer (3 posts → 1 row).
+
+## D-015 · Operability: /metrics, /readyz, and a retrieval-quality harness (2026-09-04)
+
+- Engine exposes Prometheus at `/metrics` (`loom_ingest_total{kind}`,
+  `loom_ingest_deduped_total`, `loom_requests_rejected_total{reason}`,
+  `loom_pack_build_seconds` histogram, `loom_answers_total{outcome}`) and a
+  store-probing `/readyz` that the k8s readiness probes now use. The gateway
+  serves its own hand-rolled counters at `/metrics` (requests, forwarded,
+  rejected-invalid/unauthorized/ratelimited, upstream errors) — a client
+  library isn't worth a dependency in the hot path.
+- **Quality loop:** `tests/test_quality.py` is a golden-question scorecard
+  over the seed corpus (conflict-first, relevance@5, lease history, as-of
+  time travel, scope coverage, budget compliance — 9/9 passing). It runs in
+  CI, so ranking changes (the phase-4 embedding swap especially) ship with
+  before/after evidence.
+
+## D-016 · Data lifecycle: export/import, retention, tombstone redaction (2026-09-04)
+
+`python -m loom.lifecycle` provides: `export`/`import` (JSONL — backup,
+SQLite⇄Postgres migration path, and the "your data is never trapped"
+guarantee), `purge --older-than-days` (retention sweep of observations +
+artifacts per namespace), and `redact` (a **tombstone**: the observation
+stops appearing in every read but the append-only record and the tombstone
+remain for audit — deletion without falsified history). Stores migrate
+in-place at startup (capability-checked column/table adds), so existing
+database files survive upgrades.
+
+## D-017 · License: Apache-2.0 (2026-09-04)
+
+Public framework needs a real license; Apache-2.0 for the patent grant and
+infrastructure-ecosystem norm. Canonical text in `LICENSE`.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~
@@ -233,7 +293,10 @@ caller naming predicates) land with schema-registry persistence.
   question is *when* demo/adopter volume forces the scale shape.
 - **OQ-2:** One shared deployment with namespaces vs. per-team stacks as the primary
   story? (Both work; affects auth priority.)
-- **OQ-3:** AuthN/Z on the HTTP surface — API keys per namespace is the likely v1.
+- **OQ-3:** ~~AuthN/Z on the HTTP surface~~ Resolved by D-013 (per-namespace
+  API keys). Remaining: key management API (rotation without redeploy) and
+  auth for the MCP http profile.
 - **OQ-4:** Embedding model choice + dimensionality (affects sqlite-vec schema).
-- **OQ-5:** Retention/TTL policy for raw artifacts vs. derived observations.
+- **OQ-5:** ~~Retention/TTL policy~~ Mechanism shipped (D-016 purge/redact);
+  remaining is per-team policy defaults and a scheduled sweep (cron/k8s Job).
 - **OQ-6:** Public name (D-005).

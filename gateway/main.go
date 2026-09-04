@@ -64,6 +64,16 @@ func main() {
 		log.Fatalf("loading contract schema: %v", err)
 	}
 
+	auth, err := parseAuth(os.Getenv("LOOM_API_KEYS"))
+	if err != nil {
+		log.Fatalf("parsing LOOM_API_KEYS: %v", err)
+	}
+	if auth.enabled() {
+		log.Printf("auth: %d API key entries loaded", len(auth.entries))
+	} else {
+		log.Printf("auth: LOOM_API_KEYS unset — auth DISABLED (open dev mode)")
+	}
+
 	var fwd forwarder
 	if cfg.natsURL != "" {
 		fwd, err = newNATSForwarder(cfg.natsURL)
@@ -78,7 +88,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,
-		Handler:           newServer(cfg, validator, fwd),
+		Handler:           newServer(cfg, validator, fwd, auth),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

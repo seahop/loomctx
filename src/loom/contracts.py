@@ -30,6 +30,12 @@ class ClaimIn(BaseModel):
 
     kind: Literal["claim"] = "claim"
     namespace: str = DEFAULT_NAMESPACE
+    event_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="sender-supplied idempotency key; redelivery of the same "
+        "(namespace, event_id) is deduplicated instead of duplicated (D-014)",
+    )
     subject: EntityRef
     predicate: str
     object: ObjectValue
@@ -46,6 +52,7 @@ class DocumentIn(BaseModel):
 
     kind: Literal["document"] = "document"
     namespace: str = DEFAULT_NAMESPACE
+    event_id: str | None = Field(default=None, max_length=128)
     text: str | None = None
     content_b64: str | None = None
     content_type: str = "text/plain"
@@ -77,6 +84,7 @@ class Observation(BaseModel):
 
     id: str
     namespace: str
+    event_id: str | None = None
     subject: EntityRef
     predicate: str
     object: ObjectValue
@@ -95,6 +103,7 @@ class Artifact(BaseModel):
 
     id: str
     namespace: str
+    event_id: str | None = None
     filename: str | None = None
     content_type: str
     text: str | None = None
@@ -160,8 +169,10 @@ class AskRequest(BaseModel):
     namespace: str = DEFAULT_NAMESPACE
     subject: EntityRef | None = None
     scope: ScopeSpec | None = None
-    question: str
-    budget: int = Field(default=800, gt=0, description="token budget; mandatory cap")
+    question: str = Field(max_length=2000)
+    budget: int = Field(
+        default=800, gt=0, le=32000, description="token budget; mandatory cap"
+    )
     as_of: datetime | None = None
 
     @model_validator(mode="after")
@@ -172,8 +183,8 @@ class AskRequest(BaseModel):
 
 
 class ExpandRequest(BaseModel):
-    handle: str
-    budget: int = Field(default=800, gt=0)
+    handle: str = Field(max_length=4096)
+    budget: int = Field(default=800, gt=0, le=32000)
 
 
 class ContextPack(BaseModel):
@@ -195,10 +206,10 @@ class AnswerRequest(BaseModel):
     subjects are auto-resolved from entity names mentioned in the question."""
 
     namespace: str = DEFAULT_NAMESPACE
-    question: str
+    question: str = Field(max_length=2000)
     subject: EntityRef | None = None
     scope: ScopeSpec | None = None
-    budget: int = Field(default=1200, gt=0)
+    budget: int = Field(default=1200, gt=0, le=32000)
     as_of: datetime | None = None
     max_tokens: int = Field(default=1024, gt=0, le=8192)
 

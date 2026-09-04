@@ -15,9 +15,16 @@ ObjectArg = Union[EntityTuple, str, int, float, bool]
 
 
 class Loom:
-    def __init__(self, base_url: str, namespace: str = "default", timeout: float = 30.0):
+    def __init__(
+        self,
+        base_url: str,
+        namespace: str = "default",
+        api_key: str | None = None,
+        timeout: float = 30.0,
+    ):
         self.base_url = base_url.rstrip("/")
         self.namespace = namespace
+        self.api_key = api_key
         self.timeout = timeout
 
     # ------------------------------------------------------------- write side
@@ -32,6 +39,7 @@ class Loom:
         confidence: float = 1.0,
         valid_from: str | None = None,
         valid_to: str | None = None,
+        event_id: str | None = None,
         attrs: dict[str, Any] | None = None,
     ) -> dict:
         obj: Any = object
@@ -42,6 +50,7 @@ class Loom:
             {
                 "kind": "claim",
                 "namespace": self.namespace,
+                "event_id": event_id,
                 "subject": {"type": subject[0], "key": subject[1]},
                 "predicate": predicate,
                 "object": obj,
@@ -159,7 +168,10 @@ class Loom:
             return json.loads(resp.read())
 
     def _headers(self) -> dict:
-        return {
+        headers = {
             "content-type": "application/json",
             "X-Loom-Namespace": self.namespace,
         }
+        if self.api_key:
+            headers["X-Loom-Key"] = self.api_key
+        return headers

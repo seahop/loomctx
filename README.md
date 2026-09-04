@@ -84,6 +84,21 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 (`docker compose --profile scale up -d --build --scale gateway=3`, ingest on
 :8081) — see [deploy/README.md](deploy/README.md).
 
+## Governance
+
+- **License:** Apache-2.0.
+- **Auth:** per-namespace API keys via `LOOM_API_KEYS` (see `.env.example`);
+  unset = open dev mode. Enforced by the engine and the ingest gateway, with
+  per-key rate limits and cheapest-first rejection of bad traffic.
+- **Idempotency:** send an `event_id` with any envelope and retries/redelivery
+  can never duplicate a fact.
+- **Operability:** Prometheus `/metrics` on engine and gateway; `/readyz`
+  probes the store.
+- **Lifecycle:** `python -m loom.lifecycle` — JSONL export/import (backup and
+  SQLite⇄Postgres migration), retention purge, tombstone redaction.
+- **Quality:** a retrieval scorecard runs in CI (`tests/test_quality.py`), so
+  ranking changes ship with evidence.
+
 ## Status
 
 Phases 0–3 working: contracts, SQLite/Postgres stores, claim + document

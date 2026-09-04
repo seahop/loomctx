@@ -32,7 +32,7 @@ spec:
             # to enable /v1/answer.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz     # probes Postgres reachability
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5

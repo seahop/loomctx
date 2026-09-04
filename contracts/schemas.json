@@ -15,6 +15,20 @@
             "title": "Namespace",
             "type": "string"
           },
+          "event_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "sender-supplied idempotency key; redelivery of the same (namespace, event_id) is deduplicated instead of duplicated (D-014)",
+            "title": "Event Id"
+          },
           "subject": {
             "$ref": "#/$defs/EntityRef"
           },
@@ -113,6 +127,19 @@
             "default": "default",
             "title": "Namespace",
             "type": "string"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Id"
           },
           "text": {
             "anyOf": [
@@ -282,6 +309,18 @@
       "namespace": {
         "title": "Namespace",
         "type": "string"
+      },
+      "event_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Event Id"
       },
       "subject": {
         "$ref": "#/$defs/EntityRef"

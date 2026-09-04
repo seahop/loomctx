@@ -14,7 +14,7 @@ type fakeForwarder struct {
 	calls   int
 }
 
-func (f *fakeForwarder) forward(_ context.Context, kind string, payload []byte) (int, []byte, error) {
+func (f *fakeForwarder) forward(_ context.Context, kind, _ string, payload []byte) (int, []byte, error) {
 	f.calls++
 	f.kind = kind
 	f.payload = payload
@@ -34,11 +34,20 @@ const validClaim = `{
 
 func testServer(t *testing.T, fwd forwarder) http.Handler {
 	t.Helper()
+	return testServerAuth(t, fwd, "")
+}
+
+func testServerAuth(t *testing.T, fwd forwarder, keys string) http.Handler {
+	t.Helper()
 	schema, err := newValidator("../contracts/schemas.json")
 	if err != nil {
 		t.Fatalf("loading schema: %v", err)
 	}
-	return newServer(config{maxBodyBytes: 1 << 20}, schema, fwd)
+	auth, err := parseAuth(keys)
+	if err != nil {
+		t.Fatalf("parsing keys: %v", err)
+	}
+	return newServer(config{maxBodyBytes: 1 << 20}, schema, fwd, auth)
 }
 
 func post(h http.Handler, body string) *httptest.ResponseRecorder {
@@ -100,13 +109,92 @@ func TestMissingKindRejected(t *testing.T) {
 	}
 }
 
+func postWithKey(h http.Handler, body, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/ingest", strings.NewReader(body))
+	if key != "" {
+		req.Header.Set("X-Loom-Key", key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// validClaim has no explicit namespace, so it lands in "default".
+const authKeys = "agentsecret:default:w,readonly:default:r,other:elsewhere:w"
+
+func TestAuthMissingKeyIs401BeforeValidation(t *testing.T) {
+	fwd := &fakeForwarder{}
+	rec := postWithKey(testServerAuth(t, fwd, authKeys), validClaim, "")
+	if rec.Code != http.StatusUnauthorized || fwd.calls != 0 {
+		t.Fatalf("status=%d calls=%d", rec.Code, fwd.calls)
+	}
+}
+
+func TestAuthWrongPermsOrNamespaceIs403(t *testing.T) {
+	fwd := &fakeForwarder{}
+	h := testServerAuth(t, fwd, authKeys)
+	for _, key := range []string{"readonly", "other", "nonsense"} {
+		rec := postWithKey(h, validClaim, key)
+		if rec.Code != http.StatusForbidden || fwd.calls != 0 {
+			t.Fatalf("key %q: status=%d calls=%d", key, rec.Code, fwd.calls)
+		}
+	}
+}
+
+func TestAuthValidKeyForwards(t *testing.T) {
+	fwd := &fakeForwarder{}
+	rec := postWithKey(testServerAuth(t, fwd, authKeys), validClaim, "agentsecret")
+	if rec.Code != http.StatusOK || fwd.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, fwd.calls, rec.Body.String())
+	}
+}
+
+func TestWildcardNamespaceKey(t *testing.T) {
+	fwd := &fakeForwarder{}
+	rec := postWithKey(testServerAuth(t, fwd, "root:*:rw"), validClaim, "root")
+	if rec.Code != http.StatusOK || fwd.calls != 1 {
+		t.Fatalf("status=%d calls=%d", rec.Code, fwd.calls)
+	}
+}
+
+func TestPerKeyRateLimit(t *testing.T) {
+	fwd := &fakeForwarder{}
+	schema, err := newValidator("../contracts/schemas.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := parseAuth(authKeys)
+	h := newServer(config{maxBodyBytes: 1 << 20, ratePerSec: 1}, schema, fwd, auth)
+	first := postWithKey(h, validClaim, "agentsecret")
+	second := postWithKey(h, validClaim, "agentsecret")
+	if first.Code != http.StatusOK || second.Code != http.StatusTooManyRequests {
+		t.Fatalf("first=%d second=%d", first.Code, second.Code)
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatal("429 must carry Retry-After")
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	h := testServer(t, &fakeForwarder{})
+	post(h, validClaim)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "loom_gateway_requests_total 1") {
+		t.Fatalf("metrics: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOversizeBodyRejected(t *testing.T) {
 	fwd := &fakeForwarder{}
 	schema, err := newValidator("../contracts/schemas.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newServer(config{maxBodyBytes: 64}, schema, fwd)
+	auth, _ := parseAuth("")
+	h := newServer(config{maxBodyBytes: 64}, schema, fwd, auth)
 	rec := post(h, validClaim)
 	if rec.Code != http.StatusRequestEntityTooLarge || fwd.calls != 0 {
 		t.Fatalf("status = %d, calls = %d", rec.Code, fwd.calls)

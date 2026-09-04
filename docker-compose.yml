@@ -3,8 +3,11 @@ services:
   # the server-backed store instead (D-011), e.g.:
   #   LOOM_DB=postgresql://loom:loom@postgres:5432/loom \
   #     docker compose --profile pg up -d loom postgres
+  # All engine-based services (loom, test, consumer, mcp) share ONE image so
+  # they can never drift apart — `docker compose build loom` refreshes them all.
   loom:
     build: .
+    image: loom-engine:local
     ports:
       - "8000:8000"
     volumes:
@@ -17,9 +20,10 @@ services:
       LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
       LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
       LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
+      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
 
   test:
-    build: .
+    image: loom-engine:local
     profiles: ["test"]
     environment:
       LOOM_DB: /tmp/loom-test.db
@@ -46,6 +50,7 @@ services:
     profiles: ["scale"]
     environment:
       LOOM_NATS_URL: nats://nats:4222
+      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
     depends_on:
       - nats
 
@@ -65,7 +70,7 @@ services:
     command: ["-js"]
 
   consumer:
-    build: .
+    image: loom-engine:local
     profiles: ["scale"]
     command: python -m loom.consumer
     environment:
@@ -80,7 +85,7 @@ services:
   # stdio instead: claude mcp add loom -- docker compose run --rm -T loom
   #   python -m loom.mcp_server
   mcp:
-    build: .
+    image: loom-engine:local
     profiles: ["mcp"]
     command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
     ports:
@@ -93,6 +98,7 @@ services:
       LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
       LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
       LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
+      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
 
   # Server-backed store for the database-scaling lane (D-011).
   postgres:

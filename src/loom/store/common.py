@@ -49,6 +49,7 @@ def row_to_observation(row: Mapping[str, Any]) -> Observation:
     return Observation(
         id=row["id"],
         namespace=row["namespace"],
+        event_id=row["event_id"],
         subject=EntityRef(type=row["subj_type"], key=row["subj_key"]),
         predicate=row["predicate"],
         object=obj,
@@ -67,6 +68,7 @@ def row_to_artifact(row: Mapping[str, Any]) -> Artifact:
     return Artifact(
         id=row["id"],
         namespace=row["namespace"],
+        event_id=row["event_id"],
         filename=row["filename"],
         content_type=row["content_type"],
         text=row["text"],

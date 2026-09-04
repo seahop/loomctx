@@ -74,6 +74,21 @@ presentable.
   profile `mcp` (:8300/mcp, boot-verified).
 - ⬜ Exercise from a real agent session end-to-end (part of demo hardening).
 
+## Governance & operability batch ✅ (2026-09-04, D-013…D-017)
+
+- ✅ Apache-2.0 LICENSE (public-adoption blocker removed)
+- ✅ Per-namespace API keys enforced at engine + gateway; cheap-rejection
+  ordering and per-key rate buckets shed abuse before it costs anything
+- ✅ Idempotent ingest (`event_id` dedupe, both stores, verified through
+  the full queue path) — at-least-once delivery no longer duplicates facts
+- ✅ `/metrics` (engine + gateway), store-probing `/readyz` wired into k8s
+  probes; in-place store migrations for existing DB files
+- ✅ Lifecycle CLI: export/import (JSONL), retention purge, tombstone
+  redaction
+- ✅ Retrieval-quality scorecard in CI (9/9) — the baseline the phase-4
+  embedding swap must beat
+- ✅ Compose services now share one engine image (kills stale-image drift)
+
 ## Phase 4 — Async enrichment ⬜
 
 - In-process workers (D-004): chunking, embeddings (sqlite-vec) replacing the

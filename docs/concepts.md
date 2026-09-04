@@ -111,6 +111,27 @@ When sources disagree, the context pack shows the disagreement explicitly with b
 citations ("auth-log says X on Mar 3; IR-4432 says Y on May 1"). Contradictions are
 never silently merged or resolved by recency alone.
 
+### Idempotency key (event_id)
+
+An optional sender-supplied identifier on any ingestion envelope. Redelivery
+of the same `(namespace, event_id)` — queue retries, sender retries, network
+flakes — stores exactly one observation and returns the original. Without an
+event_id, every delivery is stored (some data really is repeated
+measurements). See D-014.
+
+### Tombstone
+
+The redaction mechanism that respects append-only: a tombstoned observation
+disappears from every read (packs, expansions, raw views) but the row and
+the tombstone itself remain, so history is suppressed, never falsified.
+`python -m loom.lifecycle redact`. See D-016.
+
+### API key
+
+Per-namespace credential in `LOOM_API_KEYS` (`key:namespace:perms`),
+enforced identically by the engine and the ingest gateway; presented as
+`X-Loom-Key` or a Bearer token. Unset means open dev mode. See D-013.
+
 ### Namespace
 
 The multi-tenancy boundary. Every contract carries a namespace; schemas, entities,

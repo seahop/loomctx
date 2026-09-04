@@ -26,6 +26,17 @@ everything** in `scale-pg`, where the Postgres-backed store makes engine pods
 stateless. The default shape deliberately does not autoscale — that's the
 SQLite trade documented in D-008.
 
+## Operating it
+
+- **Metrics:** scrape the engine and each gateway at `GET /metrics`
+  (Prometheus text). Watch `loom_gateway_rejected_*` for abuse,
+  `loom_ingest_deduped_total` for retry storms, `loom_pack_build_seconds`
+  for read latency.
+- **Probes:** liveness `GET /healthz`; readiness `GET /readyz` (probes the
+  store — a pod with a dead database drops out of the Service).
+- **Auth:** set `LOOM_API_KEYS` (same value) on the engine and gateway —
+  via `.env` locally, via a Secret on k8s. Unset = open dev mode.
+
 **HPA prerequisite:** the cluster must run metrics-server (managed clusters
 usually do; on kind/minikube enable it). Resource *requests* are set on every
 container — HPA percentage targets are meaningless without them.

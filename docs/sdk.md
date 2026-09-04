@@ -66,8 +66,10 @@ computers at once, or an anchor expanded over containment predicates:
 ```
 
 Conventions: JSON everywhere; namespace via `X-Loom-Namespace` header (default
-`"default"`); errors are RFC 7807 problem+json; auth is per-namespace API keys
-(phase 5, OQ-3).
+`"default"`); auth via `X-Loom-Key: <key>` or `Authorization: Bearer <key>`
+(per-namespace keys, D-013 — `Loom(url, namespace, api_key=...)` in the SDK);
+optional `event_id` on any envelope makes ingestion idempotent (D-014);
+`/metrics` and `/readyz` for operations.
 
 ## 3. Python SDK — `sdk/python/`
 
