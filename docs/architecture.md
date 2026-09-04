@@ -1,8 +1,12 @@
 # Architecture
 
 Loom is a **context engine**: it absorbs data about entities over time and serves
-agents small, question-scoped slices of that knowledge. The load-bearing decision is
-the split between a **write path** and a **read path** with opposite temperaments.
+agents small, question-scoped slices of that knowledge. It is neutral about the
+data and about intent — the same store serves blue-team questions (what happened,
+what's exposed) and red-team questions (what's exploitable, what can I reach); the
+read path just shapes whatever's in the graph to the question asked. The
+load-bearing decision is the split between a **write path** and a **read path** with
+opposite temperaments.
 
 - **Write path — greedy and thorough.** Accept every incoming piece of data, resolve
   it to an entity, store it append-only with full provenance and timestamps, and do

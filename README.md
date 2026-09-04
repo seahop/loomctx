@@ -14,6 +14,23 @@ those things, it usually gets either nothing or everything. Loom's job is the mi
 *"what do we know about `web-01` relevant to Tuesday's alert, in under 800 tokens,
 with citations."*
 
+## Who it's for
+
+Security teams on **both sides of the line**. Loom is neutral about the data it
+holds — the value is in how each operator shapes information *out* of it:
+
+- **Blue teams** ask *what happened, is it patched, what's exposed* — served by
+  provenance, conflict-surfacing across sources, and bitemporal "what did we
+  know, and when."
+- **Red teams** ask *what's exploitable, what can I reach from here, what do we
+  know about this target* — served by scopes and relationship traversal that
+  assemble an entity and everything connected to it into one budgeted pack.
+
+Same store, same engine; the question determines the answer. The bundled demo
+is network telemetry; the [tutorial](docs/tutorial.md) builds a vulnerability-
+management domain — swap in cloud posture, identities, EDR events, or recon
+findings without touching Loom's code.
+
 ## Core ideas (details in `docs/`)
 
 - **Write path is greedy, read path is stingy.** Ingest everything with provenance;
@@ -34,6 +51,9 @@ with citations."*
 
 | Path | What it is |
 | --- | --- |
+| `docs/quickstart.md` | 5-minute run: seeded demo, a cited pack, an answer |
+| `docs/tutorial.md` | 30-minute build of your own security domain, end to end |
+| `examples/` | Runnable sender + agent-query scripts (stdlib only) |
 | `docs/architecture.md` | Full system design: layers, write/read paths, retrieval contract |
 | `docs/contracts.md` | The data contracts (the real API of the framework) |
 | `docs/concepts.md` | Glossary — precise definitions of every term of art |
@@ -45,6 +65,12 @@ with citations."*
 | `sdk/python/` | Thin Python client SDK (mirrors the HTTP/MCP surface) |
 | `deploy/` | Kubernetes manifests + deployment guide (local Compose stays primary) |
 | `tests/` | Contract, store, context-pack, seed, and API tests |
+
+## Documentation
+
+New here? **[docs/quickstart.md](docs/quickstart.md)** (5 min) → then
+**[docs/tutorial.md](docs/tutorial.md)** builds your own security domain from
+scratch. Full index: **[docs/README.md](docs/README.md)**.
 
 ## Quickstart (Docker only — nothing installs on the host)
 
