@@ -38,6 +38,7 @@ with citations."*
 | `docs/contracts.md` | The data contracts (the real API of the framework) |
 | `docs/concepts.md` | Glossary — precise definitions of every term of art |
 | `docs/decisions.md` | Language/tech choices with rationale, and the constraints we hold |
+| `docs/administration.md` | Running it for a team: users, scopes, rotation, retention |
 | `docs/roadmap.md` | Phased execution plan with current status |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP, Python SDK, CLI |
 | `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, seed data |

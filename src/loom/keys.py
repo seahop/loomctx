@@ -91,6 +91,41 @@ def cmd_list(args) -> None:
               f"{k['perms']:<3} {state:<9} {' '.join(gates) or '(no extra gates)'}")
 
 
+def cmd_update(args) -> None:
+    """Change a key's GRANTS without re-minting the secret. The scope lives
+    beside the hash, so widening or narrowing what a user may see is an edit
+    + hot reload, and the sender keeps the same plaintext key."""
+    data = _load(args.file)
+    for k in data["keys"]:
+        if k["id"] != args.id:
+            continue
+        if args.entity_types is not None:
+            k["entity_types"] = (
+                None if args.entity_types == "any"
+                else args.entity_types.split(",")
+            )
+        if args.sources is not None:
+            k["sources"] = (
+                None if args.sources == "any" else args.sources.split(",")
+            )
+        if args.perms is not None:
+            k["perms"] = args.perms
+        if args.namespace:
+            k["namespaces"] = args.namespace
+        if args.expires_days is not None:
+            k["expires"] = (
+                None if args.expires_days == 0
+                else (datetime.now(timezone.utc)
+                      + timedelta(days=args.expires_days)).isoformat()
+            )
+        _save(args.file, data)
+        print(f"updated {args.id!r}: namespaces={k['namespaces']} "
+              f"perms={k['perms']} entity_types={k.get('entity_types')} "
+              f"sources={k.get('sources')} expires={k.get('expires')}")
+        return
+    sys.exit(f"error: no key with id {args.id!r}")
+
+
 def cmd_revoke(args) -> None:
     data = _load(args.file)
     for k in data["keys"]:
@@ -119,13 +154,25 @@ def main() -> None:
     gen.add_argument("--expires-days", type=int, default=None)
 
     lst = sub.add_parser("list")
+
+    upd = sub.add_parser("update", help="change grants without re-minting")
+    upd.add_argument("--id", required=True)
+    upd.add_argument("--entity-types", default=None,
+                     help="comma list, or 'any' to remove the gate")
+    upd.add_argument("--sources", default=None,
+                     help="comma list, or 'any' to remove the gate")
+    upd.add_argument("--perms", choices=["r", "w", "rw"], default=None)
+    upd.add_argument("--namespace", action="append", default=None,
+                     help="repeatable; replaces the namespace list")
+    upd.add_argument("--expires-days", type=int, default=None,
+                     help="from now; 0 = never expires")
+
     rev = sub.add_parser("revoke")
     rev.add_argument("--id", required=True)
 
     args = parser.parse_args()
-    {"generate": cmd_generate, "list": cmd_list, "revoke": cmd_revoke}[
-        args.command
-    ](args)
+    {"generate": cmd_generate, "list": cmd_list, "update": cmd_update,
+     "revoke": cmd_revoke}[args.command](args)
 
 
 if __name__ == "__main__":

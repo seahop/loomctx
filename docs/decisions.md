@@ -275,6 +275,10 @@ rules control which slice of the world those queries operate over.
   its own provider key per request (`X-Loom-LLM-Key`) so LLM spend bills to
   the caller; the provider/model stays server-chosen and the bearer still
   bounds visibility.
+- **Administration:** the CLI + mounted-file flow is the audited admin path
+  (recipes in `docs/administration.md`); `keys update` changes a principal's
+  grants in place without re-minting their secret, and Secret-mount refresh
+  + hot reload means no admin action restarts anything.
 - Future (post-conference): per-entity ACLs / attribute rules via the schema
   registry, and an admin API for key management beyond the CLI+file flow.
 

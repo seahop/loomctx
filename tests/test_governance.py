@@ -158,6 +158,35 @@ def test_keys_cli_generates_hashed_scoped_keys(tmp_path, monkeypatch):
     assert auth.grant_for("loomk_wrong") is None
 
 
+def test_keys_cli_update_changes_grants_not_secret(tmp_path, monkeypatch):
+    import os as _os
+    import subprocess, sys
+    plaintext, path = _generate_key(
+        tmp_path, id="analyst", perms="r", entity_types="host",
+    )
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    auth = AuthConfig.from_env()
+    assert not auth.grant_for(plaintext).allows_entity_type("alert")
+
+    subprocess.run([sys.executable, "-m", "loom.keys", "--file", str(path),
+                    "update", "--id", "analyst",
+                    "--entity-types", "host,alert", "--perms", "rw"],
+                   check=True, capture_output=True)
+    stat = _os.stat(path)
+    _os.utime(path, (stat.st_atime, stat.st_mtime + 5))
+    grant = auth.grant_for(plaintext)  # SAME key, hot-reloaded grants
+    assert grant.allows_entity_type("alert")
+    assert grant.allows("default", "w")
+
+    # 'any' removes the gate entirely
+    subprocess.run([sys.executable, "-m", "loom.keys", "--file", str(path),
+                    "update", "--id", "analyst", "--entity-types", "any"],
+                   check=True, capture_output=True)
+    _os.utime(path, (stat.st_atime, stat.st_mtime + 10))
+    assert auth.grant_for(plaintext).entity_types is None
+
+
 def test_keys_cli_revoke_and_hot_reload(tmp_path, monkeypatch):
     import os as _os
     plaintext, path = _generate_key(tmp_path, id="rotate-me")
