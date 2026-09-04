@@ -9,13 +9,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build engine image
-        run: docker compose build test
+        run: docker compose build test loom
       - name: Run Python test suite
         run: docker compose run --rm test
       - name: Contracts in sync (schemas.json regenerates identically)
-        run: docker compose run --rm -T loom python -m loom.schemas | diff - contracts/schemas.json
+        # image is pre-built above, so stdout carries only the schema JSON
+        run: |
+          docker compose run --rm -T loom python -m loom.schemas > /tmp/schemas.json
+          diff /tmp/schemas.json contracts/schemas.json
       - name: Store tests against Postgres
         run: |
           docker compose --profile pg up -d --wait postgres
@@ -33,7 +36,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
