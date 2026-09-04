@@ -72,6 +72,13 @@ Ask about `host web-01`'s OS instead and the pack *leads with a conflict item*
 pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
 `document` envelope (see `docs/contracts.md`).
 
+To enable the answering LLM (`/v1/answer`, MCP `answer`) locally, copy
+`.env.example` to `.env`, fill in a provider key (OpenRouter, Venice,
+Anthropic, or a self-hosted base URL), and restart — compose picks it up
+automatically. The gitignored `.env` never reaches the repo or the images.
+With it filled in, the real-provider e2e test activates:
+`docker compose run --rm test pytest -q tests/test_e2e_answer.py`.
+
 Deploying beyond a laptop: `kubectl apply -k deploy/k8s`, or the **scale
 shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 (`docker compose --profile scale up -d --build --scale gateway=3`, ingest on

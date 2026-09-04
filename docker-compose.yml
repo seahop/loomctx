@@ -23,6 +23,11 @@ services:
     profiles: ["test"]
     environment:
       LOOM_DB: /tmp/loom-test.db
+      # from .env when present — lets the e2e answer test hit a real provider
+      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
+      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
+      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
+      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
     volumes:
       - ./tests:/app/tests:ro
     command: pytest -q

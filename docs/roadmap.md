@@ -57,8 +57,11 @@ presentable.
   plus native Anthropic; configured by four `LOOM_LLM_*` env vars
 - ✅ `POST /v1/answer`: retrieval-grounded, citation-required LLM answers;
   auto-resolves entities named in the question; returns the pack for audit
-- ⬜ Live end-to-end run against a real provider (needs an API key or local
-  model — do this before the conference demo)
+- ✅ Live end-to-end run against a real provider (2026-09-04, OpenRouter /
+  deepseek-chat-v3.1 via `.env`): auto-resolved 3 entities from the incident
+  question, 63-item merged pack, cited answer that correctly traced the
+  10.0.4.7 lease reassignment and flagged the OS conflict unresolved.
+  Repeatable via `tests/test_e2e_answer.py` (skips without `.env`).
 
 ## Phase 3 — MCP server ✅ (2026-09-04)
 

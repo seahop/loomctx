@@ -1,0 +1,657 @@
+{
+  "IngestEnvelope": {
+    "$defs": {
+      "ClaimIn": {
+        "description": "Structured, entity-addressed ingestion payload. Maps ~1:1 to an Observation.",
+        "properties": {
+          "kind": {
+            "const": "claim",
+            "default": "claim",
+            "title": "Kind",
+            "type": "string"
+          },
+          "namespace": {
+            "default": "default",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "object": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntityRef"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Object"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid To"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "confidence": {
+            "default": 1.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "attrs": {
+            "additionalProperties": true,
+            "title": "Attrs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "subject",
+          "predicate",
+          "object",
+          "observed_at",
+          "source"
+        ],
+        "title": "ClaimIn",
+        "type": "object"
+      },
+      "DocumentIn": {
+        "description": "Unstructured ingestion payload. Stored verbatim as an artifact, mined async.",
+        "properties": {
+          "kind": {
+            "const": "document",
+            "default": "document",
+            "title": "Kind",
+            "type": "string"
+          },
+          "namespace": {
+            "default": "default",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          },
+          "content_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Content B64"
+          },
+          "content_type": {
+            "default": "text/plain",
+            "title": "Content Type",
+            "type": "string"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Filename"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "attrs": {
+            "additionalProperties": true,
+            "title": "Attrs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "DocumentIn",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "claim": "#/$defs/ClaimIn",
+        "document": "#/$defs/DocumentIn"
+      },
+      "propertyName": "kind"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/ClaimIn"
+      },
+      {
+        "$ref": "#/$defs/DocumentIn"
+      }
+    ]
+  },
+  "Observation": {
+    "$defs": {
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "Provenance": {
+        "description": "Where an extracted observation came from: an artifact and a character span.",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "title": "Provenance",
+        "type": "object"
+      }
+    },
+    "description": "Immutable stored fact. Never edited, only superseded.",
+    "properties": {
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "subject": {
+        "$ref": "#/$defs/EntityRef"
+      },
+      "predicate": {
+        "title": "Predicate",
+        "type": "string"
+      },
+      "object": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EntityRef"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          }
+        ],
+        "title": "Object"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "valid_from": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid From"
+      },
+      "valid_to": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid To"
+      },
+      "recorded_at": {
+        "format": "date-time",
+        "title": "Recorded At",
+        "type": "string"
+      },
+      "source": {
+        "title": "Source",
+        "type": "string"
+      },
+      "confidence": {
+        "title": "Confidence",
+        "type": "number"
+      },
+      "provenance": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Provenance"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "attrs": {
+        "additionalProperties": true,
+        "title": "Attrs",
+        "type": "object"
+      }
+    },
+    "required": [
+      "id",
+      "namespace",
+      "subject",
+      "predicate",
+      "object",
+      "observed_at",
+      "recorded_at",
+      "source",
+      "confidence"
+    ],
+    "title": "Observation",
+    "type": "object"
+  },
+  "ContextPack": {
+    "$defs": {
+      "Citation": {
+        "properties": {
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observation_id",
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "ContextItem": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "brief",
+              "fact",
+              "relation",
+              "doc_excerpt",
+              "conflict"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/$defs/Citation"
+            },
+            "title": "Citations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "score"
+        ],
+        "title": "ContextItem",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "ExpansionHandle": {
+        "description": "Opaque 'there is more here' pointer; feed back to expand().",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "hint": {
+            "title": "Hint",
+            "type": "string"
+          },
+          "est_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Est Tokens"
+          }
+        },
+        "required": [
+          "id",
+          "hint"
+        ],
+        "title": "ExpansionHandle",
+        "type": "object"
+      }
+    },
+    "description": "The unit of retrieval: budgeted, ranked, cited, expandable.",
+    "properties": {
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "subject": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EntityRef"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "subjects": {
+        "items": {
+          "$ref": "#/$defs/EntityRef"
+        },
+        "title": "Subjects",
+        "type": "array"
+      },
+      "question": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Question"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "As Of"
+      },
+      "budget": {
+        "title": "Budget",
+        "type": "integer"
+      },
+      "items": {
+        "items": {
+          "$ref": "#/$defs/ContextItem"
+        },
+        "title": "Items",
+        "type": "array"
+      },
+      "handles": {
+        "items": {
+          "$ref": "#/$defs/ExpansionHandle"
+        },
+        "title": "Handles",
+        "type": "array"
+      }
+    },
+    "required": [
+      "namespace",
+      "budget"
+    ],
+    "title": "ContextPack",
+    "type": "object"
+  },
+  "SchemaRegistration": {
+    "$defs": {
+      "EntityTypeDef": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "facets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Facets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "EntityTypeDef",
+        "type": "object"
+      },
+      "PredicateDef": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "object_types": {
+            "description": "allowed object entity types; empty = any entity or scalar",
+            "items": {
+              "type": "string"
+            },
+            "title": "Object Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PredicateDef",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "entity_types": {
+        "items": {
+          "$ref": "#/$defs/EntityTypeDef"
+        },
+        "title": "Entity Types",
+        "type": "array"
+      },
+      "predicates": {
+        "items": {
+          "$ref": "#/$defs/PredicateDef"
+        },
+        "title": "Predicates",
+        "type": "array"
+      }
+    },
+    "title": "SchemaRegistration",
+    "type": "object"
+  }
+}

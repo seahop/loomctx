@@ -1,7 +1,11 @@
+.env
 __pycache__/
 *.pyc
 *.db
 .pytest_cache/
 dist/
 *.egg-info/
-schemas.json
+# contracts/schemas.json is TRACKED (the language-neutral contract the Go
+# gateway builds against; CI checks it stays in sync) — only ignore stray
+# root-level exports
+/schemas.json

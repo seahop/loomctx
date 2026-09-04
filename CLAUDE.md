@@ -21,6 +21,19 @@ agents token-budgeted, cited, question-scoped "context packs".
 - Observations are append-only; reads always take a token budget; every derived fact
   carries citations. Domain specifics go in the schema registry, never core code.
 
+## Secrets / .env
+
+`.env` (gitignored + dockerignored) holds LOOM_LLM_* credentials; compose
+reads it automatically and passes values to loom/mcp/test services. NEVER
+commit, print, or paste `.env` contents anywhere (public repo!). When it is
+filled in, the real-provider e2e test runs:
+
+```bash
+docker compose run --rm test pytest -q -s tests/test_e2e_answer.py
+```
+
+(it skips cleanly when .env is absent). Template: `.env.example`.
+
 ## Verify
 
 ```bash
