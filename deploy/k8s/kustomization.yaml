@@ -1,14 +1,8 @@
+# Default shape: single engine + PVC (SQLite). `kubectl apply -k deploy/k8s`
+# keeps working; the real resources live in base/ so the overlays
+# (scale/, scale-pg/) can build on them without cycles.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: loom
-
 resources:
-  - namespace.yaml
-  - pvc.yaml
-  - deployment.yaml
-  - service.yaml
-
-images:
-  - name: ghcr.io/seahop/loom
-    newTag: latest
+  - base

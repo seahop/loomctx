@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The fully horizontal shape (D-008 + D-011): Postgres-backed store, so
+# EVERY tier autoscales — N gateways, N engines, N writer consumers.
+# Standalone on purpose (no PVC, no SQLite): edit postgres-secret.yaml to
+# point at your Postgres, then: kubectl apply -k deploy/k8s/scale-pg
+#
+# HPA prerequisite: the cluster must run metrics-server (most managed
+# clusters do; kind/minikube need it enabled).
+
+namespace: loom
+
+resources:
+  - namespace.yaml
+  - postgres-secret.yaml
+  - nats.yaml
+  - gateway.yaml
+  - engine.yaml
+  - consumer.yaml
+
+images:
+  - name: ghcr.io/seahop/loom
+    newTag: latest
+  - name: ghcr.io/seahop/loom-gateway
+    newTag: latest

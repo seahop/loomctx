@@ -80,3 +80,24 @@ def test_invalid_envelope_rejected(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/ingest", json={"kind": "claim", "predicate": "x"})
         assert r.status_code == 422
+
+
+def test_entity_search(tmp_path, monkeypatch):
+    with make_client(tmp_path, monkeypatch) as client:
+        client.post("/v1/ingest", json=CLAIM)
+        r = client.get("/v1/entities/search", params={"q": "web-01"})
+        assert r.status_code == 200
+        assert [m["key"] for m in r.json()["matches"]] == ["web-01"]
+        assert client.get(
+            "/v1/entities/search", params={"q": "zzz"}
+        ).json()["matches"] == []
+
+
+def test_answer_503_when_no_llm_configured(tmp_path, monkeypatch):
+    for var in ("LOOM_LLM_MODEL", "LOOM_LLM_PROVIDER",
+                "LOOM_LLM_BASE_URL", "LOOM_LLM_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    with make_client(tmp_path, monkeypatch) as client:
+        r = client.post("/v1/answer", json={"question": "anything?"})
+        assert r.status_code == 503
+        assert "LOOM_LLM_MODEL" in r.json()["detail"]

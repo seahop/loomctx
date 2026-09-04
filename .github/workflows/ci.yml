@@ -10,10 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
+      - name: Build engine image
         run: docker compose build test
-      - name: Run test suite
+      - name: Run Python test suite
         run: docker compose run --rm test
+      - name: Contracts in sync (schemas.json regenerates identically)
+        run: docker compose run --rm -T loom python -m loom.schemas | diff - contracts/schemas.json
+      - name: Store tests against Postgres
+        run: |
+          docker compose --profile pg up -d --wait postgres
+          docker compose run --rm \
+            -e LOOM_TEST_POSTGRES_URL=postgresql://loom:loom@postgres:5432/loom \
+            test pytest -q tests/test_store.py
+      - name: Build gateway (go vet + go test run in the build)
+        run: docker compose --profile scale build gateway
 
   publish-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -36,3 +46,11 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/loom:latest
             ghcr.io/${{ github.repository_owner }}/loom:${{ github.sha }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: gateway/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/loom-gateway:latest
+            ghcr.io/${{ github.repository_owner }}/loom-gateway:${{ github.sha }}

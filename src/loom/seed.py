@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .contracts import ClaimIn, DocumentIn, EntityRef
-from .store.sqlite import SqliteStore
+from .store.factory import store_from_url
 
 # Fixed epoch: the dataset describes July-September 2026 regardless of when
 # it is generated, so demos and tests are perfectly reproducible.
@@ -121,6 +121,11 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
             ns, ("host", host), "logged_in_by", ("user", user), day, hour,
             "auth-log", attrs={"method": rng.choice(["ssh", "console", "vpn"])},
         ))
+
+    # Domain membership (scope demo: "what's happening in corp.local?")
+    for host in HOSTS:
+        claims.append(_claim(ns, ("host", host), "member_of",
+                             ("domain", "corp.local"), 1, 9, "asset-inventory"))
 
     # ~120 host-to-host flows
     for _ in range(120):
@@ -222,10 +227,9 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
 
 def cmd_load(db_path: str, seed: int) -> None:
     claims, docs = generate(seed)
-    store = SqliteStore(db_path)
+    store = store_from_url(db_path)
     try:
-        for claim in claims:
-            store.record_claim(claim)
+        store.record_claims(claims)
         for doc in docs:
             store.store_artifact(doc)
     finally:

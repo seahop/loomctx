@@ -143,12 +143,32 @@ class ExpansionHandle(BaseModel):
     est_tokens: int | None = None
 
 
+class ScopeSpec(BaseModel):
+    """The set of entities a question is about — several computers, or an
+    anchor plus everything related to it ("domain X and its contents").
+
+    `expand` names the containment/relational predicates to follow outward
+    from the subjects (e.g. ["member_of"]); `depth` bounds the traversal.
+    """
+
+    subjects: list[EntityRef] = Field(min_length=1)
+    expand: list[str] = Field(default_factory=list)
+    depth: int = Field(default=1, ge=0, le=3)
+
+
 class AskRequest(BaseModel):
     namespace: str = DEFAULT_NAMESPACE
-    subject: EntityRef
+    subject: EntityRef | None = None
+    scope: ScopeSpec | None = None
     question: str
     budget: int = Field(default=800, gt=0, description="token budget; mandatory cap")
     as_of: datetime | None = None
+
+    @model_validator(mode="after")
+    def _subject_or_scope(self) -> "AskRequest":
+        if (self.subject is None) == (self.scope is None):
+            raise ValueError("provide exactly one of 'subject' or 'scope'")
+        return self
 
 
 class ExpandRequest(BaseModel):
@@ -160,12 +180,33 @@ class ContextPack(BaseModel):
     """The unit of retrieval: budgeted, ranked, cited, expandable."""
 
     namespace: str
-    subject: EntityRef
+    subject: EntityRef | None = None  # set for single-subject packs
+    subjects: list[EntityRef] = Field(default_factory=list)  # always populated
     question: str | None = None
     as_of: datetime | None = None
     budget: int
     items: list[ContextItem] = Field(default_factory=list)
     handles: list[ExpansionHandle] = Field(default_factory=list)
+
+
+class AnswerRequest(BaseModel):
+    """Ask + synthesize: retrieve a context pack, then have the configured
+    LLM produce a cited answer/decision. With neither subject nor scope,
+    subjects are auto-resolved from entity names mentioned in the question."""
+
+    namespace: str = DEFAULT_NAMESPACE
+    question: str
+    subject: EntityRef | None = None
+    scope: ScopeSpec | None = None
+    budget: int = Field(default=1200, gt=0)
+    as_of: datetime | None = None
+    max_tokens: int = Field(default=1024, gt=0, le=8192)
+
+
+class AnswerResponse(BaseModel):
+    answer: str
+    model: str
+    pack: ContextPack
 
 
 # --------------------------------------------------------------------------- #

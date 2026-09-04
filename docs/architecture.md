@@ -113,6 +113,21 @@ distance from the subject, recency/decay, and source confidence.
 **Progressive disclosure is the point:** the agent starts with ~500 tokens and pulls
 more only when the question demands it. That is what keeps agent context clean.
 
+**Scopes** extend the contract beyond a single entity: a question may name
+several subjects at once, or an anchor plus everything reachable over
+containment predicates ("domain corp.local and its contents" =
+`{subjects: [domain], expand: [member_of], depth: 1}`). The engine resolves
+the scope by bounded BFS, gathers across all resolved entities, dedupes,
+runs conflict detection per subject, and fits everything into one shared
+budget. With no subject at all, `/v1/answer` resolves entities whose keys
+appear verbatim in the question.
+
+**Answering (`/v1/answer`)** closes the loop for teams that want a decision,
+not just context: the engine builds the pack, then a configured LLM — any
+OpenAI-compatible provider (OpenRouter, Venice, Groq, ...), a self-hosted
+endpoint (Ollama/vLLM), or Anthropic — synthesizes a cited answer under a
+grounding prompt. The pack rides along in the response for audit (D-012).
+
 ## Access surfaces — three shells over one core
 
 1. **MCP server** (primary, for agents): `find_entity`, `get_brief`, `ask`, `expand`,
@@ -173,33 +188,46 @@ buffer serializes writes toward the store.
 - The same `docker-compose.yml` deploys unchanged to a laptop, a small VPS, Fly.io,
   or ECS. Design for portability, not for any specific cloud.
 
-## Diagram
+## Diagrams
 
+### The pipeline: two front doors, one store, one retrieval contract
+
+```mermaid
+flowchart TB
+    C["structured claims<br/>(telemetry, events)"] --> ING
+    D["documents<br/>(reports, tickets, files)"] --> ING
+    ING["INGEST — one envelope, ack fast"] --> ER["entity resolution<br/>(natural keys now; fuzzy in phase 4)"]
+    ING --> ART["artifact store (verbatim)"]
+    ART -.->|"async: chunk, embed,<br/>extract claims (phase 4)"| OBS
+    ER --> OBS
+    subgraph STORE["GraphStore interface — SQLite or Postgres by connection string"]
+        OBS["OBSERVATIONS — append-only, cited"]
+        GRAPH["ENTITY GRAPH — bitemporal edges"]
+        DOS["DOSSIERS — rolling summaries (phase 4)"]
+        OBS --- GRAPH --- DOS
+    end
+    STORE --> CPB["CONTEXT PACK BUILDER<br/>resolve scope → rank → trim to budget<br/>→ cite → surface conflicts → attach handles"]
+    CPB --> MCP["MCP (agents)"]
+    CPB --> HTTP["HTTP / SDK"]
+    CPB --> ANS["/v1/answer + LLM<br/>(any provider, D-012)"]
 ```
-   structured claims          documents (artifacts)
-        |                         |
-        v                         v
-  +-----------------------------------------+
-  |            INGEST (envelope)            |  <- ack fast, never blocks
-  +-----------------------------------------+
-        |                         |
-        v                         v (async workers)
-  entity resolution         chunk/embed -> claim extraction
-        |                         |
-        v                         v
-  +-----------------------------------------+
-  |   OBSERVATIONS (append-only, cited)     |
-  |   ENTITY GRAPH (bitemporal edges)       |
-  |   DOSSIERS (rolling summaries)          |   all behind GraphStore interface
-  +-----------------------------------------+
-                     |
-                     v
-  +-----------------------------------------+
-  |  CONTEXT PACK BUILDER                   |
-  |  (rank -> trim to budget -> cite ->     |
-  |   attach expansion handles)             |
-  +-----------------------------------------+
-        |            |            |
-        v            v            v
-       MCP         HTTP/SDK      CLI
+
+### Deployment shapes: same contract, growing horizontally
+
+```mermaid
+flowchart LR
+    subgraph S1["default — one container"]
+        E1["engine + SQLite"]
+    end
+    subgraph S2["scale — ingestion tier (D-010)"]
+        LB2["load balancer"] --> G2["Go gateways ×N (HPA)"]
+        G2 --> N2["NATS JetStream"] --> W2["writer"] --> DB2["SQLite (1 writer)"]
+        E2["engine ×1"] --> DB2
+    end
+    subgraph S3["scale-pg — everything horizontal (D-011)"]
+        LB3["load balancer"] --> G3["Go gateways ×N (HPA)"]
+        G3 --> N3["NATS JetStream"] --> W3["consumers ×N"] --> DB3[("Postgres")]
+        E3["engines ×N (HPA)"] --> DB3
+    end
+    S1 -->|"more senders"| S2 -->|"LOOM_DB=postgresql://"| S3
 ```

@@ -19,6 +19,12 @@ test = [
     "pytest>=8",
     "httpx>=0.27",
 ]
+scale = [
+    "nats-py>=2.7",
+]
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

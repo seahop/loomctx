@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom
+  labels:
+    app: loom
+spec:
+  # Postgres-backed => stateless engine pods; the HPA below scales the read
+  # path (ask/expand/answer) with load. No volume, no Recreate constraint.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: loom
+  template:
+    metadata:
+      labels:
+        app: loom
+    spec:
+      containers:
+        - name: loom
+          image: ghcr.io/seahop/loom:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LOOM_DB
+              valueFrom:
+                secretKeyRef:
+                  name: loom-db
+                  key: LOOM_DB
+            # Answering LLM (D-012) — add LOOM_LLM_* here (from a Secret)
+            # to enable /v1/answer.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom
+  labels:
+    app: loom
+spec:
+  selector:
+    app: loom
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: loom
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: loom
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

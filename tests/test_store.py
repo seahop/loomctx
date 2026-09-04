@@ -1,4 +1,13 @@
+"""GraphStore contract tests, run against every backend.
+
+SQLite always runs. Postgres runs when LOOM_TEST_POSTGRES_URL is set (CI
+brings one up via the compose `pg` profile); otherwise those params skip.
+"""
+
+import os
 from datetime import datetime, timezone
+
+import pytest
 
 from loom.contracts import ClaimIn, EntityRef
 from loom.store.sqlite import SqliteStore
@@ -6,8 +15,20 @@ from loom.store.sqlite import SqliteStore
 OBSERVED = datetime(2026, 9, 1, 14, 3, tzinfo=timezone.utc)
 
 
-def make_store(tmp_path):
-    return SqliteStore(tmp_path / "test.db")
+@pytest.fixture(params=["sqlite", "postgres"])
+def store(request, tmp_path):
+    if request.param == "sqlite":
+        s = SqliteStore(tmp_path / "test.db")
+    else:
+        url = os.environ.get("LOOM_TEST_POSTGRES_URL")
+        if not url:
+            pytest.skip("LOOM_TEST_POSTGRES_URL not set")
+        from loom.store.postgres import PostgresStore
+
+        s = PostgresStore(url)
+        s.wipe()
+    yield s
+    s.close()
 
 
 def login_claim(namespace="default"):
@@ -21,8 +42,7 @@ def login_claim(namespace="default"):
     )
 
 
-def test_record_claim_creates_entities_and_edge(tmp_path):
-    store = make_store(tmp_path)
+def test_record_claim_creates_entities_and_edge(store):
     obs = store.record_claim(login_claim())
 
     assert store.get_entity("default", EntityRef(type="host", key="web-01"))
@@ -37,29 +57,75 @@ def test_record_claim_creates_entities_and_edge(tmp_path):
     assert from_object[0].subject == EntityRef(type="host", key="web-01")
 
 
-def test_scalar_object_roundtrip(tmp_path):
-    store = make_store(tmp_path)
-    claim = login_claim()
-    claim = claim.model_copy(update={"predicate": "runs_os", "object": "fedora-44"})
+def test_record_claims_batch(store):
+    claims = [
+        login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"user-{i}")}
+        )
+        for i in range(25)
+    ]
+    observations = store.record_claims(claims)
+    assert len(observations) == 25
+    stored = store.observations_for(
+        "default", EntityRef(type="host", key="web-01"), limit=100
+    )
+    assert len(stored) == 25
+
+
+def test_scalar_object_roundtrip(store):
+    claim = login_claim().model_copy(
+        update={"predicate": "runs_os", "object": "fedora-44"}
+    )
     store.record_claim(claim)
     obs = store.observations_for("default", EntityRef(type="host", key="web-01"))
     assert obs[0].object == "fedora-44"
 
 
-def test_namespace_isolation(tmp_path):
-    store = make_store(tmp_path)
+def test_namespace_isolation(store):
     store.record_claim(login_claim(namespace="team-a"))
     assert store.observations_for("team-b", EntityRef(type="host", key="web-01")) == []
     assert store.get_entity("team-b", EntityRef(type="host", key="web-01")) is None
 
 
-def test_upsert_is_idempotent(tmp_path):
-    store = make_store(tmp_path)
+def test_upsert_is_idempotent(store):
     first = store.upsert_entity("default", EntityRef(type="host", key="web-01"))
     second = store.upsert_entity("default", EntityRef(type="host", key="web-01"))
     assert first.id == second.id
 
 
-def test_unknown_entity_returns_empty(tmp_path):
-    store = make_store(tmp_path)
+def test_unknown_entity_returns_empty(store):
     assert store.observations_for("default", EntityRef(type="host", key="nope")) == []
+
+
+def test_artifact_roundtrip(store):
+    from loom.contracts import DocumentIn
+
+    artifact = store.store_artifact(
+        DocumentIn(
+            text="incident report",
+            filename="ir.txt",
+            source="ir-pipeline",
+            observed_at=OBSERVED,
+        )
+    )
+    fetched = store.get_artifact("default", artifact.id)
+    assert fetched is not None and fetched.text == "incident report"
+    assert fetched.extraction_status == "pending"
+    assert store.get_artifact("default", "missing") is None
+
+
+def test_search_entities_exact_and_prefix(store):
+    store.record_claim(login_claim())  # creates host web-01 + user jdoe
+    exact = store.search_entities("default", "web-01")
+    assert [e.key for e in exact] == ["web-01"]
+    prefix = store.search_entities("default", "web")
+    assert [e.key for e in prefix] == ["web-01"]
+    assert store.search_entities("default", "zzz") == []
+    assert store.search_entities("other-ns", "web-01") == []
+
+
+def test_wipe_clears_everything(store):
+    store.record_claim(login_claim())
+    store.wipe()
+    assert store.get_entity("default", EntityRef(type="host", key="web-01")) is None
+    assert store.observations_for("default", EntityRef(type="host", key="web-01")) == []

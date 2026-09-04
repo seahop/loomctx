@@ -72,8 +72,10 @@ Ask about `host web-01`'s OS instead and the pack *leads with a conflict item*
 pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
 `document` envelope (see `docs/contracts.md`).
 
-Deploying beyond a laptop: `kubectl apply -k deploy/k8s` — see
-[deploy/README.md](deploy/README.md).
+Deploying beyond a laptop: `kubectl apply -k deploy/k8s`, or the **scale
+shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
+(`docker compose --profile scale up -d --build --scale gateway=3`, ingest on
+:8081) — see [deploy/README.md](deploy/README.md).
 
 ## Status
 

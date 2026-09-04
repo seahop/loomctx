@@ -88,16 +88,23 @@ class Loom:
 
     def ask(
         self,
-        subject: EntityTuple,
+        subject: EntityTuple | None,
         question: str,
         budget: int = 800,
         as_of: str | None = None,
+        scope: dict | None = None,
     ) -> dict:
+        """One of subject / scope. scope example:
+        {"subjects": [{"type": "domain", "key": "corp.local"}],
+         "expand": ["member_of"], "depth": 1}"""
         return self._post(
             "/v1/ask",
             {
                 "namespace": self.namespace,
-                "subject": {"type": subject[0], "key": subject[1]},
+                "subject": (
+                    {"type": subject[0], "key": subject[1]} if subject else None
+                ),
+                "scope": scope,
                 "question": question,
                 "budget": budget,
                 "as_of": as_of,
@@ -106,6 +113,33 @@ class Loom:
 
     def expand(self, handle_id: str, budget: int = 800) -> dict:
         return self._post("/v1/expand", {"handle": handle_id, "budget": budget})
+
+    def answer(
+        self,
+        question: str,
+        subject: EntityTuple | None = None,
+        scope: dict | None = None,
+        budget: int = 1200,
+        as_of: str | None = None,
+    ) -> dict:
+        """Retrieval-grounded LLM answer. With neither subject nor scope,
+        entities named in the question are auto-resolved server-side."""
+        return self._post(
+            "/v1/answer",
+            {
+                "namespace": self.namespace,
+                "question": question,
+                "subject": (
+                    {"type": subject[0], "key": subject[1]} if subject else None
+                ),
+                "scope": scope,
+                "budget": budget,
+                "as_of": as_of,
+            },
+        )
+
+    def search(self, query: str, limit: int = 10) -> dict:
+        return self._get(f"/v1/entities/search?q={query}&limit={limit}")
 
     # --------------------------------------------------------------- plumbing
 

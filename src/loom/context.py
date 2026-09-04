@@ -24,6 +24,7 @@ from .contracts import (
     ContextPack,
     EntityRef,
     Observation,
+    ScopeSpec,
 )
 from .contracts import ExpansionHandle
 from .store.base import GraphStore
@@ -163,13 +164,50 @@ def decode_handle(handle: str) -> dict:
 
 # ------------------------------------------------------------------ builder #
 
+def resolve_scope(
+    store: GraphStore, namespace: str, scope: ScopeSpec
+) -> list[EntityRef]:
+    """Expand a scope into a concrete entity list: BFS from the subjects over
+    the named containment predicates, bounded by depth. Deterministic order."""
+    seen = {(r.type, r.key) for r in scope.subjects}
+    resolved = list(scope.subjects)
+    frontier = list(scope.subjects)
+    for _ in range(scope.depth):
+        if not scope.expand or not frontier:
+            break
+        next_frontier: list[EntityRef] = []
+        for ref in frontier:
+            for obs in store.observations_for(namespace, ref, limit=_GATHER_LIMIT):
+                if obs.predicate not in scope.expand:
+                    continue
+                ends = [obs.subject]
+                if isinstance(obs.object, EntityRef):
+                    ends.append(obs.object)
+                for end in ends:
+                    if (end.type, end.key) not in seen:
+                        seen.add((end.type, end.key))
+                        resolved.append(end)
+                        next_frontier.append(end)
+        frontier = next_frontier
+    return resolved
+
+
 def build_pack(store: GraphStore, req: AskRequest) -> ContextPack:
-    observations = store.observations_for(
-        req.namespace, req.subject, limit=_GATHER_LIMIT
-    )
+    if req.scope is not None:
+        subjects = resolve_scope(store, req.namespace, req.scope)
+    else:
+        subjects = [req.subject]
+    observations: list[Observation] = []
+    seen_ids: set[str] = set()  # an obs can reach us via several subjects
+    for ref in subjects:
+        for obs in store.observations_for(req.namespace, ref, limit=_GATHER_LIMIT):
+            if obs.id not in seen_ids:
+                seen_ids.add(obs.id)
+                observations.append(obs)
+    observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
     return _pack(
         namespace=req.namespace,
-        subject=req.subject,
+        subjects=subjects,
         question=req.question,
         as_of=req.as_of,
         budget=req.budget,
@@ -188,7 +226,7 @@ def expand_pack(store: GraphStore, handle: str, budget: int) -> ContextPack:
     ]
     return _pack(
         namespace=meta["ns"],
-        subject=subject,
+        subjects=[subject],
         question=None,
         as_of=as_of,
         budget=budget,
@@ -199,7 +237,7 @@ def expand_pack(store: GraphStore, handle: str, budget: int) -> ContextPack:
 
 def _pack(
     namespace: str,
-    subject: EntityRef,
+    subjects: list[EntityRef],
     question: str | None,
     as_of: datetime | None,
     budget: int,
@@ -230,14 +268,15 @@ def _pack(
     remaining = budget
 
     # Conflicts ship first: an agent must not act on a contested fact unaware.
-    for item in _find_conflicts(subject, observations):
-        cost = est_tokens(item.text)
-        if cost <= remaining:
-            items.append(item)
-            remaining -= cost
+    for subj in subjects:
+        for item in _find_conflicts(subj, observations):
+            cost = est_tokens(item.text)
+            if cost <= remaining:
+                items.append(item)
+                remaining -= cost
 
     included: set[str] = set()
-    skipped_by_predicate: dict[str, int] = {}
+    skipped: dict[tuple[str, str, str], int] = {}  # (subj type, key, predicate)
     for score, obs in scored:
         text = _render_fact(obs)
         cost = est_tokens(text)
@@ -253,27 +292,28 @@ def _pack(
             remaining -= cost
             included.add(obs.id)
         else:
-            skipped_by_predicate[obs.predicate] = (
-                skipped_by_predicate.get(obs.predicate, 0) + 1
-            )
+            key = (obs.subject.type, obs.subject.key, obs.predicate)
+            skipped[key] = skipped.get(key, 0) + 1
 
     handles: list[ExpansionHandle] = []
     if with_handles:
-        for predicate, skipped in sorted(
-            skipped_by_predicate.items(), key=lambda kv: kv[1], reverse=True
+        for (stype, skey, predicate), count in sorted(
+            skipped.items(), key=lambda kv: kv[1], reverse=True
         ):
+            subj = EntityRef(type=stype, key=skey)
             handles.append(
                 ExpansionHandle(
-                    id=encode_handle(namespace, subject, predicate, as_of),
-                    hint=f"{skipped} more '{predicate}' observations for "
-                    f"{subject.type}:{subject.key}",
-                    est_tokens=skipped * 25,
+                    id=encode_handle(namespace, subj, predicate, as_of),
+                    hint=f"{count} more '{predicate}' observations for "
+                    f"{stype}:{skey}",
+                    est_tokens=count * 25,
                 )
             )
 
     return ContextPack(
         namespace=namespace,
-        subject=subject,
+        subject=subjects[0] if len(subjects) == 1 else None,
+        subjects=subjects,
         question=question,
         as_of=as_of,
         budget=budget,

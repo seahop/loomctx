@@ -1,4 +1,8 @@
 services:
+  # LOOM_DB is a SQLite path by default; point it at postgresql://... to use
+  # the server-backed store instead (D-011), e.g.:
+  #   LOOM_DB=postgresql://loom:loom@postgres:5432/loom \
+  #     docker compose --profile pg up -d loom postgres
   loom:
     build: .
     ports:
@@ -6,7 +10,13 @@ services:
     volumes:
       - loom-data:/data
     environment:
-      LOOM_DB: /data/loom.db
+      LOOM_DB: ${LOOM_DB:-/data/loom.db}
+      # Answering LLM (D-012): any OpenAI-compatible provider or self-hosted
+      # endpoint, or provider=anthropic. Unset => /v1/answer returns 503.
+      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
+      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
+      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
+      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
 
   test:
     build: .
@@ -16,6 +26,66 @@ services:
     volumes:
       - ./tests:/app/tests:ro
     command: pytest -q
+
+  # ------------------------------------------------------------------------
+  # Scale shape (D-010): devices -> lb :8081 -> N gateways -> NATS -> writer
+  # consumer -> shared store. Start with:
+  #   docker compose --profile scale up -d --build --scale gateway=3
+  # The read path stays on the loom service (:8000).
+  # ------------------------------------------------------------------------
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    profiles: ["scale"]
+    environment:
+      LOOM_NATS_URL: nats://nats:4222
+    depends_on:
+      - nats
+
+  lb:
+    image: nginx:1.27-alpine
+    profiles: ["scale"]
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./deploy/compose/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - gateway
+
+  nats:
+    image: nats:2.10-alpine
+    profiles: ["scale"]
+    command: ["-js"]
+
+  consumer:
+    build: .
+    profiles: ["scale"]
+    command: python -m loom.consumer
+    environment:
+      LOOM_DB: ${LOOM_DB:-/data/loom.db}
+      LOOM_NATS_URL: nats://nats:4222
+    volumes:
+      - loom-data:/data
+    depends_on:
+      - nats
+
+  # Server-backed store for the database-scaling lane (D-011).
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["pg"]
+    environment:
+      POSTGRES_USER: loom
+      POSTGRES_PASSWORD: loom
+      POSTGRES_DB: loom
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loom"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - pg-data:/var/lib/postgresql/data
 
   # Optional GraphStore backend for teams wanting Cypher / visual exploration.
   # Requires the (not yet written) Neo4jStore implementation — see docs/decisions.md
@@ -33,4 +103,5 @@ services:
 
 volumes:
   loom-data:
+  pg-data:
   # neo4j-data:

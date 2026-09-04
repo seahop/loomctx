@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-consumer
+  labels:
+    app: loom-consumer
+spec:
+  # Writer consumers share one JetStream durable ("loom-writer"), so NATS
+  # distributes messages across replicas — raise replicas if the queue
+  # depth grows. Delivery is at-least-once; Postgres serializes the writes.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: loom-consumer
+  template:
+    metadata:
+      labels:
+        app: loom-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: ghcr.io/seahop/loom:latest
+          command: ["python", "-m", "loom.consumer"]
+          env:
+            - name: LOOM_DB
+              valueFrom:
+                secretKeyRef:
+                  name: loom-db
+                  key: LOOM_DB
+            - name: LOOM_NATS_URL
+              value: nats://nats:4222
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

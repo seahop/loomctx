@@ -32,10 +32,21 @@ Everything else is built on this. v1 routes:
 GET  /healthz
 POST /v1/ingest                                  # ClaimIn -> 200; DocumentIn -> 202 (artifact stored, extraction pending)
 GET  /v1/entities/{type}/{key}/observations      # raw, for debug/audit
+GET  /v1/entities/search?q=                      # resolve names to entities
 GET  /v1/artifacts/{id}                          # stored document, verbatim
-POST /v1/ask                                     # AskRequest -> ContextPack
+POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
 POST /v1/expand                                  # ExpandRequest -> ContextPack
+POST /v1/answer                                  # retrieval-grounded LLM answer (503 until an LLM is configured, D-012)
 POST /v1/schemas                                 # register entity types/predicates (phase 1 remainder)
+```
+
+Multi-entity questions use a **scope** instead of a subject — several
+computers at once, or an anchor expanded over containment predicates:
+
+```json
+{"scope": {"subjects": [{"type": "domain", "key": "corp.local"}],
+           "expand": ["member_of"], "depth": 1},
+ "question": "what alerts or unusual activity happened?", "budget": 800}
 ```
 
 Conventions: JSON everywhere; namespace via `X-Loom-Namespace` header (default
@@ -66,8 +77,31 @@ loom.document(text=report_text, source="ir-pipeline", filename="IR-4432.txt",
 
 # read side — an app or agent framework without MCP
 pack = loom.ask(("host", "web-01"), "who logged in this week?", budget=800)
-print(pack.items[0].text, pack.items[0].citations)
-more = loom.expand(pack.handles[0].id)
+more = loom.expand(pack["handles"][0]["id"])
+
+# scoped: a domain and its contents
+pack = loom.ask(None, "what changed?", scope={
+    "subjects": [{"type": "domain", "key": "corp.local"}],
+    "expand": ["member_of"], "depth": 1})
+
+# retrieval-grounded LLM answer (server has LOOM_LLM_* configured; entities
+# named in the question are auto-resolved)
+result = loom.answer("what do web-01 and web-02 have in common?")
+print(result["answer"], result["model"])
+```
+
+### Configuring the answering LLM (server side, D-012)
+
+```bash
+# OpenRouter                          # Venice
+LOOM_LLM_PROVIDER=openrouter          LOOM_LLM_PROVIDER=venice
+LOOM_LLM_API_KEY=sk-or-...            LOOM_LLM_API_KEY=...
+LOOM_LLM_MODEL=deepseek/deepseek-v3   LOOM_LLM_MODEL=llama-3.3-70b
+
+# Anthropic                           # Self-hosted (Ollama/vLLM/LM Studio)
+LOOM_LLM_PROVIDER=anthropic           LOOM_LLM_BASE_URL=http://my-box:11434/v1
+LOOM_LLM_API_KEY=sk-ant-...           LOOM_LLM_MODEL=llama3.1:8b
+LOOM_LLM_MODEL=claude-sonnet-5
 ```
 
 Later: a TypeScript SDK generated from the exported JSON Schema (phase 5) — no

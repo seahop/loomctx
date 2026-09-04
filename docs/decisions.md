@@ -153,6 +153,79 @@ Build order: design now (this entry + architecture.md), build post-conference
 unless demo load requires it sooner (roadmap phase 5). Resolves OQ-1's shape:
 the queue exists only in the scale profile.
 
+**Update 2026-09-03: built same day at the user's request.** `gateway/` (Go,
+validates against `contracts/schemas.json` — the checked-in export that CI
+keeps in sync with the Pydantic contracts), compose `scale` profile (nginx lb
+on host :8081), `deploy/k8s/scale` overlay, `loom.consumer` writer, SQLite
+WAL mode. Verified live: multi-gateway ingest → JetStream → consumer →
+`/v1/ask`, with contract violations rejected at the gateway.
+
+## D-011 · Database: two lanes — tuned singular SQLite, or Postgres by connection string (2026-09-03)
+
+User requirement: the database must be able to scale, AND a singular setup
+must handle decent input volume if that's all a team wants. Both lanes ship:
+
+- **Singular lane (default): SQLite, tuned.** WAL + `synchronous=NORMAL`
+  (one fsync per transaction, safe under WAL), busy timeout, and batched
+  claim writes (`GraphStore.record_claims`) committed as one transaction —
+  the queue consumer writes whole fetched batches this way. Measured
+  2026-09-03 (laptop, one container, per-request HTTP ingest): **~507
+  claims/s, 0 errors** (~44M/day). The measuring tool ships as
+  `python -m loom.loadgen`; at these rates the load *generator* is the
+  bottleneck, so treat the numbers as floors.
+- **Scaling lane: `PostgresStore`,** selected purely by connection string —
+  `LOOM_DB=postgresql://...` and nothing else changes (engine, consumer, and
+  seed all go through `store.factory`). Identical column shapes and shared
+  row converters keep behavior byte-for-byte equal; the same contract test
+  suite runs against both backends (CI spins up Postgres via the compose
+  `pg` profile). Measured: ~454 claims/s through the same per-request path.
+  This is what lets engine replicas + writer consumers scale horizontally on
+  k8s (D-008's promise, now real).
+- Scale-shape intake measured end-to-end the same day: lb → 3 gateways →
+  NATS at **~515/s intake** with the consumer draining all messages in
+  batched transactions.
+- Rule: backends must stay behaviorally identical — new store features land
+  in the shared contract tests first. Neo4j remains a possible third backend
+  for graph-native traversal, not a throughput play.
+
+## D-012 · Answering LLMs: OpenAI-compatible everywhere + Anthropic native + self-hosted; scoped questions (2026-09-03)
+
+User requirements: agents/models talking to Loom must work with OpenRouter,
+Venice, other common providers, or a custom self-hosted instance; and
+questions may span multiple computers or "a domain and its contents".
+
+**Provider strategy — one wire format covers nearly everyone.** OpenRouter,
+Venice, Groq, Together, Mistral, OpenAI, Ollama, vLLM, and LM Studio all
+speak the OpenAI-compatible chat-completions API, so `loom/llm.py` ships one
+stdlib-only client for all of them (provider shortcut → base URL, or
+`LOOM_LLM_BASE_URL` for anything self-hosted/custom) plus a native Anthropic
+client. Config is four env vars: `LOOM_LLM_MODEL` (required),
+`LOOM_LLM_PROVIDER` or `LOOM_LLM_BASE_URL`, `LOOM_LLM_API_KEY`. Unconfigured
+=> `/v1/answer` returns 503 with setup instructions; everything else works
+without any LLM. No provider SDK dependencies in the core, per D-007.
+
+**`POST /v1/answer` = ask + synthesize.** Builds the context pack, hands
+pack + question to the LLM under a system prompt that requires citations,
+surfaces conflicts both-sided, and forbids guessing beyond the pack. The
+response returns the pack alongside the answer so callers can audit exactly
+what the model saw.
+
+**Scopes (multi-entity questions).** `ScopeSpec {subjects, expand, depth}`:
+several subjects at once, optionally expanded by BFS over named containment
+predicates (e.g. `member_of`) — "domain corp.local and everything in it"
+is `{subjects: [domain:corp.local], expand: [member_of], depth: 1}`. Packs
+gather across the resolved entities, dedupe observations, run conflict
+detection per subject, and share one budget. `AskRequest` now takes exactly
+one of `subject` | `scope`; `ContextPack.subject` became optional with a new
+always-populated `subjects` list (contract change, pre-1.0).
+
+**Auto-resolution.** With neither subject nor scope, `/v1/answer` resolves
+subjects from entity keys appearing verbatim in the question (backed by the
+new `search_entities` store method + `GET /v1/entities/search`). Exact
+matches only — auto-resolution must never guess; unresolvable => 422.
+Registry-declared containment predicates (so scopes expand without the
+caller naming predicates) land with schema-registry persistence.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~
