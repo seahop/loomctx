@@ -87,9 +87,13 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 ## Governance
 
 - **License:** Apache-2.0.
-- **Auth:** per-namespace API keys via `LOOM_API_KEYS` (see `.env.example`);
-  unset = open dev mode. Enforced by the engine and the ingest gateway, with
-  per-key rate limits and cheapest-first rejection of bad traffic.
+- **Auth:** real API keys via `python -m loom.keys generate` — hashed at
+  rest, hot-rotated, and scoped per key: namespaces, read/write (senders get
+  write-only keys), entity-type allowlists (an operator's agent sees only
+  that user's slice of the world — the query/LLM surface itself is never
+  gated), source pinning for writers, expiry. Enforced identically by the
+  engine and the ingest gateway, with per-key rate limits and cheapest-first
+  rejection of bad traffic. Unset = open dev mode.
 - **Idempotency:** send an `event_id` with any envelope and retries/redelivery
   can never duplicate a fact.
 - **Operability:** Prometheus `/metrics` on engine and gateway; `/readyz`

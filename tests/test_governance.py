@@ -120,7 +120,102 @@ def test_http_enforces_write_and_read_keys(tmp_path, monkeypatch):
         assert b"loom_ingest_total" in client.get("/metrics").content
 
 
-# ------------------------------------------------------------------- D-016 #
+# ------------------------------------------------------------------ D-013a #
+
+def _generate_key(tmp_path, **overrides):
+    """Run the keys CLI and return (plaintext_key, keys_file_path)."""
+    import subprocess, sys
+    path = tmp_path / "keys.json"
+    argv = [sys.executable, "-m", "loom.keys", "--file", str(path), "generate",
+            "--id", overrides.pop("id", "test-key"),
+            "--perms", overrides.pop("perms", "rw")]
+    for ns in overrides.pop("namespaces", ["default"]):
+        argv += ["--namespace", ns]
+    for flag, value in overrides.items():
+        argv += [f"--{flag.replace('_', '-')}", str(value)]
+    out = subprocess.run(argv, capture_output=True, text=True, check=True)
+    return out.stdout.strip(), path
+
+
+def test_keys_cli_generates_hashed_scoped_keys(tmp_path, monkeypatch):
+    plaintext, path = _generate_key(
+        tmp_path, id="shipper", perms="w", namespaces=["netsec"],
+        entity_types="host,ip", sources="auth-log", expires_days=30,
+    )
+    assert plaintext.startswith("loomk_")
+    assert plaintext not in path.read_text()  # hash only at rest
+
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    auth = AuthConfig.from_env()
+    grant = auth.grant_for(plaintext)
+    assert grant is not None and grant.id == "shipper"
+    assert grant.allows("netsec", "w") and not grant.allows("netsec", "r")
+    assert grant.allows_entity_type("host")
+    assert not grant.allows_entity_type("vendor")
+    assert grant.allows_source("auth-log")
+    assert not grant.allows_source("forged")
+    assert auth.grant_for("loomk_wrong") is None
+
+
+def test_keys_cli_revoke_and_hot_reload(tmp_path, monkeypatch):
+    import os as _os
+    plaintext, path = _generate_key(tmp_path, id="rotate-me")
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    auth = AuthConfig.from_env()
+    assert auth.grant_for(plaintext) is not None
+
+    import subprocess, sys
+    subprocess.run([sys.executable, "-m", "loom.keys", "--file", str(path),
+                    "revoke", "--id", "rotate-me"], check=True)
+    stat = _os.stat(path)
+    _os.utime(path, (stat.st_atime, stat.st_mtime + 5))  # force mtime change
+    assert auth.grant_for(plaintext) is None  # picked up without restart
+
+
+def make_scoped_client(tmp_path, monkeypatch):
+    """Engine client + a write key pinned to host/user types and auth-log,
+    plus an unrestricted reader."""
+    write_key, path = _generate_key(
+        tmp_path, id="shipper", perms="w",
+        entity_types="host,user", sources="auth-log",
+    )
+    import subprocess, sys
+    read = subprocess.run(
+        [sys.executable, "-m", "loom.keys", "--file", str(path), "generate",
+         "--id", "analyst", "--namespace", "default", "--perms", "r"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "scoped.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    for var in ("LOOM_LLM_MODEL", "LOOM_LLM_PROVIDER",
+                "LOOM_LLM_BASE_URL", "LOOM_LLM_API_KEY"):
+        monkeypatch.delenv(var, raising=False)  # hermetic: no real provider
+    from loom.api.http import app
+    return TestClient(app), write_key, read
+
+
+def test_http_scoping_gates(tmp_path, monkeypatch):
+    client, write_key, read_key = make_scoped_client(tmp_path, monkeypatch)
+    with client:
+        headers = {"X-Loom-Key": write_key}
+        ok = claim().model_dump(mode="json")
+        assert client.post("/v1/ingest", json=ok, headers=headers).status_code == 200
+
+        forged = {**ok, "source": "forged-feed"}
+        r = client.post("/v1/ingest", json=forged, headers=headers)
+        assert r.status_code == 403 and "source" in r.json()["detail"]
+
+        wrong_type = {**ok, "subject": {"type": "vendor", "key": "initech"}}
+        r = client.post("/v1/ingest", json=wrong_type, headers=headers)
+        assert r.status_code == 403 and "entity type" in r.json()["detail"]
+
+        # the LLM/query path itself is NEVER blocked for a valid reader: an
+        # unrestricted read key hits 503 (no LLM configured), not 403
+        r = client.post("/v1/answer", json={"question": "web-01?"},
+                        headers={"X-Loom-Key": read_key})
+        assert r.status_code == 503
 
 def test_redaction_tombstones_hide_but_preserve(tmp_path):
     store = SqliteStore(tmp_path / "l.db")

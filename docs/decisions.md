@@ -245,6 +245,39 @@ cap question length (2k chars) and budgets (32k tokens). MCP stdio is
 local-trust by design; the MCP http profile should sit behind cluster policy
 until it grows its own auth (open item).
 
+## D-013a · Key generation, hashed keys file, and data-scoping gates (2026-09-04)
+
+Design principle, set by the user: **capabilities are never gated — data is.**
+A valid reader always has the full query surface including `/v1/answer`; the
+rules control which slice of the world those queries operate over.
+
+- **Generation:** `python -m loom.keys generate` mints `loomk_...` keys
+  (32 random bytes), prints the plaintext exactly once, and stores only the
+  SHA-256 in a keys file. `list`/`revoke` manage it. Distribute the file via
+  `LOOM_AUTH_FILE` (a k8s Secret mount / compose bind mount); the engine and
+  the Go gateway **hot-reload it on change**, so rotation is
+  generate → hand over → revoke, with no restarts. Legacy `LOOM_API_KEYS`
+  plaintext env entries keep working (hashed in memory).
+- **Grants (per key):** `namespaces` + `perms` (a sender's key is `w` only —
+  it can put data in but never read anything back), optional
+  `entity_types` allowlist (an operator's agent key scoped to what that user
+  may see), optional `sources` allowlist for writes (**source pinning**: a
+  compromised log shipper cannot forge facts attributed to other sources),
+  optional `expires`, and `disabled`.
+- **Enforcement style:** explicit requests for out-of-scope data get a 403
+  naming the gate; list-shaped operations (entity search, `/v1/answer`
+  auto-resolution) silently operate over the scoped world instead — the
+  agent experience is "this is my universe", not a wall of errors. Expand
+  handles inherit the namespace check from the ask that produced them.
+- **Two credentials, cleanly separated:** the Loom bearer is the *user's*
+  identity + data permissions; the LLM provider key is the *server's*
+  (`LOOM_LLM_API_KEY`) — users never touch it. Optionally an agent presents
+  its own provider key per request (`X-Loom-LLM-Key`) so LLM spend bills to
+  the caller; the provider/model stays server-chosen and the bearer still
+  bounds visibility.
+- Future (post-conference): per-entity ACLs / attribute rules via the schema
+  registry, and an admin API for key management beyond the CLI+file flow.
+
 ## D-014 · Idempotent ingest via sender event_id (2026-09-04)
 
 The scale shape is at-least-once (NATS redelivery after a consumer crash

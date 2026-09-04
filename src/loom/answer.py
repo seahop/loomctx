@@ -36,11 +36,16 @@ class UnresolvedQuestionError(ValueError):
 
 
 def auto_subjects(
-    store: GraphStore, namespace: str, question: str, cap: int = 5
+    store: GraphStore,
+    namespace: str,
+    question: str,
+    cap: int = 5,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> list[EntityRef]:
     """Entities whose keys appear verbatim in the question ("web-01 and
     web-02", "corp.local"). Exact key matches only — auto-resolution should
-    never guess."""
+    never guess. allowed_types restricts resolution to a scoped key's world
+    (D-013a)."""
     subjects: list[EntityRef] = []
     seen: set[tuple[str, str]] = set()
     for token in sorted(_tokens(question)):
@@ -48,6 +53,8 @@ def auto_subjects(
             continue
         for entity in store.search_entities(namespace, token, limit=3):
             if entity.key.lower() != token:
+                continue
+            if allowed_types is not None and entity.type not in allowed_types:
                 continue
             key = (entity.type, entity.key)
             if key not in seen:
@@ -69,12 +76,16 @@ def render_user_prompt(question: str, pack: ContextPack) -> str:
 
 
 def build_answer(
-    store: GraphStore, llm: LLMClient, req: AnswerRequest
+    store: GraphStore,
+    llm: LLMClient,
+    req: AnswerRequest,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> AnswerResponse:
     if req.subject is not None or req.scope is not None:
         subject, scope = req.subject, req.scope
     else:
-        found = auto_subjects(store, req.namespace, req.question)
+        found = auto_subjects(store, req.namespace, req.question,
+                              allowed_types=allowed_types)
         if not found:
             raise UnresolvedQuestionError(
                 "no entity named in the question was found; pass an explicit "

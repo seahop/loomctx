@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -172,6 +176,76 @@ func TestPerKeyRateLimit(t *testing.T) {
 	}
 	if second.Header().Get("Retry-After") == "" {
 		t.Fatal("429 must carry Retry-After")
+	}
+}
+
+func TestScopedFileKeyGates(t *testing.T) {
+	key := "loomk_gwtest"
+	sum := sha256.Sum256([]byte(key))
+	doc := fmt.Sprintf(`{"keys":[{"id":"shipper","sha256":"%x",
+	  "namespaces":["default"],"perms":"w",
+	  "entity_types":["host","user"],"sources":["auth-log"]}]}`, sum)
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auth := &authConfig{path: path}
+	if err := auth.reload(); err != nil {
+		t.Fatal(err)
+	}
+	fwd := &fakeForwarder{}
+	schema, err := newValidator("../contracts/schemas.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newServer(config{maxBodyBytes: 1 << 20}, schema, fwd, auth)
+
+	if rec := postWithKey(h, validClaim, key); rec.Code != http.StatusOK {
+		t.Fatalf("in-scope claim: %d %s", rec.Code, rec.Body.String())
+	}
+	forged := strings.Replace(validClaim, `"source": "auth-log"`,
+		`"source": "forged-feed"`, 1)
+	if rec := postWithKey(h, forged, key); rec.Code != http.StatusForbidden {
+		t.Fatalf("forged source must be 403, got %d", rec.Code)
+	}
+	outOfScope := strings.Replace(validClaim, `{"type": "host"`,
+		`{"type": "vendor"`, 1)
+	if rec := postWithKey(h, outOfScope, key); rec.Code != http.StatusForbidden {
+		t.Fatalf("out-of-scope entity type must be 403, got %d", rec.Code)
+	}
+	if fwd.calls != 1 {
+		t.Fatalf("only the in-scope claim may be forwarded, got %d", fwd.calls)
+	}
+}
+
+func TestKeysFileHotReload(t *testing.T) {
+	key := "loomk_rotateme"
+	sum := sha256.Sum256([]byte(key))
+	path := filepath.Join(t.TempDir(), "keys.json")
+	entry := func(disabled bool) string {
+		return fmt.Sprintf(`{"keys":[{"id":"k","sha256":"%x",
+		  "namespaces":["*"],"perms":"rw","disabled":%v}]}`, sum, disabled)
+	}
+	if err := os.WriteFile(path, []byte(entry(false)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auth := &authConfig{path: path}
+	if err := auth.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if auth.grantFor(key) == nil {
+		t.Fatal("key should resolve before revocation")
+	}
+	if err := os.WriteFile(path, []byte(entry(true)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// force an mtime difference regardless of filesystem resolution
+	future := auth.mtime.Add(2e9)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if auth.grantFor(key) != nil {
+		t.Fatal("revoked key must stop resolving after hot reload")
 	}
 }
 

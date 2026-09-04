@@ -67,9 +67,33 @@ computers at once, or an anchor expanded over containment predicates:
 
 Conventions: JSON everywhere; namespace via `X-Loom-Namespace` header (default
 `"default"`); auth via `X-Loom-Key: <key>` or `Authorization: Bearer <key>`
-(per-namespace keys, D-013 — `Loom(url, namespace, api_key=...)` in the SDK);
-optional `event_id` on any envelope makes ingestion idempotent (D-014);
-`/metrics` and `/readyz` for operations.
+(`Loom(url, namespace, api_key=...)` in the SDK); optional `event_id` on any
+envelope makes ingestion idempotent (D-014); `/metrics` and `/readyz` for
+operations.
+
+### Keys and scoping (D-013/D-013a)
+
+Generate real keys (hashed at rest, plaintext printed once):
+
+```bash
+docker compose run --rm -v $PWD/secrets:/secrets loom \
+  python -m loom.keys --file /secrets/keys.json generate \
+  --id netsec-shipper --namespace netsec --perms w \
+  --entity-types host,ip,user --sources auth-log --expires-days 180
+```
+
+Then point both the engine and gateway at it: `LOOM_AUTH_FILE=/secrets/keys.json`
+(mounted Secret on k8s). Rotation is hot — rewrite the file, no restarts.
+
+Typical grants:
+- **Sender/pipeline device:** `--perms w` (+ `--sources`, `--entity-types`) —
+  can put data in, can never read anything back.
+- **Operator's agent:** `--perms r` scoped to the namespaces/entity types that
+  user may see. The agent keeps the full query surface — ask, expand,
+  search, `/v1/answer` — it just operates over that user's slice of the
+  world (search and auto-resolution return only in-scope entities).
+- **LLM spend:** the provider key normally lives server-side; an agent may
+  instead send its own via `X-Loom-LLM-Key` per request.
 
 ## 3. Python SDK — `sdk/python/`
 

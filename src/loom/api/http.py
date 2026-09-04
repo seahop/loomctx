@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from .. import metrics
 from ..answer import UnresolvedQuestionError, build_answer
-from ..auth import AuthConfig, extract_key
+from ..auth import AuthConfig, Grant, extract_key
 from ..context import build_pack, decode_handle, expand_pack
 from ..contracts import (
     AnswerRequest,
@@ -49,17 +49,47 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Loom", version="0.1.0", lifespan=_lifespan)
 
 
-def _authorize(request: Request, namespace: str, action: str) -> None:
+def _authorize(request: Request, namespace: str, action: str) -> Grant | None:
+    """Namespace/perms check. Returns the grant (for fine-grained gates) or
+    None when auth is disabled."""
+    auth: AuthConfig = request.app.state.auth
+    if not auth.enabled:
+        return None
     key = extract_key(request.headers)
-    if request.app.state.auth.allows(key, namespace, action):
-        return
-    metrics.REJECTED.labels(reason="auth").inc()
-    raise HTTPException(
-        status_code=401 if key is None else 403,
-        detail="missing API key (X-Loom-Key or Authorization: Bearer)"
-        if key is None
-        else f"key not authorized for '{action}' on namespace {namespace!r}",
-    )
+    if key is None:
+        metrics.REJECTED.labels(reason="auth").inc()
+        raise HTTPException(
+            status_code=401,
+            detail="missing API key (X-Loom-Key or Authorization: Bearer)",
+        )
+    grant = auth.grant_for(key)
+    if grant is None or not grant.allows(namespace, action):
+        metrics.REJECTED.labels(reason="auth").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key not authorized for '{action}' on namespace {namespace!r}",
+        )
+    return grant
+
+
+def _gate_entity_type(grant: Grant | None, entity_type: str) -> None:
+    if grant is not None and not grant.allows_entity_type(entity_type):
+        metrics.REJECTED.labels(reason="scope").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key {grant.id!r} is not scoped to entity type "
+            f"{entity_type!r}",
+        )
+
+
+def _gate_source(grant: Grant | None, source: str) -> None:
+    if grant is not None and not grant.allows_source(source):
+        metrics.REJECTED.labels(reason="scope").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key {grant.id!r} may not write claims for source "
+            f"{source!r}",
+        )
 
 
 @app.get("/healthz")
@@ -83,11 +113,16 @@ def prometheus_metrics() -> Response:
 
 @app.post("/v1/ingest")
 def ingest(envelope: IngestEnvelope, request: Request):
-    _authorize(request, envelope.namespace, "w")
-    metrics.INGEST.labels(kind=envelope.kind).inc()
+    grant = _authorize(request, envelope.namespace, "w")
+    _gate_source(grant, envelope.source)
     if isinstance(envelope, ClaimIn):
+        _gate_entity_type(grant, envelope.subject.type)
+        if isinstance(envelope.object, EntityRef):
+            _gate_entity_type(grant, envelope.object.type)
+        metrics.INGEST.labels(kind=envelope.kind).inc()
         obs = request.app.state.store.record_claim(envelope)
         return {"status": "recorded", "observation_id": obs.id}
+    metrics.INGEST.labels(kind=envelope.kind).inc()
     artifact = request.app.state.store.store_artifact(envelope)
     return JSONResponse(
         status_code=202,
@@ -107,7 +142,8 @@ def entity_observations(
     limit: Annotated[int, Query(gt=0, le=1000)] = 100,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
 ) -> dict:
-    _authorize(request, namespace, "r")
+    grant = _authorize(request, namespace, "r")
+    _gate_entity_type(grant, etype)
     observations = request.app.state.store.observations_for(
         namespace, EntityRef(type=etype, key=key), limit=limit
     )
@@ -134,7 +170,9 @@ def get_artifact(
 
 @app.post("/v1/ask", response_model=ContextPack)
 def ask(req: AskRequest, request: Request) -> ContextPack:
-    _authorize(request, req.namespace, "r")
+    grant = _authorize(request, req.namespace, "r")
+    for subject in [req.subject] if req.subject else req.scope.subjects:
+        _gate_entity_type(grant, subject.type)
     with metrics.PACK_SECONDS.time():
         return build_pack(request.app.state.store, req)
 
@@ -157,8 +195,11 @@ def search_entities(
     limit: Annotated[int, Query(gt=0, le=100)] = 10,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
 ) -> dict:
-    _authorize(request, namespace, "r")
+    grant = _authorize(request, namespace, "r")
     matches = request.app.state.store.search_entities(namespace, q, limit=limit)
+    if grant is not None and grant.entity_types is not None:
+        # scoped keys see a scoped world, not an error
+        matches = [m for m in matches if m.type in grant.entity_types]
     return {
         "query": q,
         "matches": [m.model_dump(mode="json") for m in matches],
@@ -167,8 +208,23 @@ def search_entities(
 
 @app.post("/v1/answer", response_model=AnswerResponse)
 def answer(req: AnswerRequest, request: Request) -> AnswerResponse:
-    _authorize(request, req.namespace, "r")
+    grant = _authorize(request, req.namespace, "r")
+    explicit = [req.subject] if req.subject else (
+        req.scope.subjects if req.scope else []
+    )
+    for subject in explicit:
+        _gate_entity_type(grant, subject.type)
     llm = request.app.state.llm
+    # BYO provider key (D-013a): an agent may present its own key for the
+    # configured provider (X-Loom-LLM-Key) so LLM spend bills to the caller.
+    # The Loom bearer still controls what data the answer can see; the
+    # provider/model choice stays server-side.
+    caller_llm_key = request.headers.get("x-loom-llm-key")
+    if llm is not None and caller_llm_key:
+        import copy
+
+        llm = copy.copy(llm)
+        llm.api_key = caller_llm_key
     if llm is None:
         metrics.ANSWERS.labels(outcome="no_llm").inc()
         raise HTTPException(
@@ -177,7 +233,10 @@ def answer(req: AnswerRequest, request: Request) -> AnswerResponse:
             "LOOM_LLM_PROVIDER or LOOM_LLM_BASE_URL (docs/decisions.md D-012)",
         )
     try:
-        result = build_answer(request.app.state.store, llm, req)
+        result = build_answer(
+            request.app.state.store, llm, req,
+            allowed_types=grant.entity_types if grant else None,
+        )
     except UnresolvedQuestionError as exc:
         metrics.ANSWERS.labels(outcome="unresolved").inc()
         raise HTTPException(status_code=422, detail=str(exc))

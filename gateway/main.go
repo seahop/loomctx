@@ -64,14 +64,18 @@ func main() {
 		log.Fatalf("loading contract schema: %v", err)
 	}
 
-	auth, err := parseAuth(os.Getenv("LOOM_API_KEYS"))
+	auth, err := loadAuth()
 	if err != nil {
-		log.Fatalf("parsing LOOM_API_KEYS: %v", err)
+		log.Fatalf("loading auth config: %v", err)
 	}
-	if auth.enabled() {
-		log.Printf("auth: %d API key entries loaded", len(auth.entries))
-	} else {
-		log.Printf("auth: LOOM_API_KEYS unset — auth DISABLED (open dev mode)")
+	switch {
+	case auth.path != "":
+		log.Printf("auth: %d key(s) from %s (hot-reloaded on change)",
+			len(auth.entries), auth.path)
+	case auth.enabled():
+		log.Printf("auth: %d key entries from LOOM_API_KEYS", len(auth.entries))
+	default:
+		log.Printf("auth: no LOOM_AUTH_FILE / LOOM_API_KEYS — auth DISABLED (open dev mode)")
 	}
 
 	var fwd forwarder

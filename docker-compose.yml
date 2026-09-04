@@ -21,6 +21,7 @@ services:
       LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
       LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
+      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
 
   test:
     image: loom-engine:local
@@ -51,6 +52,7 @@ services:
     environment:
       LOOM_NATS_URL: nats://nats:4222
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
+      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
     depends_on:
       - nats
 
@@ -99,6 +101,7 @@ services:
       LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
       LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
+      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
 
   # Server-backed store for the database-scaling lane (D-011).
   postgres:

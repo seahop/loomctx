@@ -216,11 +216,22 @@ func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authC
 				map[string]string{"detail": "envelope must carry an explicit 'kind'"})
 			return
 		}
-		if !auth.allows(apiKey, extractNamespace(doc), "w") {
-			m.rejectedAuth.Add(1)
-			writeJSON(w, http.StatusForbidden,
-				map[string]string{"detail": "key not authorized to write this namespace"})
-			return
+		if auth.enabled() {
+			g := auth.grantFor(apiKey)
+			if g == nil || !g.allows(extractNamespace(doc), "w") {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusForbidden,
+					map[string]string{"detail": "key not authorized to write this namespace"})
+				return
+			}
+			// Data-scoping gates (D-013a): keys write only the slice of the
+			// world they're entitled to. Source pinning stops a compromised
+			// sender from forging other sources' facts.
+			if detail := checkWriteGates(g, kind, doc); detail != "" {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusForbidden, map[string]string{"detail": detail})
+				return
+			}
 		}
 		status, respBody, err := fwd.forward(r.Context(), kind, apiKey, body)
 		if err != nil {
@@ -245,6 +256,30 @@ func extractNamespace(doc any) string {
 		}
 	}
 	return "default"
+}
+
+func checkWriteGates(g *grant, kind string, doc any) string {
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if src, ok := obj["source"].(string); ok && !g.allowsSource(src) {
+		return fmt.Sprintf("key %q may not write claims for source %q", g.ID, src)
+	}
+	if kind != "claim" {
+		return ""
+	}
+	if subj, ok := obj["subject"].(map[string]any); ok {
+		if t, ok := subj["type"].(string); ok && !g.allowsEntityType(t) {
+			return fmt.Sprintf("key %q is not scoped to entity type %q", g.ID, t)
+		}
+	}
+	if o, ok := obj["object"].(map[string]any); ok {
+		if t, ok := o["type"].(string); ok && !g.allowsEntityType(t) {
+			return fmt.Sprintf("key %q is not scoped to entity type %q", g.ID, t)
+		}
+	}
+	return ""
 }
 
 func extractKind(doc any) string {
