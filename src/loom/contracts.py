@@ -172,7 +172,8 @@ class AskRequest(BaseModel):
     scope: ScopeSpec | None = None
     question: str = Field(max_length=2000)
     budget: int = Field(
-        default=800, gt=0, le=32000, description="token budget; mandatory cap"
+        default=800, gt=0, le=1_000_000,
+        description="token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)"
     )
     as_of: datetime | None = None
 
@@ -185,7 +186,7 @@ class AskRequest(BaseModel):
 
 class ExpandRequest(BaseModel):
     handle: str = Field(max_length=4096)
-    budget: int = Field(default=800, gt=0, le=32000)
+    budget: int = Field(default=800, gt=0, le=1_000_000)
 
 
 class ContextPack(BaseModel):
@@ -210,7 +211,7 @@ class AnswerRequest(BaseModel):
     question: str = Field(max_length=2000)
     subject: EntityRef | None = None
     scope: ScopeSpec | None = None
-    budget: int = Field(default=1200, gt=0, le=32000)
+    budget: int = Field(default=1200, gt=0, le=1_000_000)
     as_of: datetime | None = None
     max_tokens: int = Field(default=1024, gt=0, le=8192)
 

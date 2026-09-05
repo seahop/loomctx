@@ -100,6 +100,20 @@ CREATE TABLE IF NOT EXISTS dossiers (
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (namespace, entity_id)
 );
+
+CREATE TABLE IF NOT EXISTS doc_chunks (
+    id          TEXT PRIMARY KEY,
+    namespace   TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    span_start  INTEGER NOT NULL,
+    span_end    INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    vector      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_artifact
+    ON doc_chunks (namespace, artifact_id);
 """
 
 _INDEXES = """
@@ -367,6 +381,54 @@ class SqliteStore(GraphStore):
             )
             self._conn.commit()
 
+    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM artifacts a WHERE a.text IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
+                "   WHERE c.artifact_id = a.id)"
+                " ORDER BY a.recorded_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [common.row_to_artifact(r) for r in rows]
+
+    def put_doc_chunks(
+        self, namespace: str, artifact_id: str,
+        chunks: list[tuple[int, int, int, str, list[float]]],
+    ) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO doc_chunks (id, namespace, artifact_id,"
+                " seq, span_start, span_end, text, vector)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(f"{artifact_id}:{seq}", namespace, artifact_id, seq,
+                  start, end, text, json.dumps(vec))
+                 for seq, start, end, text, vec in chunks],
+            )
+            self._conn.commit()
+
+    def doc_chunks_for_artifacts(
+        self, namespace: str, artifact_ids: list[str]
+    ) -> list[dict]:
+        if not artifact_ids:
+            return []
+        out = []
+        with self._lock:
+            for start in range(0, len(artifact_ids), 400):
+                chunk = artifact_ids[start:start + 400]
+                rows = self._conn.execute(
+                    "SELECT artifact_id, seq, span_start, span_end, text, vector"
+                    f" FROM doc_chunks WHERE namespace = ?"
+                    f" AND artifact_id IN ({','.join('?' * len(chunk))})",
+                    (namespace, *chunk),
+                ).fetchall()
+                for r in rows:
+                    out.append({"artifact_id": r["artifact_id"], "seq": r["seq"],
+                                "span_start": r["span_start"],
+                                "span_end": r["span_end"], "text": r["text"],
+                                "vector": json.loads(r["vector"])})
+        return out
+
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
         with self._lock:
             entity = self._get_entity(namespace, ref)
@@ -524,7 +586,7 @@ class SqliteStore(GraphStore):
 
     def wipe(self) -> None:
         with self._lock:
-            for table in ("tombstones", "embeddings", "dossiers",
+            for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
                           "observations", "aliases", "artifacts", "entities"):
                 self._conn.execute(f"DELETE FROM {table}")
             self._conn.commit()

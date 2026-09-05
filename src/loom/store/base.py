@@ -104,6 +104,24 @@ class GraphStore(ABC):
         """Artifacts still awaiting claim extraction."""
 
     @abstractmethod
+    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
+        """Text artifacts not yet chunked+embedded for excerpt retrieval."""
+
+    @abstractmethod
+    def put_doc_chunks(
+        self, namespace: str, artifact_id: str,
+        chunks: list[tuple[int, int, int, str, list[float]]],
+    ) -> None:
+        """Store (seq, span_start, span_end, text, vector) passages."""
+
+    @abstractmethod
+    def doc_chunks_for_artifacts(
+        self, namespace: str, artifact_ids: list[str]
+    ) -> list[dict]:
+        """Chunks (with vectors) for the given artifacts, for excerpt ranking.
+        Each dict: artifact_id, seq, span_start, span_end, text, vector."""
+
+    @abstractmethod
     def set_extraction_status(
         self, namespace: str, artifact_id: str, status: str
     ) -> None: ...

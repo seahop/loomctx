@@ -368,6 +368,35 @@ natural key across differing types — the drift LLM extraction produces
   (roadmap) — deliberately deferred because loose auto-merging is worse than
   none. Both stores implement it; the parametrized contract tests cover both.
 
+## D-020 · Configurable budget ceiling + document-excerpt retrieval (2026-09-04)
+
+Two related read-side additions, prompted by "a pentest report could be more
+than 800 tokens."
+
+- **The budget is the slider, and its ceiling is tunable.** Every read carries
+  a per-request `budget`; the operator sets the hard ceiling via
+  `LOOM_MAX_BUDGET` (default 32k). Requests above it are clamped and the pack
+  reports the effective budget. The contract allows up to 1e6 as an
+  absurd-value guard; `LOOM_MAX_BUDGET` is the real limit. A big *document*
+  never floods the window regardless — it's mined into discrete facts, and the
+  budget governs how many surface.
+- **`doc_excerpt` retrieval (RAG over artifacts).** The enrichment worker now
+  also chunks document artifacts (~400-char passages on paragraph/sentence
+  boundaries, offsets preserved) and embeds each chunk. At read time, packs
+  pull the top-cosine passages *from the documents that produced this entity's
+  facts* (via observation provenance), emitted as `doc_excerpt` items citing
+  `[doc:<artifact> @start-end]`, capped at half the remaining budget so
+  passages inform without crowding out structured facts. This is the "read a
+  large report in, get the relevant part back within budget" path; the whole
+  artifact remains at `GET /v1/artifacts/{id}`.
+
+**Operational note:** semantic ranking AND excerpt retrieval require the
+*serving* engine to have `LOOM_EMBED_*` configured, not just the enrichment
+worker — the query is embedded at read time. Without an embedder the engine
+still answers (keyword ranking, facts only, no excerpts); it just isn't
+semantic. Verified live: a pentest passage surfaces as a cited `doc_excerpt`
+alongside the extracted facts.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

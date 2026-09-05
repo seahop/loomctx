@@ -96,6 +96,20 @@ CREATE TABLE IF NOT EXISTS dossiers (
     PRIMARY KEY (namespace, entity_id)
 );
 
+CREATE TABLE IF NOT EXISTS doc_chunks (
+    id          TEXT PRIMARY KEY,
+    namespace   TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    span_start  INTEGER NOT NULL,
+    span_end    INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    vector      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_artifact
+    ON doc_chunks (namespace, artifact_id);
+
 ALTER TABLE observations ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS event_id TEXT;
 
@@ -357,6 +371,51 @@ class PostgresStore(GraphStore):
             )
             self._conn.commit()
 
+    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
+        with self._lock:
+            rows = self._q(
+                "SELECT * FROM artifacts a WHERE a.text IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
+                "   WHERE c.artifact_id = a.id)"
+                " ORDER BY a.recorded_at LIMIT %s",
+                (limit,),
+            )
+        return [common.row_to_artifact(r) for r in rows]
+
+    def put_doc_chunks(
+        self, namespace: str, artifact_id: str,
+        chunks: list[tuple[int, int, int, str, list[float]]],
+    ) -> None:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO doc_chunks (id, namespace, artifact_id, seq,"
+                    " span_start, span_end, text, vector)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (id) DO UPDATE SET vector = EXCLUDED.vector,"
+                    " text = EXCLUDED.text",
+                    [(f"{artifact_id}:{seq}", namespace, artifact_id, seq,
+                      start, end, text, json.dumps(vec))
+                     for seq, start, end, text, vec in chunks],
+                )
+            self._conn.commit()
+
+    def doc_chunks_for_artifacts(
+        self, namespace: str, artifact_ids: list[str]
+    ) -> list[dict]:
+        if not artifact_ids:
+            return []
+        with self._lock:
+            rows = self._q(
+                "SELECT artifact_id, seq, span_start, span_end, text, vector"
+                " FROM doc_chunks WHERE namespace = %s AND artifact_id = ANY(%s)",
+                (namespace, artifact_ids),
+            )
+        return [{"artifact_id": r["artifact_id"], "seq": r["seq"],
+                 "span_start": r["span_start"], "span_end": r["span_end"],
+                 "text": r["text"], "vector": json.loads(r["vector"])}
+                for r in rows]
+
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
         with self._lock:
             entity = self._get_entity(namespace, ref)
@@ -520,7 +579,7 @@ class PostgresStore(GraphStore):
 
     def wipe(self) -> None:
         with self._lock:
-            for table in ("tombstones", "embeddings", "dossiers",
+            for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
                           "observations", "aliases", "artifacts", "entities"):
                 self._x(f"DELETE FROM {table}")
             self._conn.commit()

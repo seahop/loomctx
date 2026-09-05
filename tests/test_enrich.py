@@ -150,6 +150,67 @@ def test_resolve_merges_extracted_into_structured(tmp_path):
     assert resolve_entities(store) == 0
 
 
+# ------------------------------------------------- doc excerpts + budget cap #
+
+def test_chunk_and_excerpt_retrieval(tmp_path):
+    store = _store(tmp_path)
+    # a claim ties the entity to the artifact via provenance
+    from loom.contracts import Provenance
+    art = store.store_artifact(DocumentIn(
+        namespace="vuln",
+        text=(
+            "Section one covers routine patching notes across the estate, "
+            "including scheduled maintenance windows, change tickets, and the "
+            "usual reboot coordination that operations handles every month. "
+            "\n\n"
+            "Section two: web-01 remains exploitable via CVE-2026-1337 despite "
+            "the August patch cycle, which addressed only lower-priority items; "
+            "emergency remediation is strongly recommended before month end. "
+            "\n\n"
+            "Section three is an unrelated appendix about printer firmware "
+            "revisions, toner supplier contacts, and office badge reader "
+            "maintenance schedules that has nothing to do with the finding."),
+        filename="pentest.txt", source="pentest", observed_at=OBSERVED))
+    store.record_claim(ClaimIn(
+        namespace="vuln", subject=EntityRef(type="asset", key="web-01"),
+        predicate="mentioned_in", object="pentest.txt",
+        observed_at=OBSERVED, source="doc:pentest",
+        provenance=Provenance(artifact_id=art.id)))
+
+    from loom.enrich import chunk_artifacts
+    embedder = HashingEmbedder()
+    assert chunk_artifacts(store, embedder) >= 2
+
+    pack = build_pack(store, AskRequest(
+        namespace="vuln", subject=EntityRef(type="asset", key="web-01"),
+        question="is web-01 exploitable via CVE-2026-1337?", budget=1500),
+        embedder=embedder)
+    excerpts = [i for i in pack.items if i.kind == "doc_excerpt"]
+    assert excerpts, "a relevant passage should surface as a doc_excerpt"
+    top = excerpts[0].text
+    assert "CVE-2026-1337" in top and "@" in top  # passage + cited span
+
+
+def test_budget_cap_is_configurable(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    host = EntityRef(type="host", key="web-01")
+    for i in range(30):
+        store.record_claim(ClaimIn(
+            subject=host, predicate="logged_in_by",
+            object=EntityRef(type="user", key=f"u{i}"),
+            observed_at=OBSERVED, source="auth"))
+
+    monkeypatch.setenv("LOOM_MAX_BUDGET", "100")
+    pack = build_pack(store, AskRequest(
+        subject=host, question="who?", budget=5000))
+    assert pack.budget == 100  # request clamped to the operator ceiling
+
+    monkeypatch.setenv("LOOM_MAX_BUDGET", "5000")
+    pack = build_pack(store, AskRequest(
+        subject=host, question="who?", budget=5000))
+    assert pack.budget == 5000  # raised ceiling honored
+
+
 # ---------------------------------------------------------------- dossiers #
 
 def test_dossier_built_and_served_as_brief(tmp_path):

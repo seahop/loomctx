@@ -106,8 +106,13 @@ presentable.
 - ⬜ Deeper resolution: embedding/fuzzy key matching (web-01 vs web01) and
   LLM adjudication for ambiguous cases — exact-key-cross-type covers the
   common extraction drift; typo/alias matching is the next increment.
+- ✅ **Document-excerpt retrieval + tunable budget (D-020, 2026-09-04):**
+  artifacts are chunked + embedded; packs surface top-relevant passages as
+  cited `doc_excerpt` items (RAG over the docs behind an entity's facts);
+  `LOOM_MAX_BUDGET` makes the budget ceiling operator-tunable.
 - ⬜ Optional: sqlite-vec / pgvector for ANN search once embedded row counts
-  outgrow the current exact in-memory cosine (fine at seed/demo scale).
+  outgrow the current exact in-memory cosine (fine at seed/demo scale);
+  doc_excerpt expansion handles to pull surrounding chunks.
 
 ## Phase 5 — Hardening & spread 🔨
 

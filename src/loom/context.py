@@ -17,6 +17,8 @@ import json
 import re
 from datetime import datetime, timezone
 
+from .config import max_budget
+
 from .contracts import (
     AskRequest,
     Citation,
@@ -229,18 +231,27 @@ def build_pack(
                 observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
 
-    # Semantic ranking (D-018): cosine against precomputed observation
-    # vectors; observations not yet embedded fall back to keyword scoring.
+    # Semantic ranking (D-018) + document excerpts (D-020): embed the question
+    # once, reuse it to score observation vectors AND rank passages from the
+    # documents that produced this entity's facts.
     cos_map: dict[str, float] = {}
+    excerpts: list[tuple[float, str, str, int, int]] = []
     if embedder is not None and req.question and observations:
+        query_vec = embedder.embed([req.question])[0]
         vectors = store.embeddings_for(
             req.namespace, [o.id for o in observations], embedder.model
         )
-        if vectors:
-            query_vec = embedder.embed([req.question])[0]
-            cos_map = {
-                oid: _cosine(query_vec, vec) for oid, vec in vectors.items()
-            }
+        cos_map = {oid: _cosine(query_vec, vec) for oid, vec in vectors.items()}
+
+        artifact_ids = sorted({
+            o.provenance.artifact_id for o in observations
+            if o.provenance and o.provenance.artifact_id
+        })
+        for ch in store.doc_chunks_for_artifacts(req.namespace, artifact_ids):
+            score = _cosine(query_vec, ch["vector"])
+            excerpts.append((score, ch["artifact_id"], ch["text"],
+                             ch["span_start"], ch["span_end"]))
+        excerpts.sort(key=lambda e: e[0], reverse=True)
 
     # Dossier briefs: the cheap orientation layer, when the enrichment
     # worker has built one for a subject.
@@ -255,10 +266,11 @@ def build_pack(
         subjects=subjects,
         question=req.question,
         as_of=req.as_of,
-        budget=req.budget,
+        budget=min(req.budget, max_budget()),
         observations=observations,
         cos_map=cos_map,
         briefs=briefs,
+        excerpts=excerpts,
     )
 
 
@@ -292,6 +304,7 @@ def _pack(
     with_handles: bool = True,
     cos_map: dict[str, float] | None = None,
     briefs: list[tuple[EntityRef, str]] | None = None,
+    excerpts: list[tuple[float, str, str, int, int]] | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -332,6 +345,22 @@ def _pack(
         if cost <= remaining:
             items.append(ContextItem(kind="brief", text=text, score=0.99))
             remaining -= cost
+
+    # Relevant document passages (D-020): top-ranked excerpts from the
+    # documents behind this entity's facts, capped so they inform without
+    # crowding out structured facts. Each cites its artifact + span in-text.
+    excerpt_budget = remaining // 2
+    for score, artifact_id, text, start, end in (excerpts or []):
+        if score < 0.15:
+            break
+        rendered = f'"{text}" [doc:{artifact_id[:8]} @{start}-{end}]'
+        cost = est_tokens(rendered)
+        if cost <= excerpt_budget:
+            items.append(ContextItem(
+                kind="doc_excerpt", text=rendered,
+                score=round(min(max(score, 0.0), 1.0), 4)))
+            remaining -= cost
+            excerpt_budget -= cost
 
     included: set[str] = set()
     skipped: dict[tuple[str, str, str], int] = {}  # (subj type, key, predicate)

@@ -69,6 +69,49 @@ def embed_pending(store: GraphStore, embedder: Embedder, batch: int = 128) -> in
     return len(observations)
 
 
+def _chunk_text(text: str, target: int = 400, hard: int = 800) -> list[tuple[int, int, str]]:
+    """Split into (start, end, text) passages on paragraph/sentence
+    boundaries, aiming for ~target chars and never exceeding hard. Offsets
+    index the original text so excerpts cite an exact span."""
+    import re
+
+    chunks: list[tuple[int, int, str]] = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        end = min(pos + target, n)
+        if end < n:
+            window = text[pos:min(pos + hard, n)]
+            # prefer a paragraph break, then sentence, then whitespace
+            for pat in ("\n\n", ". ", "\n", " "):
+                idx = window.rfind(pat, target // 2)
+                if idx != -1:
+                    end = pos + idx + len(pat)
+                    break
+        piece = text[pos:end].strip()
+        if piece:
+            real_start = pos + (len(text[pos:end]) - len(text[pos:end].lstrip()))
+            chunks.append((real_start, real_start + len(piece), piece))
+        pos = end
+    return chunks
+
+
+def chunk_artifacts(store: GraphStore, embedder: Embedder, limit: int = 4) -> int:
+    """Chunk + embed pending document artifacts so their passages can rank
+    into packs as doc_excerpt items (D-020)."""
+    total = 0
+    for artifact in store.artifacts_needing_chunks(limit):
+        pieces = _chunk_text(artifact.text or "")
+        if not pieces:
+            continue
+        vectors = embedder.embed([p[2] for p in pieces])
+        rows = [(seq, start, end, txt, vec)
+                for seq, ((start, end, txt), vec) in enumerate(zip(pieces, vectors))]
+        store.put_doc_chunks(artifact.namespace, artifact.id, rows)
+        total += len(rows)
+    return total
+
+
 def _parse_extraction(raw: str) -> list[dict]:
     text = raw.strip()
     if text.startswith("```"):
@@ -204,11 +247,14 @@ def run(once: bool, interval: float) -> None:
             # embedded and summarized once, under their canonical identity
             resolved = resolve_entities(store)
             embedded = embed_pending(store, embedder) if embedder else 0
+            chunked = chunk_artifacts(store, embedder) if embedder else 0
             dossiers = refresh_dossiers(store, llm) if llm else 0
-            if extracted or resolved or embedded or dossiers:
-                log.info("extracted_claims=%d resolved=%d embedded=%d dossiers=%d",
-                         extracted, resolved, embedded, dossiers)
-            if once and not (extracted or resolved or embedded or dossiers):
+            work = extracted or resolved or embedded or chunked or dossiers
+            if work:
+                log.info("extracted=%d resolved=%d embedded=%d chunked=%d "
+                         "dossiers=%d", extracted, resolved, embedded, chunked,
+                         dossiers)
+            if once and not work:
                 break
             if once:
                 continue  # drain fully in --once mode

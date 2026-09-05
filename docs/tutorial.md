@@ -120,8 +120,12 @@ docker compose exec -T -e LOOM_EMBED_PROVIDER=hashing loom \
 ```
 
 Now the pentest report's assertions ("web-01 exploitable via CVE-2026-1337")
-exist as cited observations, `web-01` has a dossier brief, and ranking is
-semantic. Ask a question whose wording doesn't match any predicate literally:
+exist as cited observations, `web-01` has a dossier brief, its passages are
+retrievable as `doc_excerpt` items, and ranking is semantic. (Configure
+`LOOM_EMBED_*` on the **engine** too, not just the worker — the query is
+embedded at read time; see `.env.example`.) Ask a question whose wording
+doesn't match any predicate literally, and raise the budget if you want more
+of the report's passages back — the ceiling is `LOOM_MAX_BUDGET`:
 
 ```bash
 curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
