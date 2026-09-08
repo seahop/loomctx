@@ -73,6 +73,11 @@ services:
       LOOM_NATS_URL: nats://nats:4222
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
+      # stream shape (D-029): single-node NATS here, so replicas stay 1;
+      # cap the buffer so an ingestion storm degrades predictably
+      LOOM_STREAM_REPLICAS: ${LOOM_STREAM_REPLICAS:-1}
+      LOOM_STREAM_MAX_BYTES: ${LOOM_STREAM_MAX_BYTES:-1073741824}
+      LOOM_STREAM_DISCARD: ${LOOM_STREAM_DISCARD:-old}
     depends_on:
       nats:
         condition: service_healthy

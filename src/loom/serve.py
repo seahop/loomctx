@@ -15,13 +15,23 @@ import os
 import uvicorn
 
 
+def _int_env(name: str, default: int) -> int:
+    """Kubernetes injects `<SERVICE>_PORT=tcp://ip:port` for every Service —
+    a Service named `loom` sets LOOM_PORT — so listen settings use names no
+    Service can collide with, and anything non-numeric falls back."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def main() -> None:
-    workers = max(1, int(os.environ.get("LOOM_WORKERS", "") or 1))
     uvicorn.run(
         "loom.api.http:app",
-        host=os.environ.get("LOOM_HOST", "0.0.0.0"),
-        port=int(os.environ.get("LOOM_PORT", "") or 8000),
-        workers=workers,
+        host=os.environ.get("LOOM_HTTP_HOST", "0.0.0.0"),
+        port=_int_env("LOOM_HTTP_PORT", 8000),
+        workers=max(1, _int_env("LOOM_WORKERS", 1)),
         proxy_headers=True,
     )
 

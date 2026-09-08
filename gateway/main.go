@@ -26,6 +26,16 @@ type config struct {
 	natsURL      string // when set, publish to JetStream instead
 	maxBodyBytes int64
 	ratePerSec   float64 // 0 disables rate limiting
+	stream       streamConfig
+}
+
+// streamConfig: how the ingest stream is shaped (D-029). Replicas must
+// match the NATS cluster size (1 on a single node, 3 on the HA cluster);
+// maxBytes caps what a storm can buffer, discard says which end gives.
+type streamConfig struct {
+	replicas int
+	maxBytes int64  // 0 = unlimited
+	discard  string // "old" | "new"
 }
 
 func loadConfig() config {
@@ -36,6 +46,11 @@ func loadConfig() config {
 		natsURL:      os.Getenv("LOOM_NATS_URL"),
 		maxBodyBytes: envInt("LOOM_MAX_BODY_BYTES", 1<<20),
 		ratePerSec:   float64(envInt("LOOM_RATE_PER_SEC", 0)),
+		stream: streamConfig{
+			replicas: int(envInt("LOOM_STREAM_REPLICAS", 1)),
+			maxBytes: envInt("LOOM_STREAM_MAX_BYTES", 0),
+			discard:  envOr("LOOM_STREAM_DISCARD", "old"),
+		},
 	}
 	return cfg
 }
@@ -80,11 +95,12 @@ func main() {
 
 	var fwd forwarder
 	if cfg.natsURL != "" {
-		fwd, err = connectNATS(cfg.natsURL, 2*time.Minute)
+		fwd, err = connectNATS(cfg.natsURL, cfg.stream, 2*time.Minute)
 		if err != nil {
 			log.Fatalf("connecting to NATS: %v", err)
 		}
-		log.Printf("forwarding to NATS JetStream at %s", cfg.natsURL)
+		log.Printf("forwarding to NATS JetStream at %s (stream replicas=%d maxBytes=%d discard=%s)",
+			cfg.natsURL, cfg.stream.replicas, cfg.stream.maxBytes, cfg.stream.discard)
 	} else {
 		fwd = newHTTPForwarder(cfg.forwardURL)
 		log.Printf("forwarding to core engine at %s", cfg.forwardURL)

@@ -100,10 +100,10 @@ type natsForwarder struct {
 // connectNATS keeps trying until the queue answers or the deadline passes:
 // compose/k8s start ordering is best-effort and a gateway that dies on the
 // first refused connection leaves the scale shape half-up (H-F3).
-func connectNATS(url string, wait time.Duration) (*natsForwarder, error) {
+func connectNATS(url string, sc streamConfig, wait time.Duration) (*natsForwarder, error) {
 	deadline := time.Now().Add(wait)
 	for {
-		fwd, err := newNATSForwarder(url)
+		fwd, err := newNATSForwarder(url, sc)
 		if err == nil {
 			return fwd, nil
 		}
@@ -115,7 +115,7 @@ func connectNATS(url string, wait time.Duration) (*natsForwarder, error) {
 	}
 }
 
-func newNATSForwarder(url string) (*natsForwarder, error) {
+func newNATSForwarder(url string, sc streamConfig) (*natsForwarder, error) {
 	nc, err := nats.Connect(url, nats.MaxReconnects(-1))
 	if err != nil {
 		return nil, err
@@ -127,9 +127,20 @@ func newNATSForwarder(url string) (*natsForwarder, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	discard := jetstream.DiscardOld
+	if sc.discard == "new" {
+		discard = jetstream.DiscardNew
+	}
+	replicas := sc.replicas
+	if replicas < 1 {
+		replicas = 1
+	}
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     streamName,
 		Subjects: []string{"loom.ingest.>"},
+		Replicas: replicas,
+		MaxBytes: sc.maxBytes,
+		Discard:  discard,
 	})
 	if err != nil {
 		nc.Close()
@@ -145,10 +156,20 @@ func (f *natsForwarder) forward(ctx context.Context, kind, _, principal string, 
 	if principal != "" {
 		msg.Header.Set(principalHeader, principal)
 	}
-	if _, err := f.js.PublishMsg(ctx, msg); err != nil {
-		return 0, nil, err
+	// A leader election or a node restart in the cluster makes a publish
+	// fail for a moment; retry briefly before telling the sender 502.
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = f.js.PublishMsg(ctx, msg); err == nil {
+			return http.StatusAccepted, []byte(`{"status":"queued"}`), nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-time.After(time.Duration(200*(attempt+1)) * time.Millisecond):
+		}
 	}
-	return http.StatusAccepted, []byte(`{"status":"queued"}`), nil
+	return 0, nil, err
 }
 
 func (f *natsForwarder) close() { f.nc.Close() }

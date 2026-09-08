@@ -15,7 +15,7 @@ Same images, same `/v1/ingest` contract, pick a shape:
 | Tier | default | scale | scale-pg |
 | --- | --- | --- | --- |
 | Ingest gateways | — (no gateway tier) | **HPA 2–10** on CPU | **HPA 2–10** on CPU |
-| Burst absorption | none (direct writes) | NATS JetStream buffer | NATS JetStream buffer |
+| Burst absorption | none (direct writes) | NATS JetStream (1 node) | NATS JetStream **3-node cluster**, streams replicated 3× |
 | Engine (ask/expand/answer) | fixed 1 (SQLite single writer) | fixed 1 (SQLite single writer) | **HPA 2–8** on CPU |
 | Writer consumers | n/a | 1 (engine sidecar) | replicas (shared JetStream durable — raise freely) |
 | Database | SQLite on PVC | SQLite on PVC | your Postgres (managed/operator — scale it there) |
@@ -145,6 +145,9 @@ simple as it is. Turn them when a measurement says to.
 | Engine pods | HPA in `scale-pg` | 2–8 | stateless once on Postgres |
 | Gateway pods | HPA in `scale` / `scale-pg` | 2–10 | ingestion bursts |
 | Writer consumers | replicas in `scale-pg` | 2 | queue depth grows |
+| Stream replicas | `LOOM_STREAM_REPLICAS` (gateway + consumer) | 1 (`scale-pg`: 3) | must match the NATS cluster size |
+| Ingest buffer cap | `LOOM_STREAM_MAX_BYTES`, `LOOM_STREAM_DISCARD` | 1 GiB / old (`scale-pg`: 4 GiB) | storms degrade predictably instead of filling disks |
+| Redelivery | `LOOM_ACK_WAIT`, `LOOM_MAX_DELIVER` (consumer) | 30 s / 5 | after the bound a message is parked on `LOOM_DEADLETTER` with the error, never dropped |
 
 Measured on one laptop (D-028, compose, Postgres, `loadgen`): see
 `docs/decisions.md` D-028 for the before/after table.

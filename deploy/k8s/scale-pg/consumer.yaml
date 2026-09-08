@@ -36,6 +36,8 @@ spec:
                   key: LOOM_DB
             - name: LOOM_NATS_URL
               value: nats://nats:4222
+            - name: LOOM_STREAM_REPLICAS
+              value: "3"
           resources:
             requests:
               cpu: 50m

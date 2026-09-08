@@ -732,6 +732,38 @@ workers add a third to ingest but saturate a laptop's cores (the ask
 dip at 2–4 workers is contention with the generator and Postgres, not a
 regression). On real nodes, start at 2 workers and let the HPA add pods.
 
+## D-029 · Ingestion HA: replicated JetStream, bounded buffer, dead-letter (2026-09-08, phase 6.2)
+
+The queue was one pod with an unreplicated, unbounded stream (D-027 #1).
+Now, all opt-in:
+
+- **Stream shape is configuration.** The gateway creates `LOOM_INGEST`
+  with `LOOM_STREAM_REPLICAS` (default 1 — a single-node NATS cannot host
+  a 3-replica stream), `LOOM_STREAM_MAX_BYTES` (compose default 1 GiB,
+  `scale-pg` 4 GiB) and `LOOM_STREAM_DISCARD` (`old`: shed the oldest
+  when full; `new`: refuse new publishes so senders back off). Publishes
+  retry three times over ~1 s so a leader election never surfaces as a
+  502.
+- **Redelivery is bounded and poison is parked.** The writer consumer's
+  durable has `ack_wait` (30 s) and `max_deliver` (5). A batch the store
+  rejects is nak'd for prompt redelivery — event_id dedupe absorbs any
+  partial writes (D-022) — and any message on its last allowed delivery
+  is published to the `LOOM_DEADLETTER` stream (`loom.deadletter.<kind>`)
+  with the sender's principal and the error as headers, then acked. One
+  bad envelope can no longer hold the queue hostage, and nothing is
+  silently dropped.
+- **`scale-pg` runs NATS as a 3-node JetStream cluster** (StatefulSet,
+  headless Service, per-node PVC, `replicas: 3` on both streams). Clients
+  keep using `nats://nats:4222`; the client library discovers the peers.
+  The `scale` overlay and compose stay single-node — a small team's
+  ingestion tier is still one small container.
+
+**Validated on the cluster:** with the stream replicated 3/3, a
+3000-envelope burst through the gateway Service while the stream leader
+pod was deleted mid-burst: 3000/3000 acknowledged (0 errors), leadership
+moved to another node, and Postgres held exactly every acknowledged
+envelope afterwards — nothing lost, nothing duplicated.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

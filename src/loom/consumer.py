@@ -29,6 +29,15 @@ SUBJECTS = "loom.ingest.>"
 DURABLE = "loom-writer"
 BATCH = 64
 CONNECT_TIMEOUT_SECONDS = 120.0
+# Redelivery (D-029): a batch the store rejects is nak'd and comes back
+# after ACK_WAIT; after MAX_DELIVER tries a message is parked on the
+# dead-letter stream with the reason, and acked, so one bad envelope can't
+# hold the queue hostage. Both are env-tunable.
+ACK_WAIT_SECONDS = float(os.environ.get("LOOM_ACK_WAIT", "") or 30)
+MAX_DELIVER = int(os.environ.get("LOOM_MAX_DELIVER", "") or 5)
+DEADLETTER_STREAM = "LOOM_DEADLETTER"
+DEADLETTER_SUBJECTS = "loom.deadletter.>"
+STREAM_REPLICAS = int(os.environ.get("LOOM_STREAM_REPLICAS", "") or 1)
 
 
 def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
@@ -67,6 +76,28 @@ def handle_message(store: GraphStore, data: bytes) -> str:
     return next(k for k, v in counts.items() if v)
 
 
+async def settle_failed_batch(js, msgs, exc: Exception,
+                              max_deliver: int | None = None) -> int:
+    """The store rejected a whole batch (it rolled back, D-022). nak every
+    message for prompt redelivery — event_id dedupe absorbs partial writes —
+    except those on their last allowed delivery, which are parked on the
+    dead-letter stream with the reason and acked, so one poison envelope
+    can't hold the queue hostage (D-029). Returns how many were parked."""
+    limit = max_deliver or MAX_DELIVER
+    reason = f"{type(exc).__name__}: {exc}"[:500]
+    parked = 0
+    for m in msgs:
+        delivered = getattr(getattr(m, "metadata", None), "num_delivered", 1) or 1
+        if delivered >= limit:
+            await js.publish(m.subject.replace("loom.ingest.", "loom.deadletter.", 1),
+                             m.data, headers={**(m.headers or {}), "Loom-Error": reason})
+            await m.ack()
+            parked += 1
+        else:
+            await m.nak(delay=2)
+    return parked
+
+
 async def run() -> None:
     import nats
     from nats.errors import TimeoutError as NatsTimeoutError
@@ -87,14 +118,22 @@ async def run() -> None:
             log.warning("NATS at %s not ready (%s); retrying", url, exc)
             await asyncio.sleep(2)
     js = nc.jetstream()
-    try:
-        await js.add_stream(name=STREAM, subjects=[SUBJECTS])
-    except Exception:  # stream already exists (gateway may have created it)
-        pass
-    sub = await js.pull_subscribe(SUBJECTS, durable=DURABLE)
-    log.info("consuming %s from %s", SUBJECTS, nc.connected_url.netloc)
+    from nats.js.api import ConsumerConfig, StreamConfig
 
-    totals = {"recorded": 0, "accepted": 0, "skipped": 0}
+    for name, subjects in ((STREAM, [SUBJECTS]), (DEADLETTER_STREAM, [DEADLETTER_SUBJECTS])):
+        try:
+            await js.add_stream(StreamConfig(name=name, subjects=subjects,
+                                             num_replicas=STREAM_REPLICAS))
+        except Exception:  # noqa: BLE001 — exists already (gateway creates the ingest one)
+            pass
+    sub = await js.pull_subscribe(
+        SUBJECTS, durable=DURABLE,
+        config=ConsumerConfig(durable_name=DURABLE, ack_wait=ACK_WAIT_SECONDS,
+                              max_deliver=MAX_DELIVER))
+    log.info("consuming %s from %s (ack_wait=%ss max_deliver=%d)",
+             SUBJECTS, nc.connected_url.netloc, ACK_WAIT_SECONDS, MAX_DELIVER)
+
+    totals = {"recorded": 0, "accepted": 0, "skipped": 0, "deadlettered": 0}
     while True:
         try:
             msgs = await sub.fetch(BATCH, timeout=5)
@@ -108,13 +147,11 @@ async def run() -> None:
             principals[who] = principals.get(who, 0) + 1
         try:
             batch_counts = handle_batch(store, [m.data for m in msgs])
-        except Exception:  # noqa: BLE001 — the store rolled back (D-022)
-            # Leave the batch un-acked: JetStream redelivers it after
-            # ack-wait, and event_id dedupe absorbs any partial writes. A
-            # crash here would do the same, minus the log line and the
-            # chance for a transient store error to clear.
-            log.exception("batch of %d failed; leaving it for redelivery", len(msgs))
-            await asyncio.sleep(2)
+        except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
+            parked = await settle_failed_batch(js, msgs, exc)
+            totals["deadlettered"] += parked
+            log.exception("batch of %d failed (%d dead-lettered); rest redelivered",
+                          len(msgs), parked)
             continue
         for msg in msgs:  # ack only after the batch is durably written
             await msg.ack()

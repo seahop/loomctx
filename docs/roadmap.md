@@ -154,8 +154,9 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
 - ✅ 6.1 Engine concurrency (2026-09-08, D-028): connection pool,
   `LOOM_DB_READ` read replica, `LOOM_WORKERS`; measured (see D-028)
-- ⬜ 6.2 Ingestion HA: 3-node JetStream cluster, stream replicas=3,
-  retention limits, consumer ack/redelivery tuning, dead-letter subject
+- ✅ 6.2 Ingestion HA (2026-09-08, D-029): 3-node JetStream cluster in
+  `scale-pg`, stream replicas/limits/discard dials, bounded redelivery,
+  dead-letter stream; leader-loss chaos test passed on the cluster
 - 🔨 6.3 Database HA + read replicas: `LOOM_DB_READ` read/write split
   shipped with 6.1; CloudNativePG Cluster manifest still to add
 - ⬜ 6.4 Worker fleet: lease-based job claiming so N enrichment replicas
