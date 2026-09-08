@@ -24,11 +24,25 @@ from datetime import datetime
 from typing import Iterator
 
 from .. import metrics
-from ..contracts import Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation
+from ..contracts import (
+    Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation,
+    SchemaRegistration,
+)
 from . import common
 from .base import GraphStore
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS loom_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schemas (
+    namespace         TEXT PRIMARY KEY,
+    registration_json TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS entities (
     id          TEXT PRIMARY KEY,
     namespace   TEXT NOT NULL,
@@ -36,6 +50,7 @@ CREATE TABLE IF NOT EXISTS entities (
     key         TEXT NOT NULL,
     provisional BOOLEAN NOT NULL DEFAULT FALSE,
     created_at  TEXT NOT NULL,
+    norm_key    TEXT NOT NULL DEFAULT '',
     UNIQUE (namespace, type, key)
 );
 
@@ -76,6 +91,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     observed_at       TEXT NOT NULL,
     recorded_at       TEXT NOT NULL,
     extraction_status TEXT NOT NULL DEFAULT 'pending',
+    extraction_attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at   TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -122,6 +139,9 @@ ALTER TABLE observations ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE dossiers     ADD COLUMN IF NOT EXISTS observation_ids TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE doc_chunks   ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
+ALTER TABLE entities     ADD COLUMN IF NOT EXISTS norm_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS extraction_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -135,7 +155,10 @@ CREATE INDEX IF NOT EXISTS idx_obs_recorded ON observations (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
+CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 """
+
+SCHEMA_VERSION = 2  # keep in step with sqlite.py
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -172,11 +195,37 @@ class PostgresStore(GraphStore):
         # inside this class; the interface doesn't change.
         self._lock = threading.Lock()
         self._psycopg = psycopg
-        self._conn = psycopg.connect(dsn, row_factory=dict_row)
+        self._dsn = dsn
+        self._dict_row = dict_row
+        self._conn = self._connect()
         with self._conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
             cur.execute(_SCHEMA)
+            self._migrate(cur)
         self._conn.commit()
+
+    def _connect(self):
+        return self._psycopg.connect(self._dsn, row_factory=self._dict_row)
+
+    def _migrate(self, cur) -> None:
+        """One-shot versioned steps (H-B12); idempotent DDL lives in _SCHEMA."""
+        cur.execute("SELECT value FROM loom_meta WHERE key = 'schema_version'")
+        row = cur.fetchone()
+        current = int(row["value"]) if row else 0
+        if current < 2:
+            cur.execute(
+                "UPDATE entities SET norm_key ="
+                " regexp_replace(lower(key), '[^a-z0-9]+', '', 'g')"
+                " WHERE norm_key = ''")
+        cur.execute(
+            "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
+            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (str(SCHEMA_VERSION),))
+
+    def schema_version(self) -> int:
+        with self._tx():
+            rows = self._q("SELECT value FROM loom_meta WHERE key = 'schema_version'")
+        return int(rows[0]["value"]) if rows else 0
 
     def _q(self, sql: str, params: tuple = ()) -> list:
         with self._conn.cursor() as cur:
@@ -193,15 +242,18 @@ class PostgresStore(GraphStore):
     @contextmanager
     def _tx(self):
         """One locked transaction: commit on success, rollback on error so
-        the connection never sticks in the aborted state (H-B1)."""
+        the connection never sticks in the aborted state (H-B1). A dropped
+        server connection is re-established on the next call (H-E5)."""
         with self._lock:
+            if self._conn.closed or self._conn.broken:
+                self._conn = self._connect()
             try:
                 yield
             except BaseException:
                 try:
                     self._conn.rollback()
                 except self._psycopg.Error:
-                    pass  # connection itself is gone; the caller sees the cause
+                    pass  # connection itself is gone; reconnects next call
                 raise
             else:
                 self._conn.commit()
@@ -239,10 +291,59 @@ class PostgresStore(GraphStore):
             self._x("UPDATE aliases SET entity_id = %s WHERE entity_id = %s",
                     (dst.id, src.id))
             self._put_alias(namespace, f"{src.type}:{src.key}", dst.id)
-            self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id = %s",
-                    (namespace, src.id))
+            self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
+                    (namespace, src.id, dst.id))
             self._x("DELETE FROM entities WHERE id = %s", (src.id,))
             return True
+
+    def fuzzy_merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        with self._tx():
+            rows = self._q(
+                "SELECT namespace, norm_key FROM entities WHERE norm_key <> ''"
+                + (" AND namespace = %s" if namespace else "")
+                + " GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1"
+                " ORDER BY namespace, norm_key LIMIT %s",
+                ((namespace, limit) if namespace else (limit,)),
+            )
+            groups = []
+            for row in rows:
+                members = self._q(
+                    "SELECT * FROM entities WHERE namespace = %s AND norm_key = %s"
+                    " ORDER BY created_at, type, key",
+                    (row["namespace"], row["norm_key"]),
+                )
+                groups.append([common.row_to_entity(m) for m in members])
+        return groups
+
+    # ------------------------------------------------ schema registry (D-024)
+
+    def put_schema(self, registration: SchemaRegistration) -> SchemaRegistration:
+        with self._tx():
+            rows = self._q(
+                "SELECT registration_json FROM schemas WHERE namespace = %s",
+                (registration.namespace,),
+            )
+            merged = common.merge_schema(
+                common.row_to_schema(rows[0]) if rows else None, registration)
+            self._x(
+                "INSERT INTO schemas (namespace, registration_json, updated_at)"
+                " VALUES (%s, %s, %s) ON CONFLICT (namespace) DO UPDATE SET"
+                " registration_json = EXCLUDED.registration_json,"
+                " updated_at = EXCLUDED.updated_at",
+                (merged.namespace, merged.model_dump_json(),
+                 common.iso(common.now())),
+            )
+            return merged
+
+    def get_schema(self, namespace: str) -> SchemaRegistration | None:
+        with self._tx():
+            rows = self._q(
+                "SELECT registration_json FROM schemas WHERE namespace = %s",
+                (namespace,),
+            )
+        return common.row_to_schema(rows[0]) if rows else None
 
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -425,14 +526,25 @@ class PostgresStore(GraphStore):
             )
             return [common.row_to_observation(r) for r in rows]
 
-    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
+    def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
         with self._tx():
             rows = self._q(
                 "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
+                " AND (next_attempt_at IS NULL OR next_attempt_at <= %s)"
                 " ORDER BY recorded_at LIMIT %s",
-                (limit,),
+                (common.iso(now or common.now()), limit),
             )
         return [common.row_to_artifact(r) for r in rows]
+
+    def defer_extraction(
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
+    ) -> None:
+        with self._tx():
+            self._x(
+                "UPDATE artifacts SET extraction_attempts = %s, next_attempt_at = %s"
+                " WHERE namespace = %s AND id = %s",
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
+            )
 
     def set_extraction_status(
         self, namespace: str, artifact_id: str, status: str
@@ -493,6 +605,22 @@ class PostgresStore(GraphStore):
             )
         return [common.row_to_chunk(r) for r in rows]
 
+    def doc_chunks_by_seq(
+        self, namespace: str, artifact_id: str, model: str, seqs: list[int]
+    ) -> list[dict]:
+        if not seqs:
+            return []
+        with self._tx():
+            rows = self._q(
+                "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
+                " c.text, c.vector, a.source, a.observed_at"
+                " FROM doc_chunks c JOIN artifacts a ON a.id = c.artifact_id"
+                " WHERE c.namespace = %s AND c.artifact_id = %s AND c.model = %s"
+                " AND c.seq = ANY(%s) ORDER BY c.seq",
+                (namespace, artifact_id, model, list(seqs)),
+            )
+        return [common.row_to_chunk(r) for r in rows]
+
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
         with self._tx():
             entity = self._resolve_entity(namespace, ref)
@@ -533,23 +661,28 @@ class PostgresStore(GraphStore):
     ) -> list[tuple[str, EntityRef, int]]:
         with self._tx():
             rows = self._q(
-                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS n"
+                "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh"
                 " FROM entities e"
                 " JOIN observations o ON o.subject_id = e.id"
                 "   AND NOT EXISTS (SELECT 1 FROM tombstones t"
                 "                   WHERE t.observation_id = o.id)"
                 " LEFT JOIN dossiers d ON d.namespace = e.namespace"
                 "   AND d.entity_id = e.id"
+                " WHERE d.updated_at IS NULL OR o.recorded_at > d.updated_at"
                 " GROUP BY e.id, d.observation_count"
                 " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s)"
-                "     OR (COUNT(o.id) - d.observation_count >= %s)"
+                "     OR (d.observation_count IS NOT NULL AND COUNT(o.id) >= %s)"
                 " ORDER BY COUNT(o.id) DESC, e.created_at LIMIT %s",
                 (min_total, min_new, limit),
             )
-        return [
-            (r["namespace"], EntityRef(type=r["type"], key=r["key"]), r["n"])
-            for r in rows
-        ]
+            out = []
+            for r in rows:
+                total = self._q(
+                    "SELECT COUNT(*) AS n FROM observations o WHERE o.subject_id = %s"
+                    + _NOT_TOMBSTONED, (r["eid"],))[0]["n"]
+                out.append((r["namespace"], EntityRef(type=r["type"], key=r["key"]),
+                            int(total)))
+        return out
 
     # ------------------------------------------------------ lifecycle (D-016)
 
@@ -592,39 +725,42 @@ class PostgresStore(GraphStore):
             )
         return removed
 
+    _PAGE = 1000
+
+    def _pages(self, sql: str, params: tuple, order_cols: tuple[str, str]):
+        """Keyset-paged streaming (H-E4): bounded memory, lock per page."""
+        last = ("", "")
+        while True:
+            with self._tx():
+                rows = self._q(
+                    sql + f" AND ({order_cols[0]}, {order_cols[1]}) > (%s, %s)"
+                    f" ORDER BY {order_cols[0]}, {order_cols[1]} LIMIT %s",
+                    (*params, *last, self._PAGE),
+                )
+            if not rows:
+                return
+            yield from rows
+            tail = rows[-1]
+            last = (tail[order_cols[0].split(".")[-1]], tail["id"])
+
     def iter_observations(
         self, namespace: str | None = None
     ) -> Iterator[Observation]:
-        with self._tx():
-            rows = self._q(
-                _OBS_SELECT
-                + (" WHERE o.namespace = %s" if namespace else "")
-                + " ORDER BY o.recorded_at",
-                (namespace,) if namespace else (),
-            )
-        for row in rows:
+        sql = _OBS_SELECT + " WHERE 1=1" + (" AND o.namespace = %s" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("o.recorded_at", "o.id")):
             yield common.row_to_observation(row)
 
     def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        with self._tx():
-            rows = self._q(
-                "SELECT * FROM entities"
-                + (" WHERE namespace = %s" if namespace else "")
-                + " ORDER BY created_at",
-                (namespace,) if namespace else (),
-            )
-        for row in rows:
+        sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = %s" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("created_at", "id")):
             yield common.row_to_entity(row)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
-        with self._tx():
-            rows = self._q(
-                "SELECT * FROM artifacts"
-                + (" WHERE namespace = %s" if namespace else "")
-                + " ORDER BY recorded_at",
-                (namespace,) if namespace else (),
-            )
-        for row in rows:
+        sql = "SELECT * FROM artifacts WHERE 1=1" + (" AND namespace = %s" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("recorded_at", "id")):
             yield common.row_to_artifact(row)
 
     def iter_aliases(self, namespace: str | None = None) -> Iterator[dict]:
@@ -676,10 +812,11 @@ class PostgresStore(GraphStore):
         with self._tx():
             self._x(
                 "INSERT INTO entities (id, namespace, type, key, provisional,"
-                " created_at) VALUES (%s, %s, %s, %s, %s, %s)"
+                " created_at, norm_key) VALUES (%s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (namespace, type, key) DO NOTHING",
                 (uuid.uuid4().hex, entity.namespace, entity.type, entity.key,
-                 bool(entity.provisional), common.iso(entity.created_at)),
+                 bool(entity.provisional), common.iso(entity.created_at),
+                 common.norm_key(entity.key)),
             )
 
     def restore_alias(self, namespace: str, alias: str, canonical: EntityRef) -> None:
@@ -696,7 +833,8 @@ class PostgresStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities"):
+                          "observations", "aliases", "artifacts", "entities",
+                          "schemas"):
                 self._x(f"DELETE FROM {table}")
 
     def close(self) -> None:
@@ -753,10 +891,10 @@ class PostgresStore(GraphStore):
         )
         self._x(
             "INSERT INTO entities (id, namespace, type, key, provisional,"
-            " created_at) VALUES (%s, %s, %s, %s, FALSE, %s)"
+            " created_at, norm_key) VALUES (%s, %s, %s, %s, FALSE, %s, %s)"
             " ON CONFLICT (namespace, type, key) DO NOTHING",
             (entity.id, namespace, ref.type, ref.key,
-             common.iso(entity.created_at)),
+             common.iso(entity.created_at), common.norm_key(ref.key)),
         )
         # A concurrent writer may have won the ON CONFLICT race; re-read.
         return self._get_entity(namespace, ref) or entity
@@ -848,13 +986,14 @@ class PostgresStore(GraphStore):
         return self._x(
             "INSERT INTO artifacts (id, namespace, event_id, filename,"
             " content_type, text, content_b64, source, observed_at, recorded_at,"
-            " extraction_status, attrs_json)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" + suffix,
+            " extraction_status, extraction_attempts, attrs_json)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" + suffix,
             (
                 artifact.id, artifact.namespace, artifact.event_id,
                 artifact.filename, artifact.content_type, artifact.text,
                 artifact.content_b64, artifact.source,
                 common.iso(artifact.observed_at), common.iso(artifact.recorded_at),
-                artifact.extraction_status, json.dumps(artifact.attrs),
+                artifact.extraction_status, artifact.extraction_attempts,
+                json.dumps(artifact.attrs),
             ),
         ) > 0

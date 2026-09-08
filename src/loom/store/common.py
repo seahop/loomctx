@@ -11,7 +11,19 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from ..contracts import Artifact, Entity, EntityRef, Observation, Provenance
+import re
+
+from ..contracts import (
+    Artifact, Entity, EntityRef, Observation, Provenance, SchemaRegistration,
+)
+
+_NORM = re.compile(r"[^a-z0-9]+")
+
+
+def norm_key(key: str) -> str:
+    """The fuzzy-match key: lowercase, punctuation/whitespace stripped, so
+    web-01 / WEB_01 / web01 collide (D-024 entity resolution tier 2)."""
+    return _NORM.sub("", key.lower())
 
 
 def now() -> datetime:
@@ -122,5 +134,31 @@ def row_to_artifact(row: Mapping[str, Any]) -> Artifact:
         observed_at=parse(row["observed_at"]),
         recorded_at=parse(row["recorded_at"]),
         extraction_status=row["extraction_status"],
+        extraction_attempts=(
+            int(row["extraction_attempts"] or 0)
+            if "extraction_attempts" in row.keys() else 0
+        ),
         attrs=json.loads(row["attrs_json"]),
+    )
+
+
+def row_to_schema(row: Mapping[str, Any]) -> SchemaRegistration:
+    return SchemaRegistration.model_validate(json.loads(row["registration_json"]))
+
+
+def merge_schema(existing: SchemaRegistration | None,
+                 incoming: SchemaRegistration) -> SchemaRegistration:
+    """Registration is additive: later definitions override by name, the
+    rest survive; `strict` takes the incoming value."""
+    if existing is None:
+        return incoming
+    types = {t.name: t for t in existing.entity_types}
+    types.update({t.name: t for t in incoming.entity_types})
+    preds = {p.name: p for p in existing.predicates}
+    preds.update({p.name: p for p in incoming.predicates})
+    return SchemaRegistration(
+        namespace=incoming.namespace,
+        entity_types=list(types.values()),
+        predicates=list(preds.values()),
+        strict=incoming.strict,
     )

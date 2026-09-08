@@ -23,6 +23,7 @@ migrations so existing database files gain new columns/tables in place.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -32,11 +33,25 @@ from pathlib import Path
 from typing import Iterator
 
 from .. import metrics
-from ..contracts import Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation
+from ..contracts import (
+    Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation,
+    SchemaRegistration,
+)
 from . import common
 from .base import GraphStore
 
 _TABLES = """
+CREATE TABLE IF NOT EXISTS loom_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schemas (
+    namespace         TEXT PRIMARY KEY,
+    registration_json TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS entities (
     id          TEXT PRIMARY KEY,
     namespace   TEXT NOT NULL,
@@ -44,6 +59,7 @@ CREATE TABLE IF NOT EXISTS entities (
     key         TEXT NOT NULL,
     provisional INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
+    norm_key    TEXT NOT NULL DEFAULT '',
     UNIQUE (namespace, type, key)
 );
 
@@ -84,6 +100,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     observed_at       TEXT NOT NULL,
     recorded_at       TEXT NOT NULL,
     extraction_status TEXT NOT NULL DEFAULT 'pending',
+    extraction_attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at   TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -140,7 +158,12 @@ CREATE INDEX IF NOT EXISTS idx_obs_recorded ON observations (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
+CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 """
+
+# Versioned migrations (H-B12): capability checks add columns idempotently;
+# anything that must run exactly once (a backfill) is keyed by version here.
+SCHEMA_VERSION = 2
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -174,14 +197,28 @@ class SqliteStore(GraphStore):
         self._conn.executescript(_TABLES)
         self._migrate()
         self._conn.executescript(_INDEXES)
+        # Referential integrity is per-connection in SQLite (H-B10). Old
+        # files may hold dangling rows from before this was on; report,
+        # don't refuse to start.
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        dangling = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        if dangling:
+            logging.getLogger("loom.store").warning(
+                "sqlite: %d row(s) violate foreign keys (pre-existing data);"
+                " reads skip them, a lifecycle export/import cleans them",
+                len(dangling))
 
     def _migrate(self) -> None:
-        """Bring pre-existing database files up to the current shape."""
+        """Bring pre-existing database files up to the current shape:
+        idempotent column adds first, then one-shot versioned steps."""
         wanted = {
             "observations": [("event_id", "TEXT")],
-            "artifacts": [("event_id", "TEXT")],
+            "artifacts": [("event_id", "TEXT"),
+                          ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                          ("next_attempt_at", "TEXT")],
             "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
             "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
+            "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''")],
         }
         for table, columns in wanted.items():
             have = {
@@ -193,7 +230,27 @@ class SqliteStore(GraphStore):
                     self._conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
                     )
+        current = self._meta_version()
+        if current < 2:
+            # v2: backfill normalized keys for fuzzy resolution (D-024)
+            rows = self._conn.execute(
+                "SELECT id, key FROM entities WHERE norm_key = ''").fetchall()
+            self._conn.executemany(
+                "UPDATE entities SET norm_key = ? WHERE id = ?",
+                [(common.norm_key(r["key"]), r["id"]) for r in rows])
+        self._conn.execute(
+            "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
+            " ('schema_version', ?)", (str(SCHEMA_VERSION),))
         self._conn.commit()
+
+    def _meta_version(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM loom_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+
+    def schema_version(self) -> int:
+        with self._tx():
+            return self._meta_version()
 
     @contextmanager
     def _tx(self):
@@ -253,11 +310,58 @@ class SqliteStore(GraphStore):
             # the folded node's brief described a partial view; drop it and
             # let the canonical's rebuild when the new facts accumulate
             self._conn.execute(
-                "DELETE FROM dossiers WHERE namespace = ? AND entity_id = ?",
-                (namespace, src.id),
+                "DELETE FROM dossiers WHERE namespace = ? AND entity_id IN (?, ?)",
+                (namespace, src.id, dst.id),
             )
             self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
             return True
+
+    def fuzzy_merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT namespace, norm_key FROM entities WHERE norm_key <> ''"
+                + (" AND namespace = ?" if namespace else "")
+                + " GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1"
+                " ORDER BY namespace, norm_key LIMIT ?",
+                ((namespace, limit) if namespace else (limit,)),
+            ).fetchall()
+            groups = []
+            for row in rows:
+                members = self._conn.execute(
+                    "SELECT * FROM entities WHERE namespace = ? AND norm_key = ?"
+                    " ORDER BY created_at, type, key",
+                    (row["namespace"], row["norm_key"]),
+                ).fetchall()
+                groups.append([common.row_to_entity(m) for m in members])
+        return groups
+
+    # ------------------------------------------------ schema registry (D-024)
+
+    def put_schema(self, registration: SchemaRegistration) -> SchemaRegistration:
+        with self._tx():
+            row = self._conn.execute(
+                "SELECT registration_json FROM schemas WHERE namespace = ?",
+                (registration.namespace,),
+            ).fetchone()
+            merged = common.merge_schema(
+                common.row_to_schema(row) if row else None, registration)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO schemas (namespace, registration_json,"
+                " updated_at) VALUES (?, ?, ?)",
+                (merged.namespace, merged.model_dump_json(),
+                 common.iso(common.now())),
+            )
+            return merged
+
+    def get_schema(self, namespace: str) -> SchemaRegistration | None:
+        with self._tx():
+            row = self._conn.execute(
+                "SELECT registration_json FROM schemas WHERE namespace = ?",
+                (namespace,),
+            ).fetchone()
+        return common.row_to_schema(row) if row else None
 
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -442,14 +546,25 @@ class SqliteStore(GraphStore):
             ).fetchall()
             return [common.row_to_observation(r) for r in rows]
 
-    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
+    def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
         with self._tx():
             rows = self._conn.execute(
                 "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
+                " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
                 " ORDER BY recorded_at LIMIT ?",
-                (limit,),
+                (common.iso(now or common.now()), limit),
             ).fetchall()
         return [common.row_to_artifact(r) for r in rows]
+
+    def defer_extraction(
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
+    ) -> None:
+        with self._tx():
+            self._conn.execute(
+                "UPDATE artifacts SET extraction_attempts = ?, next_attempt_at = ?"
+                " WHERE namespace = ? AND id = ?",
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
+            )
 
     def set_extraction_status(
         self, namespace: str, artifact_id: str, status: str
@@ -509,6 +624,22 @@ class SqliteStore(GraphStore):
                 out.extend(common.row_to_chunk(r) for r in rows)
         return out
 
+    def doc_chunks_by_seq(
+        self, namespace: str, artifact_id: str, model: str, seqs: list[int]
+    ) -> list[dict]:
+        if not seqs:
+            return []
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
+                " c.text, c.vector, a.source, a.observed_at"
+                " FROM doc_chunks c JOIN artifacts a ON a.id = c.artifact_id"
+                " WHERE c.namespace = ? AND c.artifact_id = ? AND c.model = ?"
+                f" AND c.seq IN ({','.join('?' * len(seqs))}) ORDER BY c.seq",
+                (namespace, artifact_id, model, *seqs),
+            ).fetchall()
+        return [common.row_to_chunk(r) for r in rows]
+
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
         with self._tx():
             entity = self._resolve_entity(namespace, ref)  # aliases too (H-B6)
@@ -543,8 +674,11 @@ class SqliteStore(GraphStore):
         self, min_new: int = 20, min_total: int = 5, limit: int = 4
     ) -> list[tuple[str, EntityRef, int]]:
         with self._tx():
+            # Only observations recorded AFTER the last brief count as
+            # "new", so the scan is bounded by fresh rows, not the whole
+            # table (H-E2). Total counts for the few winners come after.
             rows = self._conn.execute(
-                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS n,"
+                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS fresh,"
                 "       d.observation_count AS have"
                 " FROM entities e"
                 " JOIN observations o ON o.subject_id = e.id"
@@ -552,15 +686,21 @@ class SqliteStore(GraphStore):
                 "                   WHERE t.observation_id = o.id)"
                 " LEFT JOIN dossiers d ON d.namespace = e.namespace"
                 "   AND d.entity_id = e.id"
+                " WHERE d.updated_at IS NULL OR o.recorded_at > d.updated_at"
                 " GROUP BY e.id"
-                " HAVING (have IS NULL AND n >= ?) OR (n - have >= ?)"
-                " ORDER BY n DESC, e.created_at LIMIT ?",
+                " HAVING (have IS NULL AND fresh >= ?) OR (have IS NOT NULL AND fresh >= ?)"
+                " ORDER BY fresh DESC, e.created_at LIMIT ?",
                 (min_total, min_new, limit),
             ).fetchall()
-        return [
-            (r["namespace"], EntityRef(type=r["type"], key=r["key"]), r["n"])
-            for r in rows
-        ]
+            out = []
+            for r in rows:
+                ref = EntityRef(type=r["type"], key=r["key"])
+                entity = self._get_entity(r["namespace"], ref)
+                total = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM observations o WHERE o.subject_id = ?"
+                    + _NOT_TOMBSTONED, (entity.id,)).fetchone()["n"]
+                out.append((r["namespace"], ref, int(total)))
+        return out
 
     # ------------------------------------------------------ lifecycle (D-016)
 
@@ -612,39 +752,43 @@ class SqliteStore(GraphStore):
             )
         return removed
 
+    # Exports stream in keyset pages (H-E4): the lock is held per page, not
+    # for the whole table, and memory is bounded by the page size.
+    _PAGE = 1000
+
+    def _pages(self, sql: str, params: tuple, order_cols: tuple[str, str]):
+        last = ("", "")
+        while True:
+            with self._tx():
+                rows = self._conn.execute(
+                    sql + f" AND ({order_cols[0]}, {order_cols[1]}) > (?, ?)"
+                    f" ORDER BY {order_cols[0]}, {order_cols[1]} LIMIT ?",
+                    (*params, *last, self._PAGE),
+                ).fetchall()
+            if not rows:
+                return
+            yield from rows
+            tail = rows[-1]
+            last = (tail[order_cols[0].split(".")[-1]], tail["id"])
+
     def iter_observations(
         self, namespace: str | None = None
     ) -> Iterator[Observation]:
-        with self._tx():
-            rows = self._conn.execute(
-                _OBS_SELECT
-                + (" WHERE o.namespace = ?" if namespace else "")
-                + " ORDER BY o.recorded_at",
-                (namespace,) if namespace else (),
-            ).fetchall()
-        for row in rows:
+        sql = _OBS_SELECT + " WHERE 1=1" + (" AND o.namespace = ?" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("o.recorded_at", "o.id")):
             yield common.row_to_observation(row)
 
     def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        with self._tx():
-            rows = self._conn.execute(
-                "SELECT * FROM entities"
-                + (" WHERE namespace = ?" if namespace else "")
-                + " ORDER BY created_at",
-                (namespace,) if namespace else (),
-            ).fetchall()
-        for row in rows:
+        sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = ?" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("created_at", "id")):
             yield common.row_to_entity(row)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
-        with self._tx():
-            rows = self._conn.execute(
-                "SELECT * FROM artifacts"
-                + (" WHERE namespace = ?" if namespace else "")
-                + " ORDER BY recorded_at",
-                (namespace,) if namespace else (),
-            ).fetchall()
-        for row in rows:
+        sql = "SELECT * FROM artifacts WHERE 1=1" + (" AND namespace = ?" if namespace else "")
+        for row in self._pages(sql, (namespace,) if namespace else (),
+                               ("recorded_at", "id")):
             yield common.row_to_artifact(row)
 
     def iter_aliases(self, namespace: str | None = None) -> Iterator[dict]:
@@ -697,9 +841,10 @@ class SqliteStore(GraphStore):
         with self._tx():
             self._conn.execute(
                 "INSERT OR IGNORE INTO entities (id, namespace, type, key,"
-                " provisional, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                " provisional, created_at, norm_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (uuid.uuid4().hex, entity.namespace, entity.type, entity.key,
-                 int(entity.provisional), common.iso(entity.created_at)),
+                 int(entity.provisional), common.iso(entity.created_at),
+                 common.norm_key(entity.key)),
             )
 
     def restore_alias(self, namespace: str, alias: str, canonical: EntityRef) -> None:
@@ -716,7 +861,8 @@ class SqliteStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities"):
+                          "observations", "aliases", "artifacts", "entities",
+                          "schemas"):
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
@@ -773,8 +919,9 @@ class SqliteStore(GraphStore):
         )
         self._conn.execute(
             "INSERT OR IGNORE INTO entities (id, namespace, type, key, provisional,"
-            " created_at) VALUES (?, ?, ?, ?, 0, ?)",
-            (entity.id, namespace, ref.type, ref.key, common.iso(entity.created_at)),
+            " created_at, norm_key) VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (entity.id, namespace, ref.type, ref.key, common.iso(entity.created_at),
+             common.norm_key(ref.key)),
         )
         # another process may have inserted the same key between our SELECT
         # and INSERT; the row that actually exists wins
@@ -871,14 +1018,15 @@ class SqliteStore(GraphStore):
         cur = self._conn.execute(
             f"{verb} INTO artifacts (id, namespace, event_id, filename,"
             " content_type, text, content_b64, source, observed_at, recorded_at,"
-            " extraction_status, attrs_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + suffix,
+            " extraction_status, extraction_attempts, attrs_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" + suffix,
             (
                 artifact.id, artifact.namespace, artifact.event_id,
                 artifact.filename, artifact.content_type, artifact.text,
                 artifact.content_b64, artifact.source,
                 common.iso(artifact.observed_at), common.iso(artifact.recorded_at),
-                artifact.extraction_status, json.dumps(artifact.attrs),
+                artifact.extraction_status, artifact.extraction_attempts,
+                json.dumps(artifact.attrs),
             ),
         )
         return cur.rowcount > 0

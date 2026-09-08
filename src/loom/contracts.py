@@ -105,7 +105,9 @@ class Observation(BaseModel):
 
 
 class Artifact(BaseModel):
-    """A stored document: verbatim content plus extraction lifecycle status."""
+    """A stored document: verbatim content plus extraction lifecycle status.
+    extraction_attempts counts failed extraction tries (the worker backs off
+    per attempt and dead-letters as `failed` after a bound, H-D4)."""
 
     id: str
     namespace: str
@@ -118,6 +120,7 @@ class Artifact(BaseModel):
     observed_at: datetime
     recorded_at: datetime
     extraction_status: Literal["pending", "done", "failed", "skipped"] = "pending"
+    extraction_attempts: int = 0
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -192,6 +195,12 @@ class ScopeSpec(BaseModel):
 
 
 class AskRequest(BaseModel):
+    """Two time axes (docs/architecture.md, D-024): `as_of` = what did we
+    KNOW at T (knowledge time — later-recorded observations are hidden);
+    `valid_at` = what was TRUE at T (fact time — only observations whose
+    validity window covers T survive, and facts with no window at all are
+    kept)."""
+
     namespace: str = DEFAULT_NAMESPACE
     subject: EntityRef | None = None
     scope: ScopeSpec | None = None
@@ -201,6 +210,7 @@ class AskRequest(BaseModel):
         description="token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)"
     )
     as_of: datetime | None = None
+    valid_at: datetime | None = None
 
     @model_validator(mode="after")
     def _subject_or_scope(self) -> "AskRequest":
@@ -222,6 +232,7 @@ class ContextPack(BaseModel):
     subjects: list[EntityRef] = Field(default_factory=list)  # always populated
     question: str | None = None
     as_of: datetime | None = None
+    valid_at: datetime | None = None
     budget: int
     items: list[ContextItem] = Field(default_factory=list)
     handles: list[ExpansionHandle] = Field(default_factory=list)
@@ -238,6 +249,7 @@ class AnswerRequest(BaseModel):
     scope: ScopeSpec | None = None
     budget: int = Field(default=1200, gt=0, le=1_000_000)
     as_of: datetime | None = None
+    valid_at: datetime | None = None
     max_tokens: int = Field(default=1024, gt=0, le=8192)
 
 
@@ -264,9 +276,20 @@ class PredicateDef(BaseModel):
         default_factory=list,
         description="allowed object entity types; empty = any entity or scalar",
     )
+    containment: bool = Field(
+        default=False,
+        description="a 'contains / member of' relation: scopes with no "
+        "explicit `expand` follow every containment predicate (D-012/D-024)",
+    )
 
 
 class SchemaRegistration(BaseModel):
+    """Per-namespace registry (D-024). Registering is additive (a later POST
+    merges by name). Validation on ingest: a registered predicate's
+    object_types are always enforced; with `strict` the namespace also
+    rejects unregistered predicates and entity types."""
+
     namespace: str = DEFAULT_NAMESPACE
     entity_types: list[EntityTypeDef] = Field(default_factory=list)
     predicates: list[PredicateDef] = Field(default_factory=list)
+    strict: bool = False

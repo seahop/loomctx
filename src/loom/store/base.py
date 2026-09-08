@@ -10,7 +10,10 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Iterator
 
-from ..contracts import Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation
+from ..contracts import (
+    Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation,
+    SchemaRegistration,
+)
 
 
 class GraphStore(ABC):
@@ -44,6 +47,25 @@ class GraphStore(ABC):
     ) -> list[list[Entity]]:
         """Groups of entities that share a natural key across differing types
         (the drift LLM extraction produces, e.g. ip vs ip_address)."""
+
+    @abstractmethod
+    def fuzzy_merge_candidates(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[list[Entity]]:
+        """Groups of entities whose *normalized* keys collide but whose raw
+        keys differ (web-01 / web01 / WEB_01) — resolution tier 2 (D-024).
+        Same-type members are safe to auto-merge; cross-type ones need
+        adjudication."""
+
+    # ------------------------------------------------ schema registry (D-024)
+
+    @abstractmethod
+    def put_schema(self, registration: SchemaRegistration) -> SchemaRegistration:
+        """Merge a registration into the namespace's registry (additive by
+        name); returns the effective registry."""
+
+    @abstractmethod
+    def get_schema(self, namespace: str) -> SchemaRegistration | None: ...
 
     @abstractmethod
     def record_claim(self, claim: ClaimIn) -> Observation:
@@ -124,8 +146,29 @@ class GraphStore(ABC):
         """Backlog for the enrichment worker (tombstoned rows excluded)."""
 
     @abstractmethod
-    def pending_artifacts(self, limit: int = 4) -> list[Artifact]:
-        """Artifacts still awaiting claim extraction."""
+    def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
+        """Artifacts still awaiting claim extraction whose backoff (if any)
+        has elapsed as of `now` (default: the current time)."""
+
+    @abstractmethod
+    def defer_extraction(
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
+    ) -> None:
+        """Record a failed extraction attempt and when to try again (H-D4);
+        survives worker restarts, unlike in-memory backoff."""
+
+    @abstractmethod
+    def doc_chunks_by_seq(
+        self, namespace: str, artifact_id: str, model: str, seqs: list[int]
+    ) -> list[dict]:
+        """Specific passages of one artifact (excerpt expansion: the
+        neighbours of a cited chunk), same dict shape as
+        doc_chunks_for_artifacts, ordered by seq."""
+
+    @abstractmethod
+    def schema_version(self) -> int:
+        """The store's applied migration level (loom_meta), for /readyz and
+        upgrade audits (H-B12)."""
 
     @abstractmethod
     def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:

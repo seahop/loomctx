@@ -380,8 +380,12 @@ def test_merge_moves_dossier_and_rewrites_object_refs(store):
                                 EntityRef(type="ip", key="10.0.4.7"))
     edge = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
     assert edge.object == EntityRef(type="ip", key="10.0.4.7")
+    # both briefs are dropped by the merge (each described a partial view);
+    # once rebuilt, the canonical brief is reachable through the alias
+    assert store.get_dossier("default", EntityRef(type="ip", key="10.0.4.7")) is None
+    store.put_dossier("default", EntityRef(type="ip", key="10.0.4.7"), "rebuilt brief", 2, [])
     via_alias = store.get_dossier("default", EntityRef(type="ip_address", key="10.0.4.7"))
-    assert via_alias and via_alias["brief"] == "canonical brief"
+    assert via_alias and via_alias["brief"] == "rebuilt brief"
 
 
 def test_doc_chunks_are_keyed_by_model_and_carry_artifact_metadata(store):
@@ -444,3 +448,101 @@ def test_redaction_invalidates_briefs_built_on_it(store):
     store.redact("default", obs.id, "spill")
     assert store.get_dossier("default", host) is None
     assert store.get_dossier("other", host)["brief"] == "other brief"
+
+
+# --------------------------------------------------- batch: foundations (D-024) #
+
+def test_schema_version_is_recorded(store):
+    assert store.schema_version() >= 2
+
+
+def test_fuzzy_candidates_group_by_normalized_key(store):
+    for t, k in [("host", "web-01"), ("host", "WEB_01"), ("host", "db-01"),
+                 ("asset", "web01"), ("host", "web-02")]:
+        store.upsert_entity("default", EntityRef(type=t, key=k))
+    groups = store.fuzzy_merge_candidates("default")
+    assert len(groups) == 1
+    assert {(e.type, e.key) for e in groups[0]} == {
+        ("host", "web-01"), ("host", "WEB_01"), ("asset", "web01")}
+    assert store.merge_candidates("default") == []  # exact keys don't collide
+
+
+def test_schema_registry_merges_by_name(store):
+    from loom.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
+    assert store.get_schema("netsec") is None
+    first = store.put_schema(SchemaRegistration(
+        namespace="netsec",
+        entity_types=[EntityTypeDef(name="host"), EntityTypeDef(name="domain")],
+        predicates=[PredicateDef(name="member_of", object_types=["domain"],
+                                 containment=True)]))
+    assert {t.name for t in first.entity_types} == {"host", "domain"}
+    second = store.put_schema(SchemaRegistration(
+        namespace="netsec", strict=True,
+        entity_types=[EntityTypeDef(name="host", description="a box")],
+        predicates=[PredicateDef(name="runs_os")]))
+    assert second.strict and {p.name for p in second.predicates} == {"member_of", "runs_os"}
+    assert next(t for t in second.entity_types if t.name == "host").description == "a box"
+    assert next(p for p in second.predicates if p.name == "member_of").containment
+    assert store.get_schema("netsec") == second
+    assert store.get_schema("other") is None
+
+
+def test_extraction_backoff_is_persisted(store):
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    a = store.store_artifact(DocumentIn(text="a", source="s", observed_at=OBSERVED))
+    b = store.store_artifact(DocumentIn(text="b", source="s", observed_at=OBSERVED))
+    now = OBSERVED
+    assert [x.id for x in store.pending_artifacts(10, now=now)] == [a.id, b.id]
+    store.defer_extraction("default", a.id, 2, now + timedelta(minutes=5))
+    assert [x.id for x in store.pending_artifacts(10, now=now)] == [b.id]
+    assert store.get_artifact("default", a.id).extraction_attempts == 2
+    later = now + timedelta(minutes=6)
+    assert [x.id for x in store.pending_artifacts(10, now=later)] == [a.id, b.id]
+
+
+def test_doc_chunks_by_seq(store):
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="abcdef", source="s", observed_at=OBSERVED))
+    store.put_doc_chunks("default", art.id, "m", [
+        (0, 0, 2, "ab", [1.0]), (1, 2, 4, "cd", [1.0]), (2, 4, 6, "ef", [1.0])])
+    got = store.doc_chunks_by_seq("default", art.id, "m", [2, 0, 7])
+    assert [c["seq"] for c in got] == [0, 2]
+    assert store.doc_chunks_by_seq("default", art.id, "other", [0]) == []
+
+
+def test_exports_stream_across_pages(store, monkeypatch):
+    monkeypatch.setattr(type(store), "_PAGE", 3)
+    for i in range(8):
+        store.record_claim(login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"u{i}")}))
+    ids = [o.id for o in store.iter_observations("default")]
+    assert len(ids) == 8 and len(set(ids)) == 8
+    assert len(list(store.iter_entities("default"))) == 9  # host + 8 users
+    assert list(store.iter_observations("nope")) == []
+
+
+def test_dossier_candidates_only_count_fresh_observations(store):
+    host = EntityRef(type="host", key="web-01")
+    for i in range(5):
+        store.record_claim(login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"u{i}")}))
+    cands = store.dossier_candidates(min_new=3, min_total=5)
+    assert [(c[1], c[2]) for c in cands] == [(host, 5)]
+    store.put_dossier("default", host, "brief", 5, [])
+    assert store.dossier_candidates(min_new=3, min_total=5) == []
+    for i in range(3):  # three NEW observations since the brief
+        store.record_claim(login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"new{i}")}))
+    cands = store.dossier_candidates(min_new=3, min_total=5)
+    assert [(c[1], c[2]) for c in cands] == [(host, 8)]
+
+
+def test_merge_drops_both_briefs(store):
+    a, b = EntityRef(type="ip", key="1.1.1.1"), EntityRef(type="ip_address", key="1.1.1.1")
+    for ref in (a, b):
+        store.record_claim(ClaimIn(subject=ref, predicate="p", object="x",
+                                   observed_at=OBSERVED, source="s"))
+        store.put_dossier("default", ref, "old brief", 1, [])
+    assert store.merge_entities("default", b, a)
+    assert store.get_dossier("default", a) is None
