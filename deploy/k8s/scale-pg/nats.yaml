@@ -1,3 +1,17 @@
+# NATS JetStream: the durable buffer between the gateways and the writer
+# consumers (D-010). The stream lives on a PVC so a pod restart keeps the
+# queue — that is what makes "at-least-once" true across restarts. Recreate
+# strategy: exactly one server owns the store dir.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +20,8 @@ metadata:
     app: nats
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: nats
@@ -17,16 +33,37 @@ spec:
       containers:
         - name: nats
           image: nats:2.10-alpine
-          args: ["-js"]
+          args: ["-js", "-sd", "/data", "-m", "8222"]
           ports:
             - containerPort: 4222
               name: client
+            - containerPort: 8222
+              name: monitor
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz?js-enabled-only=true
+              port: monitor
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 5
+            periodSeconds: 15
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
               memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nats-data
 ---
 apiVersion: v1
 kind: Service

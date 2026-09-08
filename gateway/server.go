@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -94,6 +95,24 @@ type natsForwarder struct {
 	js jetstream.JetStream
 }
 
+// connectNATS keeps trying until the queue answers or the deadline passes:
+// compose/k8s start ordering is best-effort and a gateway that dies on the
+// first refused connection leaves the scale shape half-up (H-F3).
+func connectNATS(url string, wait time.Duration) (*natsForwarder, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		fwd, err := newNATSForwarder(url)
+		if err == nil {
+			return fwd, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		log.Printf("NATS at %s not ready (%v); retrying", url, err)
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func newNATSForwarder(url string) (*natsForwarder, error) {
 	nc, err := nats.Connect(url, nats.MaxReconnects(-1))
 	if err != nil {
@@ -128,14 +147,19 @@ func (f *natsForwarder) close() { f.nc.Close() }
 
 // ------------------------------------------------------------------- server
 
-// limiterPool hands out one token bucket per API key (or one shared bucket
-// for the empty key when auth is off), so a misbehaving sender exhausts its
-// own budget without starving the others.
+// limiterPool hands out one token bucket per *authenticated principal*
+// (grant id) — or one shared bucket when auth is off — so a misbehaving
+// sender exhausts its own budget without starving the others. Buckets are
+// keyed by grant, never by the raw header value: an unauthenticated caller
+// can't mint a fresh bucket per request by rotating a bogus key (H-A4).
+// The map is bounded as a belt-and-braces guard.
 type limiterPool struct {
 	mu      sync.Mutex
 	rate    float64
 	buckets map[string]*rate.Limiter
 }
+
+const maxLimiterBuckets = 10000
 
 func newLimiterPool(perSec float64) *limiterPool {
 	if perSec <= 0 {
@@ -151,6 +175,12 @@ func (p *limiterPool) allow(key string) bool {
 	p.mu.Lock()
 	lim, ok := p.buckets[key]
 	if !ok {
+		if len(p.buckets) >= maxLimiterBuckets {
+			for k := range p.buckets { // evict one arbitrary entry
+				delete(p.buckets, k)
+				break
+			}
+		}
 		lim = rate.NewLimiter(rate.Limit(p.rate), int(p.rate))
 		p.buckets[key] = lim
 	}
@@ -158,8 +188,21 @@ func (p *limiterPool) allow(key string) bool {
 	return lim.Allow()
 }
 
+func (p *limiterPool) size() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.buckets)
+}
+
 func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authConfig) http.Handler {
-	limiters := newLimiterPool(cfg.ratePerSec)
+	return newServerWithLimiters(cfg, schema, fwd, auth, newLimiterPool(cfg.ratePerSec))
+}
+
+func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
+	auth *authConfig, limiters *limiterPool) http.Handler {
 	m := &gwMetrics{}
 
 	mux := http.NewServeMux()
@@ -173,16 +216,29 @@ func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authC
 		m.requests.Add(1)
 		apiKey := extractKey(r)
 
-		// Cheapest rejections first: no key (when required), then the
-		// per-key rate limit — both before the body is even read, so abusive
-		// or misconfigured senders cost almost nothing.
-		if auth.enabled() && apiKey == "" {
-			m.rejectedAuth.Add(1)
-			writeJSON(w, http.StatusUnauthorized,
-				map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
-			return
+		// Cheapest rejections first, all before the body is read: no key
+		// (when required), unknown key (one hash compare), then the
+		// per-principal rate limit. Authentication precedes the limiter so
+		// only real principals get buckets.
+		var g *grant
+		bucket := "" // shared bucket when auth is off
+		if auth.enabled() {
+			if apiKey == "" {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusUnauthorized,
+					map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+				return
+			}
+			g = auth.grantFor(apiKey)
+			if g == nil {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusForbidden,
+					map[string]string{"detail": "unknown, expired, or disabled API key"})
+				return
+			}
+			bucket = g.ID
 		}
-		if !limiters.allow(apiKey) {
+		if !limiters.allow(bucket) {
 			m.rejectedRate.Add(1)
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests,
@@ -216,9 +272,8 @@ func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authC
 				map[string]string{"detail": "envelope must carry an explicit 'kind'"})
 			return
 		}
-		if auth.enabled() {
-			g := auth.grantFor(apiKey)
-			if g == nil || !g.allows(extractNamespace(doc), "w") {
+		if g != nil {
+			if !g.allows(extractNamespace(doc), "w") {
 				m.rejectedAuth.Add(1)
 				writeJSON(w, http.StatusForbidden,
 					map[string]string{"detail": "key not authorized to write this namespace"})

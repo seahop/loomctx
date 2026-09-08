@@ -28,6 +28,7 @@ STREAM = "LOOM_INGEST"
 SUBJECTS = "loom.ingest.>"
 DURABLE = "loom-writer"
 BATCH = 64
+CONNECT_TIMEOUT_SECONDS = 120.0
 
 
 def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
@@ -43,7 +44,10 @@ def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
         try:
             envelope = _ENVELOPE.validate_json(data)
         except ValidationError as exc:
-            log.warning("dropping unparseable message: %s", exc.errors()[:2])
+            # include_input=False: the failing payload may carry document
+            # text or claim values that don't belong in logs (H-A7)
+            log.warning("dropping unparseable message: %s",
+                        exc.errors(include_input=False)[:2])
             counts["skipped"] += 1
             continue
         if isinstance(envelope, ClaimIn):
@@ -68,7 +72,20 @@ async def run() -> None:
     from nats.errors import TimeoutError as NatsTimeoutError
 
     store = store_from_env()
-    nc = await nats.connect(os.environ.get("LOOM_NATS_URL", "nats://nats:4222"))
+    url = os.environ.get("LOOM_NATS_URL", "nats://nats:4222")
+    # The queue may still be booting when we start (compose/k8s ordering
+    # is best-effort): keep trying instead of dying on the first refusal
+    # (H-F3). nats-py then reconnects on its own for the life of the process.
+    deadline = asyncio.get_running_loop().time() + CONNECT_TIMEOUT_SECONDS
+    while True:
+        try:
+            nc = await nats.connect(url, max_reconnect_attempts=-1)
+            break
+        except Exception as exc:  # noqa: BLE001 — connection-phase errors vary by cause
+            if asyncio.get_running_loop().time() >= deadline:
+                raise
+            log.warning("NATS at %s not ready (%s); retrying", url, exc)
+            await asyncio.sleep(2)
     js = nc.jetstream()
     try:
         await js.add_stream(name=STREAM, subjects=[SUBJECTS])
@@ -83,7 +100,16 @@ async def run() -> None:
             msgs = await sub.fetch(BATCH, timeout=5)
         except (TimeoutError, NatsTimeoutError):
             continue
-        batch_counts = handle_batch(store, [m.data for m in msgs])
+        try:
+            batch_counts = handle_batch(store, [m.data for m in msgs])
+        except Exception:  # noqa: BLE001 — the store rolled back (D-022)
+            # Leave the batch un-acked: JetStream redelivers it after
+            # ack-wait, and event_id dedupe absorbs any partial writes. A
+            # crash here would do the same, minus the log line and the
+            # chance for a transient store error to clear.
+            log.exception("batch of %d failed; leaving it for redelivery", len(msgs))
+            await asyncio.sleep(2)
+            continue
         for msg in msgs:  # ack only after the batch is durably written
             await msg.ack()
         for key, val in batch_counts.items():

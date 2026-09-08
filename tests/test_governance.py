@@ -353,3 +353,38 @@ def test_signed_handles_reject_forgery(monkeypatch):
     monkeypatch.setenv("LOOM_HANDLE_SECRET", "different")
     with pytest.raises(ValueError):
         decode_handle(signed)  # rotated secret invalidates outstanding handles
+
+
+def test_keys_file_tolerates_bad_entries_and_naive_expires(tmp_path, monkeypatch):
+    """H-A5/H-A13: one malformed entry disables only itself; a naive
+    `expires` is UTC rather than a 500 on every request."""
+    import hashlib, json
+    good = hashlib.sha256(b"loomk_good").hexdigest()
+    path = tmp_path / "keys.json"
+    path.write_text(json.dumps({"keys": [
+        {"id": "broken", "sha256": "nothex", "namespaces": ["default"], "perms": "w"},
+        {"id": "noperms", "sha256": good, "namespaces": ["default"]},
+        {"id": "expired", "sha256": good, "namespaces": ["default"], "perms": "w",
+         "expires": "2001-01-01T00:00:00"},
+        {"id": "ok", "sha256": good, "namespaces": ["default"], "perms": "w",
+         "expires": "2099-01-01T00:00:00"},
+    ]}))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    auth = AuthConfig.from_env()
+    grant = auth.grant_for("loomk_good")
+    assert grant is not None and grant.id == "ok"
+
+
+def test_oversized_body_is_rejected_before_parsing(tmp_path, monkeypatch):
+    """H-A14: the default shape now caps request bodies like the gateway."""
+    monkeypatch.setenv("LOOM_MAX_BODY_BYTES", "2048")
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "big.db"))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    with TestClient(app) as client:
+        body = {"kind": "document", "text": "x" * 4096, "source": "s",
+                "observed_at": OBSERVED.isoformat()}
+        assert client.post("/v1/ingest", json=body).status_code == 413
+        body["text"] = "small"
+        assert client.post("/v1/ingest", json=body).status_code == 202

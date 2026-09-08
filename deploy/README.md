@@ -34,8 +34,21 @@ SQLite trade documented in D-008.
   for read latency.
 - **Probes:** liveness `GET /healthz`; readiness `GET /readyz` (probes the
   store — a pod with a dead database drops out of the Service).
-- **Auth:** set `LOOM_API_KEYS` (same value) on the engine and gateway —
-  via `.env` locally, via a Secret on k8s. Unset = open dev mode.
+- **Auth:** the shipped manifests run in **open dev mode** (no keys) so a
+  first `kubectl apply` just works inside the cluster. Before exposing
+  anything, mint keys (`docs/administration.md`), create a Secret from the
+  keys file, and mount it on the engine and gateways — the commented block
+  in `base/deployment.yaml` shows exactly where:
+
+  ```bash
+  kubectl -n loom create secret generic loom-keys --from-file=keys.json=secrets/keys.json
+  ```
+
+  Both engine and gateway hot-reload the file, so rotating keys is
+  `kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`
+  with no restarts. Set `LOOM_HANDLE_SECRET` (any long random string, the
+  same on every engine replica) alongside it so expansion handles are signed
+  (D-021).
 
 **HPA prerequisite:** the cluster must run metrics-server (managed clusters
 usually do; on kind/minikube enable it). Resource *requests* are set on every

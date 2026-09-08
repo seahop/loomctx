@@ -80,7 +80,7 @@ func main() {
 
 	var fwd forwarder
 	if cfg.natsURL != "" {
-		fwd, err = newNATSForwarder(cfg.natsURL)
+		fwd, err = connectNATS(cfg.natsURL, 2*time.Minute)
 		if err != nil {
 			log.Fatalf("connecting to NATS: %v", err)
 		}

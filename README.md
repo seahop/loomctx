@@ -144,5 +144,5 @@ See `docs/roadmap.md` for the milestone plan (conference: end of October 2026).
 Agents connect natively over MCP:
 
 ```bash
-claude mcp add loom -- docker compose run --rm -T loom python -m loom.mcp_server
+claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
 ```

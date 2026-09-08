@@ -8,10 +8,17 @@ services:
   loom:
     build: .
     image: loom-engine:local
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - loom-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
     environment:
       LOOM_DB: ${LOOM_DB:-/data/loom.db}
       # Answering LLM (D-012): any OpenAI-compatible provider or self-hosted
@@ -55,16 +62,19 @@ services:
       context: .
       dockerfile: gateway/Dockerfile
     profiles: ["scale"]
+    restart: unless-stopped
     environment:
       LOOM_NATS_URL: nats://nats:4222
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
     depends_on:
-      - nats
+      nats:
+        condition: service_healthy
 
   lb:
     image: nginx:1.27-alpine
     profiles: ["scale"]
+    restart: unless-stopped
     ports:
       - "8081:8080"
     volumes:
@@ -75,11 +85,22 @@ services:
   nats:
     image: nats:2.10-alpine
     profiles: ["scale"]
-    command: ["-js"]
+    restart: unless-stopped
+    # JetStream on a volume so the queue survives a restart (at-least-once
+    # means nothing if the buffer is ephemeral); monitor port for health
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
 
   consumer:
     image: loom-engine:local
     profiles: ["scale"]
+    restart: unless-stopped
     command: python -m loom.consumer
     environment:
       LOOM_DB: ${LOOM_DB:-/data/loom.db}
@@ -87,7 +108,8 @@ services:
     volumes:
       - loom-data:/data
     depends_on:
-      - nats
+      nats:
+        condition: service_healthy
 
   # Enrichment worker (phase 4, D-018): embeddings + document claim
   # extraction + dossiers. One-shot drain: docker compose run --rm enrich
@@ -116,6 +138,7 @@ services:
   mcp:
     image: loom-engine:local
     profiles: ["mcp"]
+    restart: unless-stopped
     command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
     ports:
       - "8300:8300"
@@ -164,5 +187,6 @@ services:
 
 volumes:
   loom-data:
+  nats-data:
   pg-data:
   # neo4j-data:

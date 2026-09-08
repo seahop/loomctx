@@ -23,7 +23,7 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 Hook up a local agent (stdio, spawned per session — nothing on the host):
 
 ```bash
-claude mcp add loom -- docker compose run --rm -T loom python -m loom.mcp_server
+claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
 ```
 
 Remote agents use streamable HTTP:
@@ -53,8 +53,11 @@ GET  /v1/artifacts/{id}                          # stored document, verbatim
 POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
 POST /v1/expand                                  # ExpandRequest -> ContextPack
 POST /v1/answer                                  # retrieval-grounded LLM answer (503 until an LLM is configured, D-012)
-POST /v1/schemas                                 # register entity types/predicates (phase 1 remainder)
+GET  /readyz, GET /metrics                       # store-probing readiness, Prometheus
 ```
+
+Not yet served: `POST /v1/schemas` (schema-registry persistence is the open
+phase-1 item in `roadmap.md`; the shapes exist in `contracts.py`).
 
 Multi-entity questions use a **scope** instead of a subject — several
 computers at once, or an anchor expanded over containment predicates:
@@ -151,18 +154,20 @@ hand-written second client.
 
 ## 4. CLI — for humans
 
-Same core, human ergonomics. Also the debugging story: *see exactly what an agent
-would see*.
+What ships today are operator modules, each run inside the image
+(`docker compose run --rm loom python -m loom.<module> ...`):
 
 ```bash
-loom ingest claims.jsonl                 # bulk claims
-loom ingest report.pdf --source ir-pipe  # a document
-loom show host:web-01                    # entity + recent observations
-loom ask host:web-01 "who logged in this week?" --budget 800
-loom schema register netsec.yaml         # entity types + predicates
+python -m loom.seed load                 # deterministic demo corpus
+python -m loom.keys generate ...         # mint/list/revoke/update API keys (D-013a)
+python -m loom.lifecycle export|import|purge|redact   # backup, migration, retention (D-016)
+python -m loom.enrich run --once         # drain the enrichment backlog (D-018)
+python -m loom.loadgen --url ...         # measure ingest throughput (D-011)
 ```
 
-Runs via `docker compose run --rm loom loom <args>` — nothing on the host.
+The human-ergonomic `loom ask host:web-01 "..."` front-end (see exactly what
+an agent would see) is planned, not built; until then `curl` against
+`POST /v1/ask` or the Python SDK is the debugging story.
 
 ## Choosing a surface
 

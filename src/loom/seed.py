@@ -222,6 +222,16 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
             content_b64="UTMgc3BlbmQgc25hcHNob3QgKGJpbmFyeSBzYW1wbGUp",
         ),
     ]
+    # Deterministic event ids make `seed load` idempotent: loading twice
+    # into the same volume dedupes instead of doubling the corpus (H-F2).
+    claims = [
+        c.model_copy(update={"event_id": f"seed:{seed}:c{i}"})
+        for i, c in enumerate(claims)
+    ]
+    docs = [
+        d.model_copy(update={"event_id": f"seed:{seed}:d{i}"})
+        for i, d in enumerate(docs)
+    ]
     return claims, docs
 
 

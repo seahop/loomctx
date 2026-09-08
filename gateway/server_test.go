@@ -274,3 +274,59 @@ func TestOversizeBodyRejected(t *testing.T) {
 		t.Fatalf("status = %d, calls = %d", rec.Code, fwd.calls)
 	}
 }
+
+// H-A4: an unauthenticated caller rotating bogus keys must neither bypass
+// the limiter nor grow the bucket map; buckets belong to real principals.
+func TestUnknownKeysGetNoBuckets(t *testing.T) {
+	fwd := &fakeForwarder{}
+	schema, err := newValidator("../contracts/schemas.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := parseAuth(authKeys)
+	limiters := newLimiterPool(1)
+	h := newServerWithLimiters(config{maxBodyBytes: 1 << 20, ratePerSec: 1}, schema, fwd, auth, limiters)
+	for i := 0; i < 25; i++ {
+		rec := postWithKey(h, validClaim, fmt.Sprintf("bogus-%d", i))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("bogus key %d: status=%d", i, rec.Code)
+		}
+	}
+	if limiters.size() != 0 {
+		t.Fatalf("bogus keys created %d buckets", limiters.size())
+	}
+	// the same principal presenting its key twice shares ONE bucket
+	first := postWithKey(h, validClaim, "agentsecret")
+	second := postWithKey(h, validClaim, "agentsecret")
+	if first.Code != http.StatusOK || second.Code != http.StatusTooManyRequests {
+		t.Fatalf("first=%d second=%d", first.Code, second.Code)
+	}
+	if limiters.size() != 1 {
+		t.Fatalf("expected 1 bucket, got %d", limiters.size())
+	}
+}
+
+// H-A5/H-A13: a bad entry disables only itself; naive expires is UTC.
+func TestKeysFileToleratesBadEntries(t *testing.T) {
+	good := "loomk_good"
+	sum := sha256.Sum256([]byte(good))
+	doc := fmt.Sprintf(`{"keys":[
+	  {"id":"broken","sha256":"nothex","namespaces":["default"],"perms":"w"},
+	  {"id":"noperms","sha256":"%x","namespaces":["default"]},
+	  {"id":"expired","sha256":"%x","namespaces":["default"],"perms":"w","expires":"2001-01-01T00:00:00"},
+	  {"id":"ok","sha256":"%x","namespaces":["default"],"perms":"w","expires":"2099-01-01T00:00:00"}
+	]}`, sum, sum, sum)
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOM_AUTH_FILE", path)
+	auth, err := loadAuth()
+	if err != nil {
+		t.Fatalf("a bad entry must not fail the whole file: %v", err)
+	}
+	g := auth.grantFor(good)
+	if g == nil || g.ID != "ok" {
+		t.Fatalf("expected the 'ok' grant, got %+v", g)
+	}
+}

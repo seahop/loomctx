@@ -9,3 +9,5 @@ dist/
 # gateway builds against; CI checks it stays in sync) — only ignore stray
 # root-level exports
 /schemas.json
+# operator-minted keys files (docs/administration.md) — never commit
+secrets/

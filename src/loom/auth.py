@@ -74,30 +74,56 @@ def _sha256(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def _parse_expires(value: str | None) -> datetime | None:
+    """ISO-8601; a naive timestamp is taken as UTC (same rule as stored
+    data), so a hand-edited "2027-01-01T00:00:00" can't 500 every request
+    by comparing naive to aware (H-A5)."""
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _parse_entry(item: dict) -> tuple[str, Grant]:
+    digest = str(item["sha256"]).lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("sha256 is not 64 hex chars")
+    perms = str(item["perms"])
+    if not perms or not set(perms) <= {"r", "w"}:
+        raise ValueError(f"perms must be r, w or rw, got {perms!r}")
+    return (
+        digest,
+        Grant(
+            id=str(item["id"]),
+            namespaces=tuple(item["namespaces"]),
+            perms=perms,
+            entity_types=(
+                tuple(item["entity_types"])
+                if item.get("entity_types") is not None else None
+            ),
+            sources=(
+                tuple(item["sources"])
+                if item.get("sources") is not None else None
+            ),
+            expires=_parse_expires(item.get("expires")),
+        ),
+    )
+
+
 def _parse_file(raw: str) -> list[tuple[str, Grant]]:
+    """One malformed entry disables THAT key (logged), never the whole
+    file — the same tolerance the Go gateway applies, so both sides of a
+    shared Secret see the same live key set (H-A13)."""
     data = json.loads(raw)
     entries: list[tuple[str, Grant]] = []
-    for item in data.get("keys", []):
-        if item.get("disabled"):
+    for index, item in enumerate(data.get("keys", [])):
+        if not isinstance(item, dict) or item.get("disabled"):
             continue
-        expires = item.get("expires")
-        entries.append((
-            item["sha256"].lower(),
-            Grant(
-                id=item["id"],
-                namespaces=tuple(item["namespaces"]),
-                perms=item["perms"],
-                entity_types=(
-                    tuple(item["entity_types"])
-                    if item.get("entity_types") is not None else None
-                ),
-                sources=(
-                    tuple(item["sources"])
-                    if item.get("sources") is not None else None
-                ),
-                expires=datetime.fromisoformat(expires) if expires else None,
-            ),
-        ))
+        try:
+            entries.append(_parse_entry(item))
+        except (KeyError, ValueError, TypeError) as exc:
+            log.error("auth: skipping key entry %d (%r): %s",
+                      index, item.get("id", "?"), exc)
     return entries
 
 
@@ -157,10 +183,12 @@ class AuthConfig:
             return
         mtime = self._stat()
         if mtime is not None and mtime != self._mtime:
+            # advance the marker first: a broken rewrite is reported once,
+            # not re-parsed and re-logged on every request (H-A12)
+            self._mtime = mtime
             try:
                 with open(self._path) as fh:
                     self._entries = _parse_file(fh.read())
-                self._mtime = mtime
                 log.info("auth: reloaded %d key(s) from %s",
                          len(self._entries), self._path)
             except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:

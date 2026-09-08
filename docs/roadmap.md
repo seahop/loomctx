@@ -11,8 +11,9 @@ presentable.
 | When | Milestone |
 | --- | --- |
 | early Sep (done 2026-09-03) | Phases 0–2 working: contracts, store, ingestion (claims + documents), context packs, seed data, k8s manifests, CI |
-| mid Sep | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
-| late Sep | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
+| mid Sep (done 2026-09-04) | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
+| late Sep (done 2026-09-04) | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
+| early Sep (started 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` |
 | early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster, polish README for public visitors |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
@@ -126,7 +127,7 @@ presentable.
   Singular SQLite lane tuned (WAL, NORMAL sync, batched transactions) and
   measured with the new `loom.loadgen` tool: ~507/s SQLite, ~454/s
   Postgres, ~515/s scale-shape intake — all 0 errors, loadgen-bound.
-- Remaining: per-namespace API keys; retention policies; TypeScript SDK
+- Remaining: TypeScript SDK
   from JSON Schema; Neo4j backend if graph-native traversal demand appears.
 - ~~Scale-shape ingestion tier~~ **✅ built 2026-09-03 (pulled forward by the
   user), D-010:** Go ingest gateway validating against
@@ -157,6 +158,6 @@ presentable.
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
 `src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
-Verify from clean checkout: `docker compose run --rm test` (23 tests).
+Verify from clean checkout: `docker compose run --rm test` (the suite is ~110 tests; the store contract tests also run against live Postgres in CI).
 Demo rehearsal: `docker compose up -d loom && docker compose exec loom
 python -m loom.seed load`, then hit `/v1/ask`.

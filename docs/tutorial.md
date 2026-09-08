@@ -179,7 +179,7 @@ Point any MCP-capable agent at Loom and it gets `find_entity`, `ask`,
 to whatever the agent's API key allows:
 
 ```bash
-claude mcp add loom -- docker compose run --rm -T loom python -m loom.mcp_server
+claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
 ```
 
 Now "ask Loom which assets are still exploitable" is a tool call, and the

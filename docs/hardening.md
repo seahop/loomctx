@@ -16,17 +16,17 @@ demo, **P2** should, **P3** after.
 | H-A1 | P1 | ✅ | `/v1/expand` never checks the `entity_types` grant. Handles are unsigned base64 JSON (`context.py encode_handle`), so a type-scoped reader can mint a handle for any subject and read its observations. Fix: gate the decoded subject's type, and sign handles (HMAC, `LOOM_HANDLE_SECRET`, random per-process fallback). |
 | H-A2 | P1 | ✅ | Scope expansion and object-side entities ignore `entity_types`. `resolve_scope` BFSes to any type; facts whose *object* is an out-of-scope entity are returned. Fix: pass the grant's allowed types into `build_pack`/`expand_pack` and filter resolved subjects + observations there (scoped world, not an error — D-013a). |
 | H-A3 | P1 | ✅ | `expand_pack` skips the `LOOM_MAX_BUDGET` clamp that `build_pack` applies. |
-| H-A4 | P2 | ⬜ | Go gateway rate-limits on the raw key string *before* authenticating (`server.go` `limiters.allow` precedes `grantFor`). Rotating a random header yields a fresh bucket each time and grows the bucket map without bound. Fix: authenticate first when auth is on, key buckets on the grant id, cap/evict the map. |
-| H-A5 | P2 | ⬜ | Naive-datetime `expires` in the keys file raises `TypeError` in Python (`auth.py` compares to aware now) → 500 on every request with that key; Go rejects the whole file. Fix: treat naive as UTC in both; validate `perms` in the file path. |
+| H-A4 | P2 | ✅ | Go gateway rate-limits on the raw key string *before* authenticating (`server.go` `limiters.allow` precedes `grantFor`). Rotating a random header yields a fresh bucket each time and grows the bucket map without bound. Fix: authenticate first when auth is on, key buckets on the grant id, cap/evict the map. |
+| H-A5 | P2 | ✅ | Naive-datetime `expires` in the keys file raises `TypeError` in Python (`auth.py` compares to aware now) → 500 on every request with that key; Go rejects the whole file. Fix: treat naive as UTC in both; validate `perms` in the file path. |
 | H-A6 | P2 | ⬜ | `/v1/artifacts/{id}` has no data gate beyond namespace: a type-scoped reader gets full document text. Fix: gate on whether any observation the key may see cites the artifact, or require an unrestricted grant. |
-| H-A7 | P2 | ⬜ | Consumer logs pydantic `errors()` which include `input` (claim values / document text). Use `include_input=False`. |
+| H-A7 | P2 | ✅ | Consumer logs pydantic `errors()` which include `input` (claim values / document text). Use `include_input=False`. |
 | H-A8 | P2 | ✅ | Provider error bodies and base URLs leak into 502 details (`llm.py` → `http.py`). Log the detail, return a generic message. |
 | H-A9 | P3 | ⬜ | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. |
 | H-A10 | P3 | ⬜ | NATS shape has a single enforcement point (gateway); consumer applies no grants. Acceptable while the queue is cluster-internal; document it, and carry the grant id on the message for audit. |
 | H-A11 | P3 | ✅ | `decode_handle` on a base64 JSON *list* raises `AttributeError` → 500 pre-auth. Catch it. |
-| H-A12 | P3 | ⬜ | Broken keys file → re-parse + `log.error` on every request (mtime never advances on failure) in both engines. |
-| H-A13 | P3 | ⬜ | Go vs Python keys-file tolerance differs (Go fails whole file on bad hex/expires; Python `KeyError`s on missing id/namespaces/perms). Align: skip + log the bad entry in both. |
-| H-A14 | P3 | ⬜ | No body-size limit on the default (no-gateway) shape; `DocumentIn.text` unbounded. Add a contract max (e.g. 2 MB) and a request-size guard. |
+| H-A12 | P3 | ✅ | Broken keys file → re-parse + `log.error` on every request (mtime never advances on failure) in both engines. |
+| H-A13 | P3 | ✅ | Go vs Python keys-file tolerance differs (Go fails whole file on bad hex/expires; Python `KeyError`s on missing id/namespaces/perms). Align: skip + log the bad entry in both. |
+| H-A14 | P3 | ✅ | No body-size limit on the default (no-gateway) shape; `DocumentIn.text` unbounded. Add a contract max (e.g. 2 MB) and a request-size guard. |
 
 ## B. Store correctness (both backends)
 
@@ -88,12 +88,12 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-F1 | P1 | ⬜ | `secrets/` (where the docs tell users to write `keys.json`) is not in `.gitignore` or `.dockerignore`. |
-| H-F2 | P1 | ⬜ | Seed has no `event_id`s: a second `seed load` on the same volume doubles the corpus (~1,180 claims) and changes every documented number. Generate deterministic ids. |
-| H-F3 | P1 | ⬜ | Scale profile can come up dead: gateway and consumer fatal on initial NATS connect; compose has bare `depends_on` and no `restart:`. Add healthcheck + `condition: service_healthy`, `restart: unless-stopped`, connect retry. |
-| H-F4 | P2 | ⬜ | k8s NATS has no persistence or probes — a pod restart drops the queue, contradicting "at-least-once". Add a PVC-backed JetStream store dir. |
-| H-F5 | P2 | ⬜ | `claude mcp add loom -- docker compose run ...` works only from the repo root. Add `--project-directory` / absolute `-f` in README, sdk.md, tutorial.md. |
-| H-F6 | P2 | ⬜ | k8s never wires auth: no manifest sets `LOOM_API_KEYS`/`LOOM_AUTH_FILE`, so every k8s shape runs in open dev mode while `deploy/README.md` says otherwise. Add a Secret mount example. |
+| H-F1 | P1 | ✅ | `secrets/` (where the docs tell users to write `keys.json`) is not in `.gitignore` or `.dockerignore`. |
+| H-F2 | P1 | ✅ | Seed has no `event_id`s: a second `seed load` on the same volume doubles the corpus (~1,180 claims) and changes every documented number. Generate deterministic ids. |
+| H-F3 | P1 | ✅ | Scale profile can come up dead: gateway and consumer fatal on initial NATS connect; compose has bare `depends_on` and no `restart:`. Add healthcheck + `condition: service_healthy`, `restart: unless-stopped`, connect retry. |
+| H-F4 | P2 | ✅ | k8s NATS has no persistence or probes — a pod restart drops the queue, contradicting "at-least-once". Add a PVC-backed JetStream store dir. |
+| H-F5 | P2 | ✅ | `claude mcp add loom -- docker compose run ...` works only from the repo root. Add `--project-directory` / absolute `-f` in README, sdk.md, tutorial.md. |
+| H-F6 | P2 | ✅ | k8s never wires auth: no manifest sets `LOOM_API_KEYS`/`LOOM_AUTH_FILE`, so every k8s shape runs in open dev mode while `deploy/README.md` says otherwise. Add a Secret mount example. |
 | H-F7 | P2 | ⬜ | All k8s manifests pin `:latest`, which every main push overwrites. Pin the SHA tag in overlays (CI already publishes it). |
 | H-F8 | P3 | ⬜ | Containers run as root (no `USER`, no `securityContext`); no `HEALTHCHECK`; engine image installs test extras; no lockfile; base image untagged by digest. |
 | H-F9 | P3 | ⬜ | Public-repo hygiene: no CONTRIBUTING / SECURITY / CHANGELOG; `pyproject.toml` lacks license/authors/urls. |
@@ -110,9 +110,9 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-H1 | P2 | ⬜ | `roadmap.md`: "23 tests" (90 + 24 PG-parametrized); "Remaining: per-namespace API keys" (done); milestone table shows phases 3–4 as future. |
-| H-H2 | P2 | ⬜ | `sdk.md` documents `POST /v1/schemas` and a `loom` CLI that don't exist. |
-| H-H3 | P3 | ⬜ | `docs/README.md` says D-001…D-019 (D-020 exists). `docker-compose.yml` passes `LOOM_MAX_BUDGET` to the gateway, which never reads it. `http.py` open-mode warning names only `LOOM_API_KEYS`. |
+| H-H1 | P2 | ✅ | `roadmap.md`: "23 tests" (90 + 24 PG-parametrized); "Remaining: per-namespace API keys" (done); milestone table shows phases 3–4 as future. |
+| H-H2 | P2 | ✅ | `sdk.md` documents `POST /v1/schemas` and a `loom` CLI that don't exist. |
+| H-H3 | P3 | ✅ | `docs/README.md` says D-001…D-019 (D-020 exists). `docker-compose.yml` passes `LOOM_MAX_BUDGET` to the gateway, which never reads it. `http.py` open-mode warning names only `LOOM_API_KEYS`. |
 
 ## I. Tests to add
 
@@ -124,4 +124,4 @@ demo, **P2** should, **P3** after.
 | H-I4 | P2 | ✅ | Worker survives an embedder `LLMError` and a locked DB; extraction parser on `{"claims":"x"}`, `["a"]`, prose+fence; reordered re-extraction doesn't drop claims. |
 | H-I5 | P2 | 🔨 | Chunker: empty, whitespace, 5000-char unbroken line, multibyte, offset round-trip. Excerpts with a chunk/query model mismatch. *Done: model mismatch, blank artifacts. Open: chunker edge cases.* |
 | H-I6 | P2 | ✅ | Move D-014/D-016/D-018 store coverage into the backend-parametrized suite (D-011 rule). |
-| H-I7 | P3 | ⬜ | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. |
+| H-I7 | P3 | 🔨 | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. *Done: gateway bucket test, keys-file tolerance on both sides, engine body cap. Open: consumer failure-path test, SDK tests.* |

@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -104,25 +105,20 @@ func (a *authConfig) reload() error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return fmt.Errorf("parsing %s: %w", a.path, err)
 	}
+	// One malformed entry disables THAT key (logged), never the whole file —
+	// the same tolerance the Python engine applies, so both sides of a
+	// shared Secret see the same live key set (H-A13).
 	var entries []authEntry
-	for _, k := range doc.Keys {
-		if k.Disabled {
+	for i, k := range doc.Keys {
+		if k == nil || k.Disabled {
 			continue
 		}
-		hash, err := hex.DecodeString(strings.ToLower(k.SHA256))
-		if err != nil || len(hash) != sha256.Size {
-			return fmt.Errorf("key %q: bad sha256", k.ID)
+		entry, err := parseEntry(k)
+		if err != nil {
+			log.Printf("auth: skipping key entry %d (%q): %v", i, k.ID, err)
+			continue
 		}
-		g := &grant{ID: k.ID, Namespaces: k.Namespaces, Perms: k.Perms,
-			EntityTypes: k.EntityTypes, Sources: k.Sources}
-		if k.Expires != "" {
-			t, err := time.Parse(time.RFC3339, k.Expires)
-			if err != nil {
-				return fmt.Errorf("key %q: bad expires: %w", k.ID, err)
-			}
-			g.expiresAt = t
-		}
-		entries = append(entries, authEntry{hash: hash, grant: g})
+		entries = append(entries, entry)
 	}
 	info, _ := os.Stat(a.path)
 	a.mu.Lock()
@@ -132,6 +128,50 @@ func (a *authConfig) reload() error {
 	}
 	a.mu.Unlock()
 	return nil
+}
+
+// expiresLayouts: RFC3339 first; a naive timestamp or a bare date is taken
+// as UTC — same rule as the Python engine and the stored data (H-A5).
+var expiresLayouts = []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"}
+
+func parseExpires(value string) (time.Time, error) {
+	var last error
+	for _, layout := range expiresLayouts {
+		t, err := time.Parse(layout, value)
+		if err == nil {
+			return t.UTC(), nil
+		}
+		last = err
+	}
+	return time.Time{}, last
+}
+
+func parseEntry(k *grantFile) (authEntry, error) {
+	hash, err := hex.DecodeString(strings.ToLower(k.SHA256))
+	if err != nil || len(hash) != sha256.Size {
+		return authEntry{}, fmt.Errorf("bad sha256")
+	}
+	if k.ID == "" || len(k.Namespaces) == 0 {
+		return authEntry{}, fmt.Errorf("id and namespaces are required")
+	}
+	if k.Perms == "" {
+		return authEntry{}, fmt.Errorf("perms is required")
+	}
+	for _, c := range k.Perms {
+		if c != 'r' && c != 'w' {
+			return authEntry{}, fmt.Errorf("perms must be r/w/rw, got %q", k.Perms)
+		}
+	}
+	g := &grant{ID: k.ID, Namespaces: k.Namespaces, Perms: k.Perms,
+		EntityTypes: k.EntityTypes, Sources: k.Sources}
+	if k.Expires != "" {
+		t, err := parseExpires(k.Expires)
+		if err != nil {
+			return authEntry{}, fmt.Errorf("bad expires: %w", err)
+		}
+		g.expiresAt = t
+	}
+	return authEntry{hash: hash, grant: g}, nil
 }
 
 type grantFile struct {
@@ -184,10 +224,23 @@ func (a *authConfig) maybeReload() {
 		return
 	}
 	info, err := os.Stat(a.path)
-	if err != nil || info.ModTime().Equal(a.mtime) {
+	if err != nil {
 		return
 	}
-	_ = a.reload() // keep previous keys on a broken rewrite
+	a.mu.Lock()
+	unchanged := info.ModTime().Equal(a.mtime)
+	if !unchanged {
+		// advance the marker first: a broken rewrite is reported once, not
+		// re-parsed on every request (H-A12)
+		a.mtime = info.ModTime()
+	}
+	a.mu.Unlock()
+	if unchanged {
+		return
+	}
+	if err := a.reload(); err != nil {
+		log.Printf("auth: reload of %s failed, keeping previous keys: %v", a.path, err)
+	}
 }
 
 // grantFor resolves a presented key; nil if unknown, expired, or empty.

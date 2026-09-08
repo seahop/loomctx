@@ -50,6 +50,25 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Loom", version="0.1.0", lifespan=_lifespan)
 
 
+def _max_body_bytes() -> int:
+    raw = os.environ.get("LOOM_MAX_BODY_BYTES", "").strip()
+    try:
+        return int(raw) if raw else 2 * 1024 * 1024
+    except ValueError:
+        return 2 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _cap_request_size(request: Request, call_next):
+    """The default (no-gateway) shape had no body limit at all (H-A14):
+    reject oversized uploads before parsing, like the gateway does."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _max_body_bytes():
+        metrics.REJECTED.labels(reason="too_large").inc()
+        return JSONResponse(status_code=413, content={"detail": "body too large"})
+    return await call_next(request)
+
+
 def _authorize(request: Request, namespace: str, action: str) -> Grant | None:
     """Namespace/perms check. Returns the grant (for fine-grained gates) or
     None when auth is disabled."""

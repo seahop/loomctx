@@ -12,6 +12,8 @@ from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_NAMESPACE = "default"
+MAX_DOCUMENT_CHARS = 1_000_000          # ~1 MB of text per document envelope
+MAX_DOCUMENT_B64 = 1_400_000            # base64 of ~1 MB of bytes
 
 
 class EntityRef(BaseModel):
@@ -62,8 +64,11 @@ class DocumentIn(BaseModel):
     kind: Literal["document"] = "document"
     namespace: str = DEFAULT_NAMESPACE
     event_id: str | None = Field(default=None, max_length=128)
-    text: str | None = None
-    content_b64: str | None = None
+    # Bounded so one envelope can't be arbitrarily large (H-A14); the Go
+    # gateway's LOOM_MAX_BODY_BYTES (1 MiB default) and the engine's
+    # LOOM_MAX_BODY_BYTES guard the wire, this guards the contract.
+    text: str | None = Field(default=None, max_length=MAX_DOCUMENT_CHARS)
+    content_b64: str | None = Field(default=None, max_length=MAX_DOCUMENT_B64)
     content_type: str = "text/plain"
     filename: str | None = None
     source: str

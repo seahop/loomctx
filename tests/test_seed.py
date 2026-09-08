@@ -27,6 +27,19 @@ def test_generate_has_volume_and_variety():
     assert any(d.text for d in docs) and any(d.content_b64 for d in docs)
 
 
+def test_load_twice_does_not_double_the_corpus(tmp_path):
+    """H-F2: a rehearsal that re-runs `seed load` keeps every documented number."""
+    db = tmp_path / "seed.db"
+    cmd_load(str(db), seed=42)
+    cmd_load(str(db), seed=42)
+    store = SqliteStore(db)
+    claims, docs = generate(seed=42)
+    total = sum(1 for _ in store.iter_observations())
+    assert total == len(claims)
+    assert sum(1 for _ in store.iter_artifacts()) == len(docs)
+    store.close()
+
+
 def test_load_then_ask_the_demo_questions(tmp_path):
     db = tmp_path / "seed.db"
     cmd_load(str(db), seed=42)

@@ -28,9 +28,20 @@ spec:
           env:
             - name: LOOM_DB
               value: /data/loom.db
+            # --- auth (D-013a / D-021): uncomment once the `loom-keys` Secret
+            # exists (deploy/README.md). Until then the engine runs in open
+            # dev mode and logs a warning at startup.
+            # - name: LOOM_AUTH_FILE
+            #   value: /etc/loom/keys.json
+            # - name: LOOM_HANDLE_SECRET
+            #   valueFrom:
+            #     secretKeyRef: {name: loom-keys, key: handle-secret}
           volumeMounts:
             - name: data
               mountPath: /data
+            # - name: keys
+            #   mountPath: /etc/loom
+            #   readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz     # probes the store, not just the process
@@ -53,3 +64,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: loom-data
+        # - name: keys
+        #   secret:
+        #     secretName: loom-keys
