@@ -71,3 +71,9 @@ def test_load_then_ask_the_demo_questions(tmp_path):
     assert any(i.kind == "conflict" and "contract_owner" in i.text
                for i in pack.items)
     store.close()
+
+
+def test_seed_never_prints_a_password():
+    from loom.seed import redact_dsn
+    assert redact_dsn("postgresql://loom:s3cret@host:5432/loom") == "postgresql://loom:***@host:5432/loom"
+    assert redact_dsn("/data/loom.db") == "/data/loom.db"

@@ -235,6 +235,13 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
     return claims, docs
 
 
+def redact_dsn(url: str) -> str:
+    """A DSN is fine to log only without its password (operator-issued
+    credentials end up in pod logs otherwise)."""
+    import re
+    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
+
+
 def cmd_load(db_path: str, seed: int) -> None:
     claims, docs = generate(seed)
     store = store_from_url(db_path)
@@ -244,7 +251,7 @@ def cmd_load(db_path: str, seed: int) -> None:
             store.store_artifact(doc)
     finally:
         store.close()
-    print(f"loaded {len(claims)} claims and {len(docs)} documents into {db_path}")
+    print(f"loaded {len(claims)} claims and {len(docs)} documents into {redact_dsn(db_path)}")
 
 
 def cmd_generate(out_dir: str, seed: int) -> None:

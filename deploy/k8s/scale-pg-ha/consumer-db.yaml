@@ -1,0 +1,7 @@
+# Writer consumers always talk to the primary.
+- op: replace
+  path: /spec/template/spec/containers/0/env/0
+  value:
+    name: LOOM_DB
+    valueFrom:
+      secretKeyRef: {name: loom-pg-app, key: uri}

@@ -1,0 +1,26 @@
+# scale-pg + a highly available Postgres run by the CloudNativePG operator
+# (D-030): 3 instances with streaming replication and automatic failover,
+# the engine reading from the replicas (-ro Service) and writing to the
+# primary (-rw Service). Requires the operator:
+#   kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.26/releases/cnpg-1.26.0.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loom
+
+resources:
+  - ../scale-pg
+  - postgres-cluster.yaml
+
+patches:
+  # the placeholder external-Postgres Secret is replaced by the operator's
+  - patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: loom-db
+  - path: engine-db.yaml
+    target: {kind: Deployment, name: loom}
+  - path: consumer-db.yaml
+    target: {kind: Deployment, name: loom-consumer}

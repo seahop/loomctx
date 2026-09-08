@@ -194,7 +194,7 @@ _SCHEMA_LOCK_ID = 0x4C4F4F4D  # "LOOM"
 
 
 class PostgresStore(GraphStore):
-    _CONNECT_WAIT_SECONDS = 90.0
+    _CONNECT_WAIT_SECONDS = 180.0   # an operator bootstrapping a cluster takes ~2 min
     _DEFAULT_POOL = 4
 
     def __init__(self, dsn: str, read_dsn: str | None = None,

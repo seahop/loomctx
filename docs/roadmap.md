@@ -157,8 +157,9 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ 6.2 Ingestion HA (2026-09-08, D-029): 3-node JetStream cluster in
   `scale-pg`, stream replicas/limits/discard dials, bounded redelivery,
   dead-letter stream; leader-loss chaos test passed on the cluster
-- 🔨 6.3 Database HA + read replicas: `LOOM_DB_READ` read/write split
-  shipped with 6.1; CloudNativePG Cluster manifest still to add
+- ✅ 6.3 Database HA (2026-09-08, D-030): `scale-pg-ha` overlay with a
+  CloudNativePG 3-instance cluster, engine reads on replicas; primary
+  deleted under load with zero failed requests
 - ⬜ 6.4 Worker fleet: lease-based job claiming so N enrichment replicas
   share the backlog
 - ⬜ 6.5 Tenant sharding: `ShardedStore` routing namespaces to shards

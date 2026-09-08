@@ -9,6 +9,7 @@ Same images, same `/v1/ingest` contract, pick a shape:
 | Kubernetes, default | shared/team deployments | `kubectl apply -k deploy/k8s` |
 | Kubernetes, **scale** | high-volume ingestion, SQLite kept (D-010) | `kubectl apply -k deploy/k8s/scale` |
 | Kubernetes, **scale-pg** | everything autoscales, Postgres-backed (D-011) | edit `scale-pg/postgres-secret.yaml`, then `kubectl apply -k deploy/k8s/scale-pg` |
+| Kubernetes, **scale-pg-ha** | + highly available Postgres run by CloudNativePG, reads on replicas (D-030) | install the operator (one `kubectl apply`, see the overlay), then `kubectl apply -k deploy/k8s/scale-pg-ha` |
 
 ## Does it autoscale under load?
 
@@ -18,7 +19,7 @@ Same images, same `/v1/ingest` contract, pick a shape:
 | Burst absorption | none (direct writes) | NATS JetStream (1 node) | NATS JetStream **3-node cluster**, streams replicated 3× |
 | Engine (ask/expand/answer) | fixed 1 (SQLite single writer) | fixed 1 (SQLite single writer) | **HPA 2–8** on CPU |
 | Writer consumers | n/a | 1 (engine sidecar) | replicas (shared JetStream durable — raise freely) |
-| Database | SQLite on PVC | SQLite on PVC | your Postgres (managed/operator — scale it there) |
+| Database | SQLite on PVC | SQLite on PVC | your Postgres (managed/operator — scale it there); `scale-pg-ha`: CloudNativePG 3 instances, failover, reads on replicas |
 
 So: **yes for ingestion** from the `scale` overlay up (gateways autoscale and
 the queue absorbs what the writer hasn't caught up on), and **yes for

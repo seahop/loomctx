@@ -764,6 +764,31 @@ pod was deleted mid-burst: 3000/3000 acknowledged (0 errors), leadership
 moved to another node, and Postgres held exactly every acknowledged
 envelope afterwards — nothing lost, nothing duplicated.
 
+## D-030 · Database HA: CloudNativePG cluster, reads on replicas (2026-09-08, phase 6.3)
+
+`deploy/k8s/scale-pg-ha` layers a CloudNativePG `Cluster` (3 instances,
+streaming replication, automatic failover, pgvector via the operator's
+images) on `scale-pg`. The engine writes to the operator's `-rw` Service
+and reads from `-ro` through `LOOM_DB_READ` (D-028), assembled from the
+operator-issued credentials with Kubernetes env expansion — no second
+Secret to manage. Writer consumers stay on the primary. The operator is a
+one-line cluster install and is the only new dependency; the plain
+`scale-pg` overlay still takes any external Postgres, and a small team
+never sees any of this.
+
+**Validated on the cluster:** reads confirmed on a replica
+(`pg_is_in_recovery() = true` on the read DSN) and writes on the primary;
+the primary pod deleted under a probe of synchronous engine writes and
+replica reads at ~4 req/s: 319/319 writes and 319/319 reads succeeded,
+failover completed to another instance, every write present afterwards.
+The pool's connection check and the operator's promotion together kept
+the outage below the probe interval. A second run, with gateway ingest
+instead of synchronous writes, behaved the same (273/273).
+
+Two small fixes fell out: the seed CLI printed the DSN with the
+operator-issued password (now redacted), and the store's startup wait for
+Postgres is 180 s to cover an operator bootstrap.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
