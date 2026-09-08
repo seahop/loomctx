@@ -1,0 +1,66 @@
+# Vector (vector.dev) -> Loom, no SDK (D-034).
+#
+# Any Vector source works (file, journald, syslog, kubernetes_logs, kafka,
+# http_server, aws_s3, ...). The `remap` step reshapes each event into a
+# Loom claim envelope with VRL; the `http` sink posts newline-delimited
+# JSON to POST /v1/ingest/batch on the engine or the gateway.
+#
+#   docker run --rm -v "<repo>/deploy/integrations/vector.yaml:/etc/vector/vector.yaml" \
+#     --network project2026_default timberio/vector:0.42.0-alpine
+# (Vector interpolates environment variables written with a dollar sign
+# anywhere in this file, comments included. Double the sign for a literal.)
+#
+# Replace the demo source with yours; keep the sink.
+sources:
+  demo_auth_events:
+    type: demo_logs
+    format: json
+    interval: 1.0
+
+transforms:
+  to_loom_claims:
+    type: remap
+    inputs: [demo_auth_events]
+    # Map YOUR record fields into the envelope. This example turns a generic
+    # JSON log line into "host <name> logged_in_by user <user>". Records that
+    # can't be mapped are dropped here rather than rejected by Loom.
+    drop_on_error: true
+    source: |
+      parsed = parse_json!(string!(.message))
+      host = if is_string(parsed.host) { string!(parsed.host) } else { "web-01" }
+      user = if is_string(parsed.user) { string!(parsed.user) } else { "jdoe" }
+      method = if is_string(parsed.method) { string!(parsed.method) } else { "unknown" }
+      id = if exists(parsed.id) { to_string!(parsed.id) } else { uuid_v4() }
+      . = {
+        "kind": "claim",
+        "namespace": "netsec",
+        "event_id": "vector:" + id,
+        "subject": {"type": "host", "key": host},
+        "predicate": "logged_in_by",
+        "object": {"type": "user", "key": user},
+        "observed_at": format_timestamp!(now(), "%+"),
+        "source": "vector:auth-log",
+        "confidence": 1.0,
+        "attrs": {"method": method}
+      }
+
+sinks:
+  loom:
+    type: http
+    inputs: [to_loom_claims]
+    uri: http://loom:8000/v1/ingest/batch      # or the gateway / lb
+    method: post
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        Content-Type: application/x-ndjson
+        # X-Loom-Key: loomk_...                  # a write-only, source-pinned key
+    batch:
+      max_events: 500
+      timeout_secs: 2
+    compression: none
+    acknowledgements:
+      enabled: true

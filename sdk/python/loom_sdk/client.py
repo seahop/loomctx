@@ -109,6 +109,11 @@ class Loom:
             },
         )
 
+    def ingest_batch(self, envelopes: list[dict]) -> dict:
+        """Many claim/document envelopes in one request (D-034); each is
+        reported individually in the returned `results`."""
+        return self._post("/v1/ingest/batch", envelopes)
+
     # -------------------------------------------------------------- read side
 
     def observations(self, subject: EntityTuple, limit: int = 100) -> dict:

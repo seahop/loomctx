@@ -52,6 +52,12 @@ vector = [
 s3 = [
     "boto3>=1.34",       # artifact offload to S3-compatible storage (D-033)
 ]
+kafka = [
+    "aiokafka>=0.11",    # consume envelopes from your Kafka/Redpanda topics (D-034)
+    "python-snappy>=0.7", # the codecs producers commonly use (Redpanda defaults to snappy)
+    "lz4>=4.3",
+    "zstandard>=0.22",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

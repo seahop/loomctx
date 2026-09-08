@@ -25,6 +25,7 @@ type config struct {
 	forwardURL   string // used when natsURL is empty
 	natsURL      string // when set, publish to JetStream instead
 	maxBodyBytes int64
+	maxBatch     int64   // items per /v1/ingest/batch request (D-034)
 	ratePerSec   float64 // 0 disables rate limiting
 	stream       streamConfig
 }
@@ -45,6 +46,7 @@ func loadConfig() config {
 		forwardURL:   envOr("LOOM_FORWARD_URL", "http://loom:8000"),
 		natsURL:      os.Getenv("LOOM_NATS_URL"),
 		maxBodyBytes: envInt("LOOM_MAX_BODY_BYTES", 1<<20),
+		maxBatch:     envInt("LOOM_MAX_BATCH", 1000),
 		ratePerSec:   float64(envInt("LOOM_RATE_PER_SEC", 0)),
 		stream: streamConfig{
 			replicas: int(envInt("LOOM_STREAM_REPLICAS", 1)),

@@ -53,6 +53,7 @@ Everything else is built on this. v1 routes:
 ```
 GET  /healthz
 POST /v1/ingest                                  # ClaimIn -> 200; DocumentIn -> 202 (artifact stored, extraction pending)
+POST /v1/ingest/batch                            # JSON array or NDJSON of envelopes -> per-item outcomes (D-034)
 GET  /v1/entities/{type}/{key}/observations      # raw, for debug/audit
 GET  /v1/entities/search?q=                      # resolve names to entities
 GET  /v1/entities/semantic?q=                    # entities by MEANING, each with a cited fact (needs an embedder, D-025)
@@ -164,6 +165,35 @@ LOOM_LLM_PROVIDER=anthropic           LOOM_LLM_BASE_URL=http://my-box:11434/v1
 LOOM_LLM_API_KEY=sk-ant-...           LOOM_LLM_MODEL=llama3.1:8b
 LOOM_LLM_MODEL=claude-sonnet-5
 ```
+
+### Batch ingest, bulk loading, and other pipelines (D-034)
+
+`POST /v1/ingest/batch` takes a JSON array or NDJSON of envelopes and reports
+each item; both SDKs expose it (`ingest_batch` / `ingestBatch`). Log shippers
+post to it directly — see `deploy/integrations/` for Vector and Fluent Bit
+configs — and `python -m loom.ingest file.jsonl --url …` loads files from
+any language. Kafka topics feed `python -m loom.kafka_consumer`.
+
+### Go SDK — `sdk/go/` (D-034)
+
+```go
+c := loom.New("http://localhost:8000", "netsec"); c.APIKey = "loomk_..."
+res, _ := c.IngestBatch(ctx, loom.Claim{...}, loom.Document{...})
+pack, _ := c.Ask(ctx, &loom.EntityRef{Type: "host", Key: "web-01"}, "who logged in?", loom.AskOptions{Budget: 800})
+```
+
+Its envelopes are tested against `contracts/schemas.json`, the schema the
+Go gateway enforces. `docker compose --profile sdk run --rm sdk-go`.
+
+### Every other language — `contracts/openapi.json`
+
+```bash
+docker run --rm -v "$PWD:/local" openapitools/openapi-generator-cli:v7.10.0 generate \
+  -i /local/contracts/openapi.json -g java -o /local/build/loom-java   # csharp, kotlin, rust, php, ruby, swift5 ...
+```
+
+CI regenerates the document from the app and proves Java and C# generate
+cleanly, so a generated client is always current.
 
 ### TypeScript SDK — `sdk/typescript/` (D-026)
 

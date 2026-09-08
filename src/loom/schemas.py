@@ -1,6 +1,12 @@
-"""Export the contracts as JSON Schema for non-Python SDKs.
+"""Export the contracts as JSON Schema (default) or the HTTP API as OpenAPI.
 
-Usage: docker compose run --rm loom python -m loom.schemas > schemas.json
+Usage:
+    docker compose run --rm loom python -m loom.schemas          > contracts/schemas.json
+    docker compose run --rm loom python -m loom.schemas openapi  > contracts/openapi.json
+
+The OpenAPI document (D-034) is what any language's generator consumes
+(`openapi-generator-cli generate -g java|csharp|go|rust|kotlin|php ...`);
+CI regenerates both files and fails on drift.
 
 The Go gateway validates IngestEnvelope; the TypeScript SDK's
 `src/contracts.ts` is generated from every root here (D-026). CI checks the
@@ -19,6 +25,7 @@ from .contracts import (
     ContextPack,
     Entity,
     ExpandRequest,
+    IngestBatchResponse,
     IngestEnvelope,
     Observation,
     SchemaRegistration,
@@ -37,10 +44,27 @@ ROOTS = {
     "AnswerResponse": AnswerResponse.model_json_schema,
     "SemanticSearchResponse": SemanticSearchResponse.model_json_schema,
     "SchemaRegistration": SchemaRegistration.model_json_schema,
+    "IngestBatchResponse": IngestBatchResponse.model_json_schema,
 }
 
 
+def openapi() -> dict:
+    from .api.http import app
+
+    doc = app.openapi()
+    doc["info"]["description"] = (
+        "Loom context engine HTTP API. Generated from the FastAPI app; the "
+        "Pydantic contracts in src/loom/contracts.py are the source of truth."
+    )
+    return doc
+
+
 def main() -> None:
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "openapi":
+        print(json.dumps(openapi(), indent=2, sort_keys=True))
+        return
     print(json.dumps({name: build() for name, build in ROOTS.items()}, indent=2))
 
 

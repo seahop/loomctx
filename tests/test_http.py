@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 CLAIM = {
@@ -184,3 +186,56 @@ def test_semantic_entity_search(tmp_path, monkeypatch):
         assert body["matches"][0]["entity"] == {"type": "host", "key": "db-01"}
         assert body["matches"][0]["evidence"]["citations"]
         assert "vector_backend" in client.get("/readyz").json()
+
+
+def test_batch_ingest_array_and_ndjson(tmp_path, monkeypatch):
+    """D-034: many envelopes per request; per-item outcomes; bad records
+    don't block good ones; NDJSON for log shippers."""
+    with make_client(tmp_path, monkeypatch) as client:
+        items = [
+            CLAIM,
+            {**CLAIM, "subject": {"type": "host", "key": "db-01"}, "event_id": "b-2"},
+            {"kind": "document", "text": "report", "source": "ir", "observed_at": "2026-09-02T09:00:00Z"},
+            {"kind": "claim", "predicate": "broken"},                       # schema failure
+        ]
+        r = client.post("/v1/ingest/batch", json=items)
+        assert r.status_code == 200
+        body = r.json()
+        assert (body["total"], body["recorded"], body["accepted"], body["rejected"]) == (4, 2, 1, 1)
+        statuses = [x["status"] for x in body["results"]]
+        assert statuses == ["recorded", "recorded", "accepted", "rejected"]
+        assert body["results"][2]["artifact_id"] and "subject" in body["results"][3]["detail"]
+        # NDJSON, replaying an event_id dedupes, wrapper object accepted
+        nd = "\n".join(json.dumps(x) for x in items[:2]) + "\n"
+        r = client.post("/v1/ingest/batch", content=nd, headers={"content-type": "application/x-ndjson"})
+        assert r.status_code == 200 and r.json()["recorded"] == 2
+        assert client.get("/v1/entities/host/db-01/observations").json()["count"] == 1
+        r = client.post("/v1/ingest/batch", json={"items": [CLAIM]})
+        assert r.json()["recorded"] == 1
+        assert client.post("/v1/ingest/batch", content=b"not json", headers={"content-type": "application/json"}).status_code == 400
+        monkeypatch.setenv("LOOM_MAX_BATCH", "2")
+        assert client.post("/v1/ingest/batch", json=items).status_code == 413
+
+
+def test_batch_ingest_applies_gates_per_item(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_API_KEYS", "w1:default:w,r1:default:r")
+    with make_client(tmp_path, monkeypatch) as client:
+        assert client.post("/v1/ingest/batch", json=[CLAIM]).status_code == 401
+        r = client.post("/v1/ingest/batch", json=[CLAIM, {**CLAIM, "namespace": "other"}],
+                        headers={"X-Loom-Key": "w1"})
+        assert r.status_code == 200
+        st = {x["index"]: x for x in r.json()["results"]}
+        assert st[0]["status"] == "recorded" and st[1]["status"] == "rejected"
+        assert "other" in st[1]["detail"]
+        r = client.post("/v1/ingest/batch", json=[CLAIM], headers={"X-Loom-Key": "r1"})
+        assert r.json()["results"][0]["status"] == "rejected"
+
+
+def test_openapi_document_exports(tmp_path, monkeypatch):
+    from loom.schemas import openapi
+    doc = openapi()
+    assert doc["openapi"].startswith("3.")
+    paths = set(doc["paths"])
+    assert {"/v1/ingest", "/v1/ingest/batch", "/v1/ask", "/v1/expand", "/v1/answer",
+            "/v1/schemas", "/v1/entities/semantic", "/readyz"} <= paths
+    assert "IngestBatchResponse" in doc["components"]["schemas"]

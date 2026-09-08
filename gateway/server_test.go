@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -53,7 +55,7 @@ func testServerAuth(t *testing.T, fwd forwarder, keys string) http.Handler {
 	if err != nil {
 		t.Fatalf("parsing keys: %v", err)
 	}
-	return newServer(config{maxBodyBytes: 1 << 20}, schema, fwd, auth)
+	return newServer(config{maxBodyBytes: 1 << 20, maxBatch: 1000}, schema, fwd, auth)
 }
 
 func post(h http.Handler, body string) *httptest.ResponseRecorder {
@@ -334,5 +336,65 @@ func TestKeysFileToleratesBadEntries(t *testing.T) {
 	g := auth.grantFor(good)
 	if g == nil || g.ID != "ok" {
 		t.Fatalf("expected the 'ok' grant, got %+v", g)
+	}
+}
+
+
+// D-034: batch ingest — array and NDJSON, per-item outcomes, gates per item.
+func TestBatchIngestArrayAndNDJSON(t *testing.T) {
+	fwd := &fakeForwarder{}
+	h := testServerAuth(t, fwd, authKeys)
+	bad := `{"kind": "claim", "predicate": "broken"}`
+	other := strings.Replace(validClaim, `"kind": "claim",`, `"kind": "claim", "namespace": "elsewhere",`, 1)
+	body := "[" + validClaim + "," + bad + "," + other + "," + validClaim + "]"
+	req := httptest.NewRequest(http.MethodPost, "/v1/ingest/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Loom-Key", "agentsecret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Total, Recorded, Rejected int
+		Results                   []struct {
+			Index  int
+			Status string
+			Detail string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 4 || out.Recorded != 2 || out.Rejected != 2 || fwd.calls != 2 {
+		t.Fatalf("total=%d recorded=%d rejected=%d forwarded=%d", out.Total, out.Recorded, out.Rejected, fwd.calls)
+	}
+	if out.Results[1].Status != "rejected" || !strings.Contains(out.Results[1].Detail, "contract violation") {
+		t.Fatalf("item 1: %+v", out.Results[1])
+	}
+	if out.Results[2].Status != "rejected" || !strings.Contains(out.Results[2].Detail, "namespace") {
+		t.Fatalf("item 2: %+v", out.Results[2])
+	}
+	// NDJSON: one envelope per line (the fixture is pretty-printed, so compact it)
+	fwd.calls = 0
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(validClaim)); err != nil {
+		t.Fatal(err)
+	}
+	nd := compact.String() + "\n" + compact.String() + "\n"
+	req = httptest.NewRequest(http.MethodPost, "/v1/ingest/batch", strings.NewReader(nd))
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.Header.Set("X-Loom-Key", "agentsecret")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted || fwd.calls != 2 {
+		t.Fatalf("ndjson: status=%d forwarded=%d body=%s", rec.Code, fwd.calls, rec.Body.String())
+	}
+	// no key at all -> 401 for the whole request
+	req = httptest.NewRequest(http.MethodPost, "/v1/ingest/batch", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no key: status=%d", rec.Code)
 	}
 }

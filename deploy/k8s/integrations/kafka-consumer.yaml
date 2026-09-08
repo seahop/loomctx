@@ -1,0 +1,50 @@
+# Kafka / Redpanda writer consumer (D-034): standalone manifest — apply into
+# the loom namespace next to any shape when your pipelines already publish
+# to Kafka. Scale replicas up to the topic's partition count.
+#   kubectl -n loom apply -f deploy/k8s/integrations/kafka-consumer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-kafka-consumer
+  labels:
+    app: loom-kafka-consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: loom-kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: loom-kafka-consumer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: consumer
+          image: ghcr.io/seahop/loom:latest
+          command: ["python", "-m", "loom.kafka_consumer"]
+          env:
+            - name: LOOM_DB
+              valueFrom:
+                secretKeyRef:
+                  name: loom-db
+                  key: LOOM_DB
+            - name: LOOM_KAFKA_BROKERS
+              value: "kafka:9092"          # your brokers
+            - name: LOOM_KAFKA_TOPICS
+              value: "loom.ingest"         # comma-separated
+            - name: LOOM_KAFKA_GROUP
+              value: "loom-writer"
+            - name: LOOM_KAFKA_DEADLETTER
+              value: "loom.deadletter"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi

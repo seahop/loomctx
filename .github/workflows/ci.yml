@@ -14,11 +14,18 @@ jobs:
         run: docker compose build loom
       - name: Run Python test suite
         run: docker compose run --rm test
-      - name: Contracts in sync (schemas.json regenerates identically)
-        # image is pre-built above, so stdout carries only the schema JSON
+      - name: Contracts in sync (schemas.json + openapi.json regenerate identically)
+        # image is pre-built above, so stdout carries only the JSON
         run: |
           docker compose run --rm -T loom python -m loom.schemas > /tmp/schemas.json
           diff /tmp/schemas.json contracts/schemas.json
+          docker compose run --rm -T loom python -m loom.schemas openapi > /tmp/openapi.json
+          diff /tmp/openapi.json contracts/openapi.json
+      - name: OpenAPI generates clients cleanly (java + csharp, D-034)
+        run: |
+          docker run --rm -v "$PWD:/local" openapitools/openapi-generator-cli:v7.10.0 validate -i /local/contracts/openapi.json
+          docker run --rm -v "$PWD:/local" openapitools/openapi-generator-cli:v7.10.0 generate -i /local/contracts/openapi.json -g java -o /tmp/gen-java >/dev/null
+          docker run --rm -v "$PWD:/local" openapitools/openapi-generator-cli:v7.10.0 generate -i /local/contracts/openapi.json -g csharp -o /tmp/gen-csharp >/dev/null
       - name: Store tests against Postgres
         run: |
           docker compose --profile pg up -d --wait postgres
@@ -27,10 +34,11 @@ jobs:
             test pytest -q tests/test_store.py
       - name: Build gateway (go vet + go test run in the build)
         run: docker compose --profile scale build gateway
-      - name: TypeScript SDK (generated types in sync, build, live test)
+      - name: TypeScript + Go SDKs (generated types in sync, build, live tests)
         run: |
           docker compose up -d --wait loom
           docker compose --profile sdk run --rm sdk-ts
+          docker compose --profile sdk run --rm sdk-go
           docker compose down
 
   publish-image:

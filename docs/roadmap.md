@@ -171,6 +171,17 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   measured table in `deploy/README.md` (laptop floors; re-run on real
   nodes before the conference quote)
 
+## Phase 7 — Pipeline integrations ✅ (D-034, 2026-09-08)
+
+- ✅ `POST /v1/ingest/batch` (engine + gateway), per-item outcomes
+- ✅ `contracts/openapi.json` drift-checked; Java + C# generation in CI
+- ✅ Go SDK with a contract-drift test, live-tested in CI
+- ✅ `python -m loom.ingest` bulk loader (HTTP batches or direct to store)
+- ✅ Vector + Fluent Bit configs, live-validated (`deploy/integrations/`)
+- ✅ Kafka/Redpanda consumer with retry + dead-letter, live-validated
+- ⬜ On request: hand-written Rust client; webhook adapters beyond the
+  shipper transform stage
+
 ## Deployment & CI (2026-09-03)
 
 - ✅ Local: `docker compose up loom`; tests: `docker compose run --rm test`

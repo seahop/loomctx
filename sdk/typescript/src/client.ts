@@ -11,6 +11,7 @@ import type {
   AskRequest,
   ContextPack,
   EntityRef,
+  IngestBatchResponse,
   Observation,
   SchemaRegistration,
   SemanticSearchResponse,
@@ -134,6 +135,11 @@ export class Loom {
       observed_at: a.observed_at,
       attrs: a.attrs ?? {},
     });
+  }
+
+  /** Many envelopes in one request (D-034); each is reported individually. */
+  ingestBatch(envelopes: unknown[]): Promise<IngestBatchResponse> {
+    return this.post("/v1/ingest/batch", envelopes);
   }
 
   registerSchema(reg: Omit<SchemaRegistration, "namespace">): Promise<SchemaRegistration> {

@@ -854,6 +854,47 @@ the blob with the row, and import offloads again. Persistence still lives
 behind `GraphStore`; nothing above it knows. `GET /v1/artifacts/{id}`
 streams the same bytes as before.
 
+## D-034 · Pipeline integration surface: batch ingest, OpenAPI, Go SDK, Kafka (2026-09-08)
+
+User direction: teams must be able to tie Loom into whatever pipelines they
+already run. Pipelines end in log shippers, queues, and scheduled exports —
+rarely in custom code — so the investment went into the integration points
+those already speak, with generated clients for the languages that remain.
+
+- **`POST /v1/ingest/batch`** on the engine and the Go gateway: a JSON
+  array, NDJSON, or a wrapped `items`/`records` object of envelopes, up to
+  `LOOM_MAX_BATCH` (1000). Every item passes the same gates as
+  `/v1/ingest` and is reported individually (`recorded` / `accepted` /
+  `rejected` + detail) — one bad record never blocks the rest. Claims land
+  in one transaction per store; the gateway charges a batch of n against
+  the principal's rate bucket as n. This is what Fluent Bit's, Vector's,
+  Logstash's and the OpenTelemetry Collector's HTTP outputs produce.
+  Shipped configs in `deploy/integrations/` (Vector VRL remap, Fluent Bit
+  Lua filter) were validated live: records reshaped in the shipper, posted
+  as batches, stored once (event_id dedupe absorbed repeated flushes).
+- **`contracts/openapi.json`**, generated from the running app and
+  drift-checked in CI beside `schemas.json`; CI also proves it generates
+  Java and C# clients cleanly with `openapi-generator-cli`. That is the
+  answer for every language without a hand-written SDK.
+- **Go SDK** (`sdk/go`): zero dependencies at runtime; its envelopes are
+  validated in tests against the same schema the gateway enforces, so it
+  cannot drift. Live-tested in CI like the TypeScript SDK.
+- **`python -m loom.ingest`**: NDJSON files or stdin → batches over HTTP
+  (`--url`) or straight into a store (`--db`, the consumer's code path).
+  Anything that can write JSON lines is now a pipeline.
+- **Kafka / Redpanda consumer** (`python -m loom.kafka_consumer`, extra
+  `kafka`, compose profile `kafka` with a Redpanda for trial,
+  `deploy/k8s/integrations/kafka-consumer.yaml`): reads envelopes from your
+  topics, commits offsets only after the batch is written, retries a
+  rejected batch with backoff and dead-letters it to `loom.deadletter`
+  with the error after `LOOM_MAX_DELIVER`. Consuming from a team's Kafka
+  is not the same as requiring one: nothing in the default shape depends
+  on it (hard constraint 2). Validated live: produce, replay, poison.
+- **Deliberately not built:** hand-written Rust, Lua, Ruby, Java or C#
+  clients. Java/C# come from the generator; Lua's real role is Fluent
+  Bit's filter language, covered by the shipped example; Rust waits for a
+  shop that asks.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

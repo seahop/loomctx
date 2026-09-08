@@ -84,6 +84,28 @@ class DocumentIn(BaseModel):
 
 IngestEnvelope = Annotated[Union[ClaimIn, DocumentIn], Field(discriminator="kind")]
 
+MAX_BATCH_ITEMS = 1000
+
+
+class IngestItemResult(BaseModel):
+    """Outcome of one envelope in a batch (D-034). `rejected` items carry
+    the reason; the rest of the batch still lands — a shipper's bad record
+    never blocks its good ones."""
+
+    index: int
+    status: Literal["recorded", "accepted", "rejected"]
+    observation_id: str | None = None
+    artifact_id: str | None = None
+    detail: str | None = None
+
+
+class IngestBatchResponse(BaseModel):
+    total: int
+    recorded: int
+    accepted: int
+    rejected: int
+    results: list[IngestItemResult] = Field(default_factory=list)
+
 
 class Observation(BaseModel):
     """Immutable stored fact. Never edited, only superseded."""

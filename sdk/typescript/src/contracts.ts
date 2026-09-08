@@ -21,6 +21,7 @@ export interface LoomContracts {
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
   SchemaRegistration?: SchemaRegistration;
+  IngestBatchResponse?: IngestBatchResponse;
 }
 /**
  * Structured, entity-addressed ingestion payload. Maps ~1:1 to an Observation.
@@ -322,4 +323,26 @@ export interface PredicateDef {
    * a 'contains / member of' relation: scopes with no explicit `expand` follow every containment predicate (D-012/D-024)
    */
   containment?: boolean;
+}
+export interface IngestBatchResponse {
+  total: number;
+  recorded: number;
+  accepted: number;
+  rejected: number;
+  results?: IngestItemResult[];
+}
+/**
+ * Outcome of one envelope in a batch (D-034). `rejected` items carry
+ * the reason; the rest of the batch still lands — a shipper's bad record
+ * never blocks its good ones.
+ *
+ * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * via the `definition` "IngestItemResult".
+ */
+export interface IngestItemResult {
+  index: number;
+  status: "recorded" | "accepted" | "rejected";
+  observation_id?: string | null;
+  artifact_id?: string | null;
+  detail?: string | null;
 }

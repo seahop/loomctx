@@ -14,6 +14,8 @@ from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from .. import metrics
 from ..answer import UnresolvedQuestionError, build_answer
@@ -29,7 +31,14 @@ from ..contracts import (
     ExpandRequest,
     IngestEnvelope,
 )
-from ..contracts import SchemaRegistration, SemanticSearchResponse
+from ..contracts import (
+    MAX_BATCH_ITEMS,
+    DocumentIn,
+    IngestBatchResponse,
+    IngestItemResult,
+    SchemaRegistration,
+    SemanticSearchResponse,
+)
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..registry import RegistryCache, validate_claim
 from ..store.factory import store_from_env
@@ -164,6 +173,109 @@ def ingest(envelope: IngestEnvelope, request: Request):
             "extraction": artifact.extraction_status,
         },
     )
+
+
+_ENVELOPE = TypeAdapter(IngestEnvelope)
+
+
+def _parse_batch(raw: bytes, content_type: str) -> list:
+    """A JSON array, a single object, or newline-delimited JSON — the shapes
+    log shippers' HTTP outputs produce (Fluent Bit, Vector, Logstash, the
+    OpenTelemetry Collector)."""
+    import json as _json
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return []
+    if "ndjson" in content_type or "x-ldjson" in content_type or (
+        not text.startswith("[") and "\n" in text and not content_type.startswith("application/json")
+    ):
+        return [_json.loads(line) for line in text.splitlines() if line.strip()]
+    data = _json.loads(text)
+    if isinstance(data, dict):
+        data = data.get("items", data.get("records", [data]))  # common wrappers
+    if not isinstance(data, list):
+        raise ValueError("batch body must be a JSON array, NDJSON, or one envelope")
+    return data
+
+
+@app.post("/v1/ingest/batch", response_model=IngestBatchResponse)
+async def ingest_batch(request: Request) -> IngestBatchResponse:
+    """Many envelopes in one request (D-034): a JSON array or NDJSON, up to
+    LOOM_MAX_BATCH items. Each item passes the same gates as /v1/ingest and
+    is reported individually — one bad record never blocks the rest. Claims
+    land in one transaction per store. Idempotent per item via event_id."""
+    raw = await request.body()
+    try:
+        items = _parse_batch(raw, request.headers.get("content-type", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid batch: {exc}")
+    limit = int(os.environ.get("LOOM_MAX_BATCH", "") or MAX_BATCH_ITEMS)
+    if len(items) > limit:
+        raise HTTPException(status_code=413, detail=f"batch of {len(items)} exceeds {limit} items")
+    return await run_in_threadpool(_ingest_batch_sync, request, items)
+
+
+def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
+    store = request.app.state.store
+    registry = request.app.state.registry
+    results: list[IngestItemResult] = []
+    claims: list[tuple[int, ClaimIn]] = []
+    grants: dict[str, Grant | None] = {}
+
+    def gate(i: int, envelope) -> str | None:
+        ns = envelope.namespace
+        if ns not in grants:
+            try:
+                grants[ns] = _authorize(request, ns, "w")
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise  # no key at all: the whole request is unauthenticated
+                grants[ns] = exc  # type: ignore[assignment]
+        grant = grants[ns]
+        if isinstance(grant, HTTPException):
+            return grant.detail
+        try:
+            _gate_source(grant, envelope.source)
+            if isinstance(envelope, ClaimIn):
+                _gate_entity_type(grant, envelope.subject.type)
+                if isinstance(envelope.object, EntityRef):
+                    _gate_entity_type(grant, envelope.object.type)
+                problem = validate_claim(registry.get(ns), envelope)
+                if problem is not None:
+                    return problem
+        except HTTPException as exc:
+            return exc.detail
+        return None
+
+    for i, item in enumerate(items):
+        try:
+            envelope = _ENVELOPE.validate_python(item)
+        except ValidationError as exc:
+            errs = exc.errors(include_input=False)[:2]
+            results.append(IngestItemResult(index=i, status="rejected",
+                                            detail="; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in errs)))
+            continue
+        problem = gate(i, envelope)
+        if problem is not None:
+            metrics.REJECTED.labels(reason="scope").inc()
+            results.append(IngestItemResult(index=i, status="rejected", detail=problem))
+            continue
+        if isinstance(envelope, ClaimIn):
+            claims.append((i, envelope))
+        else:
+            artifact = store.store_artifact(envelope)
+            metrics.INGEST.labels(kind="document").inc()
+            results.append(IngestItemResult(index=i, status="accepted", artifact_id=artifact.id))
+    if claims:
+        observations = store.record_claims([c for _, c in claims])
+        for (i, _), obs in zip(claims, observations):
+            metrics.INGEST.labels(kind="claim").inc()
+            results.append(IngestItemResult(index=i, status="recorded", observation_id=obs.id))
+    results.sort(key=lambda r: r.index)
+    counts = {"recorded": 0, "accepted": 0, "rejected": 0}
+    for r in results:
+        counts[r.status] += 1
+    return IngestBatchResponse(total=len(items), results=results, **counts)
 
 
 @app.get("/v1/entities/{etype}/{key:path}/observations")  # keys may hold '/'

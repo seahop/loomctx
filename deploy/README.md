@@ -133,6 +133,13 @@ printf '%s\n' 'resources: ["rendered.yaml"]' 'images:' \
 kubectl apply -k /tmp/loom
 ```
 
+## Tying in existing pipelines (D-034)
+
+Log shippers post batches to `POST /v1/ingest/batch`; Kafka topics feed
+the `kafka` profile / `deploy/k8s/integrations/kafka-consumer.yaml`; files
+load with `python -m loom.ingest`. Configs and the full table are in
+[`integrations/README.md`](integrations/README.md).
+
 ## Scaling dials (D-027 / D-028)
 
 Every dial is off by default: the single-container shape stays exactly as

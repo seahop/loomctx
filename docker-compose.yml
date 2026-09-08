@@ -117,6 +117,8 @@ services:
 
   consumer:
     image: loom-engine:local
+    healthcheck:
+      disable: true    # no HTTP port here; the image's readyz check doesn't apply
     profiles: ["scale"]
     restart: unless-stopped
     command: python -m loom.consumer
@@ -129,11 +131,47 @@ services:
       nats:
         condition: service_healthy
 
+  # Kafka / Redpanda writer consumer (D-034): reads envelopes from topics your
+  # pipelines already publish to. Point it at your brokers; a Redpanda for
+  # local trial ships in the same profile.
+  #   docker compose --profile kafka up -d
+  kafka-consumer:
+    image: loom-engine:local
+    healthcheck:
+      disable: true    # no HTTP port here; the image's readyz check doesn't apply
+    profiles: ["kafka"]
+    restart: unless-stopped
+    command: python -m loom.kafka_consumer
+    environment:
+      LOOM_DB: ${LOOM_DB:-/data/loom.db}
+      LOOM_KAFKA_BROKERS: ${LOOM_KAFKA_BROKERS:-redpanda:9092}
+      LOOM_KAFKA_TOPICS: ${LOOM_KAFKA_TOPICS:-loom.ingest}
+      LOOM_KAFKA_GROUP: ${LOOM_KAFKA_GROUP:-loom-writer}
+    volumes:
+      - loom-data:/data
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    profiles: ["kafka"]
+    command: ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "512M",
+              "--reserve-memory", "0M", "--node-id", "0", "--check=false",
+              "--kafka-addr", "PLAINTEXT://0.0.0.0:9092", "--advertise-kafka-addr", "PLAINTEXT://redpanda:9092"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
   # Enrichment worker (phase 4, D-018): embeddings + document claim
   # extraction + dossiers. One-shot drain: docker compose run --rm enrich
   #   python -m loom.enrich run --once
   enrich:
     image: loom-engine:local
+    healthcheck:
+      disable: true    # no HTTP port here; the image's readyz check doesn't apply
     profiles: ["enrich"]
     command: python -m loom.enrich run --interval 30
     restart: unless-stopped
@@ -188,6 +226,21 @@ services:
       LOOM_URL: http://loom:8000
     volumes:
       - ./sdk/typescript/src:/app/src        # so `npm run gen` writes back
+      - ./contracts:/contracts:ro
+    depends_on:
+      loom:
+        condition: service_healthy
+
+  # Go SDK toolchain (D-034): vet, contract drift test, live test.
+  #   docker compose --profile sdk run --rm sdk-go
+  sdk-go:
+    build:
+      context: .
+      dockerfile: sdk/go/Dockerfile
+    profiles: ["sdk"]
+    environment:
+      LOOM_URL: http://loom:8000
+    volumes:
       - ./contracts:/contracts:ro
     depends_on:
       loom:

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,6 +218,30 @@ func (p *limiterPool) allow(key string) bool {
 	return lim.Allow()
 }
 
+// allowN takes n tokens at once (a batch of n envelopes costs n).
+func (p *limiterPool) allowN(key string, n int) bool {
+	if p == nil {
+		return true
+	}
+	p.mu.Lock()
+	lim, ok := p.buckets[key]
+	if !ok {
+		if len(p.buckets) >= maxLimiterBuckets {
+			for k := range p.buckets {
+				delete(p.buckets, k)
+				break
+			}
+		}
+		lim = rate.NewLimiter(rate.Limit(p.rate), int(p.rate))
+		p.buckets[key] = lim
+	}
+	p.mu.Unlock()
+	if n > lim.Burst() {
+		return false // a batch larger than the burst can never pass; refuse cleanly
+	}
+	return lim.AllowN(time.Now(), n)
+}
+
 func (p *limiterPool) size() int {
 	if p == nil {
 		return 0
@@ -240,6 +265,114 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /metrics", m.handler)
+
+	// Batch ingest (D-034): a JSON array or NDJSON of envelopes, each
+	// validated and gated individually and forwarded one message at a time
+	// (consumers batch on their side). One bad record never blocks the rest.
+	mux.HandleFunc("POST /v1/ingest/batch", func(w http.ResponseWriter, r *http.Request) {
+		m.requests.Add(1)
+		apiKey := extractKey(r)
+		var g *grant
+		bucket := ""
+		if auth.enabled() {
+			if apiKey == "" {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusUnauthorized,
+					map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+				return
+			}
+			g = auth.grantFor(apiKey)
+			if g == nil {
+				m.rejectedAuth.Add(1)
+				writeJSON(w, http.StatusForbidden,
+					map[string]string{"detail": "unknown, expired, or disabled API key"})
+				return
+			}
+			bucket = g.ID
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes))
+		if err != nil {
+			m.rejectedBad.Add(1)
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"detail": "body too large"})
+			return
+		}
+		items, err := splitBatch(body, r.Header.Get("Content-Type"))
+		if err != nil {
+			m.rejectedBad.Add(1)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"detail": "invalid batch: " + err.Error()})
+			return
+		}
+		if int64(len(items)) > cfg.maxBatch {
+			m.rejectedBad.Add(1)
+			writeJSON(w, http.StatusRequestEntityTooLarge,
+				map[string]string{"detail": fmt.Sprintf("batch of %d exceeds %d items", len(items), cfg.maxBatch)})
+			return
+		}
+		if !limiters.allowN(bucket, len(items)) {
+			m.rejectedRate.Add(1)
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"detail": "rate limit exceeded"})
+			return
+		}
+		principal := ""
+		if g != nil {
+			principal = g.ID
+		}
+		type itemResult struct {
+			Index  int    `json:"index"`
+			Status string `json:"status"`
+			Detail string `json:"detail,omitempty"`
+		}
+		results := make([]itemResult, 0, len(items))
+		counts := map[string]int{"recorded": 0, "accepted": 0, "rejected": 0}
+		reject := func(i int, detail string) {
+			m.rejectedBad.Add(1)
+			results = append(results, itemResult{Index: i, Status: "rejected", Detail: detail})
+			counts["rejected"]++
+		}
+		for i, raw := range items {
+			doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+			if err != nil {
+				reject(i, "invalid JSON")
+				continue
+			}
+			if err := schema.Validate(doc); err != nil {
+				reject(i, fmt.Sprintf("contract violation: %v", err))
+				continue
+			}
+			kind := extractKind(doc)
+			if kind == "" {
+				reject(i, "envelope must carry an explicit 'kind'")
+				continue
+			}
+			if g != nil {
+				if !g.allows(extractNamespace(doc), "w") {
+					reject(i, "key not authorized to write this namespace")
+					continue
+				}
+				if detail := checkWriteGates(g, kind, doc); detail != "" {
+					reject(i, detail)
+					continue
+				}
+			}
+			if _, _, err := fwd.forward(r.Context(), kind, apiKey, principal, raw); err != nil {
+				m.upstreamErr.Add(1)
+				writeJSON(w, http.StatusBadGateway, map[string]string{"detail": "upstream unavailable"})
+				return
+			}
+			m.queued.Add(1)
+			status := "recorded"
+			if kind == "document" {
+				status = "accepted"
+			}
+			results = append(results, itemResult{Index: i, Status: status})
+			counts[status]++
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"total": len(items), "recorded": counts["recorded"], "accepted": counts["accepted"],
+			"rejected": counts["rejected"], "results": results,
+		})
+	})
 
 	mux.HandleFunc("POST /v1/ingest", func(w http.ResponseWriter, r *http.Request) {
 		m.requests.Add(1)
@@ -335,6 +468,49 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 	})
 
 	return mux
+}
+
+// splitBatch turns a request body into individual envelope documents:
+// NDJSON (one per line), a JSON array, or a single object.
+func splitBatch(body []byte, contentType string) ([]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	isND := strings.Contains(contentType, "ndjson") || strings.Contains(contentType, "x-ldjson") ||
+		(trimmed[0] != '[' && bytes.ContainsRune(trimmed, '\n') && !strings.HasPrefix(contentType, "application/json"))
+	if isND {
+		var out []json.RawMessage
+		for _, line := range bytes.Split(trimmed, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			if !json.Valid(line) {
+				return nil, fmt.Errorf("line %d is not valid JSON", len(out)+1)
+			}
+			out = append(out, json.RawMessage(line))
+		}
+		return out, nil
+	}
+	if trimmed[0] == '{' {
+		var wrapper struct {
+			Items   []json.RawMessage `json:"items"`
+			Records []json.RawMessage `json:"records"`
+		}
+		if err := json.Unmarshal(trimmed, &wrapper); err == nil && (wrapper.Items != nil || wrapper.Records != nil) {
+			if wrapper.Items != nil {
+				return wrapper.Items, nil
+			}
+			return wrapper.Records, nil
+		}
+		return []json.RawMessage{json.RawMessage(trimmed)}, nil
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(trimmed, &arr); err != nil {
+		return nil, fmt.Errorf("expected a JSON array or NDJSON")
+	}
+	return arr, nil
 }
 
 func extractNamespace(doc any) string {

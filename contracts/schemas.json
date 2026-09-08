@@ -1730,5 +1730,102 @@
     },
     "title": "SchemaRegistration",
     "type": "object"
+  },
+  "IngestBatchResponse": {
+    "$defs": {
+      "IngestItemResult": {
+        "description": "Outcome of one envelope in a batch (D-034). `rejected` items carry\nthe reason; the rest of the batch still lands \u2014 a shipper's bad record\nnever blocks its good ones.",
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "accepted",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "index",
+          "status"
+        ],
+        "title": "IngestItemResult",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "total": {
+        "title": "Total",
+        "type": "integer"
+      },
+      "recorded": {
+        "title": "Recorded",
+        "type": "integer"
+      },
+      "accepted": {
+        "title": "Accepted",
+        "type": "integer"
+      },
+      "rejected": {
+        "title": "Rejected",
+        "type": "integer"
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/IngestItemResult"
+        },
+        "title": "Results",
+        "type": "array"
+      }
+    },
+    "required": [
+      "total",
+      "recorded",
+      "accepted",
+      "rejected"
+    ],
+    "title": "IngestBatchResponse",
+    "type": "object"
   }
 }
