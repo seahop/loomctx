@@ -36,7 +36,15 @@ OPENAI_COMPAT_BASES = {
 
 
 class LLMError(RuntimeError):
-    """The provider call failed; the HTTP layer maps this to a 502."""
+    """The provider call failed; the HTTP layer maps this to a 502.
+
+    `public` is the short, safe-to-return form; str(exc) carries the full
+    detail (provider body excerpt, URL) for server logs only.
+    """
+
+    def __init__(self, message: str, public: str | None = None):
+        super().__init__(message)
+        self.public = public or "LLM provider error (see server logs)"
 
 
 class LLMClient(ABC):
@@ -56,12 +64,19 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120) -> dic
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            body = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read()[:500].decode(errors="replace")
-        raise LLMError(f"provider returned {exc.code}: {detail}") from exc
+        raise LLMError(f"provider returned {exc.code}: {detail}",
+                       public=f"LLM provider returned HTTP {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise LLMError(f"provider unreachable: {exc}") from exc
+        raise LLMError(f"provider unreachable: {exc}",
+                       public="LLM provider unreachable") from exc
+    try:
+        return json.loads(body)
+    except ValueError as exc:  # e.g. an HTML error page from a proxy with 200
+        raise LLMError(f"provider returned non-JSON body: {body[:200]!r}",
+                       public="LLM provider returned a malformed response") from exc
 
 
 class OpenAICompatClient(LLMClient):

@@ -13,17 +13,17 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-A1 | P1 | ⬜ | `/v1/expand` never checks the `entity_types` grant. Handles are unsigned base64 JSON (`context.py encode_handle`), so a type-scoped reader can mint a handle for any subject and read its observations. Fix: gate the decoded subject's type, and sign handles (HMAC, `LOOM_HANDLE_SECRET`, random per-process fallback). |
-| H-A2 | P1 | ⬜ | Scope expansion and object-side entities ignore `entity_types`. `resolve_scope` BFSes to any type; facts whose *object* is an out-of-scope entity are returned. Fix: pass the grant's allowed types into `build_pack`/`expand_pack` and filter resolved subjects + observations there (scoped world, not an error — D-013a). |
-| H-A3 | P1 | ⬜ | `expand_pack` skips the `LOOM_MAX_BUDGET` clamp that `build_pack` applies. |
+| H-A1 | P1 | ✅ | `/v1/expand` never checks the `entity_types` grant. Handles are unsigned base64 JSON (`context.py encode_handle`), so a type-scoped reader can mint a handle for any subject and read its observations. Fix: gate the decoded subject's type, and sign handles (HMAC, `LOOM_HANDLE_SECRET`, random per-process fallback). |
+| H-A2 | P1 | ✅ | Scope expansion and object-side entities ignore `entity_types`. `resolve_scope` BFSes to any type; facts whose *object* is an out-of-scope entity are returned. Fix: pass the grant's allowed types into `build_pack`/`expand_pack` and filter resolved subjects + observations there (scoped world, not an error — D-013a). |
+| H-A3 | P1 | ✅ | `expand_pack` skips the `LOOM_MAX_BUDGET` clamp that `build_pack` applies. |
 | H-A4 | P2 | ⬜ | Go gateway rate-limits on the raw key string *before* authenticating (`server.go` `limiters.allow` precedes `grantFor`). Rotating a random header yields a fresh bucket each time and grows the bucket map without bound. Fix: authenticate first when auth is on, key buckets on the grant id, cap/evict the map. |
 | H-A5 | P2 | ⬜ | Naive-datetime `expires` in the keys file raises `TypeError` in Python (`auth.py` compares to aware now) → 500 on every request with that key; Go rejects the whole file. Fix: treat naive as UTC in both; validate `perms` in the file path. |
 | H-A6 | P2 | ⬜ | `/v1/artifacts/{id}` has no data gate beyond namespace: a type-scoped reader gets full document text. Fix: gate on whether any observation the key may see cites the artifact, or require an unrestricted grant. |
 | H-A7 | P2 | ⬜ | Consumer logs pydantic `errors()` which include `input` (claim values / document text). Use `include_input=False`. |
-| H-A8 | P2 | ⬜ | Provider error bodies and base URLs leak into 502 details (`llm.py` → `http.py`). Log the detail, return a generic message. |
+| H-A8 | P2 | ✅ | Provider error bodies and base URLs leak into 502 details (`llm.py` → `http.py`). Log the detail, return a generic message. |
 | H-A9 | P3 | ⬜ | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. |
 | H-A10 | P3 | ⬜ | NATS shape has a single enforcement point (gateway); consumer applies no grants. Acceptable while the queue is cluster-internal; document it, and carry the grant id on the message for audit. |
-| H-A11 | P3 | ⬜ | `decode_handle` on a base64 JSON *list* raises `AttributeError` → 500 pre-auth. Catch it. |
+| H-A11 | P3 | ✅ | `decode_handle` on a base64 JSON *list* raises `AttributeError` → 500 pre-auth. Catch it. |
 | H-A12 | P3 | ⬜ | Broken keys file → re-parse + `log.error` on every request (mtime never advances on failure) in both engines. |
 | H-A13 | P3 | ⬜ | Go vs Python keys-file tolerance differs (Go fails whole file on bad hex/expires; Python `KeyError`s on missing id/namespaces/perms). Align: skip + log the bad entry in both. |
 | H-A14 | P3 | ⬜ | No body-size limit on the default (no-gateway) shape; `DocumentIn.text` unbounded. Add a contract max (e.g. 2 MB) and a request-size guard. |
@@ -118,7 +118,7 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-I1 | P1 | ⬜ | Type-scoped key: forged/real handle → 403 on expand; scope expansion pack contains no out-of-type subjects or object refs. |
+| H-I1 | P1 | ✅ | Type-scoped key: forged/real handle → 403 on expand; scope expansion pack contains no out-of-type subjects or object refs. |
 | H-I2 | P1 | ⬜ | Export→import keeps a redacted observation hidden and a merged alias resolving. |
 | H-I3 | P1 | ⬜ | Store: a failing statement doesn't poison later calls (both backends); concurrent same-event_id inserts return the same row. |
 | H-I4 | P2 | ⬜ | Worker survives an embedder `LLMError` and a locked DB; extraction parser on `{"claims":"x"}`, `["a"]`, prose+fence; reordered re-extraction doesn't drop claims. |

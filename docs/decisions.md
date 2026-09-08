@@ -397,6 +397,36 @@ still answers (keyword ranking, facts only, no excerpts); it just isn't
 semantic. Verified live: a pentest passage surfaces as a cited `doc_excerpt`
 alongside the extracted facts.
 
+## D-021 · Data gates apply to what a pack *contains*, not just what it was asked about (2026-09-08)
+
+From the hardening review (`docs/hardening.md` H-A1/H-A2/H-A3). D-013a
+gated the *anchor* of a read (the subject named in an ask) but not the data
+the read returned: scope expansion reached any entity type, object-side
+entities of returned facts were never checked, and `/v1/expand` — whose
+handles are unsigned base64 JSON, i.e. a query the caller could type by
+hand — checked only the namespace. A type-scoped reader could therefore
+read anything in its namespace via a minted handle or a BFS hop.
+
+- **Rule:** an observation is visible to a key only if *every* entity it
+  touches (subject and, for edges, object) is in the key's `entity_types`.
+  This mirrors the ingest gate, which already checks both ends. Subjects
+  reached by scope expansion outside the allowlist are dropped, silently —
+  the "scoped world, not a wall" experience of D-013a is preserved; only an
+  *explicitly named* out-of-scope subject (in an ask, or in a handle) is a
+  403.
+- **Expand handles pass the same gates as a fresh ask** (namespace, then the
+  decoded subject's type) and honor `LOOM_MAX_BUDGET` like ask does.
+- **Optional signing:** with `LOOM_HANDLE_SECRET` set, handles are
+  HMAC-SHA256 signed (`h2_` prefix) and unsigned handles are refused.
+  Defense in depth — the gates above are the security boundary, signing
+  just guarantees a handle is one this deployment issued. Multi-replica
+  deployments must share the secret (same Secret mount as the keys file);
+  rotating it invalidates outstanding handles, which is fine because
+  handles are meant to live for one agent session.
+- Provider error bodies no longer reach callers of `/v1/answer` (they can
+  echo URLs, model names, account details): the 502 carries a short public
+  form, the full detail goes to the server log.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

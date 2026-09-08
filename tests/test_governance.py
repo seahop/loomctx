@@ -246,6 +246,149 @@ def test_http_scoping_gates(tmp_path, monkeypatch):
                         headers={"X-Loom-Key": read_key})
         assert r.status_code == 503
 
+def make_type_scoped_reader(tmp_path, monkeypatch, entity_types="host,user"):
+    """Engine client + a reader key that may only see the given types, plus
+    an unrestricted writer to seed data with."""
+    import subprocess, sys
+    reader, path = _generate_key(
+        tmp_path, id="analyst", perms="r", entity_types=entity_types,
+    )
+    writer = subprocess.run(
+        [sys.executable, "-m", "loom.keys", "--file", str(path), "generate",
+         "--id", "root", "--namespace", "default", "--perms", "rw"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "scoped-read.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    monkeypatch.delenv("LOOM_HANDLE_SECRET", raising=False)
+    from loom.api.http import app
+    return TestClient(app), reader, writer
+
+
+def _seed_scoped_world(client, writer):
+    """host web-01 (in scope) with a login, a domain membership (out-of-scope
+    object) and a vendor (out-of-scope subject) that also names web-01."""
+    h = {"X-Loom-Key": writer}
+    web01 = {"type": "host", "key": "web-01"}
+    rows = [
+        dict(subject=web01, predicate="logged_in_by",
+             object={"type": "user", "key": "jdoe"}),
+        dict(subject=web01, predicate="member_of",
+             object={"type": "domain", "key": "corp.local"}),
+        dict(subject={"type": "vendor", "key": "initech"}, predicate="supports",
+             object=web01),
+        dict(subject={"type": "vendor", "key": "initech"}, predicate="contract_owner",
+             object="asmith"),
+    ]
+    for i, row in enumerate(rows):
+        for _ in range(3):  # enough volume that tiny budgets leave handles
+            body = {"kind": "claim", "namespace": "default", "source": "seed",
+                    "observed_at": (OBSERVED + timedelta(hours=i)).isoformat(),
+                    **row}
+            assert client.post("/v1/ingest", json=body, headers=h).status_code == 200
+
+
+def test_scoped_reader_sees_only_its_world(tmp_path, monkeypatch):
+    """H-A2: scope expansion and object-side entities honor entity_types."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch)
+    with client:
+        _seed_scoped_world(client, writer)
+        h = {"X-Loom-Key": reader}
+        # explicit out-of-scope subject: a named wall (403)
+        r = client.post("/v1/ask", json={
+            "subject": {"type": "vendor", "key": "initech"},
+            "question": "owner?", "budget": 500}, headers=h)
+        assert r.status_code == 403
+        # scope expansion over member_of would reach domain:corp.local; a
+        # host-scoped reader must never see it, nor the edge pointing at it
+        r = client.post("/v1/ask", json={
+            "scope": {"subjects": [{"type": "host", "key": "web-01"}],
+                      "expand": ["member_of", "supports"], "depth": 2},
+            "question": "everything", "budget": 4000}, headers=h)
+        assert r.status_code == 200
+        pack = r.json()
+        assert {s["type"] for s in pack["subjects"]} <= {"host", "user"}
+        for item in pack["items"]:
+            assert "domain:" not in item["text"] and "vendor:" not in item["text"]
+        assert any("logged_in_by" in i["text"] for i in pack["items"])
+        # unrestricted reader still sees the whole graph
+        r = client.post("/v1/ask", json={
+            "scope": {"subjects": [{"type": "host", "key": "web-01"}],
+                      "expand": ["member_of", "supports"], "depth": 2},
+            "question": "everything", "budget": 4000},
+            headers={"X-Loom-Key": writer})
+        assert any("domain:corp.local" in i["text"] for i in r.json()["items"])
+
+
+def test_expand_handle_passes_entity_type_gate(tmp_path, monkeypatch):
+    """H-A1: a forged handle for an out-of-scope subject is a 403, and a
+    legitimate handle only yields in-scope observations."""
+    from loom.context import encode_handle
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch)
+    with client:
+        _seed_scoped_world(client, writer)
+        forged = encode_handle("default", EntityRef(type="vendor", key="initech"),
+                               "contract_owner", None)
+        r = client.post("/v1/expand", json={"handle": forged, "budget": 500},
+                        headers={"X-Loom-Key": reader})
+        assert r.status_code == 403
+        # the unrestricted key can use the same handle
+        r = client.post("/v1/expand", json={"handle": forged, "budget": 500},
+                        headers={"X-Loom-Key": writer})
+        assert r.status_code == 200 and r.json()["items"]
+        # a handle for an in-scope subject but an out-of-scope edge yields
+        # nothing rather than leaking the domain edge
+        edge = encode_handle("default", EntityRef(type="host", key="web-01"),
+                             "member_of", None)
+        r = client.post("/v1/expand", json={"handle": edge, "budget": 500},
+                        headers={"X-Loom-Key": reader})
+        assert r.status_code == 200 and r.json()["items"] == []
+        # garbage handles are 400s, never 500s
+        import base64
+        as_list = "h1_" + base64.urlsafe_b64encode(b"[1,2]").decode().rstrip("=")
+        for bad in ("nope", "h1_!!!", as_list):
+            r = client.post("/v1/expand", json={"handle": bad, "budget": 500},
+                            headers={"X-Loom-Key": reader})
+            assert r.status_code == 400, bad
+
+
+def test_expand_clamps_budget_to_ceiling(tmp_path, monkeypatch):
+    """H-A3: expand honors LOOM_MAX_BUDGET like ask does."""
+    from loom.context import encode_handle, expand_pack
+    store = SqliteStore(tmp_path / "clamp.db")
+    for i in range(5):
+        store.record_claim(claim(event_id=f"e{i}"))
+    monkeypatch.setenv("LOOM_MAX_BUDGET", "120")
+    handle = encode_handle("default", EntityRef(type="host", key="web-01"),
+                           "logged_in_by", None)
+    pack = expand_pack(store, handle, budget=100_000)
+    assert pack.budget == 120
+
+
+def test_signed_handles_reject_forgery(monkeypatch):
+    """LOOM_HANDLE_SECRET: only handles this deployment issued are accepted."""
+    from loom.context import decode_handle, encode_handle
+    ref = EntityRef(type="host", key="web-01")
+    monkeypatch.delenv("LOOM_HANDLE_SECRET", raising=False)
+    unsigned = encode_handle("default", ref, "p", None)
+    assert unsigned.startswith("h1_") and decode_handle(unsigned)["ns"] == "default"
+
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "s3cret")
+    signed = encode_handle("default", ref, "p", None)
+    assert signed.startswith("h2_") and decode_handle(signed)["predicate"] == "p"
+    with pytest.raises(ValueError):
+        decode_handle(unsigned)  # unsigned no longer accepted
+    with pytest.raises(ValueError):
+        decode_handle(signed[:-2] + "zz")  # tampered signature
+    body, _, sig = signed[3:].partition(".")
+    other = encode_handle("default", EntityRef(type="vendor", key="x"), "p", None)
+    with pytest.raises(ValueError):
+        decode_handle("h2_" + other[3:].partition(".")[0] + "." + sig)
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "different")
+    with pytest.raises(ValueError):
+        decode_handle(signed)  # rotated secret invalidates outstanding handles
+
+
 def test_redaction_tombstones_hide_but_preserve(tmp_path):
     store = SqliteStore(tmp_path / "l.db")
     obs = store.record_claim(claim())

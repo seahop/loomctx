@@ -8,12 +8,23 @@ at _score() when phase 4 lands.
 
 Expansion handles are stateless: a base64url-encoded JSON descriptor of the
 query they stand for. No server-side handle table to expire or migrate.
+When LOOM_HANDLE_SECRET is set they are HMAC-signed and only signed handles
+are accepted (defense in depth: a handle is a query, and a forged query must
+still pass the same data gates as a fresh ask — see `allowed_types`).
+
+Data scoping (D-013a): `allowed_types` restricts the world a pack is built
+over. Subjects reached by scope expansion and observations whose subject OR
+object entity falls outside the allowlist are silently dropped — the caller
+sees "their universe", not an error.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -158,7 +169,18 @@ def _find_conflicts(
 
 # ------------------------------------------------------------------ handles #
 
-_HANDLE_PREFIX = "h1_"
+_HANDLE_PREFIX = "h1_"          # unsigned (no LOOM_HANDLE_SECRET configured)
+_SIGNED_HANDLE_PREFIX = "h2_"   # payload.signature, HMAC-SHA256 truncated
+
+
+def _handle_secret() -> bytes | None:
+    raw = os.environ.get("LOOM_HANDLE_SECRET", "").strip()
+    return raw.encode() if raw else None
+
+
+def _sign(raw: str, secret: bytes) -> str:
+    digest = hmac.new(secret, raw.encode(), hashlib.sha256).digest()[:16]
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
 def encode_handle(
@@ -170,19 +192,62 @@ def encode_handle(
         "predicate": predicate,
         "as_of": as_of.isoformat() if as_of else None,
     }
-    raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
-    return _HANDLE_PREFIX + raw.rstrip("=")
+    raw = base64.urlsafe_b64encode(
+        json.dumps(payload, sort_keys=True).encode()
+    ).decode().rstrip("=")
+    secret = _handle_secret()
+    if secret is None:
+        return _HANDLE_PREFIX + raw
+    return f"{_SIGNED_HANDLE_PREFIX}{raw}.{_sign(raw, secret)}"
 
 
 def decode_handle(handle: str) -> dict:
-    if not handle.startswith(_HANDLE_PREFIX):
+    """Parse (and, when a secret is configured, verify) a handle.
+
+    Raises ValueError for anything that is not a well-formed handle this
+    deployment would have issued — including unsigned handles once
+    LOOM_HANDLE_SECRET is set.
+    """
+    if not isinstance(handle, str):
         raise ValueError("unrecognized handle format")
-    raw = handle[len(_HANDLE_PREFIX):]
+    secret = _handle_secret()
+    if handle.startswith(_SIGNED_HANDLE_PREFIX):
+        if secret is None:
+            raise ValueError("signed handle presented but no handle secret configured")
+        raw, sep, sig = handle[len(_SIGNED_HANDLE_PREFIX):].partition(".")
+        if not sep or not hmac.compare_digest(_sign(raw, secret), sig):
+            raise ValueError("handle signature invalid")
+    elif handle.startswith(_HANDLE_PREFIX):
+        if secret is not None:
+            raise ValueError("unsigned handles are not accepted on this deployment")
+        raw = handle[len(_HANDLE_PREFIX):]
+    else:
+        raise ValueError("unrecognized handle format")
     raw += "=" * (-len(raw) % 4)
-    payload = json.loads(base64.urlsafe_b64decode(raw))
-    if not {"ns", "subject", "predicate"} <= payload.keys():
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(raw))
+    except (ValueError, UnicodeDecodeError) as exc:  # binascii.Error is a ValueError
+        raise ValueError("malformed handle payload") from exc
+    if not isinstance(payload, dict) or not {"ns", "subject", "predicate"} <= payload.keys():
+        raise ValueError("malformed handle payload")
+    if not isinstance(payload["subject"], dict) or not isinstance(payload["ns"], str):
         raise ValueError("malformed handle payload")
     return payload
+
+
+# ------------------------------------------------------------ data scoping #
+
+def _in_scope(obs: Observation, allowed_types: tuple[str, ...] | None) -> bool:
+    """An observation is visible only if every entity it touches is in the
+    caller's allowed types (mirrors the ingest gate, which checks both
+    subject and object)."""
+    if allowed_types is None:
+        return True
+    if obs.subject.type not in allowed_types:
+        return False
+    if isinstance(obs.object, EntityRef) and obs.object.type not in allowed_types:
+        return False
+    return True
 
 
 # ------------------------------------------------------------------ builder #
@@ -216,17 +281,24 @@ def resolve_scope(
 
 
 def build_pack(
-    store: GraphStore, req: AskRequest, embedder=None
+    store: GraphStore,
+    req: AskRequest,
+    embedder=None,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> ContextPack:
     if req.scope is not None:
         subjects = resolve_scope(store, req.namespace, req.scope)
     else:
         subjects = [req.subject]
+    if allowed_types is not None:
+        # scoped keys see a scoped world (D-013a): entities reached by
+        # expansion outside the allowlist simply aren't there
+        subjects = [s for s in subjects if s.type in allowed_types]
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
     for ref in subjects:
         for obs in store.observations_for(req.namespace, ref, limit=_GATHER_LIMIT):
-            if obs.id not in seen_ids:
+            if obs.id not in seen_ids and _in_scope(obs, allowed_types):
                 seen_ids.add(obs.id)
                 observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
@@ -274,21 +346,26 @@ def build_pack(
     )
 
 
-def expand_pack(store: GraphStore, handle: str, budget: int) -> ContextPack:
+def expand_pack(
+    store: GraphStore,
+    handle: str,
+    budget: int,
+    allowed_types: tuple[str, ...] | None = None,
+) -> ContextPack:
     meta = decode_handle(handle)
     subject = EntityRef(**meta["subject"])
     as_of = datetime.fromisoformat(meta["as_of"]) if meta.get("as_of") else None
     observations = [
         o
         for o in store.observations_for(meta["ns"], subject, limit=_GATHER_LIMIT)
-        if o.predicate == meta["predicate"]
+        if o.predicate == meta["predicate"] and _in_scope(o, allowed_types)
     ]
     return _pack(
         namespace=meta["ns"],
         subjects=[subject],
         question=None,
         as_of=as_of,
-        budget=budget,
+        budget=min(budget, max_budget()),
         observations=observations,
         with_handles=False,
     )

@@ -105,6 +105,7 @@ def build_answer(
             as_of=req.as_of,
         ),
         embedder=embedder,
+        allowed_types=allowed_types,
     )
     text = llm.complete(
         SYSTEM_PROMPT,

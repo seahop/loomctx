@@ -169,6 +169,10 @@ def get_artifact(
     return artifact.model_dump(mode="json")
 
 
+def _allowed_types(grant: Grant | None) -> tuple[str, ...] | None:
+    return grant.entity_types if grant is not None else None
+
+
 @app.post("/v1/ask", response_model=ContextPack)
 def ask(req: AskRequest, request: Request) -> ContextPack:
     grant = _authorize(request, req.namespace, "r")
@@ -178,18 +182,27 @@ def ask(req: AskRequest, request: Request) -> ContextPack:
         return build_pack(
             request.app.state.store, req,
             embedder=request.app.state.embedder,
+            allowed_types=_allowed_types(grant),
         )
 
 
 @app.post("/v1/expand", response_model=ContextPack)
 def expand(req: ExpandRequest, request: Request) -> ContextPack:
+    # A handle is a query the caller could have typed by hand (they are
+    # forgeable unless LOOM_HANDLE_SECRET is set), so it passes exactly the
+    # gates a fresh ask would: namespace, then the subject's entity type.
     try:
-        namespace = decode_handle(req.handle)["ns"]
-    except (ValueError, KeyError, TypeError):
+        meta = decode_handle(req.handle)
+        subject = EntityRef(**meta["subject"])
+    except (ValueError, KeyError, TypeError, AttributeError):
         raise HTTPException(status_code=400, detail="invalid expansion handle")
-    _authorize(request, namespace, "r")
+    grant = _authorize(request, meta["ns"], "r")
+    _gate_entity_type(grant, subject.type)
     with metrics.PACK_SECONDS.time():
-        return expand_pack(request.app.state.store, req.handle, req.budget)
+        return expand_pack(
+            request.app.state.store, req.handle, req.budget,
+            allowed_types=_allowed_types(grant),
+        )
 
 
 @app.get("/v1/entities/search")
@@ -247,6 +260,9 @@ def answer(req: AnswerRequest, request: Request) -> AnswerResponse:
         raise HTTPException(status_code=422, detail=str(exc))
     except LLMError as exc:
         metrics.ANSWERS.labels(outcome="provider_error").inc()
-        raise HTTPException(status_code=502, detail=str(exc))
+        # Provider bodies can echo URLs, model names, or account details;
+        # keep those in the server log and give the caller the short form.
+        logging.getLogger("loom.answer").warning("LLM provider error: %s", exc)
+        raise HTTPException(status_code=502, detail=exc.public)
     metrics.ANSWERS.labels(outcome="ok").inc()
     return result

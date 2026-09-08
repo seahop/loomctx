@@ -232,7 +232,7 @@ def answer(
     except UnresolvedQuestionError as exc:
         return {"error": str(exc)}
     except LLMError as exc:
-        return {"error": f"provider error: {exc}"}
+        return {"error": f"provider error: {exc.public}"}
     return {
         "answer": resp.answer,
         "model": resp.model,
