@@ -13,6 +13,13 @@ Or serve remote agents over streamable HTTP (compose profile `mcp`):
 
     docker compose --profile mcp up -d mcp     # -> :8300/mcp
 
+Auth (H-A9, D-024): stdio is local trust — the agent that spawned the
+process already owns the data. The HTTP transports authenticate like the
+REST API: every request must carry `X-Loom-Key` / `Authorization: Bearer`
+when LOOM_AUTH_FILE / LOOM_API_KEYS is set (an ASGI gate rejects the rest
+before MCP sees them), and every tool call applies the key's namespace,
+perms, entity-type and source gates exactly as the HTTP routes do.
+
 Requires the `mcp` extra (installed in the image).
 """
 
@@ -22,17 +29,23 @@ import argparse
 from datetime import datetime
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from .answer import UnresolvedQuestionError, build_answer
-from .context import build_pack, expand_pack
+from .auth import AuthConfig, Grant, extract_key
+from .context import build_pack, decode_handle, expand_pack
 from .contracts import AnswerRequest, AskRequest, ClaimIn, EntityRef, ScopeSpec
 from .llm import LLMError, embedder_from_env, llm_from_env
+from .registry import validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
 
 _embedder_loaded = False
 _embedder = None
+_llm_loaded = False
+_llm = None
+_auth: AuthConfig | None = None
+_transport = "stdio"
 
 
 def _get_embedder():
@@ -41,6 +54,85 @@ def _get_embedder():
         _embedder = embedder_from_env()
         _embedder_loaded = True
     return _embedder
+
+
+def _get_llm():
+    """Built once per process, not per call (H-E6)."""
+    global _llm_loaded, _llm
+    if not _llm_loaded:
+        _llm = llm_from_env()
+        _llm_loaded = True
+    return _llm
+
+
+def _get_auth() -> AuthConfig:
+    global _auth
+    if _auth is None:
+        _auth = AuthConfig.from_env()
+    return _auth
+
+
+# ------------------------------------------------------------------- auth #
+
+def _grant(ctx, namespace: str, action: str) -> Grant | None:
+    """The caller's grant for this tool call, or None when no gate applies
+    (stdio transport, or auth disabled). Raises PermissionError — which the
+    MCP layer returns to the agent as a tool error — when the key is
+    missing, unknown, or not allowed the action on the namespace."""
+    if _transport == "stdio":
+        return None
+    auth = _get_auth()
+    if not auth.enabled:
+        return None
+    headers = getattr(ctx, "headers", None) if ctx is not None else None
+    key = extract_key(headers or {})
+    grant = auth.grant_for(key)
+    if grant is None:
+        raise PermissionError("missing or unknown API key: send X-Loom-Key "
+                              "(or Authorization: Bearer) on every request")
+    if not grant.allows(namespace, action):
+        raise PermissionError(
+            f"key {grant.id!r} is not authorized for {action!r} on namespace {namespace!r}")
+    return grant
+
+
+def _gate_type(grant: Grant | None, entity_type: str) -> None:
+    if grant is not None and not grant.allows_entity_type(entity_type):
+        raise PermissionError(f"key {grant.id!r} is not scoped to entity type {entity_type!r}")
+
+
+def _allowed(grant: Grant | None) -> tuple[str, ...] | None:
+    return grant.entity_types if grant is not None else None
+
+
+class KeyGate:
+    """ASGI middleware for the HTTP transports: reject requests without a
+    valid key before the MCP session machinery sees them (cheap rejection,
+    same order as the gateway). Tool-level gates then scope the data."""
+
+    def __init__(self, app, auth: AuthConfig):
+        self.app = app
+        self.auth = auth
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and self.auth.enabled:
+            headers = {k.decode().lower(): v.decode()
+                       for k, v in scope.get("headers", [])}
+            key = extract_key(headers)
+            if key is None:
+                return await self._reject(send, 401, "missing API key")
+            if self.auth.grant_for(key) is None:
+                return await self._reject(send, 403, "unknown, expired, or disabled API key")
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(send, status: int, detail: str) -> None:
+        import json
+        body = json.dumps({"detail": detail}).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
 
 mcp = MCPServer(
     "loom",
@@ -64,10 +156,14 @@ def _get_store() -> GraphStore:
     return _store
 
 
-def configure(store: GraphStore) -> None:
-    """Inject a store (tests)."""
-    global _store
+def configure(store: GraphStore, auth: AuthConfig | None = None,
+              transport: str = "stdio") -> None:
+    """Inject a store (tests); optionally an auth config + transport so the
+    tool-level gates can be exercised without a network."""
+    global _store, _auth, _transport
     _store = store
+    _auth = auth
+    _transport = transport
 
 
 def _parse_ref(handle: str) -> EntityRef:
@@ -85,9 +181,11 @@ def _parse_time(value: str | None) -> datetime | None:
 
 # ------------------------------------------------------------------- tools #
 
-def find_entity(query: str, namespace: str = "default", limit: int = 10) -> list[dict]:
+def find_entity(query: str, namespace: str = "default", limit: int = 10,
+                ctx: Context = None) -> list[dict]:
     """Resolve a name or key fragment to entity handles. Returns matches as
     'type:key' handles usable with the other tools (exact match first)."""
+    grant = _grant(ctx, namespace, "r")
     return [
         {
             "handle": f"{e.type}:{e.key}",
@@ -95,7 +193,8 @@ def find_entity(query: str, namespace: str = "default", limit: int = 10) -> list
             "key": e.key,
             "provisional": e.provisional,
         }
-        for e in _get_store().search_entities(namespace, query, limit=limit)
+        for e in _get_store().search_entities(namespace, query, limit=limit,
+                                              types=_allowed(grant))
     ]
 
 
@@ -106,22 +205,26 @@ def ask(
     namespace: str = "default",
     as_of: str | None = None,
     valid_at: str | None = None,
+    ctx: Context = None,
 ) -> dict:
     """Question-scoped, token-budgeted, cited context about one entity.
     subject is a 'type:key' handle. Conflicting facts are flagged explicitly;
     'handles' in the result feed the expand tool for more detail. as_of
     (ISO timestamp) = what was KNOWN at that moment; valid_at = what was
     TRUE at that moment (e.g. which host held an IP during an incident)."""
+    grant = _grant(ctx, namespace, "r")
+    ref = _parse_ref(subject)
+    _gate_type(grant, ref.type)
     req = AskRequest(
         namespace=namespace,
-        subject=_parse_ref(subject),
+        subject=ref,
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
         valid_at=_parse_time(valid_at),
     )
     return build_pack(
-        _get_store(), req, embedder=_get_embedder()
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)
     ).model_dump(mode="json")
 
 
@@ -134,33 +237,38 @@ def ask_scope(
     namespace: str = "default",
     as_of: str | None = None,
     valid_at: str | None = None,
+    ctx: Context = None,
 ) -> dict:
     """Context about SEVERAL entities at once — a set of hosts, or an anchor
     plus its contents ('domain:corp.local' expanded over ['member_of'] covers
     every member). subjects are 'type:key' handles; expand_predicates names
     the relations to follow outward (omit it to follow the namespace's
     registered containment predicates); depth bounds the traversal."""
+    grant = _grant(ctx, namespace, "r")
+    refs = [_parse_ref(s) for s in subjects]
+    for ref in refs:
+        _gate_type(grant, ref.type)
     req = AskRequest(
         namespace=namespace,
-        scope=ScopeSpec(
-            subjects=[_parse_ref(s) for s in subjects],
-            expand=expand_predicates or [],
-            depth=depth,
-        ),
+        scope=ScopeSpec(subjects=refs, expand=expand_predicates or [], depth=depth),
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
         valid_at=_parse_time(valid_at),
     )
     return build_pack(
-        _get_store(), req, embedder=_get_embedder()
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)
     ).model_dump(mode="json")
 
 
-def expand(handle: str, budget: int = 800) -> dict:
+def expand(handle: str, budget: int = 800, ctx: Context = None) -> dict:
     """Pull one thread deeper: pass an expansion handle id from a previous
     ask/ask_scope result to fetch the observations it stands for."""
-    return expand_pack(_get_store(), handle, budget).model_dump(mode="json")
+    meta = decode_handle(handle)
+    grant = _grant(ctx, meta["ns"], "r")
+    _gate_type(grant, str(meta["subject"].get("type", "")))
+    return expand_pack(_get_store(), handle, budget,
+                       allowed_types=_allowed(grant)).model_dump(mode="json")
 
 
 def record_claim(
@@ -174,6 +282,7 @@ def record_claim(
     namespace: str = "default",
     valid_from: str | None = None,
     valid_to: str | None = None,
+    ctx: Context = None,
 ) -> dict:
     """Write back a fact you learned. subject is 'type:key'; provide exactly
     one of object_ref (another 'type:key' entity — creates a graph edge) or
@@ -181,10 +290,17 @@ def record_claim(
     valid_from / valid_to are ISO timestamps."""
     if (object_ref is None) == (object_value is None):
         raise ValueError("provide exactly one of object_ref or object_value")
+    grant = _grant(ctx, namespace, "w")
+    if grant is not None and not grant.allows_source(source):
+        raise PermissionError(f"key {grant.id!r} may not write claims for source {source!r}")
+    subj = _parse_ref(subject)
+    _gate_type(grant, subj.type)
     obj: Any = _parse_ref(object_ref) if object_ref else object_value
+    if isinstance(obj, EntityRef):
+        _gate_type(grant, obj.type)
     claim = ClaimIn(
         namespace=namespace,
-        subject=_parse_ref(subject),
+        subject=subj,
         predicate=predicate,
         object=obj,
         observed_at=datetime.fromisoformat(observed_at),
@@ -193,18 +309,28 @@ def record_claim(
         source=source,
         confidence=confidence,
     )
+    problem = validate_claim(_get_store().get_schema(namespace), claim)
+    if problem is not None:
+        raise ValueError(problem)
     obs = _get_store().record_claim(claim)
     return {"status": "recorded", "observation_id": obs.id}
 
 
 def get_observations(
-    subject: str, namespace: str = "default", limit: int = 50
+    subject: str, namespace: str = "default", limit: int = 50, ctx: Context = None
 ) -> dict:
     """Raw observations touching an entity (audit/debug — prefer ask for
     focused context)."""
-    observations = _get_store().observations_for(
-        namespace, _parse_ref(subject), limit=limit
-    )
+    grant = _grant(ctx, namespace, "r")
+    ref = _parse_ref(subject)
+    _gate_type(grant, ref.type)
+    observations = [
+        o for o in _get_store().observations_for(namespace, ref, limit=limit)
+        if grant is None or (
+            grant.allows_entity_type(o.subject.type)
+            and (not isinstance(o.object, EntityRef)
+                 or grant.allows_entity_type(o.object.type)))
+    ]
     return {
         "subject": subject,
         "count": len(observations),
@@ -218,11 +344,15 @@ def answer(
     budget: int = 1200,
     namespace: str = "default",
     valid_at: str | None = None,
+    ctx: Context = None,
 ) -> dict:
     """Retrieval-grounded LLM answer with citations. Entities named verbatim
     in the question are auto-resolved when subject is omitted. Requires the
     server to have LOOM_LLM_* configured; use ask when it isn't."""
-    llm = llm_from_env()
+    grant = _grant(ctx, namespace, "r")
+    if subject:
+        _gate_type(grant, _parse_ref(subject).type)
+    llm = _get_llm()
     if llm is None:
         return {
             "error": "no LLM configured on this Loom (set LOOM_LLM_MODEL plus "
@@ -236,7 +366,8 @@ def answer(
         valid_at=_parse_time(valid_at),
     )
     try:
-        resp = build_answer(_get_store(), llm, req, embedder=_get_embedder())
+        resp = build_answer(_get_store(), llm, req, embedder=_get_embedder(),
+                            allowed_types=_allowed(grant))
     except UnresolvedQuestionError as exc:
         return {"error": str(exc)}
     except LLMError as exc:
@@ -271,10 +402,21 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8300)
     args = parser.parse_args()
+    global _transport
+    _transport = args.transport
     if args.transport == "stdio":
         mcp.run(transport="stdio")
-    else:
-        mcp.run(transport=args.transport, host=args.host, port=args.port)
+        return
+    import logging
+    import uvicorn
+    auth = _get_auth()
+    if not auth.enabled:
+        logging.getLogger("loom.mcp").warning(
+            "no LOOM_AUTH_FILE / LOOM_API_KEYS — MCP %s transport is OPEN; every "
+            "connected agent gets full access", args.transport)
+    app = (mcp.streamable_http_app(host=args.host) if args.transport == "streamable-http"
+           else mcp.sse_app(host=args.host))
+    uvicorn.run(KeyGate(app, auth), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

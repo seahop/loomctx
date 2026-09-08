@@ -13,7 +13,7 @@ presentable.
 | early Sep (done 2026-09-03) | Phases 0–2 working: contracts, store, ingestion (claims + documents), context packs, seed data, k8s manifests, CI |
 | mid Sep (done 2026-09-04) | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
 | late Sep (done 2026-09-04) | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
-| early Sep (started 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` |
+| early Sep (done 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
 | early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster, polish README for public visitors |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
@@ -34,8 +34,10 @@ presentable.
 - ✅ Seed corpus: `python -m loom.seed` — ~580 deterministic claims + 5
   documents across `netsec` and `procurement`, with planted demo moments
   (IP lease reassignment, two cross-source conflicts, incident report doc)
-- ⬜ Schema registry persistence + claim validation against registered
-  predicates (shapes exist; any predicate currently accepted)
+- ✅ Schema registry persistence + claim validation (2026-09-08, D-024):
+  `POST/GET /v1/schemas`, additive per namespace; registered predicates
+  enforce object types, `strict` namespaces reject the unregistered;
+  `containment` predicates drive default scope expansion
 
 ## Phase 2 — Retrieval + context packs ✅ (2026-09-03)
 
@@ -104,23 +106,25 @@ presentable.
   are repointed never dropped, and a query for a merged-away ref still
   resolves via its alias. Live-verified: doc-extracted facts reconcile onto
   the structured `ip:10.0.4.7`.
-- ⬜ Deeper resolution: embedding/fuzzy key matching (web-01 vs web01) and
-  LLM adjudication for ambiguous cases — exact-key-cross-type covers the
-  common extraction drift; typo/alias matching is the next increment.
+- ✅ Deeper resolution (2026-09-08, D-024): normalized-key matching
+  (web-01 / WEB_01 / web01) auto-merges same-type spelling drift; cross-type
+  collisions are adjudicated by the LLM with each record's facts as
+  evidence and merged only on a confident verdict.
 - ✅ **Document-excerpt retrieval + tunable budget (D-020, 2026-09-04):**
   artifacts are chunked + embedded; packs surface top-relevant passages as
   cited `doc_excerpt` items (RAG over the docs behind an entity's facts);
   `LOOM_MAX_BUDGET` makes the budget ceiling operator-tunable.
-- ⬜ Optional: sqlite-vec / pgvector for ANN search once embedded row counts
-  outgrow the current exact in-memory cosine (fine at seed/demo scale);
-  doc_excerpt expansion handles to pull surrounding chunks.
+- ✅ doc_excerpt expansion handles pull the surrounding passages (2026-09-08).
+- 🔨 Exact cosine now batches through numpy (`vector` extra, in the image);
+  sqlite-vec / pgvector ANN remains the option once embedded row counts
+  outgrow it (fine at seed/demo scale).
 
 ## Phase 5 — Hardening & spread 🔨
 
-- 🔨 **Review batch (2026-09-08):** the full verified issue list, with
-  pre-conference priorities and live status, is in `docs/hardening.md`.
-  P1 items there (auth gate bypasses, store rollback/dedupe races,
-  uncited briefs, worker resilience, seed idempotency) land first.
+- ✅ **Review batch (2026-09-08, D-021…D-024):** the full verified issue
+  list with status is `docs/hardening.md` — all items landed except two
+  documented won't-fixes. Includes `valid_at` (fact-time reads), MCP auth
+  on the HTTP transports, non-root containers, and the hardened worker.
 - ✅ **Postgres `GraphStore` (D-011, 2026-09-03):** selected by
   `LOOM_DB=postgresql://...`, behaviorally identical to SQLite (shared
   contract tests run against both; CI includes a live-Postgres pass).

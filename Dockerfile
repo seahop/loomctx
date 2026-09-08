@@ -9,8 +9,17 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector]"
 
+# Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
+# /data is created owned by that user, so a fresh named volume inherits it.
+RUN groupadd -r -g 10001 loom && useradd -r -u 10001 -g loom -d /app loom \
+    && mkdir -p /data && chown loom:loom /data /app
+USER loom
+
 ENV LOOM_DB=/data/loom.db
 VOLUME /data
 EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=4s --start-period=5s --retries=6 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).status == 200 else 1)"
 
 CMD ["uvicorn", "loom.api.http:app", "--host", "0.0.0.0", "--port", "8000"]

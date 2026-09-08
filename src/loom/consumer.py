@@ -100,6 +100,12 @@ async def run() -> None:
             msgs = await sub.fetch(BATCH, timeout=5)
         except (TimeoutError, NatsTimeoutError):
             continue
+        # audit trail (H-A10): which principals this batch came from — the
+        # gateway stamps the grant id, never the key, on each message
+        principals: dict[str, int] = {}
+        for m in msgs:
+            who = (m.headers or {}).get("Loom-Principal", "-")
+            principals[who] = principals.get(who, 0) + 1
         try:
             batch_counts = handle_batch(store, [m.data for m in msgs])
         except Exception:  # noqa: BLE001 — the store rolled back (D-022)
@@ -114,7 +120,7 @@ async def run() -> None:
             await msg.ack()
         for key, val in batch_counts.items():
             totals[key] += val
-        log.info("progress: %s", totals)
+        log.info("progress: %s (principals: %s)", totals, principals)
 
 
 def main() -> None:

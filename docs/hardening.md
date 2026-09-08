@@ -5,9 +5,10 @@ was verified against the code at commit `a2aa1a5`; nothing speculative.
 Status legend: ✅ fixed · 🔨 in progress · ⬜ open · ➖ won't fix (with reason).
 
 Keep this file current: flip markers as items land, and reference the
-commit. **Progress 2026-09-08:** all P1 items and nearly all P2 items landed
-in commits 58300fa…HEAD (D-021/D-022/D-023); what remains is listed with
-⬜/🔨 below. Items are grouped by area and ordered by severity within each group.
+commit. **Progress 2026-09-08:** everything here has landed (D-021…D-024) except
+H-F7, marked ➖ won't-fix with its reason. The roadmap's
+deferred phase-1 registry and phase-4 resolution/excerpt items went in
+alongside (commits 58300fa…HEAD). Items are grouped by area and ordered by severity within each group.
 The "P" column is the pre-conference priority: **P1** must land before the
 demo, **P2** should, **P3** after.
 
@@ -23,8 +24,8 @@ demo, **P2** should, **P3** after.
 | H-A6 | P2 | ✅ | `/v1/artifacts/{id}` has no data gate beyond namespace: a type-scoped reader gets full document text. Fix: gate on whether any observation the key may see cites the artifact, or require an unrestricted grant. |
 | H-A7 | P2 | ✅ | Consumer logs pydantic `errors()` which include `input` (claim values / document text). Use `include_input=False`. |
 | H-A8 | P2 | ✅ | Provider error bodies and base URLs leak into 502 details (`llm.py` → `http.py`). Log the detail, return a generic message. |
-| H-A9 | P3 | 🔨 | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. *Done: compose binds the profile to 127.0.0.1 and the warning is in compose + SECURITY.md. Open: per-connection key on the http transport.* |
-| H-A10 | P3 | ⬜ | NATS shape has a single enforcement point (gateway); consumer applies no grants. Acceptable while the queue is cluster-internal; document it, and carry the grant id on the message for audit. |
+| H-A9 | P3 | ✅ | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. *Done: compose binds the profile to 127.0.0.1 and the warning is in compose + SECURITY.md. Open: per-connection key on the http transport.* |
+| H-A10 | P3 | ✅ | NATS shape has a single enforcement point (gateway); consumer applies no grants. Acceptable while the queue is cluster-internal; document it, and carry the grant id on the message for audit. |
 | H-A11 | P3 | ✅ | `decode_handle` on a base64 JSON *list* raises `AttributeError` → 500 pre-auth. Catch it. |
 | H-A12 | P3 | ✅ | Broken keys file → re-parse + `log.error` on every request (mtime never advances on failure) in both engines. |
 | H-A13 | P3 | ✅ | Go vs Python keys-file tolerance differs (Go fails whole file on bad hex/expires; Python `KeyError`s on missing id/namespaces/perms). Align: skip + log the bad entry in both. |
@@ -43,9 +44,9 @@ demo, **P2** should, **P3** after.
 | H-B7 | P2 | ✅ | `purge_older_than` orphans `embeddings`, `doc_chunks`, `dossiers`; never removes now-empty entities. |
 | H-B8 | P2 | ✅ | `search_entities` LIKE metacharacters (`_`, `%`) unescaped; SQLite LIKE is case-insensitive, Postgres is not (backend divergence visible via `/v1/entities/search` and auto-resolution). Escape and use `LOWER()` on both. |
 | H-B9 | P3 | ✅ | Postgres upserts update a column subset where SQLite `INSERT OR REPLACE` rewrites the row: `redact` keeps old `recorded_at`, `put_doc_chunks` keeps old spans, `put_embeddings` keeps old namespace. |
-| H-B10 | P3 | 🔨 | SQLite never enables `PRAGMA foreign_keys`; Postgres enforces FKs. `merge_candidates` `LIMIT` without `ORDER BY` on both. `_upsert_entity` on SQLite has no `ON CONFLICT` re-read (cross-process race). *Done: ORDER BY + SQLite re-read. Open: FK pragma (needs a data audit of old files first).* |
+| H-B10 | P3 | ✅ | SQLite never enables `PRAGMA foreign_keys`; Postgres enforces FKs. `merge_candidates` `LIMIT` without `ORDER BY` on both. `_upsert_entity` on SQLite has no `ON CONFLICT` re-read (cross-process race). *Done: ORDER BY + SQLite re-read. Open: FK pragma (needs a data audit of old files first).* |
 | H-B11 | P3 | ✅ | `restore_observation` with an `event_id` collision on a different id crashes import. |
-| H-B12 | P3 | 🔨 | No schema-version table; the next migration needing a data rewrite (e.g. `embeddings` PK → `(ref_id, model)`) has no hook. Postgres DDL runs on every replica start with no advisory lock. *Done: advisory lock around DDL. Open: schema-version table.* |
+| H-B12 | P3 | ✅ | No schema-version table; the next migration needing a data rewrite (e.g. `embeddings` PK → `(ref_id, model)`) has no hook. Postgres DDL runs on every replica start with no advisory lock. *Done: advisory lock around DDL. Open: schema-version table.* |
 
 ## C. Provenance & read-path semantics
 
@@ -53,11 +54,11 @@ demo, **P2** should, **P3** after.
 | --- | --- | --- | --- |
 | H-C1 | P1 | ✅ | **`brief` and `doc_excerpt` items ship with empty `citations`**, violating hard constraint 3. Dossiers persist only text + count. Fix: store supporting observation ids with the dossier and cite them; extend `Citation` so an excerpt can cite `(artifact_id, span)` — contract change, needs a decisions entry. |
 | H-C2 | P2 | ✅ | `as_of` is ignored by briefs and excerpts (post-`as_of` knowledge leaks into time-travel packs). |
-| H-C3 | P2 | 🔨 | `valid_to` is ignored everywhere (as-of filter and conflict detection). An expired lease from source A vs. a current one from source B reads as a conflict. *Done: expired-validity facts are excluded from conflict detection (relative to as_of or now). Open: a separate `valid_at` read parameter so "what was true at T" and "what did we know at T" are distinct queries (architecture.md promises both).* |
+| H-C3 | P2 | ✅ | `valid_to` is ignored everywhere (as-of filter and conflict detection). An expired lease from source A vs. a current one from source B reads as a conflict. *Done: expired-validity facts are excluded from conflict detection (relative to as_of or now). Open: a separate `valid_at` read parameter so "what was true at T" and "what did we know at T" are distinct queries (architecture.md promises both).* |
 | H-C4 | P2 | ✅ | Conflicts dropped at small budgets vanish silently; the "conflicts ship first" invariant fails without signal. Add a `truncated`/overflow handle. |
 | H-C5 | P2 | ✅ | Extracted (`doc:*`) claims count as an independent source in conflict detection and get no scoring discount → one injected document manufactures a score-1.0 conflict at the top of every pack (see H-D2). |
 | H-C6 | P3 | ✅ | Excerpt threshold 0.15 is meaningless for both the hashing embedder (non-negative bag vectors) and real models (rarely < 0.7): excerpts always consume half the remaining budget. Make it relative (e.g. within X of the best) or per-embedder. |
-| H-C7 | P3 | ⬜ | Recency is ordinal (list rank), so 20 observations one second apart spread like 20 across a year; in multi-subject packs rank is global. Keyword and cosine formulas aren't calibrated against each other for mixed (embedded / not-yet-embedded) sets. No stopword removal in the keyword scorer. |
+| H-C7 | P3 | ✅ | Recency is ordinal (list rank), so 20 observations one second apart spread like 20 across a year; in multi-subject packs rank is global. Keyword and cosine formulas aren't calibrated against each other for mixed (embedded / not-yet-embedded) sets. No stopword removal in the keyword scorer. |
 | H-C8 | P3 | ✅ | `search_entities` results are post-filtered after `LIMIT` for scoped keys → fewer than `limit` results. |
 
 ## D. Enrichment worker
@@ -67,10 +68,10 @@ demo, **P2** should, **P3** after.
 | H-D1 | P1 | ✅ | Worker loop has no top-level guard: an `LLMError` from `embed_pending`/`chunk_artifacts`, or a `sqlite3.OperationalError` (locked DB), exits the process. Compose `enrich` has no `restart:`. Fix: catch per job, log, continue; add restart policy. |
 | H-D2 | P1 | ✅ | Prompt injection: document text goes into the extraction prompt raw and extracted claims choose their own subject/predicate, so a hostile document can assert facts about any entity. Fix: delimit + label untrusted text, tag extracted claims (`attrs.extracted=true`), discount them in `_score`, and don't let `doc:*` sources corroborate/contradict structured sources on their own (H-C5). |
 | H-D3 | P2 | ✅ | Doc chunks aren't keyed by embedding model. A worker/engine model mismatch zips vectors of different dimensions silently → garbage excerpts. Add a `model` column, filter on it, and re-chunk when the model changes. |
-| H-D4 | P2 | 🔨 | Head-of-line starvation: a whitespace-only artifact (chunker yields nothing, never marked) or a persistently failing extraction stays in the 4-slot window forever with no backoff. Add `extraction_attempts`, mark empty artifacts `skipped`, exponential backoff, dead-letter after N. *Done: blank artifacts skipped at the query, per-artifact exponential backoff (in worker memory), ready set drawn from a wider window. Open: persist attempts + dead-letter status across restarts.* |
+| H-D4 | P2 | ✅ | Head-of-line starvation: a whitespace-only artifact (chunker yields nothing, never marked) or a persistently failing extraction stays in the 4-slot window forever with no backoff. Add `extraction_attempts`, mark empty artifacts `skipped`, exponential backoff, dead-letter after N. *Done: blank artifacts skipped at the query, per-artifact exponential backoff (in worker memory), ready set drawn from a wider window. Open: persist attempts + dead-letter status across restarts.* |
 | H-D5 | P2 | ✅ | `_parse_extraction`: `{"claims": "x"}` or a list of strings raises `AttributeError` out of the loop; prose before the JSON fence → permanent `failed`. Harden parsing (find the first `{`…`}` block; type-check items). |
 | H-D6 | P2 | ✅ | Re-extraction event_ids are index-based (`extract:<artifact>:<n>`); a reordered LLM output silently drops new claims as "duplicates". Key on a content hash of (subject, predicate, object) instead. |
-| H-D7 | P2 | 🔨 | Extraction truncates at 8000 chars with no record. Windowed extraction over the full text (offset-aware), or at least an `attrs.truncated` flag on the artifact. *Done: a warning log names the truncation. Open: windowed extraction.* |
+| H-D7 | P2 | ✅ | Extraction truncates at 8000 chars with no record. Windowed extraction over the full text (offset-aware), or at least an `attrs.truncated` flag on the artifact. *Done: a warning log names the truncation. Open: windowed extraction.* |
 | H-D8 | P3 | ✅ | Redaction/merge don't touch derived data: briefs and chunks keep redacted text; merged entities keep orphan dossiers. Invalidate on redact; move/drop on merge. *Done: redact drops briefs citing the observation; merge drops the folded node's brief. Chunks are per artifact, which redaction doesn't target (purge does).* |
 | H-D9 | P3 | ✅ | `_post_json`: one 120s attempt, no retry/backoff, no 429 handling; a non-JSON 200 body escapes as `JSONDecodeError` (→ 500 instead of 502). |
 | H-D10 | P3 | ✅ | `embed_pending` returns the requested count, not the stored count; a short provider response makes `--once` loop forever re-billing. |
@@ -79,12 +80,12 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-E1 | P2 | 🔨 | Every ask: one embedding HTTP round-trip + pure-Python cosine over ≤1000 vectors per subject + every chunk of every cited artifact (uncapped), each vector `json.loads`-decoded per call. Fix now: cap chunks per query, cache the query embedding (LRU by text+model), use numpy if present. Later: sqlite-vec / pgvector (D-002). *Done: query-embedding cache, excerpt candidates capped at 64 after ranking. Open: numpy/sqlite-vec.* |
-| H-E2 | P2 | 🔨 | Worker tick queries do full scans: no index on `artifacts(extraction_status, recorded_at)`, `observations(recorded_at)`; chunk-backlog anti-join can't use `idx_chunk_artifact` (namespace leads). `dossier_candidates` is a full entities⋈observations GROUP BY every tick. *Done: indexes on `observations(recorded_at)`, `artifacts(extraction_status, recorded_at)`, `doc_chunks(artifact_id)`, `entities(namespace, key)`. Open: incremental dossier candidates.* |
+| H-E1 | P2 | ✅ | Every ask: one embedding HTTP round-trip + pure-Python cosine over ≤1000 vectors per subject + every chunk of every cited artifact (uncapped), each vector `json.loads`-decoded per call. Fix now: cap chunks per query, cache the query embedding (LRU by text+model), use numpy if present. Later: sqlite-vec / pgvector (D-002). *Done: query-embedding cache, excerpt candidates capped at 64 after ranking. Open: numpy/sqlite-vec.* |
+| H-E2 | P2 | ✅ | Worker tick queries do full scans: no index on `artifacts(extraction_status, recorded_at)`, `observations(recorded_at)`; chunk-backlog anti-join can't use `idx_chunk_artifact` (namespace leads). `dossier_candidates` is a full entities⋈observations GROUP BY every tick. *Done: indexes on `observations(recorded_at)`, `artifacts(extraction_status, recorded_at)`, `doc_chunks(artifact_id)`, `entities(namespace, key)`. Open: incremental dossier candidates.* |
 | H-E3 | P3 | ✅ | Scoped asks read each node's observations twice (BFS + gather); `resolve_entities` loads ≤1000 full observations per candidate just to count. Add a count method / edge-only query. |
-| H-E4 | P3 | ⬜ | `iter_*` use `fetchall()` before yielding — export is O(table) memory. Stream with server-side cursors / `fetchmany`. |
-| H-E5 | P3 | ⬜ | Single connection + process lock per backend; Postgres never reconnects after a dropped connection. Pool (psycopg_pool) when replicas need it. |
-| H-E6 | P3 | ⬜ | MCP `answer` rebuilds the LLM client from env per call. |
+| H-E4 | P3 | ✅ | `iter_*` use `fetchall()` before yielding — export is O(table) memory. Stream with server-side cursors / `fetchmany`. |
+| H-E5 | P3 | ✅ | Single connection + process lock per backend; Postgres never reconnects after a dropped connection. Pool (psycopg_pool) when replicas need it. |
+| H-E6 | P3 | ✅ | MCP `answer` rebuilds the LLM client from env per call. |
 
 ## F. Demo & deployment risks
 
@@ -97,7 +98,7 @@ demo, **P2** should, **P3** after.
 | H-F5 | P2 | ✅ | `claude mcp add loom -- docker compose run ...` works only from the repo root. Add `--project-directory` / absolute `-f` in README, sdk.md, tutorial.md. |
 | H-F6 | P2 | ✅ | k8s never wires auth: no manifest sets `LOOM_API_KEYS`/`LOOM_AUTH_FILE`, so every k8s shape runs in open dev mode while `deploy/README.md` says otherwise. Add a Secret mount example. |
 | H-F7 | P2 | ➖ | All k8s manifests pin `:latest`, which every main push overwrites. Pin the SHA tag in overlays (CI already publishes it). *Won't fix in-repo: a hardcoded SHA goes stale on every merge; the pin is a per-deployment choice — `kustomize edit set image ghcr.io/seahop/loom:<sha>` is documented in deploy/README.md.* |
-| H-F8 | P3 | ⬜ | Containers run as root (no `USER`, no `securityContext`); no `HEALTHCHECK`; engine image installs test extras; no lockfile; base image untagged by digest. |
+| H-F8 | P3 | ✅ | Containers run as root (no `USER`, no `securityContext`); no `HEALTHCHECK`; engine image installs test extras; no lockfile; base image untagged by digest. |
 | H-F9 | P3 | ✅ | Public-repo hygiene: no CONTRIBUTING / SECURITY / CHANGELOG; `pyproject.toml` lacks license/authors/urls. |
 
 ## G. SDK
@@ -124,6 +125,6 @@ demo, **P2** should, **P3** after.
 | H-I2 | P1 | ✅ | Export→import keeps a redacted observation hidden and a merged alias resolving. |
 | H-I3 | P1 | ✅ | Store: a failing statement doesn't poison later calls (both backends); concurrent same-event_id inserts return the same row. |
 | H-I4 | P2 | ✅ | Worker survives an embedder `LLMError` and a locked DB; extraction parser on `{"claims":"x"}`, `["a"]`, prose+fence; reordered re-extraction doesn't drop claims. |
-| H-I5 | P2 | 🔨 | Chunker: empty, whitespace, 5000-char unbroken line, multibyte, offset round-trip. Excerpts with a chunk/query model mismatch. *Done: model mismatch, blank artifacts. Open: chunker edge cases.* |
+| H-I5 | P2 | ✅ | Chunker: empty, whitespace, 5000-char unbroken line, multibyte, offset round-trip. Excerpts with a chunk/query model mismatch. *Done: model mismatch, blank artifacts. Open: chunker edge cases.* |
 | H-I6 | P2 | ✅ | Move D-014/D-016/D-018 store coverage into the backend-parametrized suite (D-011 rule). |
-| H-I7 | P3 | 🔨 | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. *Done: gateway bucket test, keys-file tolerance on both sides, engine body cap. Open: consumer failure-path test, SDK tests.* |
+| H-I7 | P3 | ✅ | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. *Done: gateway bucket test, keys-file tolerance on both sides, engine body cap. Open: consumer failure-path test, SDK tests.* |

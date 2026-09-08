@@ -13,7 +13,7 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | Tool | Purpose |
 | --- | --- |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
-| `ask(subject, question, budget, as_of?)` | Budgeted, cited context on one entity |
+| `ask(subject, question, budget, as_of?, valid_at?)` | Budgeted, cited context on one entity (`as_of` = known at T, `valid_at` = true at T) |
 | `ask_scope(subjects, question, expand_predicates?, depth?)` | Several entities, or an anchor + contents ("domain:corp.local" over `member_of`) |
 | `expand(handle, budget)` | Progressive disclosure — pull one thread deeper |
 | `record_claim(subject, predicate, ..., object_ref \| object_value)` | Agents write back facts they learn |
@@ -29,8 +29,13 @@ claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loo
 Remote agents use streamable HTTP:
 
 ```bash
-docker compose --profile mcp up -d mcp     # MCP endpoint at :8300/mcp
+docker compose --profile mcp up -d mcp     # MCP endpoint at 127.0.0.1:8300/mcp
 ```
+
+With `LOOM_AUTH_FILE` / `LOOM_API_KEYS` set, the HTTP transports require the
+same `X-Loom-Key` / `Authorization: Bearer` header as the REST API on every
+request, and each tool call is scoped by that key's grants (D-024). stdio is
+local trust: the agent that spawned the process already owns the data.
 
 Design rules:
 - Every tool result fits the budget and carries citations — an agent can quote Loom
@@ -53,11 +58,12 @@ GET  /v1/artifacts/{id}                          # stored document, verbatim
 POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
 POST /v1/expand                                  # ExpandRequest -> ContextPack
 POST /v1/answer                                  # retrieval-grounded LLM answer (503 until an LLM is configured, D-012)
-GET  /readyz, GET /metrics                       # store-probing readiness, Prometheus
+POST /v1/schemas, GET /v1/schemas                # per-namespace registry: entity types, predicates, strictness (D-024)
+GET  /readyz, GET /metrics                       # store-probing readiness (+ schema_version), Prometheus
 ```
 
-Not yet served: `POST /v1/schemas` (schema-registry persistence is the open
-phase-1 item in `roadmap.md`; the shapes exist in `contracts.py`).
+Every read takes `as_of` (what was *known* at T) and/or `valid_at` (what was
+*true* at T — e.g. which host held an IP during an incident window).
 
 Multi-entity questions use a **scope** instead of a subject — several
 computers at once, or an anchor expanded over containment predicates:
@@ -79,7 +85,7 @@ operations.
 Generate real keys (hashed at rest, plaintext printed once):
 
 ```bash
-docker compose run --rm -v $PWD/secrets:/secrets loom \
+docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom \
   python -m loom.keys --file /secrets/keys.json generate \
   --id netsec-shipper --namespace netsec --perms w \
   --entity-types host,ip,user --sources auth-log --expires-days 180
@@ -128,6 +134,14 @@ more = loom.expand(pack["handles"][0]["id"])
 pack = loom.ask(None, "what changed?", scope={
     "subjects": [{"type": "domain", "key": "corp.local"}],
     "expand": ["member_of"], "depth": 1})
+
+# fact time: which host HELD this ip on Aug 20 (vs. as_of = what we knew then)
+pack = loom.ask(("ip", "10.0.4.7"), "which host?", valid_at="2026-08-20T00:00:00Z")
+
+# declare the domain once; strict namespaces reject unregistered predicates
+loom.register_schema(
+    entity_types=[{"name": "host"}, {"name": "domain"}],
+    predicates=[{"name": "member_of", "object_types": ["domain"], "containment": True}])
 
 # retrieval-grounded LLM answer (server has LOOM_LLM_* configured; entities
 # named in the question are auto-resolved)

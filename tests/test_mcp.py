@@ -103,3 +103,77 @@ def test_call_tool_through_mcp_layer(store):
         mcp_server.mcp.call_tool("find_entity", {"query": "web-01"})
     )
     assert "host:web-01" in str(result)
+
+
+# ------------------------------------------------------------- auth (H-A9) #
+
+class _Ctx:
+    def __init__(self, key=None):
+        self.headers = {"x-loom-key": key} if key else {}
+
+
+def _keyed_auth(monkeypatch):
+    monkeypatch.setenv("LOOM_API_KEYS", "reader:default:r,writer:default:rw")
+    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
+    from loom.auth import AuthConfig
+    return AuthConfig.from_env()
+
+
+def test_stdio_transport_is_local_trust(store, monkeypatch):
+    auth = _keyed_auth(monkeypatch)
+    mcp_server.configure(store, auth=auth, transport="stdio")
+    assert mcp_server.find_entity("web-01")  # no headers, no gate
+
+
+def test_http_transport_requires_key_per_tool_call(store, monkeypatch):
+    auth = _keyed_auth(monkeypatch)
+    mcp_server.configure(store, auth=auth, transport="streamable-http")
+    with pytest.raises(PermissionError, match="API key"):
+        mcp_server.find_entity("web-01", ctx=_Ctx())
+    with pytest.raises(PermissionError):
+        mcp_server.ask("host:web-01", "who?", ctx=_Ctx("nope"))
+    assert mcp_server.find_entity("web-01", ctx=_Ctx("reader"))
+    pack = mcp_server.ask("host:web-01", "who logged in?", budget=2000, ctx=_Ctx("reader"))
+    assert any("jdoe" in i["text"] for i in pack["items"])
+    with pytest.raises(PermissionError, match="'w'"):
+        mcp_server.record_claim(subject="host:web-01", predicate="p",
+                                observed_at="2026-09-03T12:00:00Z", source="s",
+                                object_value="v", ctx=_Ctx("reader"))
+    assert mcp_server.record_claim(subject="host:web-01", predicate="p",
+                                   observed_at="2026-09-03T12:00:00Z", source="s",
+                                   object_value="v", ctx=_Ctx("writer"))["status"] == "recorded"
+    with pytest.raises(PermissionError, match="namespace"):
+        mcp_server.ask("host:web-01", "who?", namespace="secret", ctx=_Ctx("reader"))
+
+
+def test_ctx_parameter_is_hidden_from_tool_schemas(store):
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    for name in ("find_entity", "ask", "ask_scope", "expand", "record_claim",
+                 "get_observations", "answer"):
+        assert "ctx" not in tools[name].input_schema.get("properties", {}), name
+
+
+def test_key_gate_middleware_rejects_before_mcp(monkeypatch):
+    auth = _keyed_auth(monkeypatch)
+    seen = []
+
+    async def inner(scope, receive, send):
+        seen.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    gate = mcp_server.KeyGate(inner, auth)
+
+    async def call(headers):
+        out = []
+
+        async def send(m):
+            out.append(m)
+
+        await gate({"type": "http", "path": "/mcp", "headers": headers}, None, send)
+        return out[0]["status"]
+
+    assert asyncio.run(call([])) == 401
+    assert asyncio.run(call([(b"x-loom-key", b"bogus")])) == 403
+    assert asyncio.run(call([(b"authorization", b"Bearer reader")])) == 200
+    assert seen == ["/mcp"]

@@ -192,7 +192,7 @@ agent can only *read* the slice they're cleared for — see
 **[administration.md](administration.md)**:
 
 ```bash
-docker compose run --rm -v $PWD/secrets:/secrets loom \
+docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom \
   python -m loom.keys --file /secrets/keys.json generate \
   --id nessus-feed --namespace vuln --perms w \
   --entity-types asset,cve,scanner --sources nessus

@@ -13,15 +13,17 @@ import (
 )
 
 type fakeForwarder struct {
-	kind    string
-	payload []byte
-	calls   int
+	kind      string
+	payload   []byte
+	principal string
+	calls     int
 }
 
-func (f *fakeForwarder) forward(_ context.Context, kind, _ string, payload []byte) (int, []byte, error) {
+func (f *fakeForwarder) forward(_ context.Context, kind, _, principal string, payload []byte) (int, []byte, error) {
 	f.calls++
 	f.kind = kind
 	f.payload = payload
+	f.principal = principal
 	return http.StatusOK, []byte(`{"status":"recorded"}`), nil
 }
 
@@ -150,6 +152,10 @@ func TestAuthValidKeyForwards(t *testing.T) {
 	rec := postWithKey(testServerAuth(t, fwd, authKeys), validClaim, "agentsecret")
 	if rec.Code != http.StatusOK || fwd.calls != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", rec.Code, fwd.calls, rec.Body.String())
+	}
+	// the principal (grant id) is attributed, the key itself never travels
+	if fwd.principal != "env-0" {
+		t.Fatalf("principal = %q, want env-0", fwd.principal)
 	}
 }
 

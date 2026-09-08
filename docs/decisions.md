@@ -504,6 +504,55 @@ entry. `ExpansionHandle` gained `kind: "more" | "conflict"`.
   at the query; provider calls retry transient failures with backoff and
   honor `Retry-After`.
 
+## D-024 · Closing the review: two time axes, registry served, resolution tier 2, MCP auth (2026-09-08)
+
+The remainder of `docs/hardening.md` plus the roadmap's deferred phase-1
+and phase-4 items, landed as four commits (303b225…HEAD).
+
+- **Two time axes are now two parameters.** `as_of` is knowledge time
+  (hide what was recorded after T); the new `valid_at` is fact time (keep
+  only observations whose validity window covers T; un-windowed facts are
+  timeless and kept). "Which host *held* 10.0.4.7 on Aug 20" is
+  `valid_at`; "what did we *know* on Aug 20" is `as_of`. Handles inherit
+  both. Ranking recency is time-decayed (30-day half-life relative to the
+  newest gathered fact) rather than rank-based, stopwords are dropped from
+  the keyword scorer, and when an embedder serves, un-embedded facts use
+  the same formula with a neutral cosine so populations stay comparable.
+- **Schema registry served** (`POST`/`GET /v1/schemas`, SDK
+  `register_schema()`), additive by name, persisted per namespace. A
+  registered predicate always enforces its `object_types`; a `strict`
+  namespace rejects unregistered predicates and entity types (422).
+  `PredicateDef.containment` marks the relations a scope follows when the
+  caller names none — the D-012 promise. Domain knowledge stays data.
+- **Entity resolution tier 2.** Entities carry a normalized key
+  (lowercase, punctuation stripped). Same-type collisions
+  (`web-01`/`WEB_01`/`web01`) are spelling drift and auto-merge into the
+  most-connected member. Cross-type collisions are ambiguous: the worker
+  asks the LLM with each record's facts as evidence and merges only on a
+  confident "same" (≥0.8); declined pairs aren't re-asked. Spelling alone
+  never merges across types.
+- **Extraction covers the whole document** in overlapping ~8k windows;
+  backoff and attempt counts persist on the artifact (dead-letter as
+  `failed` after 5); a garbled reply is retried like a provider error.
+- **Excerpt handles:** each `doc_excerpt` carries an `excerpt` handle that
+  expands to the cited passage with its neighbours (artifact gate applies).
+- **MCP auth on the HTTP transports.** stdio stays local trust. For
+  streamable-http/SSE an ASGI gate rejects requests without a valid key,
+  and every tool call applies the key's namespace/perms/type/source gates
+  through the request headers — the same rules as the REST routes.
+- **Stores:** versioned one-shot migrations on a `loom_meta` table (v2 =
+  norm-key backfill) beside the idempotent DDL; SQLite enforces foreign
+  keys (a startup check reports pre-existing dangling rows instead of
+  refusing to start); Postgres reconnects a dropped connection; exports
+  stream in keyset pages; dossier candidates count only observations
+  recorded since the last brief.
+- **Containers run as uid 10001** with image `HEALTHCHECK`s; k8s pods set
+  `runAsNonRoot`/`fsGroup`. Bind-mounted admin recipes pass `--user`.
+  Queued messages carry the sender's grant id (`Loom-Principal`) so the
+  writer's log attributes each batch; the key itself never travels.
+- Optional `vector` extra (numpy) batches the cosine loop; the image
+  installs it, pure Python remains the fallback.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -52,9 +52,11 @@ func newValidator(schemasPath string) (*jsonschema.Schema, error) {
 // --------------------------------------------------------------- forwarders
 
 type forwarder interface {
-	// forward relays a validated envelope; kind is "claim" or "document";
-	// apiKey travels with it in HTTP mode so the engine re-authenticates.
-	forward(ctx context.Context, kind, apiKey string, payload []byte) (status int, body []byte, err error)
+	// forward relays a validated envelope; kind is "claim" or "document".
+	// apiKey travels with it in HTTP mode so the engine re-authenticates;
+	// principal (the grant id, never the key) rides on queued messages as a
+	// header so the writer can attribute what it stores (H-A10).
+	forward(ctx context.Context, kind, apiKey, principal string, payload []byte) (status int, body []byte, err error)
 	close()
 }
 
@@ -67,7 +69,7 @@ func newHTTPForwarder(url string) *httpForwarder {
 	return &httpForwarder{url: url, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (f *httpForwarder) forward(ctx context.Context, _, apiKey string, payload []byte) (int, []byte, error) {
+func (f *httpForwarder) forward(ctx context.Context, _, apiKey, _ string, payload []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		f.url+"/v1/ingest", bytes.NewReader(payload))
 	if err != nil {
@@ -136,8 +138,14 @@ func newNATSForwarder(url string) (*natsForwarder, error) {
 	return &natsForwarder{nc: nc, js: js}, nil
 }
 
-func (f *natsForwarder) forward(ctx context.Context, kind, _ string, payload []byte) (int, []byte, error) {
-	if _, err := f.js.Publish(ctx, "loom.ingest."+kind, payload); err != nil {
+const principalHeader = "Loom-Principal"
+
+func (f *natsForwarder) forward(ctx context.Context, kind, _, principal string, payload []byte) (int, []byte, error) {
+	msg := &nats.Msg{Subject: "loom.ingest." + kind, Data: payload, Header: nats.Header{}}
+	if principal != "" {
+		msg.Header.Set(principalHeader, principal)
+	}
+	if _, err := f.js.PublishMsg(ctx, msg); err != nil {
 		return 0, nil, err
 	}
 	return http.StatusAccepted, []byte(`{"status":"queued"}`), nil
@@ -288,7 +296,11 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 				return
 			}
 		}
-		status, respBody, err := fwd.forward(r.Context(), kind, apiKey, body)
+		principal := ""
+		if g != nil {
+			principal = g.ID
+		}
+		status, respBody, err := fwd.forward(r.Context(), kind, apiKey, principal, body)
 		if err != nil {
 			m.upstreamErr.Add(1)
 			writeJSON(w, http.StatusBadGateway,

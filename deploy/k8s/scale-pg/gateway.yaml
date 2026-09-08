@@ -17,6 +17,13 @@ spec:
       labels:
         app: loom-gateway
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: gateway
           image: ghcr.io/seahop/loom-gateway:latest

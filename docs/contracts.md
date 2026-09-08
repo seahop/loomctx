@@ -123,8 +123,19 @@ handle rather than disappearing. Handles feed `POST /v1/expand`; with
 ## Schema registry
 
 `SchemaRegistration`: per-namespace `entity_types` (name, description, facets) and
-`predicates` (name, description, allowed object types). Registered at runtime via
-`POST /v1/schemas`; this is what keeps the core domain-agnostic.
+`predicates` (name, description, allowed object types, `containment`), plus
+`strict`. Registered at runtime via `POST /v1/schemas` (additive by name;
+`GET /v1/schemas` reads it back). A registered predicate's `object_types`
+are enforced on ingest; a strict namespace rejects unregistered predicates
+and entity types; containment predicates are what a scope follows when the
+caller names none (D-024). This is what keeps the core domain-agnostic.
+
+## Time axes on reads
+
+`AskRequest`/`AnswerRequest` carry `as_of` (knowledge time: hide what was
+recorded after T) and `valid_at` (fact time: keep only observations whose
+validity window covers T; un-windowed facts are timeless and kept). Both
+ride on expansion handles.
 
 ## Compatibility rules
 

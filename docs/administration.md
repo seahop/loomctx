@@ -34,7 +34,11 @@ git. It contains only hashes, but grants are still access metadata.
 
 ## Recipes
 
-All commands run in the container (`docker compose run --rm -v $PWD/secrets:/secrets loom python -m loom.keys --file /secrets/keys.json ...`).
+All commands run in the container (`docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom python -m loom.keys --file /secrets/keys.json ...`).
+The `--user` flag matters: the image runs as an unprivileged user (uid
+10001), so a bind-mounted `secrets/` owned by you would otherwise be
+read-only to it. On Kubernetes the mounted Secret is readable by that uid
+because the manifests set `fsGroup: 10001`.
 
 **Onboard a sender** (a log shipper that may only write auth-log facts about
 hosts/users/ips into netsec, expiring in 6 months):

@@ -494,3 +494,22 @@ def test_cross_type_collision_needs_adjudication(tmp_path):
     assert adjudicate_entities(store, Judge()) == 0 and len(prompts) == asked  # declined pair not re-asked
     obs = store.observations_for("default", host, limit=50)
     assert any(o.predicate == "cve_finding" for o in obs)
+
+
+# ------------------------------------------------ chunker edge cases (H-I5) #
+
+def test_chunker_edge_cases():
+    from loom.enrich import _chunk_text
+    assert _chunk_text("") == []
+    assert _chunk_text("   \n\t ") == []
+    one = "x" * 5000                      # no whitespace at all: hard cuts
+    pieces = _chunk_text(one)
+    assert all(len(p[2]) <= 800 for p in pieces) and "".join(p[2] for p in pieces) == one
+    multi = "Ünïcødé pärägraph 一二三四五. " * 60
+    pieces = _chunk_text(multi)
+    for start, end, text in pieces:       # offsets are code-point exact
+        assert multi[start:end] == text
+    assert sum(len(p[2]) for p in pieces) <= len(multi)
+    paras = "\n\n".join(f"para {i} " + "word " * 60 for i in range(5))
+    pieces = _chunk_text(paras)
+    assert len(pieces) >= 3 and all(paras[s:e] == t for s, e, t in pieces)

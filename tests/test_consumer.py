@@ -41,3 +41,22 @@ def test_batch_mixes_kinds_and_survives_poison(tmp_path):
     assert counts == {"recorded": 2, "accepted": 1, "skipped": 1}
     obs = store.observations_for("default", EntityRef(type="host", key="web-01"))
     assert len(obs) == 2
+
+
+def test_store_failure_propagates_so_the_batch_is_redelivered(tmp_path, monkeypatch):
+    """H-I7: a store error inside a batch is NOT swallowed (the run loop
+    leaves the batch un-acked for redelivery) and nothing partial lands."""
+    import pytest
+    from loom.consumer import handle_batch
+    store = SqliteStore(tmp_path / "c.db")
+
+    def boom(claims):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "record_claims", boom)
+    with pytest.raises(RuntimeError):
+        handle_batch(store, [CLAIM, DOCUMENT])
+    assert store.observations_for("default", EntityRef(type="host", key="web-01")) == []
+    monkeypatch.undo()
+    counts = handle_batch(store, [CLAIM, DOCUMENT])  # the redelivery succeeds
+    assert counts["recorded"] == 1 and counts["accepted"] == 1

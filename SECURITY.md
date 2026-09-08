@@ -25,10 +25,11 @@ D-023). In short:
   *contains*.
 - **Document text is untrusted input.** Extraction prompts label it as
   data; extracted claims are tagged and rank below sender-asserted facts.
-- **Known gaps** are tracked openly in `docs/hardening.md`. Today the
-  biggest is that the MCP streamable-HTTP transport carries no
-  per-connection key of its own — it binds to localhost by default and must
-  sit behind your own auth before being exposed.
+- **MCP transports:** stdio is local trust (the spawning agent owns the
+  data); the HTTP transports require the same API key as the REST routes
+  on every request and apply the key's data gates per tool call. The
+  compose profile still binds to localhost by default.
+- **Known gaps** are tracked openly in `docs/hardening.md`.
 
 ## Supported versions
 
