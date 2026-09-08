@@ -677,3 +677,61 @@ def test_postgres_read_replica_pool(tmp_path):
     same = PostgresStore(url, read_dsn=url)   # identical DSN: no second pool
     assert same._read_pool is None
     same.close()
+
+
+# ------------------------------------------------- worker fleet (D-031) #
+
+def test_extraction_leases_are_exclusive_and_expire(store):
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    ids = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED)).id
+           for i in range(3)]
+    now = OBSERVED
+    a = store.pending_artifacts(2, now=now, lease=("worker-a", 300))
+    b = store.pending_artifacts(5, now=now, lease=("worker-b", 300))
+    assert [x.id for x in a] == ids[:2] and [x.id for x in b] == ids[2:]
+    assert store.pending_artifacts(5, now=now, lease=("worker-a", 300)) == []   # all claimed
+    # an unleased read (tests, ops) still sees everything pending
+    assert len(store.pending_artifacts(5, now=now)) == 3
+    # completion releases; the rest come back once the lease expires
+    store.set_extraction_status("default", ids[0], "done")
+    later = now + timedelta(seconds=301)
+    again = store.pending_artifacts(5, now=later, lease=("worker-c", 300))
+    assert [x.id for x in again] == ids[1:]
+    # a deferral releases the lease too, but the backoff still holds it back
+    store.defer_extraction("default", ids[1], 1, later + timedelta(minutes=10))
+    assert [x.id for x in store.pending_artifacts(5, now=later + timedelta(seconds=301),
+                                                   lease=("worker-d", 300))] == [ids[2]]
+
+
+def test_chunk_and_dossier_leases(store):
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="hello world", source="s", observed_at=OBSERVED))
+    assert [x.id for x in store.artifacts_needing_chunks("m", 4, lease=("a", 300))] == [art.id]
+    assert store.artifacts_needing_chunks("m", 4, lease=("b", 300)) == []
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 11, "hello world", [1.0])])
+    assert store.artifacts_needing_chunks("m", 4, lease=("b", 300)) == []  # done, not just released
+
+    for host in ("h1", "h2"):
+        for i in range(5):
+            store.record_claim(login_claim().model_copy(update={
+                "subject": EntityRef(type="host", key=host),
+                "object": EntityRef(type="user", key=f"u{i}")}))
+    first = store.dossier_candidates(min_new=20, min_total=5, lease=("a", 300))
+    assert {c[1].key for c in first} == {"h1", "h2"}
+    assert store.dossier_candidates(min_new=20, min_total=5, lease=("b", 300)) == []
+    store.put_dossier("default", EntityRef(type="host", key="h1"), "brief", 5, [])
+    assert store.dossier_candidates(min_new=20, min_total=5) == []  # h1 built, h2 leased
+
+
+def test_embedding_backlog_shards_partition_the_work(store):
+    host = EntityRef(type="host", key="web-01")
+    ids = {store.record_claim(login_claim().model_copy(update={
+        "object": EntityRef(type="user", key=f"u{i}")})).id for i in range(24)}
+    seen: list[str] = []
+    for i in range(4):
+        part = [o.id for o in store.observations_without_embeddings("m", 100, shard=(i, 4))]
+        assert not set(part) & set(seen)
+        seen += part
+    assert set(seen) == ids
+    assert {o.id for o in store.observations_without_embeddings("m", 100, shard=(0, 1))} == ids

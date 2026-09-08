@@ -789,6 +789,29 @@ Two small fixes fell out: the seed CLI printed the DSN with the
 operator-issued password (now redacted), and the store's startup wait for
 Postgres is 180 s to cover an operator bootstrap.
 
+## D-031 · Worker fleet: leased jobs and a sharded backlog (2026-09-08, phase 6.4)
+
+One enrichment process with no coordination meant two workers would mine
+the same document twice (D-027 #4). Now N workers share the backlog:
+
+- **Leases for the LLM-priced work.** `pending_artifacts`,
+  `artifacts_needing_chunks` and `dossier_candidates` take
+  `lease=(worker_id, seconds)` and *claim* what they return — one atomic
+  statement (`UPDATE … RETURNING`, `FOR UPDATE SKIP LOCKED` on Postgres,
+  inside a `MATERIALIZED` CTE because an inline subquery under `IN` does
+  not honour its `LIMIT`) — so no two workers hold the same artifact or
+  entity. Completion releases the lease (`set_extraction_status`,
+  `put_doc_chunks`, `put_dossier`, `defer_extraction`); a crashed worker's
+  lease simply expires (`LOOM_LEASE_SECONDS`, default 600).
+- **A hash partition for the cheap, idempotent work.** Embeddings are
+  split by the observation id's last hex digit across
+  `LOOM_WORKER_SHARD="i/n"` (or the StatefulSet ordinal with
+  `LOOM_WORKER_COUNT`); no locks, no double calls, n ≤ 16.
+- **Workers have identities** (`LOOM_WORKER_ID`, default hostname) that
+  land on the claim for audit. `scale-pg` gains a `loom-enrich`
+  StatefulSet (2 replicas); compose and `scale` keep one worker, and a
+  lone worker with the defaults behaves exactly as before.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -28,7 +28,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS entities (
     provisional INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     norm_key    TEXT NOT NULL DEFAULT '',
+    dossier_claimed_until TEXT,
     UNIQUE (namespace, type, key)
 );
 
@@ -102,6 +103,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extraction_status TEXT NOT NULL DEFAULT 'pending',
     extraction_attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at   TEXT,
+    extract_claimed_by    TEXT,
+    extract_claimed_until TEXT,
+    chunk_claimed_until   TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -217,10 +221,14 @@ class SqliteStore(GraphStore):
             "observations": [("event_id", "TEXT")],
             "artifacts": [("event_id", "TEXT"),
                           ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
-                          ("next_attempt_at", "TEXT")],
+                          ("next_attempt_at", "TEXT"),
+                          ("extract_claimed_by", "TEXT"),
+                          ("extract_claimed_until", "TEXT"),
+                          ("chunk_claimed_until", "TEXT")],
             "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
             "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
-            "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''")],
+            "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''"),
+                         ("dossier_claimed_until", "TEXT")],
         }
         for table, columns in wanted.items():
             have = {
@@ -710,37 +718,63 @@ class SqliteStore(GraphStore):
                     result[row["ref_id"]] = json.loads(row["vector"])
         return result
 
+    # hex value of the id's last character, 0..15: the shard key (D-031)
+    _SHARD_EXPR = "(instr('0123456789abcdef', substr(o.id, -1, 1)) - 1)"
+
     def observations_without_embeddings(
-        self, model: str, limit: int = 128
+        self, model: str, limit: int = 128, shard: tuple[int, int] | None = None
     ) -> list[Observation]:
+        shard_sql, shard_args = "", ()
+        if shard is not None and shard[1] > 1:
+            shard_sql, shard_args = f" AND {self._SHARD_EXPR} % ? = ?", (shard[1], shard[0])
         with self._tx():
             rows = self._conn.execute(
                 _OBS_SELECT
                 + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
                 "   WHERE em.ref_id = o.id AND em.model = ?)"
-                + _NOT_TOMBSTONED
+                + _NOT_TOMBSTONED + shard_sql
                 + " ORDER BY o.recorded_at LIMIT ?",
-                (model, limit),
+                (model, *shard_args, limit),
             ).fetchall()
             return [common.row_to_observation(r) for r in rows]
 
-    def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
+    def pending_artifacts(
+        self, limit: int = 4, now: datetime | None = None,
+        lease: tuple[str, float] | None = None,
+    ) -> list[Artifact]:
+        moment = now or common.now()
+        now_iso = common.iso(moment)
         with self._tx():
-            rows = self._conn.execute(
-                "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
-                " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
-                " ORDER BY recorded_at LIMIT ?",
-                (common.iso(now or common.now()), limit),
-            ).fetchall()
-        return [common.row_to_artifact(r) for r in rows]
+            if lease is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM artifacts WHERE extraction_status = 'pending'"
+                    " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+                    " ORDER BY recorded_at LIMIT ?",
+                    (now_iso, limit),
+                ).fetchall()
+            else:
+                worker, seconds = lease
+                until = common.iso(moment + timedelta(seconds=seconds))
+                # claim atomically: one UPDATE selects and marks in one step,
+                # so two workers can never both take the same artifact
+                rows = self._conn.execute(
+                    "UPDATE artifacts SET extract_claimed_by = ?, extract_claimed_until = ?"
+                    " WHERE id IN (SELECT id FROM artifacts"
+                    "   WHERE extraction_status = 'pending'"
+                    "   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+                    "   AND (extract_claimed_until IS NULL OR extract_claimed_until < ?)"
+                    "   ORDER BY recorded_at LIMIT ?) RETURNING *",
+                    (worker, until, now_iso, now_iso, limit),
+                ).fetchall()
+        return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def defer_extraction(
         self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
     ) -> None:
         with self._tx():
             self._conn.execute(
-                "UPDATE artifacts SET extraction_attempts = ?, next_attempt_at = ?"
-                " WHERE namespace = ? AND id = ?",
+                "UPDATE artifacts SET extraction_attempts = ?, next_attempt_at = ?,"
+                " extract_claimed_until = NULL WHERE namespace = ? AND id = ?",
                 (attempts, common.iso(next_attempt_at), namespace, artifact_id),
             )
 
@@ -749,24 +783,38 @@ class SqliteStore(GraphStore):
     ) -> None:
         with self._tx():
             self._conn.execute(
-                "UPDATE artifacts SET extraction_status = ?"
+                "UPDATE artifacts SET extraction_status = ?, extract_claimed_until = NULL"
                 " WHERE namespace = ? AND id = ?",
                 (status, namespace, artifact_id),
             )
 
-    def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:
+    _NEEDS_CHUNKS = (
+        "a.text IS NOT NULL"
+        # blank docs would re-queue forever (H-D4); TRIM alone strips only
+        # spaces, so name the whitespace set explicitly
+        " AND TRIM(a.text, ' ' || char(9) || char(10) || char(13)) <> ''"
+        " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
+        "   WHERE c.artifact_id = a.id AND c.model = ?)"
+    )
+
+    def artifacts_needing_chunks(
+        self, model: str, limit: int = 4, lease: tuple[str, float] | None = None
+    ) -> list[Artifact]:
         with self._tx():
-            rows = self._conn.execute(
-                "SELECT * FROM artifacts a WHERE a.text IS NOT NULL"
-                # blank docs would re-queue forever (H-D4); TRIM alone strips
-                # only spaces, so name the whitespace set explicitly
-                " AND TRIM(a.text, ' ' || char(9) || char(10) || char(13)) <> ''"
-                " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
-                "   WHERE c.artifact_id = a.id AND c.model = ?)"
-                " ORDER BY a.recorded_at LIMIT ?",
-                (model, limit),
-            ).fetchall()
-        return [common.row_to_artifact(r) for r in rows]
+            if lease is None:
+                rows = self._conn.execute(
+                    f"SELECT * FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
+                    " ORDER BY a.recorded_at LIMIT ?", (model, limit)).fetchall()
+            else:
+                moment = common.now()
+                until = common.iso(moment + timedelta(seconds=lease[1]))
+                rows = self._conn.execute(
+                    "UPDATE artifacts SET chunk_claimed_until = ? WHERE id IN"
+                    f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
+                    "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < ?)"
+                    "   ORDER BY a.recorded_at LIMIT ?) RETURNING *",
+                    (until, model, common.iso(moment), limit)).fetchall()
+        return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
@@ -784,6 +832,8 @@ class SqliteStore(GraphStore):
             self._vec_upsert("vchk", model, namespace,
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
+            self._conn.execute(  # release the chunking lease (D-031)
+                "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?", (artifact_id,))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -850,16 +900,20 @@ class SqliteStore(GraphStore):
                 (namespace, entity.id, brief, observation_count,
                  json.dumps(list(observation_ids)), common.iso(common.now())),
             )
+            self._conn.execute(  # release the dossier lease (D-031)
+                "UPDATE entities SET dossier_claimed_until = NULL WHERE id = ?", (entity.id,))
 
     def dossier_candidates(
-        self, min_new: int = 20, min_total: int = 5, limit: int = 4
+        self, min_new: int = 20, min_total: int = 5, limit: int = 4,
+        lease: tuple[str, float] | None = None,
     ) -> list[tuple[str, EntityRef, int]]:
+        moment = common.now()
         with self._tx():
             # Only observations recorded AFTER the last brief count as
             # "new", so the scan is bounded by fresh rows, not the whole
             # table (H-E2). Total counts for the few winners come after.
             rows = self._conn.execute(
-                "SELECT e.namespace, e.type, e.key, COUNT(o.id) AS fresh,"
+                "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
                 "       d.observation_count AS have"
                 " FROM entities e"
                 " JOIN observations o ON o.subject_id = e.id"
@@ -867,19 +921,27 @@ class SqliteStore(GraphStore):
                 "                   WHERE t.observation_id = o.id)"
                 " LEFT JOIN dossiers d ON d.namespace = e.namespace"
                 "   AND d.entity_id = e.id"
-                " WHERE d.updated_at IS NULL OR o.recorded_at > d.updated_at"
+                " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
+                "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
                 " GROUP BY e.id"
                 " HAVING (have IS NULL AND fresh >= ?) OR (have IS NOT NULL AND fresh >= ?)"
                 " ORDER BY fresh DESC, e.created_at LIMIT ?",
-                (min_total, min_new, limit),
+                (common.iso(moment), min_total, min_new, limit),
             ).fetchall()
             out = []
             for r in rows:
                 ref = EntityRef(type=r["type"], key=r["key"])
-                entity = self._get_entity(r["namespace"], ref)
+                if lease is not None:
+                    claimed = self._conn.execute(
+                        "UPDATE entities SET dossier_claimed_until = ? WHERE id = ?"
+                        " AND (dossier_claimed_until IS NULL OR dossier_claimed_until < ?)",
+                        (common.iso(moment + timedelta(seconds=lease[1])), r["eid"],
+                         common.iso(moment))).rowcount
+                    if not claimed:
+                        continue  # another worker took it between SELECT and UPDATE
                 total = self._conn.execute(
                     "SELECT COUNT(*) AS n FROM observations o WHERE o.subject_id = ?"
-                    + _NOT_TOMBSTONED, (entity.id,)).fetchone()["n"]
+                    + _NOT_TOMBSTONED, (r["eid"],)).fetchone()["n"]
                 out.append((r["namespace"], ref, int(total)))
         return out
 

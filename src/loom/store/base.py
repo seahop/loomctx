@@ -141,9 +141,12 @@ class GraphStore(ABC):
 
     @abstractmethod
     def observations_without_embeddings(
-        self, model: str, limit: int = 128
+        self, model: str, limit: int = 128, shard: tuple[int, int] | None = None
     ) -> list[Observation]:
-        """Backlog for the enrichment worker (tombstoned rows excluded)."""
+        """Backlog for the enrichment worker (tombstoned rows excluded).
+        `shard=(i, n)` returns only the rows whose id hashes to partition
+        i of n, so n workers split the backlog without coordination
+        (D-031); n <= 16."""
 
     @abstractmethod
     def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:
@@ -182,9 +185,16 @@ class GraphStore(ABC):
         {'backend', 'observations', 'chunks'} counts indexed."""
 
     @abstractmethod
-    def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
+    def pending_artifacts(
+        self, limit: int = 4, now: datetime | None = None,
+        lease: tuple[str, float] | None = None,
+    ) -> list[Artifact]:
         """Artifacts still awaiting claim extraction whose backoff (if any)
-        has elapsed as of `now` (default: the current time)."""
+        has elapsed as of `now` (default: the current time). With
+        `lease=(worker_id, seconds)` the rows are *claimed* atomically for
+        that long (D-031): other workers skip them until the lease expires
+        or the artifact's status changes, so a fleet shares the backlog
+        without double LLM spend."""
 
     @abstractmethod
     def defer_extraction(
@@ -207,9 +217,12 @@ class GraphStore(ABC):
         upgrade audits (H-B12)."""
 
     @abstractmethod
-    def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:
+    def artifacts_needing_chunks(
+        self, model: str, limit: int = 4, lease: tuple[str, float] | None = None
+    ) -> list[Artifact]:
         """Non-blank text artifacts not yet chunked+embedded under `model`
-        (vectors from different models never mix — H-D3)."""
+        (vectors from different models never mix — H-D3). `lease` as in
+        pending_artifacts; released when chunks are stored."""
 
     @abstractmethod
     def put_doc_chunks(
@@ -247,11 +260,13 @@ class GraphStore(ABC):
 
     @abstractmethod
     def dossier_candidates(
-        self, min_new: int = 20, min_total: int = 5, limit: int = 4
+        self, min_new: int = 20, min_total: int = 5, limit: int = 4,
+        lease: tuple[str, float] | None = None,
     ) -> list[tuple[str, EntityRef, int]]:
         """(namespace, entity, current observation count) for entities whose
         dossier is missing (>= min_total observations) or stale (>= min_new
-        observations since the last build)."""
+        observations since the last build). `lease` claims the entities for
+        one worker; released by put_dossier."""
 
     # ------------------------------------------------- lifecycle (D-016)
 

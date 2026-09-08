@@ -513,3 +513,19 @@ def test_chunker_edge_cases():
     paras = "\n\n".join(f"para {i} " + "word " * 60 for i in range(5))
     pieces = _chunk_text(paras)
     assert len(pieces) >= 3 and all(paras[s:e] == t for s, e, t in pieces)
+
+
+def test_worker_shard_from_env_or_ordinal(monkeypatch):
+    from loom import enrich
+    monkeypatch.setenv("LOOM_WORKER_SHARD", "2/3")
+    assert enrich.worker_shard() == (2, 3)
+    monkeypatch.setenv("LOOM_WORKER_SHARD", "5/3")
+    assert enrich.worker_shard() == (2, 3)          # wraps
+    monkeypatch.delenv("LOOM_WORKER_SHARD")
+    monkeypatch.setenv("LOOM_WORKER_COUNT", "4")
+    monkeypatch.setattr(enrich, "WORKER_ID", "loom-enrich-3")
+    assert enrich.worker_shard() == (3, 4)          # StatefulSet ordinal
+    monkeypatch.setattr(enrich, "WORKER_ID", "somehost")
+    assert enrich.worker_shard() == (0, 4)
+    monkeypatch.delenv("LOOM_WORKER_COUNT")
+    assert enrich.worker_shard() == (0, 1)          # a lone worker: everything

@@ -24,3 +24,5 @@ patches:
     target: {kind: Deployment, name: loom}
   - path: consumer-db.yaml
     target: {kind: Deployment, name: loom-consumer}
+  - path: consumer-db.yaml
+    target: {kind: StatefulSet, name: loom-enrich}
