@@ -5,19 +5,26 @@ Postgres. Column shapes, idempotent-ingest semantics (event_id dedupe),
 tombstone redaction, and lifecycle operations are identical to the SQLite
 store — the shared contract tests enforce it.
 
-Every public method runs inside `_tx()`: lock, commit on success, ROLLBACK
-on any exception. That matters more here than on SQLite: a failed statement
-otherwise leaves the connection in "current transaction is aborted" and every
-later call on this replica fails until restart (hardening H-B1).
+Every public method runs inside `_tx()`: borrow a connection from the pool,
+commit on success, ROLLBACK on any exception. A failed statement can never
+leave a connection in "current transaction is aborted" (hardening H-B1).
+
+Concurrency (D-028): a `psycopg_pool` of `LOOM_DB_POOL` connections per
+process (default 4) so an engine pod serves that many queries at once;
+`LOOM_DB_READ` optionally names a read-replica DSN — packs, searches, and
+exports go there, ingest and the worker's backlog queries stay on the
+primary. Reads from a replica may lag by replication delay; observations
+are append-only and `as_of` makes staleness explicit, so that is safe.
 
 Selected purely by connection string — set LOOM_DB=postgresql://... and
-nothing else changes. Requires the `postgres` extra (psycopg).
+nothing else changes. Requires the `postgres` extra (psycopg + pool).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import uuid
 from contextlib import contextmanager
@@ -187,40 +194,58 @@ _SCHEMA_LOCK_ID = 0x4C4F4F4D  # "LOOM"
 
 
 class PostgresStore(GraphStore):
-    def __init__(self, dsn: str):
+    _CONNECT_WAIT_SECONDS = 90.0
+    _DEFAULT_POOL = 4
+
+    def __init__(self, dsn: str, read_dsn: str | None = None,
+                 pool_size: int | None = None):
         import psycopg
         from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
 
-        # One connection guarded by a lock keeps semantics identical to the
-        # SQLite store. Connection pooling is a straightforward later upgrade
-        # inside this class; the interface doesn't change.
-        self._lock = threading.Lock()
         self._psycopg = psycopg
-        self._dsn = dsn
-        self._dict_row = dict_row
-        self._conn = self._connect()
+        self._local = threading.local()   # the connection borrowed by _tx()
+        size = pool_size or int(os.environ.get("LOOM_DB_POOL", "") or self._DEFAULT_POOL)
+
+        def pool(url: str) -> ConnectionPool:
+            # Postgres may still be starting when a replica boots (k8s and
+            # compose ordering are best-effort): wait for a bounded time
+            # instead of crash-looping — the same courtesy the NATS clients
+            # extend. check= drops connections the server closed.
+            p = ConnectionPool(url, min_size=1, max_size=max(1, size), open=False,
+                               kwargs={"row_factory": dict_row},
+                               check=ConnectionPool.check_connection)
+            p.open(wait=True, timeout=self._CONNECT_WAIT_SECONDS)
+            return p
+
+        self._pool = pool(dsn)
+        self._read_pool = pool(read_dsn) if read_dsn and read_dsn != dsn else None
         self._vec_tables: dict[str, int] = {}
         self._vec = self._load_vec()
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
-            cur.execute(_SCHEMA)
-            self._migrate(cur)
-            cur.execute("SELECT key, value FROM loom_meta WHERE key LIKE 'vec:%%'")
-            for row in cur.fetchall():
-                self._vec_tables[row["key"][4:]] = int(row["value"])
-        self._conn.commit()
+        with self._tx():
+            self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
+            self._x(_SCHEMA)
+            with self._conn.cursor() as cur:
+                self._migrate(cur)
+            self._refresh_vec_tables()
+
+    @property
+    def _conn(self):
+        """The connection this thread borrowed in `_tx()`."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            raise RuntimeError("store used outside a _tx() block")
+        return conn
 
     # ------------------------------------------------- vector index (D-025)
 
     def _load_vec(self) -> bool:
         try:
-            with self._conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            self._conn.commit()
+            with self._tx():
+                self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
+                self._x("CREATE EXTENSION IF NOT EXISTS vector")
             return True
         except self._psycopg.Error as exc:
-            self._conn.rollback()
             logging.getLogger("loom.store").info(
                 "pgvector unavailable (%s): vector search uses exact scans", exc)
             return False
@@ -284,7 +309,7 @@ class PostgresStore(GraphStore):
         self, namespace: str, model: str, query: list[float], limit: int = 20
     ) -> list[tuple[str, float]]:
         name = common.vec_table("vobs", model, len(query))
-        with self._tx():
+        with self._tx(read=True):
             if self._has_index(name):
                 rows = self._q(
                     f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name} v"
@@ -308,7 +333,7 @@ class PostgresStore(GraphStore):
         if artifact_ids is not None and not artifact_ids:
             return []
         name = common.vec_table("vchk", model, len(query))
-        with self._tx():
+        with self._tx(read=True):
             if self._has_index(name):
                 sql = (f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name}"
                        " WHERE namespace = %s")
@@ -367,29 +392,11 @@ class PostgresStore(GraphStore):
     def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:
         if not ids:
             return []
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 _OBS_SELECT + " WHERE o.namespace = %s AND o.id = ANY(%s)" + _NOT_TOMBSTONED,
                 (namespace, list(ids)))
         return [common.row_to_observation(r) for r in rows]
-
-    _CONNECT_WAIT_SECONDS = 90.0
-
-    def _connect(self):
-        """Postgres may still be starting when a replica boots (k8s and
-        compose ordering are best-effort): retry for a bounded time instead
-        of crash-looping — the same courtesy the NATS clients extend."""
-        import time
-        deadline = time.monotonic() + self._CONNECT_WAIT_SECONDS
-        while True:
-            try:
-                return self._psycopg.connect(self._dsn, row_factory=self._dict_row)
-            except self._psycopg.OperationalError as exc:
-                if time.monotonic() >= deadline:
-                    raise
-                logging.getLogger("loom.store").warning(
-                    "postgres not ready (%s); retrying", str(exc).strip().splitlines()[0])
-                time.sleep(2)
 
     def _migrate(self, cur) -> None:
         """One-shot versioned steps (H-B12); idempotent DDL lives in _SCHEMA."""
@@ -407,7 +414,7 @@ class PostgresStore(GraphStore):
             (str(SCHEMA_VERSION),))
 
     def schema_version(self) -> int:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q("SELECT value FROM loom_meta WHERE key = 'schema_version'")
         return int(rows[0]["value"]) if rows else 0
 
@@ -424,23 +431,21 @@ class PostgresStore(GraphStore):
             return cur.rowcount
 
     @contextmanager
-    def _tx(self):
-        """One locked transaction: commit on success, rollback on error so
-        the connection never sticks in the aborted state (H-B1). A dropped
-        server connection is re-established on the next call (H-E5)."""
-        with self._lock:
-            if self._conn.closed or self._conn.broken:
-                self._conn = self._connect()
+    def _tx(self, read: bool = False):
+        """One transaction on a pooled connection: commit on success,
+        rollback on any error (H-B1). `read=True` borrows from the replica
+        pool when LOOM_DB_READ is set. Nested calls share the outer
+        transaction. Broken connections are discarded by the pool (H-E5)."""
+        if getattr(self._local, "conn", None) is not None:
+            yield
+            return
+        pool = self._read_pool if (read and self._read_pool is not None) else self._pool
+        with pool.connection() as conn:   # commits, or rolls back on exception
+            self._local.conn = conn
             try:
                 yield
-            except BaseException:
-                try:
-                    self._conn.rollback()
-                except self._psycopg.Error:
-                    pass  # connection itself is gone; reconnects next call
-                raise
-            else:
-                self._conn.commit()
+            finally:
+                self._local.conn = None
 
     # ------------------------------------------------------------ public API
 
@@ -449,7 +454,7 @@ class PostgresStore(GraphStore):
             return self._upsert_entity(namespace, ref)
 
     def get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
-        with self._tx():
+        with self._tx(read=True):
             return self._resolve_entity(namespace, ref)
 
     def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
@@ -522,7 +527,7 @@ class PostgresStore(GraphStore):
             return merged
 
     def get_schema(self, namespace: str) -> SchemaRegistration | None:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT registration_json FROM schemas WHERE namespace = %s",
                 (namespace,),
@@ -558,7 +563,7 @@ class PostgresStore(GraphStore):
         type_sql, type_args = "", ()
         if types is not None:
             type_sql, type_args = " AND type = ANY(%s)", (list(types),)
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT * FROM entities WHERE namespace = %s"
                 "   AND (LOWER(key) = %s OR LOWER(key) LIKE %s ESCAPE '\\')"
@@ -570,7 +575,7 @@ class PostgresStore(GraphStore):
         return [common.row_to_entity(r) for r in rows]
 
     def count_observations(self, namespace: str, ref: EntityRef) -> int:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
@@ -588,7 +593,7 @@ class PostgresStore(GraphStore):
     ) -> bool:
         if not allowed_types:
             return False
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT 1 FROM observations o"
                 " JOIN entities s ON s.id = o.subject_id"
@@ -613,7 +618,7 @@ class PostgresStore(GraphStore):
     def observations_for(
         self, namespace: str, ref: EntityRef, limit: int = 100
     ) -> list[Observation]:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
@@ -654,15 +659,18 @@ class PostgresStore(GraphStore):
         return artifact
 
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
-        with self._tx():
+        with self._tx(read=True):
             return self._get_artifact(namespace, artifact_id)
 
     def ping(self) -> bool:
         try:
             with self._tx():
                 self._q("SELECT 1")
+            if self._read_pool is not None:
+                with self._tx(read=True):
+                    self._q("SELECT 1")
             return True
-        except self._psycopg.Error:
+        except Exception:  # noqa: BLE001 — pool timeouts are not psycopg errors
             return False
 
     # ----------------------------------------------------- enrichment (D-018)
@@ -690,7 +698,7 @@ class PostgresStore(GraphStore):
     ) -> dict[str, list[float]]:
         if not ref_ids:
             return {}
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT ref_id, vector FROM embeddings"
                 " WHERE namespace = %s AND model = %s AND ref_id = ANY(%s)",
@@ -783,7 +791,7 @@ class PostgresStore(GraphStore):
     ) -> list[dict]:
         if not artifact_ids:
             return []
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
                 " c.text, c.vector, a.source, a.observed_at"
@@ -799,7 +807,7 @@ class PostgresStore(GraphStore):
     ) -> list[dict]:
         if not seqs:
             return []
-        with self._tx():
+        with self._tx(read=True):
             rows = self._q(
                 "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
                 " c.text, c.vector, a.source, a.observed_at"
@@ -811,7 +819,7 @@ class PostgresStore(GraphStore):
         return [common.row_to_chunk(r) for r in rows]
 
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return None
@@ -920,7 +928,7 @@ class PostgresStore(GraphStore):
         """Keyset-paged streaming (H-E4): bounded memory, lock per page."""
         last = ("", "")
         while True:
-            with self._tx():
+            with self._tx(read=True):
                 rows = self._q(
                     sql + f" AND ({order_cols[0]}, {order_cols[1]}) > (%s, %s)"
                     f" ORDER BY {order_cols[0]}, {order_cols[1]} LIMIT %s",
@@ -1027,8 +1035,9 @@ class PostgresStore(GraphStore):
                 self._x(f"DELETE FROM {table}")
 
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        self._pool.close()
+        if self._read_pool is not None:
+            self._read_pool.close()
 
     # ------------------------------------------------- internals (no commit)
 

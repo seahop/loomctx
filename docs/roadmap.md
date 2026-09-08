@@ -152,12 +152,12 @@ presentable.
 Infra-side dials for large organizations: more database nodes, HA
 ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
-- ⬜ 6.1 Engine concurrency: connection pool + multi-worker uvicorn on
-  Postgres; loadgen before/after
+- ✅ 6.1 Engine concurrency (2026-09-08, D-028): connection pool,
+  `LOOM_DB_READ` read replica, `LOOM_WORKERS`; measured (see D-028)
 - ⬜ 6.2 Ingestion HA: 3-node JetStream cluster, stream replicas=3,
   retention limits, consumer ack/redelivery tuning, dead-letter subject
-- ⬜ 6.3 Database HA + read replicas: CloudNativePG Cluster manifest,
-  `LOOM_DB_READ` read/write split in the store
+- 🔨 6.3 Database HA + read replicas: `LOOM_DB_READ` read/write split
+  shipped with 6.1; CloudNativePG Cluster manifest still to add
 - ⬜ 6.4 Worker fleet: lease-based job claiming so N enrichment replicas
   share the backlog
 - ⬜ 6.5 Tenant sharding: `ShardedStore` routing namespaces to shards

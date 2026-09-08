@@ -12,11 +12,13 @@ import os
 from .base import GraphStore
 
 
-def store_from_url(url: str) -> GraphStore:
+def store_from_url(url: str, read_url: str | None = None) -> GraphStore:
     if url.startswith(("postgres://", "postgresql://")):
         from .postgres import PostgresStore
 
-        return PostgresStore(url)
+        # LOOM_DB_READ (D-028): a replica DSN for the read path; pool size
+        # is LOOM_DB_POOL. Both are optional dials — unset means one primary.
+        return PostgresStore(url, read_dsn=read_url or os.environ.get("LOOM_DB_READ") or None)
     from .sqlite import SqliteStore
 
     return SqliteStore(url)

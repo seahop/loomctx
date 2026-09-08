@@ -35,6 +35,10 @@ services:
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
       LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
       LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
+      # Postgres-shape concurrency dials (D-028); ignored on SQLite
+      LOOM_WORKERS: ${LOOM_WORKERS:-}
+      LOOM_DB_POOL: ${LOOM_DB_POOL:-}
+      LOOM_DB_READ: ${LOOM_DB_READ:-}
 
   test:
     image: loom-engine:local

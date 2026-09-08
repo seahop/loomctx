@@ -694,6 +694,44 @@ more replica of something already shipped, or an operator the platform
 team already runs), and Neo4j (unchanged: only if graph-native traversal
 demand appears).
 
+## D-028 · Engine concurrency: connection pool, read replica, worker processes (2026-09-08, phase 6.1)
+
+The first phase-6 dial (D-027), built and measured. Off by default: the
+SQLite shape is untouched (one writer, one process), and a Postgres shape
+with no extra configuration behaves as before with a pool of 4.
+
+- `PostgresStore` borrows a connection per transaction from a
+  `psycopg_pool` (`LOOM_DB_POOL`, default 4) instead of serializing every
+  query through one connection and a process lock. Nested calls share the
+  outer transaction; broken connections are discarded by the pool; the
+  pool waits up to 90 s for Postgres at startup instead of crash-looping.
+- `LOOM_DB_READ` (optional) names a replica DSN. Packs, searches, exports,
+  and index lookups borrow from that pool; ingest and the worker's backlog
+  queries stay on the primary. Reads may lag by replication delay —
+  acceptable because observations are append-only and `as_of` makes
+  staleness explicit. `/readyz` pings both.
+- `python -m loom.serve` runs uvicorn with `LOOM_WORKERS` processes
+  (default 1); the `scale-pg` engine manifest sets 2 workers × 4
+  connections. Keep `workers × pool × pods` under Postgres
+  `max_connections`.
+- `loom.loadgen` gained `--mode ask` and p50/p99 reporting so the read
+  path is measured too.
+
+**Measured** (one laptop, compose, pgvector Postgres, load generator on the
+same machine — treat as relative):
+
+| Config | Ingest | Ask | Ask p99 |
+| --- | --- | --- | --- |
+| before: 1 connection, 1 worker | 388/s | 181/s | 178 ms |
+| pool 4, 1 worker | 416/s | 251/s | 93 ms |
+| pool 4, 2 workers | 515/s | 184/s | 141 ms |
+| pool 4, 4 workers | 473/s | 206/s | 284 ms |
+
+The pool alone buys the read path +39 % throughput and halves p99;
+workers add a third to ingest but saturate a laptop's cores (the ask
+dip at 2–4 workers is contention with the generator and Postgres, not a
+regression). On real nodes, start at 2 workers and let the HPA add pods.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

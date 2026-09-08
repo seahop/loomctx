@@ -132,6 +132,23 @@ printf '%s\n' 'resources: ["rendered.yaml"]' 'images:' \
 kubectl apply -k /tmp/loom
 ```
 
+## Scaling dials (D-027 / D-028)
+
+Every dial is off by default: the single-container shape stays exactly as
+simple as it is. Turn them when a measurement says to.
+
+| Dial | Env / manifest | Default | When |
+| --- | --- | --- | --- |
+| Engine workers per pod | `LOOM_WORKERS` | 1 | Postgres shapes: 2–4 multiplies a pod's concurrency before adding pods |
+| DB connections per worker | `LOOM_DB_POOL` | 4 | raise with `LOOM_WORKERS`; keep `workers × pool × pods` under Postgres `max_connections` |
+| Read replica for the read path | `LOOM_DB_READ` (replica DSN) | unset | packs/search/export go to replicas, ingest and worker backlog stay on the primary; reads may lag by replication delay |
+| Engine pods | HPA in `scale-pg` | 2–8 | stateless once on Postgres |
+| Gateway pods | HPA in `scale` / `scale-pg` | 2–10 | ingestion bursts |
+| Writer consumers | replicas in `scale-pg` | 2 | queue depth grows |
+
+Measured on one laptop (D-028, compose, Postgres, `loadgen`): see
+`docs/decisions.md` D-028 for the before/after table.
+
 ## Choosing a database (D-011)
 
 `LOOM_DB` is the whole decision — a file path means SQLite, a

@@ -616,3 +616,64 @@ def test_vector_index_backfill_and_exact_fallback_agree(store):
     for (_, s1), (_, s2) in zip(indexed, exact):
         assert abs(s1 - s2) < 1e-4
     assert {o.id for o in store.observations_by_ids("default", ids[:2])} == set(ids[:2])
+
+
+# ------------------------------------------------ concurrency (D-028) #
+
+def test_concurrent_writers_and_readers(store):
+    """Many threads writing and reading at once: no errors, every write
+    lands once. On Postgres this exercises the connection pool; on SQLite
+    the process lock serializes it."""
+    import threading
+    host = EntityRef(type="host", key="web-01")
+    errors: list[Exception] = []
+
+    def writer(n):
+        try:
+            for i in range(20):
+                store.record_claim(login_claim().model_copy(update={
+                    "object": EntityRef(type="user", key=f"w{n}-{i}"),
+                    "event_id": f"c-{n}-{i}"}))
+                store.observations_for("default", host, limit=5)
+                store.search_entities("default", "web")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert store.count_observations("default", host) == 160
+    # a replay from any thread still dedupes
+    dup = store.record_claim(login_claim().model_copy(update={
+        "object": EntityRef(type="user", key="w0-0"), "event_id": "c-0-0"}))
+    assert store.count_observations("default", host) == 160 and dup.event_id == "c-0-0"
+
+
+def test_postgres_read_replica_pool(tmp_path):
+    """LOOM_DB_READ: reads go to the replica pool (here: the same server
+    under a different DSN), writes stay on the primary."""
+    url = os.environ.get("LOOM_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("LOOM_TEST_POSTGRES_URL not set")
+    from loom.store.postgres import PostgresStore
+    read_url = url + ("&" if "?" in url else "?") + "application_name=loom-reader"
+    s = PostgresStore(url, read_dsn=read_url, pool_size=2)
+    try:
+        s.wipe()
+        assert s._read_pool is not None and s.ping()
+        obs = s.record_claim(login_claim())
+        got = s.observations_for("default", EntityRef(type="host", key="web-01"))
+        assert [o.id for o in got] == [obs.id]
+        assert s.get_entity("default", EntityRef(type="host", key="web-01"))
+        assert s.schema_version() >= 2
+        with s._tx(read=True):
+            who = s._q("SELECT current_setting('application_name') AS a")[0]["a"]
+        assert who == "loom-reader"
+    finally:
+        s.close()
+    same = PostgresStore(url, read_dsn=url)   # identical DSN: no second pool
+    assert same._read_pool is None
+    same.close()

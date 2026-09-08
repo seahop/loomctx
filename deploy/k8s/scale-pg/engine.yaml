@@ -37,6 +37,13 @@ spec:
                   key: LOOM_DB
             # Answering LLM (D-012) — add LOOM_LLM_* here (from a Secret)
             # to enable /v1/answer.
+            # Concurrency dials (D-028): 2 workers x 4 connections per pod;
+            # add LOOM_DB_READ (a replica DSN, e.g. the operator's -ro
+            # Service) to move the read path off the primary.
+            - name: LOOM_WORKERS
+              value: "2"
+            - name: LOOM_DB_POOL
+              value: "4"
           readinessProbe:
             httpGet:
               path: /readyz     # probes Postgres reachability
