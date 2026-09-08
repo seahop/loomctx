@@ -110,6 +110,13 @@ def embed_pending(store: GraphStore, embedder: Embedder, batch: int = 128) -> in
     return stored
 
 
+def index_pending(store: GraphStore, embedder: Embedder) -> int:
+    """Backfill the store's ANN index (D-025) for rows embedded before the
+    extension was available or imported from JSONL; a no-op otherwise."""
+    counts = store.ensure_vector_index(embedder.model)
+    return counts["observations"] + counts["chunks"]
+
+
 def _chunk_text(text: str, target: int = 400, hard: int = 800) -> list[tuple[int, int, str]]:
     """Split into (start, end, text) passages on paragraph/sentence
     boundaries, aiming for ~target chars and never exceeding hard. Offsets
@@ -477,6 +484,7 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) ->
         "resolved": _guarded("resolution", resolve_entities, store)
         + (_guarded("adjudication", adjudicate_entities, store, llm) if llm else 0),
         "embedded": _guarded("embedding", embed_pending, store, embedder) if embedder else 0,
+        "indexed": _guarded("vector-index", index_pending, store, embedder) if embedder else 0,
         "chunked": _guarded("chunking", chunk_artifacts, store, embedder) if embedder else 0,
         "dossiers": _guarded("dossiers", refresh_dossiers, store, llm) if llm else 0,
     }

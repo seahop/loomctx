@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from .. import metrics
 from ..answer import UnresolvedQuestionError, build_answer
 from ..auth import AuthConfig, Grant, extract_key
-from ..context import build_pack, decode_handle, expand_pack
+from ..context import build_pack, decode_handle, expand_pack, semantic_search
 from ..contracts import (
     AnswerRequest,
     AnswerResponse,
@@ -29,7 +29,7 @@ from ..contracts import (
     ExpandRequest,
     IngestEnvelope,
 )
-from ..contracts import SchemaRegistration
+from ..contracts import SchemaRegistration, SemanticSearchResponse
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..registry import RegistryCache, validate_claim
 from ..store.factory import store_from_env
@@ -125,7 +125,8 @@ def readyz(request: Request) -> dict:
     store = request.app.state.store
     if not store.ping():
         raise HTTPException(status_code=503, detail="store unreachable")
-    return {"status": "ready", "schema_version": store.schema_version()}
+    return {"status": "ready", "schema_version": store.schema_version(),
+            "vector_backend": store.vector_backend()}
 
 
 @app.get("/metrics")
@@ -288,6 +289,27 @@ def search_entities(
         "query": q,
         "matches": [m.model_dump(mode="json") for m in matches],
     }
+
+
+@app.get("/v1/entities/semantic", response_model=SemanticSearchResponse)
+def semantic_entities(
+    q: str,
+    request: Request,
+    limit: Annotated[int, Query(gt=0, le=50)] = 10,
+    namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+) -> SemanticSearchResponse:
+    """Entities related to a question by meaning (D-025): needs an embedder
+    on the serving engine (LOOM_EMBED_*) and the worker to have embedded
+    the namespace; each match cites its best-matching fact."""
+    grant = _authorize(request, namespace, "r")
+    embedder = request.app.state.embedder
+    if embedder is None:
+        raise HTTPException(
+            status_code=503,
+            detail="no embedder configured: set LOOM_EMBED_* on the engine (D-018)")
+    with metrics.PACK_SECONDS.time():
+        return semantic_search(request.app.state.store, namespace, embedder, q,
+                               limit=limit, allowed_types=_allowed_types(grant))
 
 
 @app.post("/v1/answer", response_model=AnswerResponse)

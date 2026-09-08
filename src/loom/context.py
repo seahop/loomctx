@@ -42,6 +42,8 @@ from .contracts import (
     EntityRef,
     Observation,
     ScopeSpec,
+    SemanticMatch,
+    SemanticSearchResponse,
 )
 from .contracts import ExpansionHandle
 from .store.base import GraphStore
@@ -53,10 +55,7 @@ _MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
 _QUERY_CACHE_SIZE = 256
 _RECENCY_HALF_LIFE_DAYS = 30.0  # recency = 1 / (1 + age / half-life)
 
-try:  # optional accelerator (extra "vector"); pure Python otherwise
-    import numpy as _np
-except ImportError:  # pragma: no cover - exercised only without the extra
-    _np = None
+from .store.common import cosine as _cosine, cosines  # noqa: E402  (re-exported)
 
 # Question words that carry no retrieval signal; stripped from the keyword
 # scorer so "what is the operating system" isn't 60% noise (H-C7).
@@ -144,36 +143,6 @@ def _is_extracted(obs: Observation) -> bool:
 
 _EXTRACTED_DISCOUNT = 0.85
 _EXCERPT_RELATIVE_FLOOR = 0.6  # keep passages scoring >= 60% of the best one
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if len(a) != len(b):
-        return 0.0  # different embedding spaces never compare
-    dot = sum(x * y for x, y in zip(a, b))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(y * y for y in b) ** 0.5
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
-
-
-def cosines(query: list[float], vectors: dict[str, list[float]]) -> dict[str, float]:
-    """Cosine of the query against many vectors at once — one matrix
-    product with numpy when installed (H-E1), the scalar loop otherwise."""
-    if _np is None or not vectors:
-        return {k: _cosine(query, v) for k, v in vectors.items()}
-    keys = [k for k, v in vectors.items() if len(v) == len(query)]
-    if not keys:
-        return {k: 0.0 for k in vectors}
-    m = _np.asarray([vectors[k] for k in keys], dtype=float)
-    q = _np.asarray(query, dtype=float)
-    norms = _np.linalg.norm(m, axis=1) * (_np.linalg.norm(q) or 1.0)
-    with _np.errstate(divide="ignore", invalid="ignore"):
-        sims = _np.where(norms > 0, m @ q / norms, 0.0)
-    out = {k: float(s) for k, s in zip(keys, sims)}
-    for k in vectors:
-        out.setdefault(k, 0.0)
-    return out
 
 
 def _recency(obs: Observation, newest: datetime) -> float:
@@ -436,13 +405,15 @@ def build_pack(
             if o.provenance and o.provenance.artifact_id
         })
         horizon = _aware(req.as_of) if req.as_of else None
-        for ch in store.doc_chunks_for_artifacts(
-            req.namespace, artifact_ids, embedder.model
+        # top passages from the documents behind this entity's facts, via
+        # the store's ANN index when one exists (D-025)
+        for ch, score in store.nearest_chunks(
+            req.namespace, embedder.model, query_vec,
+            _MAX_EXCERPT_CANDIDATES, artifact_ids,
         ):
             observed = _aware(ch["observed_at"])
             if horizon is not None and observed > horizon:
                 continue  # a document we hadn't seen yet as of then (H-C2)
-            score = _cosine(query_vec, ch["vector"])
             cite = Citation(
                 artifact_id=ch["artifact_id"], span_start=ch["span_start"],
                 span_end=ch["span_end"], source=ch["source"], observed_at=observed,
@@ -480,6 +451,41 @@ def build_pack(
         semantic=semantic,
         briefs=briefs,
         excerpts=excerpts,
+    )
+
+
+def semantic_search(
+    store: GraphStore,
+    namespace: str,
+    embedder,
+    question: str,
+    limit: int = 10,
+    allowed_types: tuple[str, ...] | None = None,
+) -> SemanticSearchResponse:
+    """Entities related to a question by meaning, not by name (D-025):
+    the namespace's nearest facts, grouped by subject, each entity backed
+    by its best-matching fact as cited evidence. Scoped keys only see
+    facts inside their world."""
+    query_vec = embed_query(embedder, question)
+    hits = store.nearest_observations(namespace, embedder.model, query_vec, limit * 4)
+    score_by_id = dict(hits)
+    by_subject: dict[tuple[str, str], tuple[float, Observation]] = {}
+    for obs in store.observations_by_ids(namespace, list(score_by_id)):
+        if not _in_scope(obs, allowed_types):
+            continue
+        key = (obs.subject.type, obs.subject.key)
+        score = score_by_id[obs.id]
+        if key not in by_subject or score > by_subject[key][0]:
+            by_subject[key] = (score, obs)
+    ranked = sorted(by_subject.values(), key=lambda pair: pair[0], reverse=True)[:limit]
+    return SemanticSearchResponse(
+        namespace=namespace, question=question,
+        matches=[SemanticMatch(
+            entity=obs.subject, score=round(min(max(score, 0.0), 1.0), 4),
+            evidence=ContextItem(kind="fact", text=_render_fact(obs),
+                                 score=round(min(max(score, 0.0), 1.0), 4),
+                                 citations=[_citation(obs)]),
+        ) for score, obs in ranked],
     )
 
 

@@ -159,3 +159,28 @@ def test_schema_registry_validates_ingest(tmp_path, monkeypatch):
 def test_readyz_reports_schema_version(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         assert client.get("/readyz").json()["schema_version"] >= 2
+
+
+def test_semantic_entity_search(tmp_path, monkeypatch):
+    """D-025: find entities by meaning; 503 without an embedder."""
+    from loom.enrich import embed_pending
+    from loom.llm import HashingEmbedder
+    from loom.store.sqlite import SqliteStore
+    monkeypatch.delenv("LOOM_EMBED_PROVIDER", raising=False)
+    with make_client(tmp_path, monkeypatch) as client:
+        assert client.get("/v1/entities/semantic", params={"q": "x"}).status_code == 503
+    monkeypatch.setenv("LOOM_EMBED_PROVIDER", "hashing")
+    with make_client(tmp_path, monkeypatch) as client:
+        for key, pred, obj in [("web-01", "runs_os", "ubuntu linux operating system"),
+                               ("db-01", "listens_on_port", "5432 postgres database"),
+                               ("vpn-01", "vpn_protocol", "wireguard tunnel")]:
+            client.post("/v1/ingest", json={**CLAIM, "subject": {"type": "host", "key": key},
+                                            "predicate": pred, "object": obj})
+        embed_pending(SqliteStore(tmp_path / "api.db"), HashingEmbedder())
+        r = client.get("/v1/entities/semantic",
+                       params={"q": "which host runs the postgres database?", "limit": 2})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["matches"][0]["entity"] == {"type": "host", "key": "db-01"}
+        assert body["matches"][0]["evidence"]["citations"]
+        assert "vector_backend" in client.get("/readyz").json()

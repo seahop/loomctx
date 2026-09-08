@@ -257,5 +257,6 @@ def test_numpy_and_python_cosines_agree():
     vecs = {"a": [1.0, 2.0, 3.0], "b": [-1.0, 0.0, 0.5], "z": [0.0, 0.0, 0.0],
             "short": [1.0, 2.0]}
     got = cosines(q, vecs)
-    for k, v in vecs.items():
-        assert abs(got[k] - _cosine(q, v)) < 1e-9, k
+    assert "short" not in got  # another embedding space is skipped, not scored 0
+    for k in ("a", "b", "z"):
+        assert abs(got[k] - _cosine(q, vecs[k])) < 1e-9, k

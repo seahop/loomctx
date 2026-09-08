@@ -13,6 +13,7 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | Tool | Purpose |
 | --- | --- |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
+| `find_related(question)` | Entities related by meaning, each with its cited matching fact (needs `LOOM_EMBED_*`) |
 | `ask(subject, question, budget, as_of?, valid_at?)` | Budgeted, cited context on one entity (`as_of` = known at T, `valid_at` = true at T) |
 | `ask_scope(subjects, question, expand_predicates?, depth?)` | Several entities, or an anchor + contents ("domain:corp.local" over `member_of`) |
 | `expand(handle, budget)` | Progressive disclosure — pull one thread deeper |
@@ -54,6 +55,7 @@ GET  /healthz
 POST /v1/ingest                                  # ClaimIn -> 200; DocumentIn -> 202 (artifact stored, extraction pending)
 GET  /v1/entities/{type}/{key}/observations      # raw, for debug/audit
 GET  /v1/entities/search?q=                      # resolve names to entities
+GET  /v1/entities/semantic?q=                    # entities by MEANING, each with a cited fact (needs an embedder, D-025)
 GET  /v1/artifacts/{id}                          # stored document, verbatim
 POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
 POST /v1/expand                                  # ExpandRequest -> ContextPack

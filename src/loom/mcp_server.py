@@ -33,7 +33,7 @@ from mcp.server.mcpserver import Context, MCPServer
 
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
-from .context import build_pack, decode_handle, expand_pack
+from .context import build_pack, decode_handle, expand_pack, semantic_search
 from .contracts import AnswerRequest, AskRequest, ClaimIn, EntityRef, ScopeSpec
 from .llm import LLMError, embedder_from_env, llm_from_env
 from .registry import validate_claim
@@ -138,7 +138,8 @@ mcp = MCPServer(
     "loom",
     instructions=(
         "Loom is a provenance-tracked context engine. Use find_entity to turn "
-        "names into 'type:key' handles, ask/ask_scope for budgeted cited "
+        "names into 'type:key' handles (find_related when you only know what "
+        "you're looking for, not its name), ask/ask_scope for budgeted cited "
         "context (start small — expand pulls threads deeper via handles), "
         "record_claim to write back facts you learn, and answer for a "
         "server-side LLM synthesis when one is configured. Conflict items "
@@ -196,6 +197,21 @@ def find_entity(query: str, namespace: str = "default", limit: int = 10,
         for e in _get_store().search_entities(namespace, query, limit=limit,
                                               types=_allowed(grant))
     ]
+
+
+def find_related(question: str, namespace: str = "default", limit: int = 10,
+                 ctx: Context = None) -> dict:
+    """Entities related to a question by MEANING rather than by name
+    ("what looks exploitable?", "who touched the finance systems?") — use
+    when you don't know an entity's key. Each match cites the fact that
+    matched. Needs the server to have an embedder configured."""
+    grant = _grant(ctx, namespace, "r")
+    embedder = _get_embedder()
+    if embedder is None:
+        return {"error": "no embedder configured on this Loom (set LOOM_EMBED_*);"
+                         " use find_entity with a key fragment instead"}
+    return semantic_search(_get_store(), namespace, embedder, question,
+                           limit=limit, allowed_types=_allowed(grant)).model_dump(mode="json")
 
 
 def ask(
@@ -381,6 +397,7 @@ def answer(
 
 TOOLS = (
     find_entity,
+    find_related,
     ask,
     ask_scope,
     expand,

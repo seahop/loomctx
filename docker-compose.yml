@@ -162,7 +162,7 @@ services:
 
   # Server-backed store for the database-scaling lane (D-011).
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17   # postgres 17 + the vector extension (D-025)
     profiles: ["pg"]
     environment:
       POSTGRES_USER: loom

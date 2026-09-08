@@ -46,7 +46,8 @@ mcp = [
     "mcp>=2",
 ]
 vector = [
-    "numpy>=1.26",   # batched cosine in the pack builder; pure Python without it
+    "numpy>=1.26",       # batched cosine; pure Python without it
+    "sqlite-vec>=0.1.6", # ANN index for the SQLite store; exact scan without it
 ]
 
 [tool.hatch.build.targets.wheel]

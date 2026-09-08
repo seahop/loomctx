@@ -26,6 +26,53 @@ def norm_key(key: str) -> str:
     return _NORM.sub("", key.lower())
 
 
+_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def vec_table(kind: str, model: str, dim: int) -> str:
+    """Name of the ANN index table (D-025): vobs_/vchk_ + a slug of the
+    embedding model + the dimension, so vectors from different models — or
+    a model that changed size — never share an index."""
+    return f"{kind}_{_SLUG.sub('_', model.lower()).strip('_')}_{int(dim)}"
+
+
+try:  # optional accelerator (extra "vector"); pure Python otherwise
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        return 0.0  # different embedding spaces never compare
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def cosines(query: list[float], vectors: dict[str, list[float]]) -> dict[str, float]:
+    """Cosine of the query against many vectors at once — one matrix
+    product with numpy when installed, the scalar loop otherwise. Vectors
+    of another dimension (a different embedding space) are left out."""
+    fitting = {k: v for k, v in vectors.items() if len(v) == len(query)}
+    if _np is None or not fitting:
+        return {k: cosine(query, v) for k, v in fitting.items()}
+    keys = list(fitting)
+    m = _np.asarray([fitting[k] for k in keys], dtype=float)
+    q = _np.asarray(query, dtype=float)
+    norms = _np.linalg.norm(m, axis=1) * (_np.linalg.norm(q) or 1.0)
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        sims = _np.where(norms > 0, m @ q / norms, 0.0)
+    return {k: float(s) for k, s in zip(keys, sims)}
+
+
+def top_k(scores: dict[str, float], limit: int) -> list[tuple[str, float]]:
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 

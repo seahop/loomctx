@@ -146,6 +146,42 @@ class GraphStore(ABC):
         """Backlog for the enrichment worker (tombstoned rows excluded)."""
 
     @abstractmethod
+    def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:
+        """Visible observations for the given ids (tombstoned excluded),
+        in no particular order."""
+
+    # ------------------------------------------------ vector index (D-025)
+    # The JSON `embeddings` / `doc_chunks` tables remain the portable source
+    # of truth; each backend keeps an ANN index beside them (sqlite-vec /
+    # pgvector) when the extension is available and falls back to an exact
+    # scan otherwise. Scores are cosine similarity in [-1, 1].
+
+    @abstractmethod
+    def vector_backend(self) -> str:
+        """'sqlite-vec', 'pgvector', or 'exact' (no extension available)."""
+
+    @abstractmethod
+    def nearest_observations(
+        self, namespace: str, model: str, query: list[float], limit: int = 20
+    ) -> list[tuple[str, float]]:
+        """Namespace-wide k-NN over observation vectors: (observation_id,
+        cosine) best first. Tombstoned observations are excluded."""
+
+    @abstractmethod
+    def nearest_chunks(
+        self, namespace: str, model: str, query: list[float], limit: int = 20,
+        artifact_ids: list[str] | None = None,
+    ) -> list[tuple[dict, float]]:
+        """k-NN over document passages, optionally restricted to the given
+        artifacts: (chunk dict as in doc_chunks_for_artifacts, cosine)."""
+
+    @abstractmethod
+    def ensure_vector_index(self, model: str) -> dict:
+        """Backfill the ANN index for `model` from the JSON tables (rows
+        written before the extension was available, or imported). Returns
+        {'backend', 'observations', 'chunks'} counts indexed."""
+
+    @abstractmethod
     def pending_artifacts(self, limit: int = 4, now: datetime | None = None) -> list[Artifact]:
         """Artifacts still awaiting claim extraction whose backoff (if any)
         has elapsed as of `now` (default: the current time)."""

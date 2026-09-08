@@ -553,6 +553,38 @@ and phase-4 items, landed as four commits (303b225…HEAD).
 - Optional `vector` extra (numpy) batches the cosine loop; the image
   installs it, pure Python remains the fallback.
 
+## D-025 · Vector index: sqlite-vec / pgvector beside the JSON tables, exact scan as fallback (2026-09-08)
+
+The D-002 promise, built now for future-proofing rather than because seed
+scale needed it.
+
+- **Source of truth stays portable.** `embeddings` and `doc_chunks` keep
+  vectors as JSON text: they export/import with `lifecycle`, survive a
+  backend swap, and need no extension. The ANN index is *derived*: each
+  backend keeps one table per (kind, embedding model, dimension) —
+  `vobs_<model>_<dim>` for observations, `vchk_<model>_<dim>` for
+  passages — as a sqlite-vec `vec0` virtual table (cosine metric,
+  namespace partition key) or a pgvector table with an HNSW cosine index.
+  Keying by dimension means a model that changes size never mixes spaces.
+- **Writes populate both; reads prefer the index.** `put_embeddings` /
+  `put_doc_chunks` upsert into the index in the same transaction. The
+  worker's `index_pending` job backfills rows that reached the JSON
+  tables without an index (imports, older builds). `nearest_observations`
+  and `nearest_chunks` use the index when one exists for the query's
+  (model, dimension) and otherwise scan exactly — so an engine without
+  the extension is slower, never wrong. `/readyz` reports which.
+- **What uses it.** Excerpt candidates in `build_pack` come from
+  `nearest_chunks` restricted to the entity's cited artifacts (was: every
+  chunk decoded and scored in Python). New: **semantic entity search** —
+  `GET /v1/entities/semantic?q=`, MCP `find_related`, SDK `semantic()` —
+  the namespace's nearest facts grouped by subject, each entity backed by
+  its best-matching fact as cited evidence and filtered by the caller's
+  entity-type scope. This is the read that only an index makes
+  affordable at scale ("what looks exploitable?" without knowing a key).
+- **Deployment.** The `vector` extra (numpy + sqlite-vec) is installed in
+  the image; the compose `postgres` service is `pgvector/pgvector:pg17`.
+  A Postgres without the extension simply reports `exact`.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -17,6 +17,7 @@ nothing else changes. Requires the `postgres` extra (psycopg).
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from contextlib import contextmanager
@@ -198,11 +199,179 @@ class PostgresStore(GraphStore):
         self._dsn = dsn
         self._dict_row = dict_row
         self._conn = self._connect()
+        self._vec_tables: dict[str, int] = {}
+        self._vec = self._load_vec()
         with self._conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
             cur.execute(_SCHEMA)
             self._migrate(cur)
+            cur.execute("SELECT key, value FROM loom_meta WHERE key LIKE 'vec:%%'")
+            for row in cur.fetchall():
+                self._vec_tables[row["key"][4:]] = int(row["value"])
         self._conn.commit()
+
+    # ------------------------------------------------- vector index (D-025)
+
+    def _load_vec(self) -> bool:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            self._conn.commit()
+            return True
+        except self._psycopg.Error as exc:
+            self._conn.rollback()
+            logging.getLogger("loom.store").info(
+                "pgvector unavailable (%s): vector search uses exact scans", exc)
+            return False
+
+    def vector_backend(self) -> str:
+        return "pgvector" if self._vec else "exact"
+
+    def _refresh_vec_tables(self) -> None:
+        for row in self._q("SELECT key, value FROM loom_meta WHERE key LIKE 'vec:%%'"):
+            self._vec_tables[row["key"][4:]] = int(row["value"])
+
+    def _has_index(self, name: str) -> bool:
+        if not self._vec:
+            return False
+        if name not in self._vec_tables:
+            self._refresh_vec_tables()
+        return name in self._vec_tables
+
+    def _vec_table(self, kind: str, model: str, dim: int) -> str:
+        name = common.vec_table(kind, model, dim)
+        if name not in self._vec_tables:
+            self._refresh_vec_tables()
+        if name not in self._vec_tables:
+            self._x(f"CREATE TABLE IF NOT EXISTS {name} (ref_id TEXT PRIMARY KEY,"
+                    f" namespace TEXT NOT NULL, artifact_id TEXT NOT NULL DEFAULT '',"
+                    f" embedding vector({dim}) NOT NULL)")
+            self._x(f"CREATE INDEX IF NOT EXISTS {name}_hnsw ON {name}"
+                    " USING hnsw (embedding vector_cosine_ops)")
+            self._x(f"CREATE INDEX IF NOT EXISTS {name}_ns ON {name} (namespace, artifact_id)")
+            self._x("INSERT INTO loom_meta (key, value) VALUES (%s, %s)"
+                    " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (f"vec:{name}", str(dim)))
+            self._vec_tables[name] = dim
+        return name
+
+    @staticmethod
+    def _vlit(vec: list[float]) -> str:
+        return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+    def _vec_upsert(self, kind: str, model: str, namespace: str,
+                    rows: list[tuple[str, str | None, list[float]]]) -> int:
+        if not self._vec or not rows:
+            return 0
+        written = 0
+        by_dim: dict[int, list] = {}
+        for rid, aid, vec in rows:
+            by_dim.setdefault(len(vec), []).append((rid, aid, vec))
+        for dim, group in by_dim.items():
+            name = self._vec_table(kind, model, dim)
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    f"INSERT INTO {name} (ref_id, namespace, artifact_id, embedding)"
+                    " VALUES (%s, %s, %s, %s::vector) ON CONFLICT (ref_id) DO UPDATE SET"
+                    " namespace = EXCLUDED.namespace, artifact_id = EXCLUDED.artifact_id,"
+                    " embedding = EXCLUDED.embedding",
+                    [(rid, namespace, aid or "", self._vlit(vec)) for rid, aid, vec in group])
+            written += len(group)
+        return written
+
+    def nearest_observations(
+        self, namespace: str, model: str, query: list[float], limit: int = 20
+    ) -> list[tuple[str, float]]:
+        name = common.vec_table("vobs", model, len(query))
+        with self._tx():
+            if self._has_index(name):
+                rows = self._q(
+                    f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name} v"
+                    " WHERE namespace = %s AND NOT EXISTS"
+                    "   (SELECT 1 FROM tombstones t WHERE t.observation_id = v.ref_id)"
+                    " ORDER BY embedding <=> %s::vector LIMIT %s",
+                    (self._vlit(query), namespace, self._vlit(query), limit))
+                return [(r["ref_id"], float(r["score"])) for r in rows]
+            rows = self._q(
+                "SELECT e.ref_id, e.vector FROM embeddings e"
+                " WHERE e.namespace = %s AND e.model = %s AND NOT EXISTS"
+                "   (SELECT 1 FROM tombstones t WHERE t.observation_id = e.ref_id)",
+                (namespace, model))
+            scored = common.cosines(query, {r["ref_id"]: json.loads(r["vector"]) for r in rows})
+        return common.top_k(scored, limit)
+
+    def nearest_chunks(
+        self, namespace: str, model: str, query: list[float], limit: int = 20,
+        artifact_ids: list[str] | None = None,
+    ) -> list[tuple[dict, float]]:
+        if artifact_ids is not None and not artifact_ids:
+            return []
+        name = common.vec_table("vchk", model, len(query))
+        with self._tx():
+            if self._has_index(name):
+                sql = (f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name}"
+                       " WHERE namespace = %s")
+                params: tuple = (self._vlit(query), namespace)
+                if artifact_ids is not None:
+                    sql += " AND artifact_id = ANY(%s)"
+                    params += (list(artifact_ids),)
+                sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+                params += (self._vlit(query), limit)
+                best = [(r["ref_id"], float(r["score"])) for r in self._q(sql, params)]
+            else:
+                sql = "SELECT id, vector FROM doc_chunks WHERE namespace = %s AND model = %s"
+                params = (namespace, model)
+                if artifact_ids is not None:
+                    sql += " AND artifact_id = ANY(%s)"
+                    params += (list(artifact_ids),)
+                rows = self._q(sql, params)
+                best = common.top_k(
+                    common.cosines(query, {r["id"]: json.loads(r["vector"]) for r in rows}), limit)
+            if not best:
+                return []
+            rows = self._q(
+                "SELECT c.id, c.artifact_id, c.seq, c.span_start, c.span_end,"
+                " c.text, c.vector, a.source, a.observed_at"
+                " FROM doc_chunks c JOIN artifacts a ON a.id = c.artifact_id"
+                " WHERE c.id = ANY(%s)", ([cid for cid, _ in best],))
+        by_id = {r["id"]: common.row_to_chunk(r) for r in rows}
+        return [(by_id[cid], s) for cid, s in best if cid in by_id]
+
+    def ensure_vector_index(self, model: str) -> dict:
+        out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
+        if not self._vec:
+            return out
+        with self._tx():
+            self._refresh_vec_tables()
+            for kind, key, sql in (
+                ("vobs", "observations",
+                 "SELECT ref_id AS id, namespace, NULL AS artifact_id, vector"
+                 " FROM embeddings WHERE model = %s"),
+                ("vchk", "chunks",
+                 "SELECT id, namespace, artifact_id, vector FROM doc_chunks WHERE model = %s"),
+            ):
+                have: set[str] = set()
+                for name in self._vec_tables:
+                    if name.startswith(f"{kind}_"):
+                        have |= {r["ref_id"] for r in self._q(f"SELECT ref_id FROM {name}")}
+                by_ns: dict[str, list] = {}
+                for r in self._q(sql, (model,)):
+                    if r["id"] not in have:
+                        by_ns.setdefault(r["namespace"], []).append(
+                            (r["id"], r["artifact_id"], json.loads(r["vector"])))
+                for ns, rows in by_ns.items():
+                    out[key] += self._vec_upsert(kind, model, ns, rows)
+        return out
+
+    def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:
+        if not ids:
+            return []
+        with self._tx():
+            rows = self._q(
+                _OBS_SELECT + " WHERE o.namespace = %s AND o.id = ANY(%s)" + _NOT_TOMBSTONED,
+                (namespace, list(ids)))
+        return [common.row_to_observation(r) for r in rows]
 
     def _connect(self):
         return self._psycopg.connect(self._dsn, row_factory=self._dict_row)
@@ -498,6 +667,8 @@ class PostgresStore(GraphStore):
                     [(ref_id, namespace, model, json.dumps(vec))
                      for ref_id, vec in items],
                 )
+            self._vec_upsert("vobs", model, namespace,
+                             [(ref_id, None, vec) for ref_id, vec in items])
 
     def embeddings_for(
         self, namespace: str, ref_ids: list[str], model: str
@@ -588,6 +759,9 @@ class PostgresStore(GraphStore):
                       start, end, text, json.dumps(vec), model)
                      for seq, start, end, text, vec in chunks],
                 )
+            self._vec_upsert("vchk", model, namespace,
+                             [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
+                              for seq, _, _, _, vec in chunks])
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -834,7 +1008,7 @@ class PostgresStore(GraphStore):
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
                           "observations", "aliases", "artifacts", "entities",
-                          "schemas"):
+                          "schemas", *self._vec_tables):
                 self._x(f"DELETE FROM {table}")
 
     def close(self) -> None:

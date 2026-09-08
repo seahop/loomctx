@@ -196,6 +196,11 @@ class Loom:
     def search(self, query: str, limit: int = 10) -> dict:
         return self._get("/v1/entities/search", {"q": query, "limit": limit})
 
+    def semantic(self, question: str, limit: int = 10) -> dict:
+        """Entities related to a question by meaning (D-025); each match
+        cites its best-matching fact. 503 until the engine has an embedder."""
+        return self._get("/v1/entities/semantic", {"q": question, "limit": limit})
+
     def ready(self) -> bool:
         """True when the engine is up AND its store answers (GET /readyz)."""
         try:

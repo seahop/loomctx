@@ -546,3 +546,73 @@ def test_merge_drops_both_briefs(store):
         store.put_dossier("default", ref, "old brief", 1, [])
     assert store.merge_entities("default", b, a)
     assert store.get_dossier("default", a) is None
+
+
+# ----------------------------------------------------- vector index (D-025) #
+
+def _unit(*xs):
+    n = sum(x * x for x in xs) ** 0.5
+    return [x / n for x in xs]
+
+
+def test_nearest_observations_rank_by_cosine(store):
+    host = EntityRef(type="host", key="web-01")
+    ids = []
+    for i, vec in enumerate([_unit(1, 0, 0), _unit(0.9, 0.1, 0), _unit(0, 1, 0), _unit(0, 0, 1)]):
+        obs = store.record_claim(login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"u{i}"), "event_id": f"v{i}"}))
+        ids.append(obs.id)
+        store.put_embeddings("default", "m", [(obs.id, vec)])
+    assert store.vector_backend() in ("sqlite-vec", "pgvector", "exact")
+    hits = store.nearest_observations("default", "m", _unit(1, 0.05, 0), limit=2)
+    assert [h[0] for h in hits] == [ids[0], ids[1]]
+    assert hits[0][1] > hits[1][1] > 0.9
+    # tombstoned rows never surface; other namespaces / models are invisible
+    store.redact("default", ids[0], "x")
+    assert [h[0] for h in store.nearest_observations("default", "m", _unit(1, 0.2, 0), 2)] == [ids[1], ids[2]]
+    assert store.nearest_observations("other", "m", _unit(1, 0, 0), 2) == []
+    assert store.nearest_observations("default", "m2", _unit(1, 0, 0), 2) == []
+    assert store.nearest_observations("default", "m", _unit(1, 0), 2) == []  # wrong dim
+
+
+def test_nearest_chunks_filter_by_artifact(store):
+    from loom.contracts import DocumentIn
+    a = store.store_artifact(DocumentIn(text="aaaa bbbb", source="s", observed_at=OBSERVED))
+    b = store.store_artifact(DocumentIn(text="cccc dddd", source="s", observed_at=OBSERVED))
+    store.put_doc_chunks("default", a.id, "m", [(0, 0, 4, "aaaa", _unit(1, 0)), (1, 5, 9, "bbbb", _unit(0, 1))])
+    store.put_doc_chunks("default", b.id, "m", [(0, 0, 4, "cccc", _unit(1, 0.1))])
+    hits = store.nearest_chunks("default", "m", _unit(1, 0), limit=3)
+    assert [c["text"] for c, _ in hits] == ["aaaa", "cccc", "bbbb"]
+    assert hits[0][0]["source"] == "s" and hits[0][0]["observed_at"] == OBSERVED
+    only_b = store.nearest_chunks("default", "m", _unit(1, 0), limit=3, artifact_ids=[b.id])
+    assert [c["text"] for c, _ in only_b] == ["cccc"]
+    assert store.nearest_chunks("default", "m", _unit(1, 0), 3, artifact_ids=[]) == []
+
+
+def test_vector_index_backfill_and_exact_fallback_agree(store):
+    """Rows that reach the JSON table without the index (imports, older
+    versions) are picked up by ensure_vector_index; the exact path ranks
+    identically to the ANN path."""
+    import json as _json
+    host = EntityRef(type="host", key="web-01")
+    ids = []
+    vecs = [_unit(1, 0, 0), _unit(0, 1, 0), _unit(0.7, 0.7, 0)]
+    for i, vec in enumerate(vecs):
+        obs = store.record_claim(login_claim().model_copy(
+            update={"object": EntityRef(type="user", key=f"u{i}"), "event_id": f"b{i}"}))
+        ids.append(obs.id)
+    backend = store.vector_backend()
+    store._vec = False                       # write JSON only, like an old build
+    for oid, vec in zip(ids, vecs):
+        store.put_embeddings("default", "m", [(oid, vec)])
+    exact = store.nearest_observations("default", "m", _unit(0.6, 0.8, 0), 3)
+    store._vec = backend != "exact"
+    counts = store.ensure_vector_index("m")
+    if backend != "exact":
+        assert counts["observations"] == 3
+        assert store.ensure_vector_index("m")["observations"] == 0  # idempotent
+    indexed = store.nearest_observations("default", "m", _unit(0.6, 0.8, 0), 3)
+    assert [h[0] for h in indexed] == [h[0] for h in exact] == [ids[2], ids[1], ids[0]]
+    for (_, s1), (_, s2) in zip(indexed, exact):
+        assert abs(s1 - s2) < 1e-4
+    assert {o.id for o in store.observations_by_ids("default", ids[:2])} == set(ids[:2])

@@ -177,3 +177,17 @@ def test_key_gate_middleware_rejects_before_mcp(monkeypatch):
     assert asyncio.run(call([(b"x-loom-key", b"bogus")])) == 403
     assert asyncio.run(call([(b"authorization", b"Bearer reader")])) == 200
     assert seen == ["/mcp"]
+
+
+def test_find_related_by_meaning(store, monkeypatch):
+    from loom.enrich import embed_pending
+    from loom.llm import HashingEmbedder
+    monkeypatch.setenv("LOOM_EMBED_PROVIDER", "hashing")
+    mcp_server._embedder_loaded = False
+    try:
+        embed_pending(store, HashingEmbedder())
+        out = mcp_server.find_related("who logged in with the jdoe account?")
+        assert out["matches"] and out["matches"][0]["entity"]["key"] in ("web-01", "jdoe")
+        assert out["matches"][0]["evidence"]["citations"]
+    finally:
+        mcp_server._embedder_loaded = False

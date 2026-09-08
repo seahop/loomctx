@@ -238,6 +238,21 @@ class ContextPack(BaseModel):
     handles: list[ExpansionHandle] = Field(default_factory=list)
 
 
+class SemanticMatch(BaseModel):
+    """An entity surfaced by meaning rather than by name (D-025): the best
+    matching fact is the evidence, cited like any pack item."""
+
+    entity: EntityRef
+    score: float = Field(ge=0.0, le=1.0)
+    evidence: ContextItem
+
+
+class SemanticSearchResponse(BaseModel):
+    namespace: str
+    question: str
+    matches: list[SemanticMatch] = Field(default_factory=list)
+
+
 class AnswerRequest(BaseModel):
     """Ask + synthesize: retrieve a context pack, then have the configured
     LLM produce a cited answer/decision. With neither subject nor scope,

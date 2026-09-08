@@ -124,7 +124,10 @@ tests and behave identically.
   docker compose run --rm loom python -m loom.loadgen --url http://loom:8000
   ```
 
-- **Scaling the database (Postgres):**
+- **Scaling the database (Postgres):** use an image with the `vector`
+  extension (compose ships `pgvector/pgvector:pg17`) to get the ANN index
+  (D-025); a plain Postgres works too and `/readyz` reports
+  `"vector_backend": "exact"`.
 
   ```bash
   LOOM_DB=postgresql://loom:loom@postgres:5432/loom \

@@ -115,9 +115,10 @@ presentable.
   cited `doc_excerpt` items (RAG over the docs behind an entity's facts);
   `LOOM_MAX_BUDGET` makes the budget ceiling operator-tunable.
 - ✅ doc_excerpt expansion handles pull the surrounding passages (2026-09-08).
-- 🔨 Exact cosine now batches through numpy (`vector` extra, in the image);
-  sqlite-vec / pgvector ANN remains the option once embedded row counts
-  outgrow it (fine at seed/demo scale).
+- ✅ ANN vector index (2026-09-08, D-025): sqlite-vec / pgvector tables
+  derived from the portable JSON vectors, exact scan as fallback; excerpt
+  retrieval uses it and `GET /v1/entities/semantic` / MCP `find_related`
+  find entities by meaning.
 
 ## Phase 5 — Hardening & spread 🔨
 
