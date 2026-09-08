@@ -71,71 +71,87 @@ flowchart TB
         shippers["Log shippers · scanners · pipeline devices<br/>SDKs · curl · bulk loaders"]
     end
     subgraph readers["Readers"]
-        agents["Agents (MCP streamable-http, keyed)<br/>Apps (HTTP)"]
+        agents["Agents (MCP streamable-http, keyed)<br/>Apps (Python / TypeScript SDK, HTTP)"]
     end
 
-    lb["Ingress / Service (round-robin)"]
+    lb1["Ingress / Service"]
     lb2["Ingress / Service"]
 
-    subgraph ingest["Ingestion tier  (stateless)"]
-        gw["Gateway pods  (Go)  HPA 2–10<br/>authenticate → per-principal rate limit → size cap<br/>→ JSON-Schema validate (contracts/schemas.json)<br/>→ namespace/type/source gates → publish (3 retries)<br/>header: Loom-Principal = grant id"]
+    subgraph gws["Gateway pods (Go) · HPA 2–10 · stateless"]
+        gw["authenticate → per-principal rate limit → size cap<br/>→ JSON-Schema validate → namespace/type/source gates<br/>→ publish (3 retries) · header Loom-Principal = grant id"]
     end
 
-    subgraph queue["Durable buffer  ·  NATS JetStream  3-node cluster  (StatefulSet, PVC per node)"]
-        s1[("LOOM_INGEST<br/>replicas 3 · max_bytes 4 GiB · discard old")]
-        s2[("LOOM_DEADLETTER<br/>replicas 3 · poison messages + Loom-Error")]
+    subgraph nats["NATS JetStream · 3-node cluster · PVC per node"]
+        direction LR
+        s1[("LOOM_INGEST · R=3<br/>max_bytes 4 GiB · discard old")]
+        s2[("LOOM_DEADLETTER · R=3<br/>poison + Loom-Error")]
     end
 
-    subgraph writers["Writer consumers  (Deployment ×N, shared durable loom-writer)"]
-        cons["pull batches of 64 → one transaction<br/>ack after commit · nak on failure<br/>park on dead-letter after max_deliver 5"]
+    subgraph cons["Writer consumers ×N · shared durable"]
+        c1["pull ≤64 → one transaction<br/>ack after commit · nak on failure<br/>dead-letter after 5 deliveries"]
     end
 
-    subgraph engines["Engine pods  HPA 2–8"]
-        eng["uvicorn LOOM_WORKERS=2 × LOOM_DB_POOL=4<br/>auth gates · registry · pack builder · semantic search<br/>writes → primary · reads → replicas (LOOM_DB_READ)"]
+    subgraph engs["Engine pods · HPA 2–8"]
+        e1["uvicorn · LOOM_WORKERS × LOOM_DB_POOL<br/>gates · registry · pack builder · semantic search"]
     end
 
-    subgraph enrich["Enrichment fleet  (StatefulSet ×N)"]
-        wk["leased extraction / chunking / dossiers<br/>embedding backlog sharded by pod ordinal<br/>vector-index backfill · adjudication"]
+    subgraph wks["Enrichment StatefulSet ×N"]
+        w1["leased extraction / chunking / dossiers<br/>embedding backlog sharded by ordinal"]
     end
 
-    subgraph pg["Postgres  ·  CloudNativePG Cluster  (3 instances, streaming replication, automatic failover)"]
-        rw[("loom-pg-rw  →  primary<br/>pgvector · HNSW indexes per model")]
-        ro[("loom-pg-ro  →  replicas ×2")]
-        rw -- "WAL streaming" --> ro
+    subgraph pg["Postgres · CloudNativePG · 3 instances · failover"]
+        direction LR
+        rw[("loom-pg-rw → primary<br/>pgvector HNSW")]
+        ro[("loom-pg-ro → 2 replicas")]
+        rw -- "WAL" --> ro
     end
 
-    subgraph tenants["Optional: tenant capacity isolation  (LOOM_SHARDS, D-032)"]
-        shard1[("acme-db<br/>Postgres or SQLite")]
-        shard2[("globex-db")]
-    end
+    llm["LLM + embedding provider"]
+    prom["Prometheus ← /metrics"]
 
-    subgraph blobs["Optional: artifact offload  (LOOM_BLOB_*, D-033)"]
-        s3[("S3 / MinIO / Ceph bucket<br/>bodies > threshold, key namespace/uuid")]
-    end
-
-    subgraph ext["External"]
-        llm["LLM + embedding provider"]
-        prom["Prometheus  (GET /metrics on engine + gateways)"]
-    end
-
-    shippers --> lb --> gw
-    gw -- "publish loom.ingest.{claim or document}" --> s1
-    s1 -- "redeliver after ack_wait 30 s" --> cons
-    cons -- "max deliveries exceeded" --> s2
-    cons -- "INSERT … ON CONFLICT (event_id) DO NOTHING" --> rw
-    agents --> lb2 --> eng
-    eng -- "ingest / record_claim / schemas" --> rw
-    eng -- "ask · expand · search · semantic · export" --> ro
-    eng -- "answer() · query embedding" --> llm
-    wk --> rw
-    wk --> llm
-    eng -. "namespace acme →" .-> shard1
-    cons -. "namespace globex →" .-> shard2
-    eng -. "large documents" .-> s3
-    wk -. "reinflate for extraction" .-> s3
-    prom -.-> eng
+    shippers --> lb1 --> gw
+    gw -- "loom.ingest.{kind}" --> s1
+    s1 -- "batches" --> c1
+    c1 -- "max deliveries" --> s2
+    c1 -- "INSERT … ON CONFLICT (event_id)" --> rw
+    agents --> lb2 --> e1
+    e1 -- "writes" --> rw
+    e1 -- "reads (LOOM_DB_READ)" --> ro
+    w1 --> rw
+    e1 -.-> llm
+    w1 -.-> llm
+    prom -.-> e1
     prom -.-> gw
 ```
+
+### 2b. Optional capacity dials on top of the scaled shape
+
+Both are off unless configured; both sit behind the same `GraphStore`
+interface, so engines, consumers and workers change nothing.
+
+```mermaid
+flowchart LR
+    subgraph procs["Every store user (engine · consumer · worker)"]
+        st["GraphStore as built by the factory<br/>BlobOffloadStore( ShardedStore( … ) )"]
+    end
+
+    subgraph shards["LOOM_SHARDS — tenant capacity isolation (D-032)"]
+        direction TB
+        d0[("LOOM_DB (default)<br/>every unmapped namespace")]
+        d1[("acme → its own Postgres cluster")]
+        d2[("globex → a SQLite file")]
+    end
+
+    subgraph blobs["LOOM_BLOB_* — artifact offload (D-033)"]
+        b1[("S3 / MinIO / Ceph bucket<br/>or a shared volume<br/>bodies above LOOM_BLOB_THRESHOLD")]
+    end
+
+    st -- "namespace → shard<br/>admin calls fan out<br/>backlogs fill shard by shard" --> d0
+    st --> d1
+    st --> d2
+    st -- "row keeps a stub + pointer<br/>every read reinflates" --> b1
+```
+
 
 Failure modes this shape was tested against on a k3s cluster (D-029/D-030):
 a JetStream leader deleted mid-burst (3000/3000 acknowledged, nothing lost
