@@ -204,6 +204,9 @@ contract from day one is what makes the last dial cheap.
 
 ## Diagrams
 
+Detailed, current views of both deployment shapes and the request flows are
+in [infrastructure.md](infrastructure.md); the two below are the summary.
+
 ### The pipeline: two front doors, one store, one retrieval contract
 
 ```mermaid

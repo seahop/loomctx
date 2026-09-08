@@ -26,6 +26,9 @@ Read in this order depending on why you're here.
 ## Understanding it
 - **[architecture.md](architecture.md)** — the write/read split, the pipeline,
   deployment shapes, diagrams.
+- **[infrastructure.md](infrastructure.md)** — detailed Mermaid views: the
+  one-container shape, the fully scaled k8s shape, and the read and write
+  flows through them.
 - **[decisions.md](decisions.md)** — every design decision (D-001…D-023) with
   rationale, the hard constraints, and the open questions.
 - **[roadmap.md](roadmap.md)** — phase status and the path to the conference.
