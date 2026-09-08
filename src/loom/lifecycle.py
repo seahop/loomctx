@@ -20,27 +20,44 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from .contracts import Artifact, Observation
+from .contracts import Artifact, Entity, EntityRef, Observation
 from .store.base import GraphStore
 from .store.factory import store_from_url
 
 
+def _line(kind: str, data) -> str:
+    return json.dumps({"type": kind, "data": data}) + "\n"
+
+
 def export_jsonl(store: GraphStore, out, namespace: str | None) -> dict[str, int]:
-    counts = {"entities": 0, "observations": 0, "artifacts": 0}
+    """Everything a faithful restore needs, in dependency order: entities,
+    observations, artifacts, then the merge aliases (D-019) and redaction
+    tombstones (D-016) that qualify them. Tombstoned observations ARE
+    exported (audit), and their tombstones ride along so a restore never
+    un-redacts anything (hardening H-B4)."""
+    counts = {"entities": 0, "observations": 0, "artifacts": 0,
+              "aliases": 0, "tombstones": 0}
     for entity in store.iter_entities(namespace):
-        out.write(json.dumps({"type": "entity", "data": entity.model_dump(mode="json")}) + "\n")
+        out.write(_line("entity", entity.model_dump(mode="json")))
         counts["entities"] += 1
     for obs in store.iter_observations(namespace):
-        out.write(json.dumps({"type": "observation", "data": obs.model_dump(mode="json")}) + "\n")
+        out.write(_line("observation", obs.model_dump(mode="json")))
         counts["observations"] += 1
     for artifact in store.iter_artifacts(namespace):
-        out.write(json.dumps({"type": "artifact", "data": artifact.model_dump(mode="json")}) + "\n")
+        out.write(_line("artifact", artifact.model_dump(mode="json")))
         counts["artifacts"] += 1
+    for alias in store.iter_aliases(namespace):
+        out.write(_line("alias", alias))
+        counts["aliases"] += 1
+    for tomb in store.iter_tombstones(namespace):
+        out.write(_line("tombstone", tomb))
+        counts["tombstones"] += 1
     return counts
 
 
 def import_jsonl(store: GraphStore, lines) -> dict[str, int]:
-    counts = {"entities": 0, "observations": 0, "artifacts": 0, "skipped": 0}
+    counts = {"entities": 0, "observations": 0, "artifacts": 0,
+              "aliases": 0, "tombstones": 0, "skipped": 0}
     for line in lines:
         line = line.strip()
         if not line:
@@ -54,9 +71,20 @@ def import_jsonl(store: GraphStore, lines) -> dict[str, int]:
             store.restore_artifact(Artifact.model_validate(data))
             counts["artifacts"] += 1
         elif kind == "entity":
-            # entities are re-created implicitly by their observations; count
-            # them so imports report faithfully, nothing to write directly
+            store.restore_entity(Entity.model_validate(data))
             counts["entities"] += 1
+        elif kind == "alias":
+            store.restore_alias(
+                data["namespace"], data["alias"],
+                EntityRef.model_validate(data["canonical"]),
+            )
+            counts["aliases"] += 1
+        elif kind == "tombstone":
+            store.restore_tombstone(
+                data["namespace"], data["observation_id"], data["reason"],
+                datetime.fromisoformat(data["recorded_at"]),
+            )
+            counts["tombstones"] += 1
         else:
             counts["skipped"] += 1
     return counts

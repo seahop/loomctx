@@ -32,18 +32,18 @@ demo, **P2** should, **P3** after.
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-B1 | P1 | ⬜ | **No rollback anywhere.** Postgres: a failed statement leaves the shared connection in aborted-transaction state; every later call fails until restart. SQLite: a failed `record_claims` leaves partial inserts that the next unrelated commit persists. Fix: a transaction context in each store that rolls back on exception. |
-| H-B2 | P1 | ⬜ | `event_id` dedupe is check-then-insert (`_record_claim`, `store_artifact`). Two writers (engine + consumer) hit the unique index → `IntegrityError` (and H-B1). Fix: `INSERT ... ON CONFLICT DO NOTHING` + re-read the winner. |
-| H-B3 | P1 | ⬜ | Redaction leaks: `_observation_by_id` (dedupe return path) has no tombstone filter, so re-sending a redacted event_id returns the full row. `dossier_candidates` counts tombstoned rows. |
-| H-B4 | P1 | ⬜ | Export omits tombstones and aliases while `iter_observations` includes tombstoned rows → a restore un-redacts data and breaks merged-away refs. Fix: `iter_tombstones`/`iter_aliases` + restore paths; export/import them. |
-| H-B5 | P2 | ⬜ | Timestamps are stored/ordered as raw ISO text with whatever offset the sender used. Mixed offsets sort wrong; naive strings sort before offset strings; `ORDER BY observed_at DESC LIMIT` and purge cutoffs are lexical. Fix: normalize to UTC `+00:00` in `common.iso` (contract: naive = UTC). |
-| H-B6 | P2 | ⬜ | `get_dossier` uses exact `_get_entity`, not alias-following `_resolve_entity` — no brief for a merged-away ref. `put_dossier` uses `_upsert_entity` and would re-create a deleted node. `merge_entities` leaves the source's dossier row orphaned and `object_json` still naming the old type/key. |
-| H-B7 | P2 | ⬜ | `purge_older_than` orphans `embeddings`, `doc_chunks`, `dossiers`; never removes now-empty entities. |
-| H-B8 | P2 | ⬜ | `search_entities` LIKE metacharacters (`_`, `%`) unescaped; SQLite LIKE is case-insensitive, Postgres is not (backend divergence visible via `/v1/entities/search` and auto-resolution). Escape and use `LOWER()` on both. |
-| H-B9 | P3 | ⬜ | Postgres upserts update a column subset where SQLite `INSERT OR REPLACE` rewrites the row: `redact` keeps old `recorded_at`, `put_doc_chunks` keeps old spans, `put_embeddings` keeps old namespace. |
-| H-B10 | P3 | ⬜ | SQLite never enables `PRAGMA foreign_keys`; Postgres enforces FKs. `merge_candidates` `LIMIT` without `ORDER BY` on both. `_upsert_entity` on SQLite has no `ON CONFLICT` re-read (cross-process race). |
-| H-B11 | P3 | ⬜ | `restore_observation` with an `event_id` collision on a different id crashes import. |
-| H-B12 | P3 | ⬜ | No schema-version table; the next migration needing a data rewrite (e.g. `embeddings` PK → `(ref_id, model)`) has no hook. Postgres DDL runs on every replica start with no advisory lock. |
+| H-B1 | P1 | ✅ | **No rollback anywhere.** Postgres: a failed statement leaves the shared connection in aborted-transaction state; every later call fails until restart. SQLite: a failed `record_claims` leaves partial inserts that the next unrelated commit persists. Fix: a transaction context in each store that rolls back on exception. |
+| H-B2 | P1 | ✅ | `event_id` dedupe is check-then-insert (`_record_claim`, `store_artifact`). Two writers (engine + consumer) hit the unique index → `IntegrityError` (and H-B1). Fix: `INSERT ... ON CONFLICT DO NOTHING` + re-read the winner. |
+| H-B3 | P1 | ✅ | Redaction leaks: `_observation_by_id` (dedupe return path) has no tombstone filter, so re-sending a redacted event_id returns the full row. `dossier_candidates` counts tombstoned rows. |
+| H-B4 | P1 | ✅ | Export omits tombstones and aliases while `iter_observations` includes tombstoned rows → a restore un-redacts data and breaks merged-away refs. Fix: `iter_tombstones`/`iter_aliases` + restore paths; export/import them. |
+| H-B5 | P2 | ✅ | Timestamps are stored/ordered as raw ISO text with whatever offset the sender used. Mixed offsets sort wrong; naive strings sort before offset strings; `ORDER BY observed_at DESC LIMIT` and purge cutoffs are lexical. Fix: normalize to UTC `+00:00` in `common.iso` (contract: naive = UTC). |
+| H-B6 | P2 | ✅ | `get_dossier` uses exact `_get_entity`, not alias-following `_resolve_entity` — no brief for a merged-away ref. `put_dossier` uses `_upsert_entity` and would re-create a deleted node. `merge_entities` leaves the source's dossier row orphaned and `object_json` still naming the old type/key. |
+| H-B7 | P2 | ✅ | `purge_older_than` orphans `embeddings`, `doc_chunks`, `dossiers`; never removes now-empty entities. |
+| H-B8 | P2 | ✅ | `search_entities` LIKE metacharacters (`_`, `%`) unescaped; SQLite LIKE is case-insensitive, Postgres is not (backend divergence visible via `/v1/entities/search` and auto-resolution). Escape and use `LOWER()` on both. |
+| H-B9 | P3 | ✅ | Postgres upserts update a column subset where SQLite `INSERT OR REPLACE` rewrites the row: `redact` keeps old `recorded_at`, `put_doc_chunks` keeps old spans, `put_embeddings` keeps old namespace. |
+| H-B10 | P3 | 🔨 | SQLite never enables `PRAGMA foreign_keys`; Postgres enforces FKs. `merge_candidates` `LIMIT` without `ORDER BY` on both. `_upsert_entity` on SQLite has no `ON CONFLICT` re-read (cross-process race). *Done: ORDER BY + SQLite re-read. Open: FK pragma (needs a data audit of old files first).* |
+| H-B11 | P3 | ✅ | `restore_observation` with an `event_id` collision on a different id crashes import. |
+| H-B12 | P3 | 🔨 | No schema-version table; the next migration needing a data rewrite (e.g. `embeddings` PK → `(ref_id, model)`) has no hook. Postgres DDL runs on every replica start with no advisory lock. *Done: advisory lock around DDL. Open: schema-version table.* |
 
 ## C. Provenance & read-path semantics
 
@@ -78,7 +78,7 @@ demo, **P2** should, **P3** after.
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
 | H-E1 | P2 | ⬜ | Every ask: one embedding HTTP round-trip + pure-Python cosine over ≤1000 vectors per subject + every chunk of every cited artifact (uncapped), each vector `json.loads`-decoded per call. Fix now: cap chunks per query, cache the query embedding (LRU by text+model), use numpy if present. Later: sqlite-vec / pgvector (D-002). |
-| H-E2 | P2 | ⬜ | Worker tick queries do full scans: no index on `artifacts(extraction_status, recorded_at)`, `observations(recorded_at)`; chunk-backlog anti-join can't use `idx_chunk_artifact` (namespace leads). `dossier_candidates` is a full entities⋈observations GROUP BY every tick. |
+| H-E2 | P2 | 🔨 | Worker tick queries do full scans: no index on `artifacts(extraction_status, recorded_at)`, `observations(recorded_at)`; chunk-backlog anti-join can't use `idx_chunk_artifact` (namespace leads). `dossier_candidates` is a full entities⋈observations GROUP BY every tick. *Done: indexes on `observations(recorded_at)`, `artifacts(extraction_status, recorded_at)`, `doc_chunks(artifact_id)`, `entities(namespace, key)`. Open: incremental dossier candidates.* |
 | H-E3 | P3 | ⬜ | Scoped asks read each node's observations twice (BFS + gather); `resolve_entities` loads ≤1000 full observations per candidate just to count. Add a count method / edge-only query. |
 | H-E4 | P3 | ⬜ | `iter_*` use `fetchall()` before yielding — export is O(table) memory. Stream with server-side cursors / `fetchmany`. |
 | H-E5 | P3 | ⬜ | Single connection + process lock per backend; Postgres never reconnects after a dropped connection. Pool (psycopg_pool) when replicas need it. |
@@ -119,9 +119,9 @@ demo, **P2** should, **P3** after.
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
 | H-I1 | P1 | ✅ | Type-scoped key: forged/real handle → 403 on expand; scope expansion pack contains no out-of-type subjects or object refs. |
-| H-I2 | P1 | ⬜ | Export→import keeps a redacted observation hidden and a merged alias resolving. |
-| H-I3 | P1 | ⬜ | Store: a failing statement doesn't poison later calls (both backends); concurrent same-event_id inserts return the same row. |
+| H-I2 | P1 | ✅ | Export→import keeps a redacted observation hidden and a merged alias resolving. |
+| H-I3 | P1 | ✅ | Store: a failing statement doesn't poison later calls (both backends); concurrent same-event_id inserts return the same row. |
 | H-I4 | P2 | ⬜ | Worker survives an embedder `LLMError` and a locked DB; extraction parser on `{"claims":"x"}`, `["a"]`, prose+fence; reordered re-extraction doesn't drop claims. |
 | H-I5 | P2 | ⬜ | Chunker: empty, whitespace, 5000-char unbroken line, multibyte, offset round-trip. Excerpts with a chunk/query model mismatch. |
-| H-I6 | P2 | ⬜ | Move D-014/D-016/D-018 store coverage into the backend-parametrized suite (D-011 rule). |
+| H-I6 | P2 | ✅ | Move D-014/D-016/D-018 store coverage into the backend-parametrized suite (D-011 rule). |
 | H-I7 | P3 | ⬜ | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. |

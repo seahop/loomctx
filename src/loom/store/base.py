@@ -47,7 +47,14 @@ class GraphStore(ABC):
 
     @abstractmethod
     def record_claim(self, claim: ClaimIn) -> Observation:
-        """Append one observation (auto-creating subject/object entities)."""
+        """Append one observation (auto-creating subject/object entities).
+
+        With an event_id, a replay returns the original observation instead
+        of appending (D-014) — race-safe across writer processes. If that
+        original has since been redacted, the returned observation is a
+        stand-in carrying the id but no content (object "[redacted]",
+        attrs {"redacted": true}): replaying an event never resurrects data.
+        """
 
     def record_claims(self, claims: list[ClaimIn]) -> list[Observation]:
         """Batch append. Backends override to commit once per batch — the
@@ -64,8 +71,9 @@ class GraphStore(ABC):
     def search_entities(
         self, namespace: str, query: str, limit: int = 10
     ) -> list[Entity]:
-        """Entities whose key matches the query exactly or by prefix. Used to
-        resolve entity names mentioned inside a free-form question."""
+        """Entities whose key matches the query exactly or by prefix
+        (case-insensitive; LIKE metacharacters in the query are literal).
+        Used to resolve entity names mentioned inside a free-form question."""
 
     @abstractmethod
     def store_artifact(self, doc: DocumentIn) -> Artifact:
@@ -155,11 +163,15 @@ class GraphStore(ABC):
     @abstractmethod
     def purge_older_than(self, namespace: str, before: datetime) -> int:
         """Retention sweep: hard-delete observations and artifacts observed
-        before the cutoff. Returns rows removed."""
+        before the cutoff, plus the derived rows that hung off them
+        (embeddings, doc chunks, tombstones, dossiers of entities left with
+        no observations). Entities themselves are kept. Returns
+        observation + artifact rows removed."""
 
     @abstractmethod
     def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
-        """Every observation (tombstoned included — export is a backup)."""
+        """Every observation (tombstoned included — export is a backup, and
+        the matching tombstones are exported alongside via iter_tombstones)."""
 
     @abstractmethod
     def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]: ...
@@ -168,11 +180,35 @@ class GraphStore(ABC):
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]: ...
 
     @abstractmethod
+    def iter_aliases(self, namespace: str | None = None) -> Iterator[dict]:
+        """{'namespace', 'alias': 'type:key', 'canonical': {'type','key'}}
+        for every merge alias (D-019) — part of a faithful export."""
+
+    @abstractmethod
+    def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
+        """{'namespace', 'observation_id', 'reason', 'recorded_at'} for every
+        redaction (D-016) — exported so a restore never un-redacts."""
+
+    @abstractmethod
     def restore_observation(self, obs: Observation) -> None:
-        """Insert an exported observation verbatim (import/migration path)."""
+        """Insert an exported observation verbatim (import/migration path).
+        Idempotent: an existing id or (namespace, event_id) is left alone."""
 
     @abstractmethod
     def restore_artifact(self, artifact: Artifact) -> None: ...
+
+    @abstractmethod
+    def restore_entity(self, entity: Entity) -> None:
+        """Ensure an exported entity exists (keeps `provisional`/`created_at`
+        when creating; leaves an existing one alone)."""
+
+    @abstractmethod
+    def restore_alias(self, namespace: str, alias: str, canonical: EntityRef) -> None: ...
+
+    @abstractmethod
+    def restore_tombstone(
+        self, namespace: str, observation_id: str, reason: str, recorded_at: datetime
+    ) -> None: ...
 
     @abstractmethod
     def wipe(self) -> None:

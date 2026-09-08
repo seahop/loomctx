@@ -19,11 +19,27 @@ def now() -> datetime:
 
 
 def iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt is not None else None
+    """Canonical stored form: UTC, `+00:00` suffix, so that the ISO text the
+    stores ORDER BY and compare lexically orders by real instant. Naive
+    datetimes are taken as UTC (contract rule)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def parse(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
+
+
+def like_pattern(query: str) -> str:
+    """Prefix pattern for LIKE ... ESCAPE '\\' with the user's metacharacters
+    neutralized, so `web_01` doesn't match `webX01` and `%` isn't a wildcard."""
+    escaped = (
+        query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return escaped.lower() + "%"
 
 
 def row_to_entity(row: Mapping[str, Any]) -> Entity:
@@ -62,6 +78,17 @@ def row_to_observation(row: Mapping[str, Any]) -> Observation:
         provenance=provenance,
         attrs=json.loads(row["attrs_json"]),
     )
+
+
+def redacted_view(obs: Observation) -> Observation:
+    """Content-free stand-in for a tombstoned observation: keeps identity
+    (id, namespace, event_id, subject, predicate, timestamps, source) so a
+    replayed event can be acknowledged, but never returns what was redacted."""
+    return obs.model_copy(update={
+        "object": "[redacted]",
+        "provenance": None,
+        "attrs": {"redacted": True},
+    })
 
 
 def row_to_artifact(row: Mapping[str, Any]) -> Artifact:

@@ -427,6 +427,42 @@ read anything in its namespace via a minted handle or a BFS hop.
   echo URLs, model names, account details): the 502 carries a short public
   form, the full detail goes to the server log.
 
+## D-022 · Store invariants: transactional methods, race-safe dedupe, faithful export, UTC text (2026-09-08)
+
+From `docs/hardening.md` H-B1…H-B11. Behavioral rules both backends now
+share (enforced by the parametrized contract tests, per D-011):
+
+- **Every public store method is one transaction** that rolls back on any
+  exception. A failed statement never leaves partial rows for the next
+  commit to persist, and never strands a Postgres connection in the
+  aborted state.
+- **Dedupe is race-safe.** The `(namespace, event_id)` pre-check stays as
+  the cheap path; the insert itself carries `ON CONFLICT DO NOTHING` on the
+  partial unique index and re-reads the winner, so two writer processes
+  (engine + queue consumer) replaying the same event both get the one
+  stored row.
+- **Replaying a redacted event returns identity, not content.** The
+  dedupe path hands back a stand-in (`object="[redacted]"`,
+  `attrs={"redacted": true}`) so an idempotent sender still gets its
+  observation id while nothing tombstoned is ever resurrected. Tombstoned
+  rows are also excluded from dossier-candidate counts.
+- **Export is faithful.** JSONL now carries `alias` and `tombstone` records
+  (and entities restore with their `provisional`/`created_at`), so a
+  restore keeps redactions hidden and merged-away refs resolving. Import is
+  idempotent across both the id and the event_id index.
+- **Timestamps are stored as UTC ISO text** (`+00:00`), naive input taken
+  as UTC — contract rule — so the stores' lexical `ORDER BY`/cutoff
+  comparisons are chronological across senders in different zones. Rows
+  written before this change keep their original offset text; a
+  normalization sweep is a one-off `lifecycle` export/import.
+- **Merges are complete:** the folded node's dossier is dropped and edges
+  pointing at it are rewritten to the canonical ref on both the id and the
+  rendered-object side; dossier lookups follow aliases.
+- **Purge sweeps derived rows** (embeddings, chunks, tombstones, dossiers of
+  now-fact-less entities). Entities are kept — they carry no content.
+- `search_entities` is case-insensitive on both backends and treats LIKE
+  metacharacters in the query as literals.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
