@@ -49,6 +49,9 @@ vector = [
     "numpy>=1.26",       # batched cosine; pure Python without it
     "sqlite-vec>=0.1.6", # ANN index for the SQLite store; exact scan without it
 ]
+s3 = [
+    "boto3>=1.34",       # artifact offload to S3-compatible storage (D-033)
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

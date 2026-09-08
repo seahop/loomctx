@@ -31,7 +31,7 @@ def store_from_env() -> GraphStore:
     default = store_from_url(os.environ.get("LOOM_DB", "loom.db"))
     raw = os.environ.get("LOOM_SHARDS", "").strip()
     if not raw:
-        return default
+        return _with_offload(default)
     import json
     from .sharded import ShardedStore
 
@@ -44,4 +44,16 @@ def store_from_env() -> GraphStore:
         if url not in by_url:
             by_url[url] = store_from_url(url)
         shards[str(namespace)] = by_url[url]
-    return ShardedStore(default, shards)
+    return _with_offload(ShardedStore(default, shards))
+
+
+def _with_offload(store: GraphStore) -> GraphStore:
+    """Artifact offload (D-033) when LOOM_BLOB_THRESHOLD + a blob backend
+    are configured; the store is returned untouched otherwise."""
+    from .blobs import BlobOffloadStore, blobs_from_env, threshold_from_env
+
+    threshold = threshold_from_env()
+    blobs = blobs_from_env() if threshold else None
+    if threshold and blobs is not None:
+        return BlobOffloadStore(store, blobs, threshold)
+    return store

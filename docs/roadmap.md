@@ -144,8 +144,9 @@ presentable.
   SQLite WAL mode for cross-process sharing. Rehearsed live end-to-end:
   3 gateways → queue → consumer → `/v1/ask`. CI checks contract sync and
   publishes `ghcr.io/seahop/loom-gateway`.
-- Load test before the conference (early-Oct milestone) so quoted capacity
-  numbers are measured, not assumed (D-001a).
+- 🔨 Load test before the conference (early-Oct milestone): laptop numbers
+  are in `deploy/README.md`; re-run the loadgen Job on real nodes for the
+  quoted figures (D-001a).
 
 ## Phase 6 — Enterprise scale ⬜ (direction D-027, 2026-09-08)
 
@@ -164,9 +165,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   dossier work, sharded embedding backlog, `loom-enrich` StatefulSet
 - ✅ 6.5 Tenant sharding (2026-09-08, D-032): `LOOM_SHARDS` →
   `ShardedStore`; the contract suite runs a two-shard lane
-- ⬜ 6.6 Artifact offload to S3-compatible storage above a size threshold
-- ⬜ 6.7 Capacity evidence: loadgen k8s Job + published measurements per
-  shape (also the pre-conference load test)
+- ✅ 6.6 Artifact offload (2026-09-08, D-033): `LOOM_BLOB_THRESHOLD` +
+  `LOOM_BLOB_DIR` / `LOOM_BLOB_S3_BUCKET`, reinflated on every read
+- ✅ 6.7 Capacity evidence (2026-09-08): `deploy/k8s/jobs/loadgen.yaml`;
+  measured table in `deploy/README.md` (laptop floors; re-run on real
+  nodes before the conference quote)
 
 ## Deployment & CI (2026-09-03)
 

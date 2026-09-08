@@ -151,9 +151,22 @@ simple as it is. Turn them when a measurement says to.
 | Redelivery | `LOOM_ACK_WAIT`, `LOOM_MAX_DELIVER` (consumer) | 30 s / 5 | after the bound a message is parked on `LOOM_DEADLETTER` with the error, never dropped |
 | Enrichment workers | `loom-enrich` StatefulSet replicas + `LOOM_WORKER_COUNT` (raise together) | 2 in `scale-pg` | document/LLM backlog grows; leases + sharding prevent double spend |
 | Tenant shards | `LOOM_SHARDS` (namespace → DSN map; engines, consumers, workers) | unset | a heavy tenant needs its own database; move with `lifecycle export`/`import`, then flip the map |
+| Artifact offload | `LOOM_BLOB_THRESHOLD` + `LOOM_BLOB_DIR` or `LOOM_BLOB_S3_BUCKET`/`_ENDPOINT` | unset | documents bloat the database; bodies above the threshold live in object storage, reinflated on every read |
 
-Measured on one laptop (D-028, compose, Postgres, `loadgen`): see
-`docs/decisions.md` D-028 for the before/after table.
+### Measured capacity (2026-09-08, one laptop — treat as relative floors)
+
+| Shape | Ingest | Ask | Notes |
+| --- | --- | --- | --- |
+| compose, SQLite, 1 worker | 507/s | — | D-011 (2026-09-03) |
+| compose, Postgres, 1 connection | 388/s | 181/s, p99 178 ms | before D-028 |
+| compose, Postgres, pool 4 | 416/s | 251/s, p99 93 ms | D-028 |
+| compose, Postgres, pool 4 × 2 workers | 515/s | 184/s (CPU-bound laptop) | D-028 |
+| k3s scale-pg, 2 gateways → 3-node JetStream → 2 consumers | 284/s acknowledged, 0 errors **while the stream leader was deleted** | — | D-029 |
+| k3s scale-pg-ha, primary deleted under load | 319/319 sync writes ok | 319/319 reads ok | D-030 |
+
+The generator ran on the same machine as everything it measured; the
+numbers are floors and the *relative* changes are the point. Re-measure on
+real nodes with `deploy/k8s/jobs/loadgen.yaml` before quoting capacity.
 
 ## Choosing a database (D-011)
 

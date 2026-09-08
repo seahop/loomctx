@@ -1,0 +1,29 @@
+# Capacity evidence (D-027 6.7 / D-001a: measure, don't assume). Run the
+# load generator inside the cluster against the gateway Service (ingest) or
+# the engine Service (ask):
+#   kubectl -n loom apply -f deploy/k8s/jobs/loadgen.yaml
+#   kubectl -n loom logs job/loom-loadgen -f
+# Edit args for --mode ask / --count / --concurrency. Delete and re-apply to
+# run again (Jobs are immutable).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loom-loadgen
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: loadgen
+          image: ghcr.io/seahop/loom:latest
+          command: ["python", "-m", "loom.loadgen"]
+          args: ["--url", "http://loom-gateway", "--count", "5000", "--concurrency", "32", "--namespace", "loadtest"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi

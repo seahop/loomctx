@@ -839,6 +839,21 @@ read at startup; hot reload is deliberately not built until someone needs
 it). A heavy tenant gets its own Postgres cluster; the contract never sees
 it. A small team never sets `LOOM_SHARDS`.
 
+## D-033 · Artifact offload to blob storage (2026-09-08, phase 6.6)
+
+Document-heavy tenants would otherwise grow the transactional database
+with bodies it never queries (D-027 #6). Off by default. With
+`LOOM_BLOB_THRESHOLD` (bytes) plus a backend — `LOOM_BLOB_DIR` (a shared
+volume) or `LOOM_BLOB_S3_BUCKET` (+ `_ENDPOINT` for MinIO/Ceph/…, extra
+`s3`, boto3) — `BlobOffloadStore` wraps the store the factory built:
+bodies above the threshold are written to `<namespace>/<uuid>` and the row
+keeps an empty body plus a pointer in `attrs["_blob"]`. Every read path
+that returns an Artifact reinflates it (API, worker backlogs, exports), a
+replay of the same `event_id` never leaves an orphan blob, purge deletes
+the blob with the row, and import offloads again. Persistence still lives
+behind `GraphStore`; nothing above it knows. `GET /v1/artifacts/{id}`
+streams the same bytes as before.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
