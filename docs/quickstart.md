@@ -59,6 +59,8 @@ pack it saw, so you can audit exactly what grounded the answer.
 
 ## Where next
 
+- **[real-data.md](real-data.md)** — one more command loads real
+  vulnerability intelligence (CISA KEV, NVD, EPSS) next to these hosts.
 - **[tutorial.md](tutorial.md)** — build your *own* security domain from an
   empty store (vulnerability management), end to end, in ~30 minutes.
 - **[sdk.md](sdk.md)** — connect an agent over MCP, or use the HTTP/Python

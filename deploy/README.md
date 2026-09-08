@@ -175,6 +175,10 @@ The generator ran on the same machine as everything it measured; the
 numbers are floors and the *relative* changes are the point. Re-measure on
 real nodes with `deploy/k8s/jobs/loadgen.yaml` before quoting capacity.
 
+Real data on a schedule: `deploy/k8s/jobs/vulns-refresh.yaml` is a nightly
+CronJob that pulls CISA KEV + NVD + EPSS into a small PVC cache and loads
+them through the engine's batch API (D-035, `docs/real-data.md`).
+
 ## Choosing a database (D-011)
 
 `LOOM_DB` is the whole decision — a file path means SQLite, a

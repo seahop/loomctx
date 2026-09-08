@@ -15,7 +15,8 @@ presentable.
 | late Sep (done 2026-09-04) | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
 | early Sep (done 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
 | early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
-| early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster, polish README for public visitors |
+| early Sep (done 2026-09-08) | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
+| early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster (GCP), polish README for public visitors |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
 
@@ -182,6 +183,28 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ Kafka/Redpanda consumer with retry + dead-letter, live-validated
 - ⬜ On request: hand-written Rust client; webhook adapters beyond the
   shipper transform stage
+
+## Phase 8 — Real data ✅ (D-035, 2026-09-08)
+
+- ✅ `python -m loom.connectors.vulns` — CISA KEV + NVD 2.0 + FIRST EPSS,
+  streamed, cached with conditional GETs, idempotent, history-preserving
+- ✅ Schema registration for the namespace; seed-host bridge for the two-hop
+  demo question; nightly CronJob (`deploy/k8s/jobs/vulns-refresh.yaml`)
+- ✅ First run against the seeded store, findings recorded honestly in
+  `docs/real-data.md`; the six core fixes it forced are listed under D-035
+  (read-path namespace scan, quadratic conflicts, handle cap +
+  `omitted_handles`, inbound handle aggregation, conflict budget share,
+  path-carrying scope facts)
+- ⬜ Scope expansion over hubs: `_GATHER_LIMIT` caps a hub's neighbours at
+  the newest 1,000 silently — surface the truncation (a handle or a count)
+  or page the expansion
+- ⬜ Entity resolution on real keys: KEV freehand names vs CPE keys (91/708
+  match), one product under two CPE vendors across eras — a resolution
+  pass over `product` aliases (D-023 machinery)
+- ⬜ Embed the KEV documents (run the enrichment worker over the real
+  corpus with an embedding provider) and measure excerpt quality
+- ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
+  the obvious non-security one)
 
 ## Deployment & CI (2026-09-03)
 

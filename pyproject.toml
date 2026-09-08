@@ -52,6 +52,9 @@ vector = [
 s3 = [
     "boto3>=1.34",       # artifact offload to S3-compatible storage (D-033)
 ]
+connectors = [
+    "ijson>=3.2",        # stream the 300 MB NVD feeds without loading them (D-035)
+]
 kafka = [
     "aiokafka>=0.11",    # consume envelopes from your Kafka/Redpanda topics (D-034)
     "python-snappy>=0.7", # the codecs producers commonly use (Redpanda defaults to snappy)

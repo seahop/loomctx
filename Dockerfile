@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector,s3,kafka]"
+RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector,s3,kafka,connectors]"
 
 # Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
 # /data is created owned by that user, so a fresh named volume inherits it.

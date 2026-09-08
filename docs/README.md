@@ -16,6 +16,9 @@ Read in this order depending on why you're here.
 - **[../deploy/integrations/README.md](../deploy/integrations/README.md)** —
   tying in pipelines you already run: Fluent Bit and Vector configs, the
   Kafka/Redpanda consumer, files from any language.
+- **[real-data.md](real-data.md)** — load real public data (CISA KEV, NVD,
+  EPSS) next to the demo hosts with one command; what the first run
+  exposed.
 - **[contracts.md](contracts.md)** — the wire shapes (the real API); JSON
   Schema export.
 - **[concepts.md](concepts.md)** — glossary: observation, claim, context pack,

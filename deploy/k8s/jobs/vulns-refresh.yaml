@@ -1,0 +1,66 @@
+# Real data on a schedule (D-035): pull CISA KEV + NVD + EPSS every night and
+# load them through the engine's batch API. Re-runs are idempotent; a record
+# NVD has re-scored since yesterday records a NEW observation, so the
+# namespace accumulates real history and `as_of` questions mean something.
+#
+#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # a write key pinned to sources nvd,cisa-kev,first-epss
+#   kubectl -n loom apply -f deploy/k8s/jobs/vulns-refresh.yaml
+#   kubectl -n loom create job --from=cronjob/loom-vulns-refresh vulns-now   # run once, now
+#
+# The feed cache lives on a small PVC so unchanged feeds are not re-downloaded
+# (conditional GETs). Point --url at the gateway Service in the scale shapes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loom-feed-cache
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loom-vulns-refresh
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+          containers:
+            - name: vulns
+              image: ghcr.io/seahop/loom:latest
+              command: ["python", "-m", "loom.connectors.vulns"]
+              args: ["load", "--url", "http://loom", "--cache", "/cache", "--namespace", "netsec"]
+              env:
+                - name: LOOM_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: loom-vulns-key
+                      key: key
+                      optional: true
+              volumeMounts:
+                - name: cache
+                  mountPath: /cache
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: cache
+              persistentVolumeClaim:
+                claimName: loom-feed-cache

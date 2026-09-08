@@ -62,11 +62,12 @@ findings without touching Loom's code.
 | `docs/roadmap.md` | Phased execution plan with current status |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
 | `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
-| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data |
+| `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
+| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
 | `contracts/` | `schemas.json` (JSON Schema) and `openapi.json`, both regenerated and drift-checked in CI |
 | `deploy/` | Kubernetes shapes (default, scale, scale-pg, scale-pg-ha), `integrations/` (Fluent Bit, Vector, Kafka), deployment guide |
-| `tests/` | Contract, store, context-pack, seed, and API tests |
+| `tests/` | Contract, store, context-pack, seed, connector, and API tests |
 
 ## Documentation
 
@@ -83,6 +84,8 @@ docker compose run --rm test
 # Start the engine (HTTP API on :8000) and load the demo dataset
 docker compose up -d loom
 docker compose exec loom python -m loom.seed load   # ~580 claims + 5 documents
+# Optional: real data next to it — CISA KEV + NVD + EPSS (docs/real-data.md)
+docker compose exec loom python -m loom.connectors.vulns load --db /data/loom.db --bridge-seed-hosts
 
 # Ask a focused, budgeted question about an entity
 curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{

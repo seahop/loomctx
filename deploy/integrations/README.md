@@ -9,6 +9,7 @@ custom code. Loom meets them where they are:
 | Kafka / Redpanda topics | `python -m loom.kafka_consumer` (compose profile `kafka`, k8s manifest) reads envelopes from your topics | none — point it at brokers + topics |
 | Files / exports / cron jobs (any language) | `python -m loom.ingest --url … file.jsonl` or `--db` for direct writes | emit NDJSON envelopes |
 | Custom code | Python SDK, TypeScript SDK, Go SDK (`sdk/`); anything else via `contracts/openapi.json` + your language's OpenAPI generator | a few lines |
+| Public feeds (CISA KEV, NVD, EPSS) | `python -m loom.connectors.vulns load` — a connector: pull, map, register schema, ingest (`docs/real-data.md`) | none — the pattern for your own connector is in `src/loom/connectors/` |
 | AI agents | MCP (stdio or streamable-http) | none |
 
 Every path lands in the same append-only, cited, idempotent store. Give

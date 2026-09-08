@@ -895,6 +895,73 @@ those already speak, with generated clients for the languages that remain.
   Bit's filter language, covered by the shipped example; Rust waits for a
   shop that asks.
 
+## D-035 · Real data: the vulnerability-intelligence connector (2026-09-08)
+
+Everything before this was validated against a corpus we wrote knowing the
+answers (~590 seed claims, 5 documents). The product claim — good, cited,
+budgeted packs from messy data — had never met data we did not author. The
+first connector fixes that with three public, keyless feeds and one command
+(`python -m loom.connectors.vulns load`), and doubles as the demo's second
+act: "is web-01 exposed to something actively exploited, and why?"
+
+- **Sources → one namespace.** NVD 2.0 yearly feeds (status, trimmed
+  summary, CVSS per *scorer*, CWE, products from vulnerable CPEs), CISA KEV
+  (exploited-in-the-wild flag, ransomware use, freehand vendor/product,
+  and the advisory text as a *document*), FIRST EPSS (score + percentile,
+  only for CVEs already present). Loaded into `netsec` so it joins the seed
+  hosts; `--bridge-seed-hosts` adds `runs_software` edges so the demo
+  question is a two-hop scope (`expand: [runs_software, affects]`).
+- **Conflicts are real, not planted.** NIST and the CNA score the same CVE
+  differently often enough that `cvss_score` conflicts surface on their
+  own. One score per scorer (newest CVSS version) so a v4.0/v3.1 pair from
+  the *same* scorer is not misread as disagreement.
+- **Entity resolution is left honest.** KEV's "NGINX Open Source" becomes
+  `nginx:nginx_open_source`, the CPE says `nginx:nginx`; the connector does
+  not paper over that. It is the resolution worker's job (D-023) and the
+  gap is documented in `docs/real-data.md` rather than hidden.
+- **History for free.** Every event_id embeds the record's own
+  modification stamp: re-runs dedupe, a re-scored NVD record records a new
+  observation. A nightly CronJob (`deploy/k8s/jobs/vulns-refresh.yaml`)
+  makes `as_of` questions answerable against real revisions.
+- **Small-resource posture kept.** The feeds are streamed (`ijson`, extra
+  `connectors`), never loaded whole; the cache uses conditional GETs; the
+  default is this year's NVD feed only (`--years` widens it). A connector
+  is a domain adapter like `loom.seed`, not core: the engine learns
+  nothing about CVEs, the namespace's schema registration carries it.
+- **Measured, not assumed:** load rate, corpus size and pack quality from
+  the first real run are recorded in `docs/real-data.md`, including what
+  the run got wrong.
+
+**What the first run changed in core** (each with a regression test):
+
+- `GraphStore.observations_for` was `subject_id = ? OR object_entity_id = ?`;
+  SQLite planned it as a scan of the whole namespace (229 ms per call at
+  465k rows, so a 1,000-subject scope took 262 s). Both stores now run two
+  indexed halves merged with `UNION ALL` (0.1 ms; the scope 0.5 s).
+- Conflict detection scanned every observation once per subject
+  (quadratic on scopes); grouped once.
+- **Contract, additive:** `ContextPack.omitted_handles`. Handles are
+  capped at 32 in priority order; a hub produced 8,234.
+- Edges pointing *into* a pack subject from outside the pack aggregate into
+  one `pointing at` handle on that subject (965 one-observation handles
+  before).
+- Conflicts still ship first but take at most half the budget
+  (`_CONFLICT_BUDGET_SHARE`); the overflow becomes conflict handles (H-C4
+  holds). A wide scope had produced 53 conflicts and zero facts.
+- A fact about an entity a scope *reached* ships with the edges it was
+  reached through, as `relation` items (the contract's until-now-unused
+  kind) right before it; if the chain doesn't fit, neither does the fact.
+  Without the chain the answering model correctly refused to connect
+  "CVE-X exploited" to web-01.
+
+**Left open, on purpose (roadmap phase 8):** `_GATHER_LIMIT` (1,000)
+silently truncates hub expansion (the kernel has 2,740 CVEs this year);
+KEV's freehand product names match NVD's CPE keys for 91 of 708 products
+and one product carries two CPE keys across eras (`nginx:nginx` /
+`f5:nginx_open_source`, `haxx:curl` / `curl:curl`) — entity-resolution
+work, not connector work; the 1,699 KEV documents were loaded but not yet
+embedded in this pass.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
