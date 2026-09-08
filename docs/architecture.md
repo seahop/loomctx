@@ -183,6 +183,16 @@ stateful or LLM-adjacent stays in the Python core. Gateways being stateless is
 what makes multi-node ingestion free — add replicas, the LB spreads load, the
 buffer serializes writes toward the store.
 
+## Scaling dials (D-027)
+
+Every tier is a replica count or a managed dependency the platform team
+already runs — never a custom cluster. Gateways and engine replicas scale
+today; the next dials, in order, are a connection pool in the engine, a
+3-node JetStream cluster with stream replicas, Postgres HA with read
+replicas (`LOOM_DB_READ`), a leased enrichment worker fleet, and per-tenant
+shards routed by namespace (`LOOM_SHARDS`). The namespace being on every
+contract from day one is what makes the last dial cheap.
+
 ## Deployment posture
 
 - Single engine container + volume-backed state (SQLite default). Optional Neo4j

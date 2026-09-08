@@ -147,6 +147,25 @@ presentable.
 - Load test before the conference (early-Oct milestone) so quoted capacity
   numbers are measured, not assumed (D-001a).
 
+## Phase 6 — Enterprise scale ⬜ (direction D-027, 2026-09-08)
+
+Infra-side dials for large organizations: more database nodes, HA
+ingestion, tenant isolation of capacity. Contract unchanged throughout.
+
+- ⬜ 6.1 Engine concurrency: connection pool + multi-worker uvicorn on
+  Postgres; loadgen before/after
+- ⬜ 6.2 Ingestion HA: 3-node JetStream cluster, stream replicas=3,
+  retention limits, consumer ack/redelivery tuning, dead-letter subject
+- ⬜ 6.3 Database HA + read replicas: CloudNativePG Cluster manifest,
+  `LOOM_DB_READ` read/write split in the store
+- ⬜ 6.4 Worker fleet: lease-based job claiming so N enrichment replicas
+  share the backlog
+- ⬜ 6.5 Tenant sharding: `ShardedStore` routing namespaces to shards
+  (`LOOM_SHARDS`), fan-out for admin ops, export/import as the move tool
+- ⬜ 6.6 Artifact offload to S3-compatible storage above a size threshold
+- ⬜ 6.7 Capacity evidence: loadgen k8s Job + published measurements per
+  shape (also the pre-conference load test)
+
 ## Deployment & CI (2026-09-03)
 
 - ✅ Local: `docker compose up loom`; tests: `docker compose run --rm test`

@@ -612,6 +612,88 @@ scale needed it.
   `claude mcp add` uses — and runs the find → ask → expand → record_claim
   loop against the seed corpus, including the fact-time `valid_at` ask.
 
+## D-027 · Enterprise scale: the infra dials and the order to turn them (2026-09-08, direction)
+
+Direction set by the user: large organizations must be able to scale Loom
+from the infrastructure side — add database nodes, run highly available
+ingestion for large volumes — without touching the contract. This entry
+records what already scales, what is a single point today, and the
+staged plan (`roadmap.md` phase 6). It is a *plan*; each stage gets its
+own decision entry when built.
+
+**What already scales (validated on k8s, D-026):** gateways (stateless,
+HPA), engine replicas (stateless once `LOOM_DB` is Postgres, HPA), writer
+consumers (shared JetStream durable, add replicas freely). The contract
+(`/v1/ingest`, packs, MCP tools) is identical at every scale — that is the
+D-010 promise and it holds.
+
+**What does not, yet — verified in the code, not assumed:**
+
+1. **The queue is one pod.** The gateway creates `LOOM_INGEST` with the
+   default single replica and no retention limits; NATS runs as a
+   one-replica Deployment. A NATS restart pauses ingestion (the PVC keeps
+   the stream, so nothing is lost), and there is no cap on how much an
+   ingestion storm can buffer.
+2. **The engine serializes the database.** `PostgresStore` holds one
+   connection behind a process-wide lock and uvicorn runs one worker, so a
+   pod's throughput is one query at a time regardless of CPU. Adding pods
+   helps; a pool would help more per pod.
+3. **The database is one instance** with no replicas, failover, or read
+   scaling. Every read and write hits the same node.
+4. **The enrichment worker is a single process** with no job leasing: two
+   workers would extract the same artifact twice (dedupe by event_id
+   absorbs the duplicates, but the LLM spend is doubled).
+5. **Multi-tenant growth has one database.** Namespaces isolate data but
+   not capacity: every tenant shares one Postgres's write throughput.
+   Every query in the store is already namespace-scoped, which is what
+   makes tenant sharding cheap later.
+
+**Stages, in the order that removes the biggest limit first:**
+
+- **6.1 Engine concurrency.** `psycopg_pool` per process (the interface
+  doesn't change: `_tx()` borrows a connection), drop the process lock for
+  Postgres (SQLite keeps it — single writer by design), run uvicorn with
+  N workers. Measure with `loom.loadgen` before/after; this is the
+  cheapest win and the one the load test will expose first.
+- **6.2 Ingestion HA.** NATS as a 3-node JetStream cluster (StatefulSet
+  with routes, or the official chart), stream `replicas: 3`, explicit
+  limits (`max_bytes`, `discard: old|new` chosen per deployment) so a storm
+  degrades predictably; consumer `ack_wait`/`max_deliver` tuned and a
+  dead-letter subject for poison messages; gateway publish retries. Global
+  per-principal rate limits stay per-gateway approximations (documented)
+  until a shared counter is worth its dependency.
+- **6.3 Database HA + read scaling.** Postgres via an operator
+  (CloudNativePG first: it ships `rw`/`ro` Services, backups, failover)
+  with a 3-instance Cluster manifest in `deploy/k8s/scale-pg`; the store
+  gains an optional `LOOM_DB_READ` DSN so packs, expand, search, and
+  semantic reads go to replicas while ingest stays on the primary
+  (replication lag is acceptable for reads: observations are append-only
+  and `as_of` already makes staleness explicit).
+- **6.4 Worker fleet.** Lease-based job claiming (`claimed_by`,
+  `claimed_until`, `FOR UPDATE SKIP LOCKED`) on artifacts and dossier
+  candidates so N enrichment replicas share the backlog without double
+  work; embedding calls batched per worker.
+- **6.5 Tenant sharding.** A `ShardedStore` implementing `GraphStore` that
+  routes each namespace to a DSN from `LOOM_SHARDS` (a small JSON map or
+  file, hot-reloaded like the keys file); cross-namespace admin ops
+  (`iter_*`, `merge_candidates(None)`) fan out. Moving a tenant is
+  `lifecycle export` → import on the new shard → flip the map. Heavy
+  tenants get their own Postgres cluster; the contract never sees it.
+- **6.6 Artifact offload.** Documents above a size threshold stored in
+  S3-compatible object storage (MinIO in-cluster or a managed bucket) with
+  the artifact row keeping the pointer, so document-heavy tenants don't
+  bloat the transactional database; `GET /v1/artifacts/{id}` streams
+  through unchanged.
+- **6.7 Capacity evidence.** A `loadgen` k8s Job and a published table of
+  measured claims/s and p99 ask latency per shape, refreshed per release
+  (D-001a's rule: quote measurements, not this entry).
+
+**Non-goals for now:** multi-region active/active, Kafka-class
+infrastructure (hard constraint 2 still holds — every stage above is one
+more replica of something already shipped, or an operator the platform
+team already runs), and Neo4j (unchanged: only if graph-native traversal
+demand appears).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
