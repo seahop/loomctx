@@ -812,6 +812,33 @@ the same document twice (D-027 #4). Now N workers share the backlog:
   StatefulSet (2 replicas); compose and `scale` keep one worker, and a
   lone worker with the defaults behaves exactly as before.
 
+## D-032 · Tenant sharding by namespace (2026-09-08, phase 6.5)
+
+Namespaces isolated data; now they can isolate *capacity*. `LOOM_SHARDS`
+(inline JSON or a file: namespace → connection string, SQLite paths and
+Postgres DSNs mixable) wraps the engine's store in a `ShardedStore` that
+implements the full `GraphStore` contract:
+
+- a `namespace` argument, or an envelope/record carrying one, routes to
+  that shard; everything unmapped goes to `LOOM_DB`;
+- `namespace=None` admin calls (`iter_*`, merge candidates) fan out and
+  concatenate — so `lifecycle export` of everything still works;
+- worker backlog calls walk the shards until `limit` is filled, so a
+  lease is never taken on a row that isn't returned;
+- health and maintenance hit every shard; `/readyz` requires all of them.
+
+The router for every plain `namespace`-first method is generated from the
+`GraphStore` signature at import time, so a new store method cannot be
+silently mis-routed: it either routes correctly or the import fails. The
+contract test suite runs a third lane, two SQLite shards with the suite's
+namespaces split across them, so every existing test also proves routing.
+
+Moving a tenant: `lifecycle export --namespace X` from the old shard,
+`import` on the new one, flip the map, restart engines/workers (the map is
+read at startup; hot reload is deliberately not built until someone needs
+it). A heavy tenant gets its own Postgres cluster; the contract never sees
+it. A small team never sets `LOOM_SHARDS`.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

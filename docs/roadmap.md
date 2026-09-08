@@ -162,8 +162,8 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   deleted under load with zero failed requests
 - ✅ 6.4 Worker fleet (2026-09-08, D-031): leased extraction/chunking/
   dossier work, sharded embedding backlog, `loom-enrich` StatefulSet
-- ⬜ 6.5 Tenant sharding: `ShardedStore` routing namespaces to shards
-  (`LOOM_SHARDS`), fan-out for admin ops, export/import as the move tool
+- ✅ 6.5 Tenant sharding (2026-09-08, D-032): `LOOM_SHARDS` →
+  `ShardedStore`; the contract suite runs a two-shard lane
 - ⬜ 6.6 Artifact offload to S3-compatible storage above a size threshold
 - ⬜ 6.7 Capacity evidence: loadgen k8s Job + published measurements per
   shape (also the pre-conference load test)

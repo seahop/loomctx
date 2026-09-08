@@ -4,6 +4,7 @@ SQLite always runs. Postgres runs when LOOM_TEST_POSTGRES_URL is set (CI
 brings one up via the compose `pg` profile); otherwise those params skip.
 """
 
+import json
 import os
 from datetime import datetime, timezone
 
@@ -15,10 +16,17 @@ from loom.store.sqlite import SqliteStore
 OBSERVED = datetime(2026, 9, 1, 14, 3, tzinfo=timezone.utc)
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(params=["sqlite", "postgres", "sharded"])
 def store(request, tmp_path):
     if request.param == "sqlite":
         s = SqliteStore(tmp_path / "test.db")
+    elif request.param == "sharded":
+        # two SQLite shards: namespaces the suite uses land on both sides,
+        # so every contract test also exercises the routing (D-032)
+        from loom.store.sharded import ShardedStore
+        b = SqliteStore(tmp_path / "shard-b.db")
+        s = ShardedStore(SqliteStore(tmp_path / "shard-a.db"),
+                         {"team-b": b, "other": b, "other-ns": b, "vuln": b})
     else:
         url = os.environ.get("LOOM_TEST_POSTGRES_URL")
         if not url:
@@ -29,6 +37,13 @@ def store(request, tmp_path):
         s.wipe()
     yield s
     s.close()
+
+
+def _raw(store):
+    """Tests that poke backend internals skip the routing wrapper."""
+    if not hasattr(store, "_tx"):
+        pytest.skip("backend-internal test; not applicable to ShardedStore")
+    return store
 
 
 def login_claim(namespace="default"):
@@ -213,6 +228,7 @@ def test_no_event_id_means_no_dedupe(store):
 
 
 def test_dedupe_survives_losing_the_insert_race(store, monkeypatch):
+    _raw(store)
     """H-B2: when the pre-check misses (another writer landed the event_id
     between check and insert), ON CONFLICT hands back the winner instead of
     raising — and the store keeps working afterwards."""
@@ -249,6 +265,7 @@ def test_dedupe_survives_losing_the_insert_race(store, monkeypatch):
 
 
 def test_failed_statement_does_not_poison_the_store(store):
+    _raw(store)
     """H-B1: an error inside a transaction rolls back and the next call
     works (Postgres would otherwise be stuck in the aborted state)."""
     with pytest.raises(Exception):
@@ -512,6 +529,7 @@ def test_doc_chunks_by_seq(store):
 
 
 def test_exports_stream_across_pages(store, monkeypatch):
+    _raw(store)
     monkeypatch.setattr(type(store), "_PAGE", 3)
     for i in range(8):
         store.record_claim(login_claim().model_copy(
@@ -590,6 +608,7 @@ def test_nearest_chunks_filter_by_artifact(store):
 
 
 def test_vector_index_backfill_and_exact_fallback_agree(store):
+    _raw(store)
     """Rows that reach the JSON table without the index (imports, older
     versions) are picked up by ensure_vector_index; the exact path ranks
     identically to the ANN path."""
@@ -735,3 +754,40 @@ def test_embedding_backlog_shards_partition_the_work(store):
         seen += part
     assert set(seen) == ids
     assert {o.id for o in store.observations_without_embeddings("m", 100, shard=(0, 1))} == ids
+
+
+# -------------------------------------------------- namespace sharding (D-032) #
+
+def test_sharded_store_routes_and_fans_out(tmp_path):
+    from loom.contracts import DocumentIn
+    from loom.store.sharded import ShardedStore
+    a, b = SqliteStore(tmp_path / "a.db"), SqliteStore(tmp_path / "b.db")
+    s = ShardedStore(a, {"acme": b})
+    assert s.describe() == {"acme": 1}
+    mixed = [login_claim("default"), login_claim("acme"), login_claim("default")]
+    out = s.record_claims(mixed)
+    assert [o.namespace for o in out] == ["default", "acme", "default"]   # order kept
+    assert len(a.observations_for("default", EntityRef(type="host", key="web-01"))) == 2
+    assert len(b.observations_for("acme", EntityRef(type="host", key="web-01"))) == 1
+    assert a.observations_for("acme", EntityRef(type="host", key="web-01")) == []
+    art = s.store_artifact(DocumentIn(namespace="acme", text="t", source="s", observed_at=OBSERVED))
+    assert b.get_artifact("acme", art.id) and a.get_artifact("acme", art.id) is None
+    # admin fan-out sees both sides; leased backlog never over-claims
+    assert len(list(s.iter_observations())) == 3
+    assert [x.id for x in s.pending_artifacts(10, lease=("w", 60))] == [art.id]
+    assert s.pending_artifacts(10, lease=("w2", 60)) == []
+    assert s.ping() and s.schema_version() >= 2 and s.vector_backend() == a.vector_backend()
+    s.close()
+
+
+def test_sharded_store_from_env(tmp_path, monkeypatch):
+    from loom.store.factory import store_from_env
+    from loom.store.sharded import ShardedStore
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "main.db"))
+    monkeypatch.setenv("LOOM_SHARDS", json.dumps({"acme": str(tmp_path / "acme.db"),
+                                                  "globex": str(tmp_path / "acme.db")}))
+    s = store_from_env()
+    assert isinstance(s, ShardedStore) and s.describe() == {"acme": 1, "globex": 1}
+    s.close()
+    monkeypatch.delenv("LOOM_SHARDS")
+    assert isinstance(store_from_env(), SqliteStore)
