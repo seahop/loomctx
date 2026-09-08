@@ -373,8 +373,23 @@ class PostgresStore(GraphStore):
                 (namespace, list(ids)))
         return [common.row_to_observation(r) for r in rows]
 
+    _CONNECT_WAIT_SECONDS = 90.0
+
     def _connect(self):
-        return self._psycopg.connect(self._dsn, row_factory=self._dict_row)
+        """Postgres may still be starting when a replica boots (k8s and
+        compose ordering are best-effort): retry for a bounded time instead
+        of crash-looping — the same courtesy the NATS clients extend."""
+        import time
+        deadline = time.monotonic() + self._CONNECT_WAIT_SECONDS
+        while True:
+            try:
+                return self._psycopg.connect(self._dsn, row_factory=self._dict_row)
+            except self._psycopg.OperationalError as exc:
+                if time.monotonic() >= deadline:
+                    raise
+                logging.getLogger("loom.store").warning(
+                    "postgres not ready (%s); retrying", str(exc).strip().splitlines()[0])
+                time.sleep(2)
 
     def _migrate(self, cur) -> None:
         """One-shot versioned steps (H-B12); idempotent DDL lives in _SCHEMA."""

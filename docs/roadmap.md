@@ -158,7 +158,10 @@ presentable.
   matrix in `deploy/README.md`.
 - ✅ GitHub Actions: tests on every push/PR; image published to
   `ghcr.io/seahop/loom` (`latest` + SHA) on `main`
-- ⬜ Validate the k8s manifests on a real cluster before the conference
+- ✅ Validated on a real cluster (2026-09-08, Rancher Desktop k3s): default,
+  scale, and scale-pg shapes rolled out from the shipped manifests; ingest
+  through gateway → NATS → consumers → store, reads from engine replicas,
+  HPAs live, non-root pods on local-path PVCs. Details in `deploy/README.md`.
 
 ## Definition of "pick-up ready"
 

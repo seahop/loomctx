@@ -83,6 +83,16 @@ working; `scale/` and `scale-pg/` are overlays.
 
 ## Kubernetes
 
+**Validated 2026-09-08 on a real cluster** (Rancher Desktop, k3s v1.36,
+docker runtime, local-path storage, metrics-server): all three shapes
+rolled out from the shipped manifests — pods run as uid 10001 with the
+`fsGroup` PVCs writable, `/readyz` reported the vector index
+(`sqlite-vec` / `pgvector`), the HPAs were live (`cpu: 2%/70%`), NATS
+persisted its stream on its PVC, and claims posted to the gateway Service
+arrived through the queue and consumers in the store served by the engine
+replicas. The `scale-pg` run used an in-cluster `pgvector/pgvector:pg17`
+Deployment behind the `loom-db` Secret.
+
 CI publishes the image to `ghcr.io/seahop/loom` (`latest` + per-commit SHA tags)
 on every push to `main`. Then:
 
@@ -101,13 +111,25 @@ kubectl -n loom exec deploy/loom -- python -m loom.seed load
 Pin a specific version by editing `images:` in `deploy/k8s/kustomization.yaml`
 to a SHA tag instead of `latest`.
 
-### Local cluster (kind/minikube) without GHCR
+### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash
-docker build -t ghcr.io/seahop/loom:dev .
-kind load docker-image ghcr.io/seahop/loom:dev   # or: minikube image load ...
-cd deploy/k8s && kustomize edit set image ghcr.io/seahop/loom:dev
-kubectl apply -k .
+docker compose build loom && docker compose --profile scale build gateway
+docker tag loom-engine:local ghcr.io/seahop/loom:dev
+docker tag project2026-gateway ghcr.io/seahop/loom-gateway:dev
+kind load docker-image ghcr.io/seahop/loom:dev   # minikube image load ...; Rancher Desktop
+                                                  # on the docker runtime sees local images directly
+```
+
+Kustomize forbids absolute resource paths, so pin the `:dev` tags from an
+overlay that layers on a *rendered* copy of the shipped manifests:
+
+```bash
+mkdir -p /tmp/loom && kubectl kustomize deploy/k8s > /tmp/loom/rendered.yaml
+printf '%s\n' 'resources: ["rendered.yaml"]' 'images:' \
+  '  - {name: ghcr.io/seahop/loom, newTag: dev}' \
+  '  - {name: ghcr.io/seahop/loom-gateway, newTag: dev}' > /tmp/loom/kustomization.yaml
+kubectl apply -k /tmp/loom
 ```
 
 ## Choosing a database (D-011)
