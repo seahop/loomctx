@@ -45,6 +45,25 @@ from .store.base import GraphStore
 _CHARS_PER_TOKEN = 4
 _ITEM_OVERHEAD_TOKENS = 8  # rough JSON/citation framing cost per item
 _GATHER_LIMIT = 1000
+_MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
+_QUERY_CACHE_SIZE = 256
+
+
+def embed_query(embedder, question: str) -> list[float]:
+    """The question's vector, memoized per (embedder model, text): agents
+    re-ask the same question with different subjects/budgets constantly,
+    and each miss is a provider round-trip (H-E1)."""
+    key = (embedder.model, question)
+    vec = _query_cache.get(key)
+    if vec is None:
+        vec = embedder.embed([question])[0]
+        if len(_query_cache) >= _QUERY_CACHE_SIZE:
+            _query_cache.pop(next(iter(_query_cache)))
+        _query_cache[key] = vec
+    return vec
+
+
+_query_cache: dict[tuple[str, str], list[float]] = {}
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
 
@@ -91,6 +110,18 @@ def _citation(obs: Observation) -> Citation:
     )
 
 
+def _is_extracted(obs: Observation) -> bool:
+    """LLM-mined from a document (D-018) rather than asserted by a sender.
+    Such claims are data that came *through* an untrusted text, so they
+    rank a notch below structured facts and never outrank them in a
+    conflict (H-C5/H-D2)."""
+    return bool(obs.attrs.get("extracted")) or obs.source.startswith("doc:")
+
+
+_EXTRACTED_DISCOUNT = 0.85
+_EXCERPT_RELATIVE_FLOOR = 0.6  # keep passages scoring >= 60% of the best one
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
@@ -121,24 +152,33 @@ def _score(
     if cos is not None:
         # semantic similarity leads once embeddings exist (phase 4, D-018);
         # keyword overlap stays as a tie-breaking signal
-        return (0.5 * (cos + 1) / 2 + 0.15 * sim
-                + 0.25 * recency + 0.1 * obs.confidence)
-    return 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
+        score = (0.5 * (cos + 1) / 2 + 0.15 * sim
+                 + 0.25 * recency + 0.1 * obs.confidence)
+    else:
+        score = 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
+    return score * _EXTRACTED_DISCOUNT if _is_extracted(obs) else score
 
 
 def _find_conflicts(
-    subject: EntityRef, observations: list[Observation]
-) -> list[ContextItem]:
-    """Scalar facts about the subject where sources disagree on the value."""
+    subject: EntityRef, observations: list[Observation], as_of: datetime | None
+) -> list[tuple[str, ContextItem]]:
+    """Scalar facts about the subject where sources disagree on the value.
+    Returns (predicate, item) pairs so a conflict that doesn't fit the
+    budget can still be handed back as an expansion handle (H-C4)."""
+    horizon = as_of or datetime.now(timezone.utc)
     by_predicate: dict[str, dict[str, Observation]] = {}
     for obs in observations:
         if obs.subject != subject or isinstance(obs.object, EntityRef):
+            continue
+        # a fact whose validity window has closed is history, not a
+        # competing claim about the present (H-C3)
+        if obs.valid_to is not None and _aware(obs.valid_to) <= horizon:
             continue
         # keep the newest observation per distinct value (list is newest-first)
         by_predicate.setdefault(obs.predicate, {}).setdefault(
             str(obs.object), obs
         )
-    items = []
+    items: list[tuple[str, ContextItem]] = []
     for predicate, by_value in sorted(by_predicate.items()):
         if len(by_value) < 2:
             continue
@@ -151,19 +191,24 @@ def _find_conflicts(
             by_value.values(), key=lambda o: o.observed_at, reverse=True
         )[:3]
         clauses = "; ".join(
-            f"{o.source} says {_object_text(o)!r} "
+            f"{o.source} says {_object_text(o)!r}"
+            f"{' (extracted from a document)' if _is_extracted(o) else ''} "
             f"as of {o.observed_at.date().isoformat()}"
             for o in sides
         )
-        items.append(
-            ContextItem(
-                kind="conflict",
-                text=f"CONFLICT on {subject.type}:{subject.key} "
-                f"{predicate}: {clauses}",
-                score=1.0,
-                citations=[_citation(o) for o in sides],
-            )
-        )
+        # A disagreement between structured sources outranks one that a
+        # document extraction introduced: hostile text can manufacture the
+        # latter, never the former (H-C5).
+        structured_sides = sum(not _is_extracted(o) for o in sides)
+        score = 1.0 if structured_sides >= 2 else 0.9
+        items.append((predicate, ContextItem(
+            kind="conflict",
+            text=f"CONFLICT on {subject.type}:{subject.key} "
+            f"{predicate}: {clauses}",
+            score=score,
+            citations=[_citation(o) for o in sides],
+        )))
+    items.sort(key=lambda pair: pair[1].score, reverse=True)
     return items
 
 
@@ -307,9 +352,9 @@ def build_pack(
     # once, reuse it to score observation vectors AND rank passages from the
     # documents that produced this entity's facts.
     cos_map: dict[str, float] = {}
-    excerpts: list[tuple[float, str, str, int, int]] = []
+    excerpts: list[tuple[float, Citation, str]] = []
     if embedder is not None and req.question and observations:
-        query_vec = embedder.embed([req.question])[0]
+        query_vec = embed_query(embedder, req.question)
         vectors = store.embeddings_for(
             req.namespace, [o.id for o in observations], embedder.model
         )
@@ -319,19 +364,38 @@ def build_pack(
             o.provenance.artifact_id for o in observations
             if o.provenance and o.provenance.artifact_id
         })
-        for ch in store.doc_chunks_for_artifacts(req.namespace, artifact_ids):
+        horizon = _aware(req.as_of) if req.as_of else None
+        for ch in store.doc_chunks_for_artifacts(
+            req.namespace, artifact_ids, embedder.model
+        ):
+            observed = _aware(ch["observed_at"])
+            if horizon is not None and observed > horizon:
+                continue  # a document we hadn't seen yet as of then (H-C2)
             score = _cosine(query_vec, ch["vector"])
-            excerpts.append((score, ch["artifact_id"], ch["text"],
-                             ch["span_start"], ch["span_end"]))
+            cite = Citation(
+                artifact_id=ch["artifact_id"], span_start=ch["span_start"],
+                span_end=ch["span_end"], source=ch["source"], observed_at=observed,
+            )
+            excerpts.append((score, cite, ch["text"]))
         excerpts.sort(key=lambda e: e[0], reverse=True)
+        excerpts = excerpts[:_MAX_EXCERPT_CANDIDATES]
 
     # Dossier briefs: the cheap orientation layer, when the enrichment
-    # worker has built one for a subject.
-    briefs = []
-    for ref in subjects[:3]:
-        dossier = store.get_dossier(req.namespace, ref)
-        if dossier:
-            briefs.append((ref, dossier["brief"]))
+    # worker has built one for a subject. A brief is a present-tense
+    # summary, so it is withheld from as-of (time-travel) reads (H-C2). It
+    # cites the observations it was synthesized from; ones no longer
+    # visible (redacted, out of scope) simply drop out of the citation list.
+    briefs: list[tuple[EntityRef, str, list[Citation]]] = []
+    if req.as_of is None:
+        by_id = {o.id: o for o in observations}
+        for ref in subjects[:3]:
+            dossier = store.get_dossier(req.namespace, ref)
+            if not dossier:
+                continue
+            cites = [_citation(by_id[i]) for i in dossier.get("observation_ids", [])
+                     if i in by_id]
+            if cites:
+                briefs.append((ref, dossier["brief"], cites))
 
     return _pack(
         namespace=req.namespace,
@@ -380,8 +444,8 @@ def _pack(
     observations: list[Observation],
     with_handles: bool = True,
     cos_map: dict[str, float] | None = None,
-    briefs: list[tuple[EntityRef, str]] | None = None,
-    excerpts: list[tuple[float, str, str, int, int]] | None = None,
+    briefs: list[tuple[EntityRef, str, list[Citation]]] | None = None,
+    excerpts: list[tuple[float, Citation, str]] | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -405,37 +469,53 @@ def _pack(
     )
 
     items: list[ContextItem] = []
+    handles: list[ExpansionHandle] = []
     remaining = budget
 
-    # Conflicts ship first: an agent must not act on a contested fact unaware.
+    # Conflicts ship first: an agent must not act on a contested fact
+    # unaware. One that doesn't fit is never dropped silently — it becomes
+    # a 'conflict' handle so the agent knows contested ground exists (H-C4).
     for subj in subjects:
-        for item in _find_conflicts(subj, observations):
+        for predicate, item in _find_conflicts(subj, observations, as_of):
             cost = est_tokens(item.text)
             if cost <= remaining:
                 items.append(item)
                 remaining -= cost
+            elif with_handles:
+                handles.append(ExpansionHandle(
+                    id=encode_handle(namespace, subj, predicate, as_of),
+                    hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "
+                    f"did not fit the budget",
+                    est_tokens=cost, kind="conflict",
+                ))
 
     # Then dossier briefs — the orientation layer (phase 4).
-    for ref, brief in briefs or []:
+    for ref, brief, cites in briefs or []:
         text = f"{ref.type}:{ref.key} — {brief}"
         cost = est_tokens(text)
         if cost <= remaining:
-            items.append(ContextItem(kind="brief", text=text, score=0.99))
+            items.append(ContextItem(kind="brief", text=text, score=0.99,
+                                     citations=cites))
             remaining -= cost
 
     # Relevant document passages (D-020): top-ranked excerpts from the
     # documents behind this entity's facts, capped so they inform without
-    # crowding out structured facts. Each cites its artifact + span in-text.
+    # crowding out structured facts. Only passages that are close to the
+    # best match count as relevant — an absolute threshold means nothing
+    # across embedders (H-C6). Each cites its artifact + span.
     excerpt_budget = remaining // 2
-    for score, artifact_id, text, start, end in (excerpts or []):
-        if score < 0.15:
+    best = excerpts[0][0] if excerpts else 0.0
+    for score, cite, text in (excerpts or []):
+        if score <= 0 or score < best * _EXCERPT_RELATIVE_FLOOR:
             break
-        rendered = f'"{text}" [doc:{artifact_id[:8]} @{start}-{end}]'
+        rendered = (f'"{text}" [doc:{cite.artifact_id[:8]} '
+                    f'@{cite.span_start}-{cite.span_end}]')
         cost = est_tokens(rendered)
         if cost <= excerpt_budget:
             items.append(ContextItem(
                 kind="doc_excerpt", text=rendered,
-                score=round(min(max(score, 0.0), 1.0), 4)))
+                score=round(min(max(score, 0.0), 1.0), 4),
+                citations=[cite]))
             remaining -= cost
             excerpt_budget -= cost
 
@@ -459,7 +539,6 @@ def _pack(
             key = (obs.subject.type, obs.subject.key, obs.predicate)
             skipped[key] = skipped.get(key, 0) + 1
 
-    handles: list[ExpansionHandle] = []
     if with_handles:
         for (stype, skey, predicate), count in sorted(
             skipped.items(), key=lambda kv: kv[1], reverse=True

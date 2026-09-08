@@ -476,10 +476,55 @@
   "ContextPack": {
     "$defs": {
       "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
         "properties": {
           "observation_id": {
-            "title": "Observation Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
           },
           "source": {
             "title": "Source",
@@ -492,7 +537,6 @@
           }
         },
         "required": [
-          "observation_id",
           "source",
           "observed_at"
         ],
@@ -500,6 +544,7 @@
         "type": "object"
       },
       "ContextItem": {
+        "description": "Every item is cited (hard constraint 3): facts and conflicts cite\nobservations, briefs cite the observations they were synthesized from,\nexcerpts cite the artifact span they quote.",
         "properties": {
           "kind": {
             "enum": [
@@ -526,6 +571,7 @@
             "items": {
               "$ref": "#/$defs/Citation"
             },
+            "minItems": 1,
             "title": "Citations",
             "type": "array"
           }
@@ -533,7 +579,8 @@
         "required": [
           "kind",
           "text",
-          "score"
+          "score",
+          "citations"
         ],
         "title": "ContextItem",
         "type": "object"
@@ -558,7 +605,7 @@
         "type": "object"
       },
       "ExpansionHandle": {
-        "description": "Opaque 'there is more here' pointer; feed back to expand().",
+        "description": "Opaque 'there is more here' pointer; feed back to expand().\nkind says what was left out: more observations of one predicate, or a\nwhole conflict that didn't fit the budget (never silently dropped).",
         "properties": {
           "id": {
             "title": "Id",
@@ -579,6 +626,15 @@
             ],
             "default": null,
             "title": "Est Tokens"
+          },
+          "kind": {
+            "default": "more",
+            "enum": [
+              "more",
+              "conflict"
+            ],
+            "title": "Kind",
+            "type": "string"
           }
         },
         "required": [

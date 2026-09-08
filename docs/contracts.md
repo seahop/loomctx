@@ -91,17 +91,34 @@ advance as they mine claims out of the text.
         {"observation_id": "…", "source": "auth-log",
          "observed_at": "2026-09-01T14:03:00Z"}
       ]
+    },
+    {
+      "kind": "doc_excerpt",
+      "text": "\"…outbound traffic was observed from 10.0.4.7…\" [doc:3fa1b2c9 @118-203]",
+      "score": 0.81,
+      "citations": [
+        {"artifact_id": "3fa1b2c9…", "span_start": 118, "span_end": 203,
+         "source": "ir-pipeline", "observed_at": "2026-09-01T18:00:00Z"}
+      ]
     }
   ],
   "handles": [
-    {"id": "h_…", "hint": "full auth history for web-01 (past 30d)",
-     "est_tokens": 600}
+    {"id": "h1_…", "hint": "69 more 'logged_in_by' observations for host:web-01",
+     "est_tokens": 1725, "kind": "more"},
+    {"id": "h1_…", "hint": "CONFLICT on host:web-01 runs_os did not fit the budget",
+     "est_tokens": 60, "kind": "conflict"}
   ]
 }
 ```
 
-Item `kind` ∈ `brief | fact | relation | doc_excerpt | conflict`. Conflicts are
-items, not merged away. Handles feed `POST /v1/expand`.
+Item `kind` ∈ `brief | fact | relation | doc_excerpt | conflict`. **Every
+item carries at least one citation** (D-023): facts and conflicts cite
+observations, briefs cite the observations they were synthesized from,
+excerpts cite an artifact span. A `Citation` therefore names either an
+`observation_id` or an `artifact_id` (+ span). Conflicts are items, not
+merged away — and one that doesn't fit the budget becomes a `conflict`
+handle rather than disappearing. Handles feed `POST /v1/expand`; with
+`LOOM_HANDLE_SECRET` set they are signed (`h2_` prefix, D-021).
 
 ## Schema registry
 

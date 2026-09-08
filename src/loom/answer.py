@@ -63,15 +63,27 @@ def auto_subjects(
     return subjects[:cap]
 
 
+_MAX_RENDERED_CITES = 8
+
+
+def _cite_label(c) -> str:
+    if c.observation_id:
+        return c.observation_id[:12]
+    return f"doc:{c.artifact_id[:8]}@{c.span_start}-{c.span_end}"
+
+
 def render_user_prompt(question: str, pack: ContextPack) -> str:
     lines = [f"Question: {question}", "", "Context items:"]
     for item in pack.items:
-        cites = ",".join(c.observation_id[:12] for c in item.citations)
+        labels = [_cite_label(c) for c in item.citations[:_MAX_RENDERED_CITES]]
+        extra = len(item.citations) - len(labels)
+        cites = ",".join(labels) + (f",+{extra} more" if extra > 0 else "")
         lines.append(f"- ({item.kind}) {item.text} [{cites}]")
     if not pack.items:
         lines.append("- (none found)")
     for handle in pack.handles:
-        lines.append(f"- more available: {handle.hint}")
+        prefix = "unresolved conflict" if handle.kind == "conflict" else "more available"
+        lines.append(f"- {prefix}: {handle.hint}")
     return "\n".join(lines)
 
 

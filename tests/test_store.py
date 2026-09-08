@@ -297,14 +297,14 @@ def test_retention_purge_cleans_derived_rows(store):
     gone = store.record_claim(_claim(observed=old))
     store.put_embeddings("default", "m", [(keep.id, [1.0]), (gone.id, [1.0])])
     art = store.store_artifact(DocumentIn(text="old doc", source="s", observed_at=old))
-    store.put_doc_chunks("default", art.id, [(0, 0, 7, "old doc", [1.0])])
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 7, "old doc", [1.0])])
     store.redact("default", gone.id, "x")
     removed = store.purge_older_than("default", OBSERVED - timedelta(days=90))
     assert removed == 2  # one observation + one artifact
     obs = store.observations_for("default", EntityRef(type="host", key="web-01"))
     assert [o.id for o in obs] == [keep.id]
     assert set(store.embeddings_for("default", [keep.id, gone.id], "m")) == {keep.id}
-    assert store.doc_chunks_for_artifacts("default", [art.id]) == []
+    assert store.doc_chunks_for_artifacts("default", [art.id], "m") == []
     assert list(store.iter_tombstones("default")) == []
 
 
@@ -374,11 +374,38 @@ def test_merge_moves_dossier_and_rewrites_object_refs(store):
     store.record_claim(ClaimIn(
         subject=EntityRef(type="ip", key="10.0.4.7"), predicate="p", object="x",
         observed_at=OBSERVED, source="dhcp"))
-    store.put_dossier("default", EntityRef(type="ip_address", key="10.0.4.7"), "stray", 1)
-    store.put_dossier("default", EntityRef(type="ip", key="10.0.4.7"), "canonical brief", 1)
+    store.put_dossier("default", EntityRef(type="ip_address", key="10.0.4.7"), "stray", 1, [])
+    store.put_dossier("default", EntityRef(type="ip", key="10.0.4.7"), "canonical brief", 1, [])
     assert store.merge_entities("default", EntityRef(type="ip_address", key="10.0.4.7"),
                                 EntityRef(type="ip", key="10.0.4.7"))
     edge = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
     assert edge.object == EntityRef(type="ip", key="10.0.4.7")
     via_alias = store.get_dossier("default", EntityRef(type="ip_address", key="10.0.4.7"))
     assert via_alias and via_alias["brief"] == "canonical brief"
+
+
+def test_doc_chunks_are_keyed_by_model_and_carry_artifact_metadata(store):
+    """H-D3/H-C1: chunks embedded under one model are invisible to another;
+    each chunk carries what a citation needs."""
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="hello world", filename="h.txt",
+                                          source="wiki", observed_at=OBSERVED))
+    blank = store.store_artifact(DocumentIn(text="   \n ", source="wiki",
+                                            observed_at=OBSERVED))
+    assert [a.id for a in store.artifacts_needing_chunks("m1")] == [art.id]  # blank skipped
+    store.put_doc_chunks("default", art.id, "m1", [(0, 0, 11, "hello world", [1.0, 0.0])])
+    assert store.artifacts_needing_chunks("m1") == []
+    assert [a.id for a in store.artifacts_needing_chunks("m2")] == [art.id]
+    rows = store.doc_chunks_for_artifacts("default", [art.id], "m1")
+    assert len(rows) == 1 and rows[0]["source"] == "wiki"
+    assert rows[0]["observed_at"] == OBSERVED
+    assert store.doc_chunks_for_artifacts("default", [art.id], "m2") == []
+    assert blank.id != art.id
+
+
+def test_dossier_round_trips_its_citations(store):
+    ref = EntityRef(type="host", key="web-01")
+    obs = store.record_claim(login_claim())
+    store.put_dossier("default", ref, "a brief", 1, [obs.id])
+    d = store.get_dossier("default", ref)
+    assert d["brief"] == "a brief" and d["observation_ids"] == [obs.id]

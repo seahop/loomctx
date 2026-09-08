@@ -112,22 +112,26 @@ class GraphStore(ABC):
         """Artifacts still awaiting claim extraction."""
 
     @abstractmethod
-    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
-        """Text artifacts not yet chunked+embedded for excerpt retrieval."""
+    def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:
+        """Non-blank text artifacts not yet chunked+embedded under `model`
+        (vectors from different models never mix — H-D3)."""
 
     @abstractmethod
     def put_doc_chunks(
-        self, namespace: str, artifact_id: str,
+        self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
     ) -> None:
-        """Store (seq, span_start, span_end, text, vector) passages."""
+        """Store (seq, span_start, span_end, text, vector) passages embedded
+        with `model`."""
 
     @abstractmethod
     def doc_chunks_for_artifacts(
-        self, namespace: str, artifact_ids: list[str]
+        self, namespace: str, artifact_ids: list[str], model: str
     ) -> list[dict]:
-        """Chunks (with vectors) for the given artifacts, for excerpt ranking.
-        Each dict: artifact_id, seq, span_start, span_end, text, vector."""
+        """Chunks (with vectors) embedded under `model` for the given
+        artifacts, for excerpt ranking. Each dict: artifact_id, seq,
+        span_start, span_end, text, vector, plus the artifact's source and
+        observed_at (datetime) so an excerpt can be cited."""
 
     @abstractmethod
     def set_extraction_status(
@@ -136,12 +140,14 @@ class GraphStore(ABC):
 
     @abstractmethod
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
-        """{'brief', 'observation_count', 'updated_at'} or None."""
+        """{'brief', 'observation_count', 'observation_ids', 'updated_at'}
+        or None. observation_ids are what the brief was synthesized from —
+        its citations (D-023)."""
 
     @abstractmethod
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
-        observation_count: int,
+        observation_count: int, observation_ids: list[str],
     ) -> None: ...
 
     @abstractmethod

@@ -463,6 +463,47 @@ share (enforced by the parametrized contract tests, per D-011):
 - `search_entities` is case-insensitive on both backends and treats LIKE
   metacharacters in the query as literals.
 
+## D-023 · Every pack item is cited; extracted claims are second-class witnesses (2026-09-08)
+
+From `docs/hardening.md` H-C1…H-C6 and H-D1…H-D10. The review found the
+project's own hard constraint 3 ("every derived fact carries citations")
+broken by the two newest item kinds: `brief` items shipped with no
+citations at all, and `doc_excerpt` items cited only inside their text.
+
+**Contract change (pre-1.0):** `Citation` now names *either* an
+observation *or* an artifact span — `observation_id` became optional and
+`artifact_id`/`span_start`/`span_end` were added, with a validator
+requiring one of the two; `ContextItem.citations` requires at least one
+entry. `ExpansionHandle` gained `kind: "more" | "conflict"`.
+
+- **Briefs cite what built them.** Dossiers persist the observation ids
+  the LLM was given; at read time the brief cites those that are still
+  visible to the caller (redacted or out-of-scope ones drop out). A brief
+  is present-tense, so it is withheld from `as_of` reads entirely.
+- **Excerpts cite `(artifact, span)`** with the artifact's source and
+  observed time, and are withheld when the document postdates `as_of`.
+  Chunks are keyed by embedding model — a serving embedder that differs
+  from the worker's sees no chunks rather than mixing vector spaces.
+  Relevance is relative (within 60% of the best passage) instead of an
+  absolute cosine floor that meant nothing across embedders.
+- **Conflicts are never dropped silently.** One that doesn't fit the
+  budget becomes a `conflict` handle, so the agent knows contested ground
+  exists and can expand it.
+- **Extracted claims are tagged and discounted.** Document text is
+  untrusted input (prompt injection is the obvious attack): it is
+  delimited and labeled as data in the extraction prompt, every mined
+  claim carries `attrs.extracted=true` (and a `doc:` source), ranks a
+  notch below sender-asserted facts, and a conflict *introduced* by an
+  extracted side scores 0.9 rather than 1.0 — a hostile document can
+  raise a question, never outrank the asset inventory. Extracted claims'
+  event ids are content hashes of (subject, predicate, object), so a
+  re-extraction in a different order can't shadow a new fact.
+- **The worker never dies on a job failure**: each job is guarded and
+  retried next tick; per-artifact exponential backoff keeps a failing
+  document from hogging the extraction slots; blank documents are skipped
+  at the query; provider calls retry transient failures with backoff and
+  honor `Retry-After`.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

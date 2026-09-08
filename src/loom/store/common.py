@@ -80,6 +80,24 @@ def row_to_observation(row: Mapping[str, Any]) -> Observation:
     )
 
 
+def row_to_chunk(row: Mapping[str, Any]) -> dict:
+    return {
+        "artifact_id": row["artifact_id"], "seq": row["seq"],
+        "span_start": row["span_start"], "span_end": row["span_end"],
+        "text": row["text"], "vector": json.loads(row["vector"]),
+        "source": row["source"], "observed_at": parse(row["observed_at"]),
+    }
+
+
+def row_to_dossier(row: Mapping[str, Any]) -> dict:
+    return {
+        "brief": row["brief"],
+        "observation_count": row["observation_count"],
+        "observation_ids": json.loads(row["observation_ids"] or "[]"),
+        "updated_at": row["updated_at"],
+    }
+
+
 def redacted_view(obs: Observation) -> Observation:
     """Content-free stand-in for a tombstoned observation: keeps identity
     (id, namespace, event_id, subject, predicate, timestamps, source) so a

@@ -133,24 +133,44 @@ class Entity(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class Citation(BaseModel):
-    observation_id: str
+    """What backs a context item: an observation (facts, conflicts, briefs)
+    or a span of a stored document (excerpts). At least one of
+    observation_id / artifact_id is set (D-023)."""
+
+    observation_id: str | None = None
+    artifact_id: str | None = None
+    span_start: int | None = None
+    span_end: int | None = None
     source: str
     observed_at: datetime
 
+    @model_validator(mode="after")
+    def _cites_something(self) -> "Citation":
+        if self.observation_id is None and self.artifact_id is None:
+            raise ValueError("a citation names an observation or an artifact")
+        return self
+
 
 class ContextItem(BaseModel):
+    """Every item is cited (hard constraint 3): facts and conflicts cite
+    observations, briefs cite the observations they were synthesized from,
+    excerpts cite the artifact span they quote."""
+
     kind: Literal["brief", "fact", "relation", "doc_excerpt", "conflict"]
     text: str
     score: float = Field(ge=0.0, le=1.0)
-    citations: list[Citation] = Field(default_factory=list)
+    citations: list[Citation] = Field(min_length=1)
 
 
 class ExpansionHandle(BaseModel):
-    """Opaque 'there is more here' pointer; feed back to expand()."""
+    """Opaque 'there is more here' pointer; feed back to expand().
+    kind says what was left out: more observations of one predicate, or a
+    whole conflict that didn't fit the budget (never silently dropped)."""
 
     id: str
     hint: str
     est_tokens: int | None = None
+    kind: Literal["more", "conflict"] = "more"
 
 
 class ScopeSpec(BaseModel):

@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS dossiers (
     entity_id         TEXT NOT NULL,
     brief             TEXT NOT NULL,
     observation_count INTEGER NOT NULL,
+    observation_ids   TEXT NOT NULL DEFAULT '[]',
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (namespace, entity_id)
 );
@@ -110,7 +111,8 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     span_start  INTEGER NOT NULL,
     span_end    INTEGER NOT NULL,
     text        TEXT NOT NULL,
-    vector      TEXT NOT NULL
+    vector      TEXT NOT NULL,
+    model       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunk_artifact
@@ -118,6 +120,8 @@ CREATE INDEX IF NOT EXISTS idx_chunk_artifact
 
 ALTER TABLE observations ADD COLUMN IF NOT EXISTS event_id TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS event_id TEXT;
+ALTER TABLE dossiers     ADD COLUMN IF NOT EXISTS observation_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE doc_chunks   ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -400,50 +404,54 @@ class PostgresStore(GraphStore):
                 (status, namespace, artifact_id),
             )
 
-    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
+    def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:
         with self._tx():
             rows = self._q(
                 "SELECT * FROM artifacts a WHERE a.text IS NOT NULL"
+                # blank docs would re-queue forever (H-D4); TRIM alone strips
+                # only spaces, so name the whitespace set explicitly
+                " AND BTRIM(a.text, E' \\t\\n\\r') <> ''"
                 " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
-                "   WHERE c.artifact_id = a.id)"
+                "   WHERE c.artifact_id = a.id AND c.model = %s)"
                 " ORDER BY a.recorded_at LIMIT %s",
-                (limit,),
+                (model, limit),
             )
         return [common.row_to_artifact(r) for r in rows]
 
     def put_doc_chunks(
-        self, namespace: str, artifact_id: str,
+        self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
     ) -> None:
         with self._tx():
             with self._conn.cursor() as cur:
                 cur.executemany(
                     "INSERT INTO doc_chunks (id, namespace, artifact_id, seq,"
-                    " span_start, span_end, text, vector)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                    " span_start, span_end, text, vector, model)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
                     " ON CONFLICT (id) DO UPDATE SET namespace = EXCLUDED.namespace,"
                     " span_start = EXCLUDED.span_start, span_end = EXCLUDED.span_end,"
-                    " text = EXCLUDED.text, vector = EXCLUDED.vector",
-                    [(f"{artifact_id}:{seq}", namespace, artifact_id, seq,
-                      start, end, text, json.dumps(vec))
+                    " text = EXCLUDED.text, vector = EXCLUDED.vector,"
+                    " model = EXCLUDED.model",
+                    [(f"{artifact_id}:{model}:{seq}", namespace, artifact_id, seq,
+                      start, end, text, json.dumps(vec), model)
                      for seq, start, end, text, vec in chunks],
                 )
 
     def doc_chunks_for_artifacts(
-        self, namespace: str, artifact_ids: list[str]
+        self, namespace: str, artifact_ids: list[str], model: str
     ) -> list[dict]:
         if not artifact_ids:
             return []
         with self._tx():
             rows = self._q(
-                "SELECT artifact_id, seq, span_start, span_end, text, vector"
-                " FROM doc_chunks WHERE namespace = %s AND artifact_id = ANY(%s)",
-                (namespace, artifact_ids),
+                "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
+                " c.text, c.vector, a.source, a.observed_at"
+                " FROM doc_chunks c JOIN artifacts a ON a.id = c.artifact_id"
+                " WHERE c.namespace = %s AND c.model = %s"
+                " AND c.artifact_id = ANY(%s)",
+                (namespace, model, artifact_ids),
             )
-        return [{"artifact_id": r["artifact_id"], "seq": r["seq"],
-                 "span_start": r["span_start"], "span_end": r["span_end"],
-                 "text": r["text"], "vector": json.loads(r["vector"])}
-                for r in rows]
+        return [common.row_to_chunk(r) for r in rows]
 
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
         with self._tx():
@@ -451,19 +459,17 @@ class PostgresStore(GraphStore):
             if entity is None:
                 return None
             rows = self._q(
-                "SELECT brief, observation_count, updated_at FROM dossiers"
-                " WHERE namespace = %s AND entity_id = %s",
+                "SELECT brief, observation_count, observation_ids, updated_at"
+                " FROM dossiers WHERE namespace = %s AND entity_id = %s",
                 (namespace, entity.id),
             )
         if not rows:
             return None
-        return {"brief": rows[0]["brief"],
-                "observation_count": rows[0]["observation_count"],
-                "updated_at": rows[0]["updated_at"]}
+        return common.row_to_dossier(rows[0])
 
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
-        observation_count: int,
+        observation_count: int, observation_ids: list[str],
     ) -> None:
         with self._tx():
             entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
@@ -471,13 +477,15 @@ class PostgresStore(GraphStore):
             )
             self._x(
                 "INSERT INTO dossiers (namespace, entity_id, brief,"
-                " observation_count, updated_at) VALUES (%s, %s, %s, %s, %s)"
+                " observation_count, observation_ids, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (namespace, entity_id) DO UPDATE SET"
                 " brief = EXCLUDED.brief,"
                 " observation_count = EXCLUDED.observation_count,"
+                " observation_ids = EXCLUDED.observation_ids,"
                 " updated_at = EXCLUDED.updated_at",
                 (namespace, entity.id, brief, observation_count,
-                 common.iso(common.now())),
+                 json.dumps(list(observation_ids)), common.iso(common.now())),
             )
 
     def dossier_candidates(

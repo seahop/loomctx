@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS dossiers (
     entity_id         TEXT NOT NULL,
     brief             TEXT NOT NULL,
     observation_count INTEGER NOT NULL,
+    observation_ids   TEXT NOT NULL DEFAULT '[]',
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (namespace, entity_id)
 );
@@ -118,7 +119,8 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     span_start  INTEGER NOT NULL,
     span_end    INTEGER NOT NULL,
     text        TEXT NOT NULL,
-    vector      TEXT NOT NULL
+    vector      TEXT NOT NULL,
+    model       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunk_artifact
@@ -175,13 +177,22 @@ class SqliteStore(GraphStore):
 
     def _migrate(self) -> None:
         """Bring pre-existing database files up to the current shape."""
-        for table in ("observations", "artifacts"):
-            cols = {
+        wanted = {
+            "observations": [("event_id", "TEXT")],
+            "artifacts": [("event_id", "TEXT")],
+            "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
+            "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
+        }
+        for table, columns in wanted.items():
+            have = {
                 r["name"]
                 for r in self._conn.execute(f"PRAGMA table_info({table})")
             }
-            if "event_id" not in cols:
-                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN event_id TEXT")
+            for name, ddl in columns:
+                if name not in have:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                    )
         self._conn.commit()
 
     @contextmanager
@@ -408,33 +419,36 @@ class SqliteStore(GraphStore):
                 (status, namespace, artifact_id),
             )
 
-    def artifacts_needing_chunks(self, limit: int = 4) -> list[Artifact]:
+    def artifacts_needing_chunks(self, model: str, limit: int = 4) -> list[Artifact]:
         with self._tx():
             rows = self._conn.execute(
                 "SELECT * FROM artifacts a WHERE a.text IS NOT NULL"
+                # blank docs would re-queue forever (H-D4); TRIM alone strips
+                # only spaces, so name the whitespace set explicitly
+                " AND TRIM(a.text, ' ' || char(9) || char(10) || char(13)) <> ''"
                 " AND NOT EXISTS (SELECT 1 FROM doc_chunks c"
-                "   WHERE c.artifact_id = a.id)"
+                "   WHERE c.artifact_id = a.id AND c.model = ?)"
                 " ORDER BY a.recorded_at LIMIT ?",
-                (limit,),
+                (model, limit),
             ).fetchall()
         return [common.row_to_artifact(r) for r in rows]
 
     def put_doc_chunks(
-        self, namespace: str, artifact_id: str,
+        self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
     ) -> None:
         with self._tx():
             self._conn.executemany(
                 "INSERT OR REPLACE INTO doc_chunks (id, namespace, artifact_id,"
-                " seq, span_start, span_end, text, vector)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [(f"{artifact_id}:{seq}", namespace, artifact_id, seq,
-                  start, end, text, json.dumps(vec))
+                " seq, span_start, span_end, text, vector, model)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(f"{artifact_id}:{model}:{seq}", namespace, artifact_id, seq,
+                  start, end, text, json.dumps(vec), model)
                  for seq, start, end, text, vec in chunks],
             )
 
     def doc_chunks_for_artifacts(
-        self, namespace: str, artifact_ids: list[str]
+        self, namespace: str, artifact_ids: list[str], model: str
     ) -> list[dict]:
         if not artifact_ids:
             return []
@@ -443,16 +457,14 @@ class SqliteStore(GraphStore):
             for start in range(0, len(artifact_ids), 400):
                 chunk = artifact_ids[start:start + 400]
                 rows = self._conn.execute(
-                    "SELECT artifact_id, seq, span_start, span_end, text, vector"
-                    f" FROM doc_chunks WHERE namespace = ?"
-                    f" AND artifact_id IN ({','.join('?' * len(chunk))})",
-                    (namespace, *chunk),
+                    "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
+                    " c.text, c.vector, a.source, a.observed_at"
+                    " FROM doc_chunks c JOIN artifacts a ON a.id = c.artifact_id"
+                    f" WHERE c.namespace = ? AND c.model = ?"
+                    f" AND c.artifact_id IN ({','.join('?' * len(chunk))})",
+                    (namespace, model, *chunk),
                 ).fetchall()
-                for r in rows:
-                    out.append({"artifact_id": r["artifact_id"], "seq": r["seq"],
-                                "span_start": r["span_start"],
-                                "span_end": r["span_end"], "text": r["text"],
-                                "vector": json.loads(r["vector"])})
+                out.extend(common.row_to_chunk(r) for r in rows)
         return out
 
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
@@ -461,19 +473,17 @@ class SqliteStore(GraphStore):
             if entity is None:
                 return None
             row = self._conn.execute(
-                "SELECT brief, observation_count, updated_at FROM dossiers"
-                " WHERE namespace = ? AND entity_id = ?",
+                "SELECT brief, observation_count, observation_ids, updated_at"
+                " FROM dossiers WHERE namespace = ? AND entity_id = ?",
                 (namespace, entity.id),
             ).fetchone()
         if row is None:
             return None
-        return {"brief": row["brief"],
-                "observation_count": row["observation_count"],
-                "updated_at": row["updated_at"]}
+        return common.row_to_dossier(row)
 
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
-        observation_count: int,
+        observation_count: int, observation_ids: list[str],
     ) -> None:
         with self._tx():
             entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
@@ -481,9 +491,10 @@ class SqliteStore(GraphStore):
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO dossiers (namespace, entity_id, brief,"
-                " observation_count, updated_at) VALUES (?, ?, ?, ?, ?)",
+                " observation_count, observation_ids, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (namespace, entity.id, brief, observation_count,
-                 common.iso(common.now())),
+                 json.dumps(list(observation_ids)), common.iso(common.now())),
             )
 
     def dossier_candidates(

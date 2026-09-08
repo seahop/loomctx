@@ -96,6 +96,7 @@ services:
     image: loom-engine:local
     profiles: ["enrich"]
     command: python -m loom.enrich run --interval 30
+    restart: unless-stopped
     volumes:
       - loom-data:/data
     environment:

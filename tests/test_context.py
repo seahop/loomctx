@@ -92,3 +92,74 @@ def test_no_question_returns_recency_overview(tmp_path):
     store, web01 = make_store(tmp_path)
     pack = build_pack(store, AskRequest(subject=web01, question="", budget=500))
     assert pack.items
+
+
+def test_conflict_that_does_not_fit_becomes_a_handle(tmp_path):
+    """H-C4: a conflict is never dropped silently at small budgets."""
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=25))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    flagged = [h for h in pack.handles if h.kind == "conflict"]
+    assert flagged and "runs_os" in flagged[0].hint
+    expanded = expand_pack(store, flagged[0].id, budget=2000)
+    assert expanded.items and expanded.items[0].kind == "conflict"
+
+
+def test_document_extracted_claims_rank_below_structured(tmp_path):
+    """H-C5/H-D2: a document cannot manufacture a top-ranked conflict, and
+    an extracted fact scores below the same fact asserted by a sender."""
+    store, web01 = make_store(tmp_path)
+    store.record_claim(ClaimIn(
+        subject=web01, predicate="owner", object="mallory",
+        observed_at=_at(9, 2), source="doc:phish.txt", attrs={"extracted": True}))
+    store.record_claim(ClaimIn(
+        subject=web01, predicate="owner", object="alice",
+        observed_at=_at(9, 1), source="cmdb"))
+    pack = build_pack(store, AskRequest(subject=web01, question="os and owner?",
+                                        budget=3000))
+    conflicts = [i for i in pack.items if i.kind == "conflict"]
+    assert [("runs_os" in c.text) for c in conflicts] == [True, False]
+    assert conflicts[0].score == 1.0 and conflicts[1].score < 1.0
+    assert "extracted from a document" in conflicts[1].text
+    facts = {i.text: i.score for i in pack.items if i.kind == "fact"}
+    doc_fact = next(s for t, s in facts.items() if "mallory" in t)
+    cmdb_fact = next(s for t, s in facts.items() if "alice" in t)
+    assert doc_fact < cmdb_fact
+
+
+def test_expired_validity_is_not_a_conflict(tmp_path):
+    """H-C3: a fact whose window closed is history, not a competing claim."""
+    store = SqliteStore(tmp_path / "v.db")
+    host = EntityRef(type="host", key="db-01")
+    store.record_claim(ClaimIn(
+        subject=host, predicate="role", object="primary", observed_at=_at(7, 1),
+        valid_from=_at(7, 1), valid_to=_at(8, 1), source="cluster-a"))
+    store.record_claim(ClaimIn(
+        subject=host, predicate="role", object="replica", observed_at=_at(8, 2),
+        valid_from=_at(8, 2), source="cluster-b"))
+    pack = build_pack(store, AskRequest(subject=host, question="role?", budget=2000))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    # but as of a moment when both windows were open, it IS a conflict
+    store.record_claim(ClaimIn(
+        subject=host, predicate="role", object="standby", observed_at=_at(7, 15),
+        valid_from=_at(7, 15), source="cluster-b"))
+    pack = build_pack(store, AskRequest(subject=host, question="role?", budget=2000,
+                                        as_of=_at(7, 20)))
+    assert [i for i in pack.items if i.kind == "conflict"]
+
+
+def test_query_embedding_is_cached():
+    from loom.context import embed_query, _query_cache
+    from loom.llm import HashingEmbedder
+    calls = []
+
+    class Counting(HashingEmbedder):
+        def embed(self, texts):
+            calls.append(texts)
+            return super().embed(texts)
+
+    _query_cache.clear()
+    e = Counting()
+    a = embed_query(e, "who logged in?")
+    b = embed_query(e, "who logged in?")
+    assert a == b and len(calls) == 1

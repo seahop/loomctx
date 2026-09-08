@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -55,28 +56,47 @@ class LLMClient(ABC):
         """One system+user exchange; returns the assistant text."""
 
 
+_RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_MAX_BACKOFF = 8.0
+
+
 def _post_json(url: str, body: dict, headers: dict, timeout: float = 120) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"content-type": "application/json", **headers},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:500].decode(errors="replace")
-        raise LLMError(f"provider returned {exc.code}: {detail}",
-                       public=f"LLM provider returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise LLMError(f"provider unreachable: {exc}",
-                       public="LLM provider unreachable") from exc
-    try:
-        return json.loads(body)
-    except ValueError as exc:  # e.g. an HTML error page from a proxy with 200
-        raise LLMError(f"provider returned non-JSON body: {body[:200]!r}",
-                       public="LLM provider returned a malformed response") from exc
+    """One provider call with bounded retries on transient failures
+    (rate limits, 5xx, connection errors), honoring Retry-After (H-D9)."""
+    payload = json.dumps(body).encode()
+    last: LLMError | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"content-type": "application/json", **headers},
+            method="POST",
+        )
+        delay = min(_MAX_BACKOFF, 2.0 ** attempt)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            try:
+                return json.loads(raw)
+            except ValueError as exc:  # e.g. an HTML error page from a proxy with 200
+                raise LLMError(f"provider returned non-JSON body: {raw[:200]!r}",
+                               public="LLM provider returned a malformed response") from exc
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()[:500].decode(errors="replace")
+            last = LLMError(f"provider returned {exc.code}: {detail}",
+                            public=f"LLM provider returned HTTP {exc.code}")
+            if exc.code not in _RETRYABLE:
+                raise last from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            if retry_after and retry_after.isdigit():
+                delay = min(_MAX_BACKOFF, float(retry_after))
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last = LLMError(f"provider unreachable: {exc}",
+                            public="LLM provider unreachable")
+        if attempt + 1 < _MAX_ATTEMPTS:
+            time.sleep(delay)
+    assert last is not None
+    raise last
 
 
 class OpenAICompatClient(LLMClient):
