@@ -202,6 +202,10 @@ export interface ContextPack {
   budget: number;
   items?: ContextItem[];
   handles?: ExpansionHandle[];
+  /**
+   * expansion threads that existed beyond the handle cap; narrow the scope or raise the budget to see them (D-035)
+   */
+  omitted_handles?: number;
 }
 /**
  * Every item is cited (hard constraint 3): facts and conflicts cite

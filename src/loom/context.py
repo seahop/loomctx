@@ -52,6 +52,8 @@ _CHARS_PER_TOKEN = 4
 _ITEM_OVERHEAD_TOKENS = 8  # rough JSON/citation framing cost per item
 _GATHER_LIMIT = 1000
 _MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
+_MAX_HANDLES = 32              # a scope over a hub produced 8,234 handles (D-035)
+_CONFLICT_BUDGET_SHARE = 0.5   # conflicts ship first, but never as the whole pack (D-035)
 _QUERY_CACHE_SIZE = 256
 _RECENCY_HALF_LIFE_DAYS = 30.0  # recency = 1 / (1 + age / half-life)
 
@@ -330,6 +332,9 @@ def _in_scope(obs: Observation, allowed_types: tuple[str, ...] | None) -> bool:
 
 # ------------------------------------------------------------------ builder #
 
+Paths = dict[tuple[str, str], list[Observation]]
+
+
 def resolve_scope(
     store: GraphStore, namespace: str, scope: ScopeSpec
 ) -> list[EntityRef]:
@@ -337,6 +342,17 @@ def resolve_scope(
     the named containment predicates, bounded by depth. Deterministic order.
     With no `expand` named, the namespace's registry supplies its
     containment predicates (D-012 promise, D-024)."""
+    return resolve_scope_paths(store, namespace, scope)[0]
+
+
+def resolve_scope_paths(
+    store: GraphStore, namespace: str, scope: ScopeSpec
+) -> tuple[list[EntityRef], Paths]:
+    """`resolve_scope` plus, for every entity the BFS reached, the chain of
+    edges it was reached through (root -> ... -> entity). A fact about a
+    reached entity only makes sense to a reader alongside that chain
+    (D-035): "CVE-X is exploited" is noise until "web-01 runs nginx, CVE-X
+    affects nginx" sits next to it."""
     expand = set(scope.expand)
     if not expand and scope.depth > 0:
         from .registry import containment_predicates
@@ -344,11 +360,13 @@ def resolve_scope(
     seen = {(r.type, r.key) for r in scope.subjects}
     resolved = list(scope.subjects)
     frontier = list(scope.subjects)
+    paths: Paths = {}
     for _ in range(scope.depth):
         if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
         for ref in frontier:
+            via = paths.get((ref.type, ref.key), [])
             for obs in store.observations_for(namespace, ref, limit=_GATHER_LIMIT):
                 if obs.predicate not in expand:
                     continue
@@ -360,8 +378,9 @@ def resolve_scope(
                         seen.add((end.type, end.key))
                         resolved.append(end)
                         next_frontier.append(end)
+                        paths[(end.type, end.key)] = via + [obs]
         frontier = next_frontier
-    return resolved
+    return resolved, paths
 
 
 def build_pack(
@@ -370,8 +389,9 @@ def build_pack(
     embedder=None,
     allowed_types: tuple[str, ...] | None = None,
 ) -> ContextPack:
+    paths: Paths = {}
     if req.scope is not None:
-        subjects = resolve_scope(store, req.namespace, req.scope)
+        subjects, paths = resolve_scope_paths(store, req.namespace, req.scope)
     else:
         subjects = [req.subject]
     if allowed_types is not None:
@@ -451,6 +471,7 @@ def build_pack(
         semantic=semantic,
         briefs=briefs,
         excerpts=excerpts,
+        paths={key: [o.id for o in chain] for key, chain in paths.items()},
     )
 
 
@@ -570,6 +591,7 @@ def _pack(
     briefs: list[tuple[EntityRef, str, list[Citation]]] | None = None,
     excerpts: list[tuple[float, Citation, str, int, str]] | None = None,
     valid_at: datetime | None = None,
+    paths: dict[tuple[str, str], list[str]] | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -611,12 +633,25 @@ def _pack(
     # Conflicts ship first: an agent must not act on a contested fact
     # unaware. One that doesn't fit is never dropped silently — it becomes
     # a 'conflict' handle so the agent knows contested ground exists (H-C4).
+    # They are bounded to a share of the budget, though: a scope over a
+    # thousand CVEs where NIST and the CNA disagree produced a pack that was
+    # 53 conflicts and zero facts, and the answering model correctly said it
+    # could not answer (D-035). Root subjects come first in `subjects`, so
+    # the caller's own contested facts are the ones that always fit.
+    # Grouped once: scanning every observation per subject was quadratic on
+    # a 1,000-subject scope (20 s of pydantic __eq__, D-035).
+    by_subject: dict[tuple[str, str], list[Observation]] = {}
+    for obs in observations:
+        by_subject.setdefault((obs.subject.type, obs.subject.key), []).append(obs)
+    conflict_remaining = int(budget * _CONFLICT_BUDGET_SHARE)
     for subj in subjects:
-        for predicate, item in _find_conflicts(subj, observations, valid_at or as_of):
+        mine = by_subject.get((subj.type, subj.key), [])
+        for predicate, item in _find_conflicts(subj, mine, valid_at or as_of):
             cost = est_tokens(item.text)
-            if cost <= remaining:
+            if cost <= remaining and cost <= conflict_remaining:
                 items.append(item)
                 remaining -= cost
+                conflict_remaining -= cost
             elif with_handles:
                 handles.append(ExpansionHandle(
                     id=encode_handle(namespace, subj, predicate, as_of, valid_at),
@@ -665,11 +700,32 @@ def _pack(
                 ))
 
     included: set[str] = set()
-    skipped: dict[tuple[str, str, str], int] = {}  # (subj type, key, predicate)
+    skipped: dict[tuple[str, str, str], int] = {}  # (owner type, key, predicate)
+    inbound: set[tuple[str, str, str]] = set()
+    subject_keys = {(s.type, s.key) for s in subjects}
+    by_id = {o.id: o for o in observations} if paths else {}
     for score, obs in scored:
+        if obs.id in included:
+            continue  # already shipped as part of another fact's path
         text = _render_fact(obs)
         cost = est_tokens(text)
-        if cost <= remaining:
+        # A fact about an entity the scope reached travels with the edges it
+        # was reached through, as `relation` items just before it; if the
+        # chain doesn't fit, neither does the fact (D-035). Without the
+        # chain an answering model correctly refuses to connect the dots.
+        chain = [
+            by_id[pid] for pid in (paths or {}).get((obs.subject.type, obs.subject.key), [])
+            if pid in by_id and pid not in included and pid != obs.id
+        ]
+        chain_cost = sum(est_tokens(_render_fact(p)) for p in chain)
+        if cost + chain_cost <= remaining:
+            for edge in chain:
+                items.append(ContextItem(
+                    kind="relation", text=_render_fact(edge),
+                    score=round(min(score, 1.0), 4), citations=[_citation(edge)],
+                ))
+                included.add(edge.id)
+            remaining -= chain_cost
             items.append(
                 ContextItem(
                     kind="fact",
@@ -681,7 +737,19 @@ def _pack(
             remaining -= cost
             included.add(obs.id)
         else:
-            key = (obs.subject.type, obs.subject.key, obs.predicate)
+            # An edge pointing INTO a pack subject from outside the pack
+            # (cve X affects product P, asked about P) is one thread on P,
+            # not a thread per X: a hub with 2,700 inbound edges made 965
+            # one-observation handles (D-035). Expanding the aggregate
+            # replays observations_for(P) filtered by predicate, which
+            # includes inbound edges.
+            owner = obs.subject
+            if ((obs.subject.type, obs.subject.key) not in subject_keys
+                    and isinstance(obs.object, EntityRef)
+                    and (obs.object.type, obs.object.key) in subject_keys):
+                owner = obs.object
+                inbound.add((owner.type, owner.key, obs.predicate))
+            key = (owner.type, owner.key, obs.predicate)
             skipped[key] = skipped.get(key, 0) + 1
 
     if with_handles:
@@ -689,15 +757,20 @@ def _pack(
             skipped.items(), key=lambda kv: kv[1], reverse=True
         ):
             subj = EntityRef(type=stype, key=skey)
+            direction = "pointing at" if (stype, skey, predicate) in inbound else "for"
             handles.append(
                 ExpansionHandle(
                     id=encode_handle(namespace, subj, predicate, as_of, valid_at),
-                    hint=f"{count} more '{predicate}' observations for "
+                    hint=f"{count} more '{predicate}' observations {direction} "
                     f"{stype}:{skey}",
                     est_tokens=count * 25,
                 )
             )
 
+    # Handles are in priority order (conflicts, excerpts, then the most
+    # skipped threads first). Past the cap they stop being a menu and become
+    # a second payload; the count says how much was left out.
+    omitted = max(0, len(handles) - _MAX_HANDLES)
     return ContextPack(
         namespace=namespace,
         subject=subjects[0] if len(subjects) == 1 else None,
@@ -707,5 +780,6 @@ def _pack(
         valid_at=valid_at,
         budget=budget,
         items=items,
-        handles=handles,
+        handles=handles[:_MAX_HANDLES],
+        omitted_handles=omitted,
     )

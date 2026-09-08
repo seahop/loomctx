@@ -1034,6 +1034,13 @@
         },
         "title": "Handles",
         "type": "array"
+      },
+      "omitted_handles": {
+        "default": 0,
+        "description": "expansion threads that existed beyond the handle cap; narrow the scope or raise the budget to see them (D-035)",
+        "minimum": 0,
+        "title": "Omitted Handles",
+        "type": "integer"
       }
     },
     "required": [
@@ -1370,6 +1377,13 @@
             },
             "title": "Handles",
             "type": "array"
+          },
+          "omitted_handles": {
+            "default": 0,
+            "description": "expansion threads that existed beyond the handle cap; narrow the scope or raise the budget to see them (D-035)",
+            "minimum": 0,
+            "title": "Omitted Handles",
+            "type": "integer"
           }
         },
         "required": [

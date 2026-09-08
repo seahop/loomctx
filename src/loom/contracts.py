@@ -258,6 +258,11 @@ class ContextPack(BaseModel):
     budget: int
     items: list[ContextItem] = Field(default_factory=list)
     handles: list[ExpansionHandle] = Field(default_factory=list)
+    omitted_handles: int = Field(
+        default=0, ge=0,
+        description="expansion threads that existed beyond the handle cap; "
+        "narrow the scope or raise the budget to see them (D-035)",
+    )
 
 
 class SemanticMatch(BaseModel):

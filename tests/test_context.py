@@ -260,3 +260,99 @@ def test_numpy_and_python_cosines_agree():
     assert "short" not in got  # another embedding space is skipped, not scored 0
     for k in ("a", "b", "z"):
         assert abs(got[k] - _cosine(q, vecs[k])) < 1e-9, k
+
+
+def test_handles_are_capped_and_the_rest_counted(tmp_path):
+    """D-035: a scope over a hub entity produced 8,234 handles. Handles stay
+    in priority order, stop at the cap, and the pack says how many were left."""
+    from loom.context import _MAX_HANDLES
+    store = SqliteStore(tmp_path / "cap.db")
+    subj = EntityRef(type="host", key="busy")
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=subj, predicate=f"pred_{i}", object=i, source="s",
+                observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        for i in range(_MAX_HANDLES + 20)
+    ])
+    pack = build_pack(store, AskRequest(namespace="ns", subject=subj, question="x", budget=1))
+    assert pack.items == []
+    assert len(pack.handles) == _MAX_HANDLES and pack.omitted_handles == 20
+    roomy = build_pack(store, AskRequest(namespace="ns", subject=subj, question="x", budget=5000))
+    assert roomy.omitted_handles == 0 and roomy.handles == []
+    store.close()
+
+
+def test_inbound_edges_on_a_hub_collapse_into_one_handle(tmp_path):
+    """D-035: 2,700 CVEs affecting one product are one expandable thread on
+    the product, not one handle per CVE."""
+    store = SqliteStore(tmp_path / "hub.db")
+    hub = EntityRef(type="product", key="linux:linux_kernel")
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=EntityRef(type="cve", key=f"CVE-2026-{i}"),
+                predicate="affects", object=hub, source="nvd",
+                observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        for i in range(40)
+    ])
+    pack = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=1))
+    assert len(pack.handles) == 1 and pack.omitted_handles == 0
+    assert pack.handles[0].hint == "40 more 'affects' observations pointing at product:linux:linux_kernel"
+    expanded = expand_pack(store, pack.handles[0].id, budget=5000)
+    assert len(expanded.items) == 40 and all("affects" in i.text for i in expanded.items)
+    store.close()
+
+
+def test_conflicts_never_crowd_out_every_fact(tmp_path):
+    """D-035: on a wide scope the conflicts alone exceeded the budget and the
+    pack carried zero facts. Conflicts keep priority but take at most half
+    the budget; the rest become conflict handles (H-C4 still holds)."""
+    store = SqliteStore(tmp_path / "flood.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    cves = [EntityRef(type="cve", key=f"CVE-2026-{i}") for i in range(30)]
+    claims = []
+    for cve in cves:
+        claims.append(ClaimIn(namespace="ns", subject=cve, predicate="cvss_score", object=9.8,
+                              source="nvd:nist", observed_at=t))
+        claims.append(ClaimIn(namespace="ns", subject=cve, predicate="cvss_score", object=5.5,
+                              source="nvd:cna", observed_at=t))
+        claims.append(ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True,
+                              source="cisa-kev", observed_at=t))
+    store.record_claims(claims)
+    from loom.contracts import ScopeSpec
+    pack = build_pack(store, AskRequest(namespace="ns", question="exploited in wild", budget=900,
+                                        scope=ScopeSpec(subjects=cves, depth=0)))
+    kinds = [i.kind for i in pack.items]
+    assert kinds[0] == "conflict" and "fact" in kinds
+    assert any("exploited_in_wild" in i.text for i in pack.items)
+    conflict_tokens = sum(est_tokens(i.text) for i in pack.items if i.kind == "conflict")
+    assert conflict_tokens <= 450
+    assert any(h.kind == "conflict" for h in pack.handles)   # the overflow is still signalled
+    store.close()
+
+
+def test_scope_facts_arrive_with_their_path(tmp_path):
+    """D-035: on the real corpus a pack held 'CVE-X exploited_in_wild' but not
+    'web-01 runs nginx' / 'CVE-X affects nginx' (fresher rows outranked them)
+    and the answering model refused to connect the dots. A fact about a
+    reached entity ships with the edges it was reached through."""
+    from loom.contracts import ScopeSpec
+    store = SqliteStore(tmp_path / "path.db")
+    t = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    host, prod, cve = (EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx"),
+                       EntityRef(type="cve", key="CVE-2026-1"))
+    claims = [
+        ClaimIn(namespace="ns", subject=host, predicate="runs_software", object=prod, source="inv", observed_at=t),
+        ClaimIn(namespace="ns", subject=cve, predicate="affects", object=prod, source="nvd", observed_at=t),
+        ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True, source="kev", observed_at=t),
+    ]
+    # fresher, irrelevant rows that outrank the old edges on recency
+    claims += [ClaimIn(namespace="ns", subject=cve, predicate=f"epss_{i}", object=0.5, source="epss",
+                       observed_at=datetime(2026, 9, 8, tzinfo=timezone.utc)) for i in range(6)]
+    store.record_claims(claims)
+    scope = ScopeSpec(subjects=[host], expand=["runs_software", "affects"], depth=2)
+    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="exploited", budget=200))
+    texts = [(i.kind, i.text) for i in pack.items]
+    idx = {p: n for n, (k, txt) in enumerate(texts) for p in ("runs_software", "affects", "exploited_in_wild") if p in txt}
+    assert set(idx) == {"runs_software", "affects", "exploited_in_wild"}
+    assert idx["runs_software"] < idx["affects"] < idx["exploited_in_wild"]
+    assert [k for k, txt in texts if "runs_software" in txt or "affects" in txt] == ["relation", "relation"]
+    assert sum(1 for k, _ in texts if k == "relation") == 2   # edges ship once
+    store.close()

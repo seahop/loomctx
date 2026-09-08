@@ -791,3 +791,31 @@ def test_sharded_store_from_env(tmp_path, monkeypatch):
     s.close()
     monkeypatch.delenv("LOOM_SHARDS")
     assert isinstance(store_from_env(), SqliteStore)
+
+
+def test_observations_for_merges_both_sides_newest_first_within_limit(store):
+    """D-035: the lookup is two indexed halves (as subject, as object) merged,
+    never a namespace scan. A self-edge appears once; the limit applies to
+    the merged, newest-first result."""
+    x = EntityRef(type="host", key="hub")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    claims = []
+    for i in range(3):   # hub as subject
+        claims.append(ClaimIn(namespace="ns", subject=x, predicate="logged_in_by",
+                              object=EntityRef(type="user", key=f"u{i}"),
+                              observed_at=t.replace(hour=2 * i), source="s"))
+    for i in range(3):   # hub as object
+        claims.append(ClaimIn(namespace="ns", subject=EntityRef(type="ip", key=f"10.0.0.{i}"),
+                              predicate="assigned_to", object=x,
+                              observed_at=t.replace(hour=2 * i + 1), source="s"))
+    claims.append(ClaimIn(namespace="ns", subject=x, predicate="peer_of", object=x,
+                          observed_at=t.replace(hour=12), source="s"))
+    store.record_claims(claims)
+    got = store.observations_for("ns", x, limit=100)
+    assert len(got) == 7
+    hours = [o.observed_at.hour for o in got]
+    assert hours == sorted(hours, reverse=True) == [12, 5, 4, 3, 2, 1, 0]
+    assert sum(1 for o in got if o.predicate == "peer_of") == 1
+    top = store.observations_for("ns", x, limit=4)
+    assert [o.observed_at.hour for o in top] == [12, 5, 4, 3]
+    assert {o.predicate for o in top} == {"peer_of", "assigned_to", "logged_in_by"}

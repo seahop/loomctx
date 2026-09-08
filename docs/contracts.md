@@ -123,18 +123,25 @@ advance as they mine claims out of the text.
      "est_tokens": 1725, "kind": "more"},
     {"id": "h1_…", "hint": "CONFLICT on host:web-01 runs_os did not fit the budget",
      "est_tokens": 60, "kind": "conflict"}
-  ]
+  ],
+  "omitted_handles": 0
 }
 ```
 
-Item `kind` ∈ `brief | fact | relation | doc_excerpt | conflict`. **Every
+Item `kind` ∈ `brief | fact | relation | doc_excerpt | conflict`. A
+`relation` is an edge a scope was expanded through, shipped right before
+the first fact about the entity it reached, so a multi-hop pack reads as a
+chain (D-035). **Every
 item carries at least one citation** (D-023): facts and conflicts cite
 observations, briefs cite the observations they were synthesized from,
 excerpts cite an artifact span. A `Citation` therefore names either an
 `observation_id` or an `artifact_id` (+ span). Conflicts are items, not
 merged away — and one that doesn't fit the budget becomes a `conflict`
 handle rather than disappearing. Handles feed `POST /v1/expand`; with
-`LOOM_HANDLE_SECRET` set they are signed (`h2_` prefix, D-021).
+`LOOM_HANDLE_SECRET` set they are signed (`h2_` prefix, D-021). At most 32
+handles ship, in priority order (conflicts, excerpts, then the most
+skipped threads); `omitted_handles` counts the rest, so a scope over a hub
+entity says "and 8,000 more threads" instead of shipping them (D-035).
 
 ## Schema registry
 

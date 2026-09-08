@@ -637,13 +637,20 @@ class SqliteStore(GraphStore):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
+            # Two indexed halves (idx_obs_subject / idx_obs_object) merged,
+            # not `subject_id = ? OR object_entity_id = ?`: SQLite planned the
+            # OR as a scan of the whole namespace, ~230 ms per call on a
+            # 465k-row namespace — found the day real data landed (D-035).
             rows = self._conn.execute(
-                _OBS_SELECT
-                + " WHERE o.namespace = ?"
-                "   AND (o.subject_id = ? OR o.object_entity_id = ?)"
-                + _NOT_TOMBSTONED
-                + " ORDER BY o.observed_at DESC LIMIT ?",
-                (namespace, entity.id, entity.id, limit),
+                "SELECT * FROM (" + _OBS_SELECT
+                + " WHERE o.namespace = ? AND o.subject_id = ?" + _NOT_TOMBSTONED
+                + " ORDER BY o.observed_at DESC LIMIT ?)"
+                " UNION ALL SELECT * FROM (" + _OBS_SELECT
+                + " WHERE o.namespace = ? AND o.object_entity_id = ?"
+                "   AND o.subject_id != ?" + _NOT_TOMBSTONED
+                + " ORDER BY o.observed_at DESC LIMIT ?)"
+                " ORDER BY observed_at DESC LIMIT ?",
+                (namespace, entity.id, limit, namespace, entity.id, entity.id, limit, limit),
             ).fetchall()
             return [common.row_to_observation(r) for r in rows]
 

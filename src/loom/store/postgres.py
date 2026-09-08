@@ -630,13 +630,18 @@ class PostgresStore(GraphStore):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
+            # same two-index UNION as the SQLite store (D-035): a per-side
+            # index range each, never a namespace scan
             rows = self._q(
-                _OBS_SELECT
-                + " WHERE o.namespace = %s"
-                "   AND (o.subject_id = %s OR o.object_entity_id = %s)"
-                + _NOT_TOMBSTONED
-                + " ORDER BY o.observed_at DESC LIMIT %s",
-                (namespace, entity.id, entity.id, limit),
+                "SELECT * FROM (" + _OBS_SELECT
+                + " WHERE o.namespace = %s AND o.subject_id = %s" + _NOT_TOMBSTONED
+                + " ORDER BY o.observed_at DESC LIMIT %s) s"
+                " UNION ALL SELECT * FROM (" + _OBS_SELECT
+                + " WHERE o.namespace = %s AND o.object_entity_id = %s"
+                "   AND o.subject_id <> %s" + _NOT_TOMBSTONED
+                + " ORDER BY o.observed_at DESC LIMIT %s) t"
+                " ORDER BY observed_at DESC LIMIT %s",
+                (namespace, entity.id, limit, namespace, entity.id, entity.id, limit, limit),
             )
             return [common.row_to_observation(r) for r in rows]
 
