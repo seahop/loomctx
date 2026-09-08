@@ -119,7 +119,7 @@ flowchart TB
     end
 
     shippers --> lb --> gw
-    gw -- "publish loom.ingest.{claim|document}" --> s1
+    gw -- "publish loom.ingest.{claim or document}" --> s1
     s1 -- "redeliver after ack_wait 30 s" --> cons
     cons -- "max deliveries exceeded" --> s2
     cons -- "INSERT … ON CONFLICT (event_id) DO NOTHING" --> rw
@@ -155,11 +155,11 @@ sequenceDiagram
     participant S as GraphStore
     participant E as Embedder (optional)
 
-    A->>H: POST /v1/ask {subject|scope, question, budget, as_of?, valid_at?}
+    A->>H: POST /v1/ask {subject or scope, question, budget, as_of?, valid_at?}
     H->>G: X-Loom-Key → grant (namespace, perms, entity_types)
     G-->>H: 401 / 403, or grant
     H->>P: build_pack(req, allowed_types)
-    P->>S: resolve_scope (BFS over containment predicates; registry default)
+    P->>S: resolve_scope (BFS over containment predicates, registry default)
     P->>S: observations_for each subject (≤1000, tombstones excluded)
     Note over P: drop subjects / edges outside allowed_types (scoped world)
     opt embedder configured
@@ -171,7 +171,7 @@ sequenceDiagram
     Note over P: as_of → hide later-recorded facts<br/>valid_at → keep facts whose window covers T
     Note over P: rank = cosine∘keyword + time-decayed recency + confidence<br/>extracted (doc:) claims discounted
     Note over P: conflicts first (cross-source scalar disagreement)<br/>→ brief → excerpts (≤ half remaining) → facts, until budget
-    Note over P: every item cited; what didn't fit → handles<br/>(more | conflict | excerpt), HMAC-signed if LOOM_HANDLE_SECRET
+    Note over P: every item cited, what didn't fit → handles<br/>(more / conflict / excerpt), HMAC-signed if LOOM_HANDLE_SECRET
     P-->>H: ContextPack
     H-->>A: 200 {items[], handles[], budget, subjects[]}
     A->>H: POST /v1/expand {handle}  (same gates re-applied)
@@ -190,10 +190,10 @@ sequenceDiagram
     participant W as Enrichment worker
     participant L as LLM / Embedder
 
-    D->>GW: POST /v1/ingest {kind: claim|document, event_id?}
+    D->>GW: POST /v1/ingest {kind: claim or document, event_id?}
     GW->>GW: key → grant · rate bucket (per grant) · size cap<br/>schema validate · namespace/type/source gates
     GW-->>D: 401 / 403 / 413 / 422 / 429 on failure
-    GW->>JS: publish loom.ingest.<kind> + Loom-Principal (3 retries)
+    GW->>JS: publish loom.ingest.{kind} + Loom-Principal (3 retries)
     JS-->>GW: quorum ack
     GW-->>D: 202 {status: queued}
     JS->>C: batch (≤64) via durable loom-writer
