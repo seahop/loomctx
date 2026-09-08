@@ -10,8 +10,12 @@ Read in this order depending on why you're here.
    connect an agent. Runnable scripts in [`../examples/`](../examples/).
 
 ## Using it
-- **[sdk.md](sdk.md)** — the four surfaces (MCP for agents, HTTP, Python SDK,
-  CLI), the full endpoint list, and how to configure the answering LLM.
+- **[sdk.md](sdk.md)** — the surfaces: MCP for agents, HTTP (single and batch
+  ingest), Python / TypeScript / Go SDKs, OpenAPI for every other language,
+  the bulk loader, and how to configure the answering LLM.
+- **[../deploy/integrations/README.md](../deploy/integrations/README.md)** —
+  tying in pipelines you already run: Fluent Bit and Vector configs, the
+  Kafka/Redpanda consumer, files from any language.
 - **[contracts.md](contracts.md)** — the wire shapes (the real API); JSON
   Schema export.
 - **[concepts.md](concepts.md)** — glossary: observation, claim, context pack,

@@ -17,14 +17,15 @@ cited packs.
 flowchart LR
     subgraph callers["Callers"]
         agent["AI agent<br/>(Claude Code, any MCP client)"]
-        app["Apps / pipelines<br/>Python SDK · TypeScript SDK · curl"]
+        app["Apps / custom code<br/>Python · TypeScript · Go SDK · curl · OpenAPI clients"]
+        ship["Existing pipelines<br/>Fluent Bit / Vector (batch HTTP) · files via loom.ingest"]
         admin["Operator<br/>python -m loom.keys / lifecycle / seed"]
     end
 
     subgraph engine["Engine container  ·  loom-engine:local  ·  uid 10001"]
         direction TB
         mcp["MCP server (stdio)<br/>find_entity · find_related · ask · ask_scope<br/>expand · record_claim · get_observations · answer"]
-        http["HTTP  :8000  (uvicorn, 1 worker)<br/>POST /v1/ingest · /v1/ask · /v1/expand · /v1/answer · /v1/schemas<br/>GET /v1/entities/search|semantic · /v1/artifacts/{id}<br/>GET /healthz · /readyz · /metrics"]
+        http["HTTP  :8000  (uvicorn, 1 worker)<br/>POST /v1/ingest · /v1/ingest/batch · /v1/ask · /v1/expand · /v1/answer · /v1/schemas<br/>GET /v1/entities/search|semantic · /v1/artifacts/{id}<br/>GET /healthz · /readyz · /metrics"]
         gate["Auth + data gates (D-013a/D-021)<br/>keys file hot-reload · namespace/perms<br/>entity_types · sources · signed handles"]
         core["Core<br/>registry validation (D-024) · pack builder<br/>rank: cosine ∘ keyword · time-decayed recency · confidence<br/>conflicts first · budget trim · citations · handles<br/>as_of (knowledge) / valid_at (fact) time axes"]
         store["GraphStore → SqliteStore<br/>transactions · event_id dedupe · tombstones<br/>norm keys · schema registry · leases"]
@@ -44,6 +45,7 @@ flowchart LR
 
     agent -- "stdio (spawned per session)" --> mcp
     app -- "HTTPS + X-Loom-Key" --> http
+    ship -- "POST /v1/ingest/batch (NDJSON or array)" --> http
     admin -- "docker compose run --rm loom …" --> store
     store <--> db
     gate -. reads .-> keys
@@ -68,7 +70,8 @@ measurement asks for.
 ```mermaid
 flowchart TB
     subgraph senders["Senders"]
-        shippers["Log shippers · scanners · pipeline devices<br/>SDKs · curl · bulk loaders"]
+        shippers["Log shippers (Fluent Bit, Vector) · scanners<br/>SDKs (Python/TS/Go) · bulk loader · OpenAPI clients"]
+        kafka[("Your Kafka / Redpanda topics")]
     end
     subgraph readers["Readers"]
         agents["Agents (MCP streamable-http, keyed)<br/>Apps (Python / TypeScript SDK, HTTP)"]
@@ -91,6 +94,10 @@ flowchart TB
         c1["pull ≤64 → one transaction<br/>ack after commit · nak on failure<br/>dead-letter after 5 deliveries"]
     end
 
+    subgraph kcons["Kafka consumers ×N (optional, D-034)"]
+        k1["read envelopes from your topics<br/>commit after write · retry · dead-letter topic"]
+    end
+
     subgraph engs["Engine pods · HPA 2–8"]
         e1["uvicorn · LOOM_WORKERS × LOOM_DB_POOL<br/>gates · registry · pack builder · semantic search"]
     end
@@ -109,7 +116,8 @@ flowchart TB
     llm["LLM + embedding provider"]
     prom["Prometheus ← /metrics"]
 
-    shippers --> lb1 --> gw
+    shippers -- "/v1/ingest · /v1/ingest/batch" --> lb1 --> gw
+    kafka --> k1 --> rw
     gw -- "loom.ingest.{kind}" --> s1
     s1 -- "batches" --> c1
     c1 -- "max deliveries" --> s2
@@ -206,8 +214,8 @@ sequenceDiagram
     participant W as Enrichment worker
     participant L as LLM / Embedder
 
-    D->>GW: POST /v1/ingest {kind: claim or document, event_id?}
-    GW->>GW: key → grant · rate bucket (per grant) · size cap<br/>schema validate · namespace/type/source gates
+    D->>GW: POST /v1/ingest {envelope} — or /v1/ingest/batch [envelopes] (each item below, individually)
+    GW->>GW: key → grant · rate bucket (per grant, n tokens for n items) · size cap<br/>schema validate · namespace/type/source gates
     GW-->>D: 401 / 403 / 413 / 422 / 429 on failure
     GW->>JS: publish loom.ingest.{kind} + Loom-Principal (3 retries)
     JS-->>GW: quorum ack
@@ -231,7 +239,7 @@ sequenceDiagram
 
 | Concern | Simple | Scaled |
 | --- | --- | --- |
-| Ingest path | direct write to SQLite | gateways → replicated JetStream → N consumers → Postgres primary |
+| Ingest path | direct write to SQLite (single or batch) | gateways → replicated JetStream → N consumers → Postgres primary; or Kafka topics → Kafka consumers → primary |
 | Read path | same process, same file | engine replicas, reads on Postgres replicas |
 | Vector search | sqlite-vec tables beside the JSON vectors | pgvector HNSW; exact scan if the extension is absent |
 | Enrichment | one optional worker | leased, sharded StatefulSet |

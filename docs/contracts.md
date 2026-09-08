@@ -51,6 +51,22 @@ Loom stamps `recorded_at` itself (knowledge-time axis).
 
 Exactly one of `text` / `content_b64` is required.
 
+**Batch** — `POST /v1/ingest/batch` takes a JSON array of envelopes, NDJSON
+(one per line, `Content-Type: application/x-ndjson`), or `{"items": [...]}`,
+up to `LOOM_MAX_BATCH` (1000), and answers with `IngestBatchResponse`:
+
+```json
+{"total": 3, "recorded": 1, "accepted": 1, "rejected": 1,
+ "results": [
+   {"index": 0, "status": "recorded", "observation_id": "…"},
+   {"index": 1, "status": "accepted", "artifact_id": "…"},
+   {"index": 2, "status": "rejected", "detail": "subject: Field required"}
+ ]}
+```
+
+Every item passes the same gates as the single-envelope route and is
+reported individually; a bad record never blocks the rest (D-034).
+
 ## Observation (stored form)
 
 What both doors converge into. Same as a claim plus: server-assigned `id`,

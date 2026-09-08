@@ -207,6 +207,8 @@ integration. The same data answered a defender's question and an attacker's.
 That's the framework: **your security data, whatever its shape, whichever side
 you're asking from.**
 
-Next: **[sdk.md](sdk.md)** for the typed SDK and full surface,
+Next: **[sdk.md](sdk.md)** for the typed SDKs and full surface,
+**[../deploy/integrations/README.md](../deploy/integrations/README.md)** to
+feed Loom from the shippers, queues, and files you already have,
 **[architecture.md](architecture.md)** for how the write/read split works, and
 **[administration.md](administration.md)** for running it for a team.

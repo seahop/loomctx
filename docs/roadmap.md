@@ -14,6 +14,7 @@ presentable.
 | mid Sep (done 2026-09-04) | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
 | late Sep (done 2026-09-04) | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
 | early Sep (done 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
+| early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
 | early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster, polish README for public visitors |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
@@ -203,6 +204,6 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
 `src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
-Verify from clean checkout: `docker compose run --rm test` (the suite is ~110 tests; the store contract tests also run against live Postgres in CI).
+Verify from clean checkout: `docker compose run --rm test` (~215 tests; the store contract tests also run against live Postgres and a two-shard lane in CI, and the Go/TypeScript SDKs run live against the engine).
 Demo rehearsal: `docker compose up -d loom && docker compose exec loom
 python -m loom.seed load`, then hit `/v1/ask`.

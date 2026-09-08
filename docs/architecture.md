@@ -132,15 +132,22 @@ OpenAI-compatible provider (OpenRouter, Venice, Groq, ...), a self-hosted
 endpoint (Ollama/vLLM), or Anthropic — synthesizes a cited answer under a
 grounding prompt. The pack rides along in the response for audit (D-012).
 
-## Access surfaces — three shells over one core
+## Access surfaces — shells over one core
 
-1. **MCP server** (primary, for agents): `find_entity`, `get_brief`, `ask`, `expand`,
-   `record_observation`. Agents can also *write back* what they learn.
-2. **HTTP API + thin SDKs** for apps, pipelines, and non-MCP frameworks.
-3. **CLI** for humans: ingest files, inspect entities, and debug exactly what an
-   agent would see (`loom ask host:web-01 "who logged in this week?" --budget 800`).
+1. **MCP server** (primary, for agents): `find_entity`, `find_related`, `ask`,
+   `ask_scope`, `expand`, `record_claim`, `get_observations`, `answer`. Agents
+   also *write back* what they learn.
+2. **HTTP API + thin SDKs** (Python, TypeScript, Go; OpenAPI for the rest) for
+   apps and custom pipeline code. `POST /v1/ingest/batch` takes a JSON array or
+   NDJSON, which is what log shippers' HTTP outputs produce.
+3. **Pipeline adapters** for what teams already run: Fluent Bit / Vector
+   configs that reshape records into envelopes, a Kafka/Redpanda consumer that
+   reads envelopes from existing topics, and a bulk loader for NDJSON files
+   from any language (D-034).
+4. **Operator modules** (`loom.keys`, `loom.lifecycle`, `loom.seed`,
+   `loom.ingest`, `loom.loadgen`) for humans.
 
-All three are shells over one internal service, so behavior never diverges.
+All of them are shells over one internal service, so behavior never diverges.
 
 ## Multi-tenancy
 
@@ -150,8 +157,10 @@ compose stack — both work because the deployment is one small container plus a
 
 ## Ingestion tier — two shapes, one contract (D-010)
 
-`POST /v1/ingest` is the same envelope everywhere; which shape sits behind it
-is a deployment choice invisible to senders.
+`POST /v1/ingest` (one envelope) and `POST /v1/ingest/batch` (many) are the
+same everywhere; which shape sits behind them is a deployment choice
+invisible to senders. Teams with a Kafka pipeline skip HTTP entirely: the
+Kafka consumer reads envelopes from their topics into the same store.
 
 **Default shape** (laptop, small team, the demo): one engine container does
 everything. The k8s Service or compose port mapping is the only "proxy".
@@ -160,9 +169,9 @@ everything. The k8s Service or compose port mapping is the only "proxy".
 ingestion tier in front of the core —
 
 ```
- pipeline devices / SDKs
-        |
-        v
+ log shippers (Fluent Bit, Vector) · SDKs (Python/TS/Go) · bulk loader
+        |                            (Kafka topics -> kafka consumer -> store,
+        v                             bypassing this tier)
   load balancer            (k8s Service + HPA; nginx locally — shipped
         |                   config, never a custom proxy)
         v

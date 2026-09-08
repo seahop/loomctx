@@ -10,9 +10,11 @@ get a numbered entry in `decisions.md` rather than a comment.
 - **Docker-only.** Build and run everything through `docker compose`;
   nothing installs on the host. Tests: `docker compose run --rm test`.
 - **Contracts are the API.** `src/loom/contracts.py` is the source of
-  truth; `contracts/schemas.json` is generated from it
-  (`python -m loom.schemas`) and CI fails if it drifts. A contract change is
-  a decision, not a refactor — add a `D-xxx` entry.
+  truth; `contracts/schemas.json` and `contracts/openapi.json` are generated
+  from it (`python -m loom.schemas`, `python -m loom.schemas openapi`) and CI
+  fails if either drifts — as do the TypeScript SDK's generated types
+  (`docker compose --profile sdk run --rm sdk-ts npm run gen`). A contract
+  change is a decision, not a refactor — add a `D-xxx` entry.
 - **Persistence only through `GraphStore`** (`src/loom/store/`). New store
   behavior lands in `tests/test_store.py` first, which runs against both
   SQLite and Postgres; the two backends must stay behaviorally identical.

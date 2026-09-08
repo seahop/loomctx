@@ -60,10 +60,12 @@ findings without touching Loom's code.
 | `docs/decisions.md` | Language/tech choices with rationale, and the constraints we hold |
 | `docs/administration.md` | Running it for a team: users, scopes, rotation, retention |
 | `docs/roadmap.md` | Phased execution plan with current status |
-| `docs/sdk.md` | How consumers tap in: MCP, HTTP, Python SDK, CLI |
-| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, seed data |
-| `sdk/python/` | Thin Python client SDK (mirrors the HTTP/MCP surface) |
-| `deploy/` | Kubernetes manifests + deployment guide (local Compose stays primary) |
+| `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
+| `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
+| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data |
+| `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
+| `contracts/` | `schemas.json` (JSON Schema) and `openapi.json`, both regenerated and drift-checked in CI |
+| `deploy/` | Kubernetes shapes (default, scale, scale-pg, scale-pg-ha), `integrations/` (Fluent Bit, Vector, Kafka), deployment guide |
 | `tests/` | Contract, store, context-pack, seed, and API tests |
 
 ## Documentation
@@ -97,7 +99,10 @@ Ask about `host web-01`'s OS instead and the pack *leads with a conflict item*
 (two sources disagree), plus expansion handles like
 `"69 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
 pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
-`document` envelope (see `docs/contracts.md`).
+`document` envelope, or `POST /v1/ingest/batch` for many at once — which is
+what log shippers (Fluent Bit, Vector), the bulk loader, and the Kafka
+consumer use to tie existing pipelines in (see `docs/contracts.md` and
+`deploy/integrations/`).
 
 To enable the answering LLM (`/v1/answer`, MCP `answer`) locally, copy
 `.env.example` to `.env`, fill in a provider key (OpenRouter, Venice,

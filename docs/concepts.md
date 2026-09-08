@@ -18,8 +18,10 @@ vibes:
 3. **Pluggable enrichers** — summarization, embedding, and claim extraction are
    interfaces with an LLM-backed default; teams can substitute their own models,
    endpoints, or rule-based extractors.
-4. **Layered access** — MCP, HTTP, SDK, and CLI are thin shells over one core, so a
-   new surface (a Slack bot, a Kafka consumer) is an adapter, not a rewrite.
+4. **Layered access** — MCP, HTTP, SDKs, pipeline adapters, and operator modules
+   are thin shells over one core, so a new surface is an adapter, not a rewrite
+   (the Kafka consumer, `loom.kafka_consumer`, is exactly that: 120 lines over
+   the same batch-write path the NATS consumer uses).
 
 If a proposed feature can only serve one domain, it belongs in a registered schema
 or a plugin — not in the core.
