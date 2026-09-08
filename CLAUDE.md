@@ -6,6 +6,8 @@ agents token-budgeted, cited, question-scoped "context packs".
 ## Orientation order for a fresh session
 
 1. `docs/roadmap.md` — what is done / stubbed / next (keep its status markers updated)
+   and `docs/hardening.md` — the verified issue list from the 2026-09-08 review
+   (flip its status markers as items land)
 2. `docs/decisions.md` — constraints and choices (append new decisions there)
 3. `docs/architecture.md` — the design
 4. Code: `src/loom/contracts.py` → `src/loom/store/sqlite.py` → `src/loom/api/http.py`

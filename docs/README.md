@@ -29,3 +29,6 @@ Read in this order depending on why you're here.
 - **[decisions.md](decisions.md)** — every design decision (D-001…D-019) with
   rationale, the hard constraints, and the open questions.
 - **[roadmap.md](roadmap.md)** — phase status and the path to the conference.
+- **[hardening.md](hardening.md)** — verified issue list from the 2026-09-08
+  review (security gates, store robustness, provenance gaps, demo risks),
+  with priorities and status.

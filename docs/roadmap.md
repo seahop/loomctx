@@ -116,6 +116,10 @@ presentable.
 
 ## Phase 5 — Hardening & spread 🔨
 
+- 🔨 **Review batch (2026-09-08):** the full verified issue list, with
+  pre-conference priorities and live status, is in `docs/hardening.md`.
+  P1 items there (auth gate bypasses, store rollback/dedupe races,
+  uncited briefs, worker resilience, seed idempotency) land first.
 - ✅ **Postgres `GraphStore` (D-011, 2026-09-03):** selected by
   `LOOM_DB=postgresql://...`, behaviorally identical to SQLite (shared
   contract tests run against both; CI includes a live-Postgres pass).
