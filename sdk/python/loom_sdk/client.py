@@ -127,10 +127,12 @@ class Loom:
         budget: int = 800,
         as_of: str | None = None,
         scope: dict | None = None,
+        valid_at: str | None = None,
     ) -> dict:
         """One of subject / scope. scope example:
         {"subjects": [{"type": "domain", "key": "corp.local"}],
-         "expand": ["member_of"], "depth": 1}"""
+         "expand": ["member_of"], "depth": 1}
+        as_of = what was known at T; valid_at = what was true at T."""
         return self._post(
             "/v1/ask",
             {
@@ -142,6 +144,7 @@ class Loom:
                 "question": question,
                 "budget": budget,
                 "as_of": as_of,
+                "valid_at": valid_at,
             },
         )
 
@@ -156,6 +159,7 @@ class Loom:
         budget: int = 1200,
         as_of: str | None = None,
         max_tokens: int = 1024,
+        valid_at: str | None = None,
     ) -> dict:
         """Retrieval-grounded LLM answer. With neither subject nor scope,
         entities named in the question are auto-resolved server-side."""
@@ -171,10 +175,23 @@ class Loom:
                 "scope": scope,
                 "budget": budget,
                 "as_of": as_of,
+                "valid_at": valid_at,
                 "max_tokens": max_tokens,
             },
             extra_headers=headers,
         )
+
+    def register_schema(self, entity_types: list[dict], predicates: list[dict],
+                        strict: bool = False) -> dict:
+        """Register the namespace's entity types / predicates (D-024).
+        e.g. predicates=[{"name": "member_of", "object_types": ["domain"],
+        "containment": True}]."""
+        return self._post("/v1/schemas", {
+            "namespace": self.namespace, "entity_types": entity_types,
+            "predicates": predicates, "strict": strict})
+
+    def schema(self) -> dict:
+        return self._get("/v1/schemas")
 
     def search(self, query: str, limit: int = 10) -> dict:
         return self._get("/v1/entities/search", {"q": query, "limit": limit})

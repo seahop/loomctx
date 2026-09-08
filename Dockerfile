@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[test,scale,postgres,mcp]"
+RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector]"
 
 ENV LOOM_DB=/data/loom.db
 VOLUME /data

@@ -45,6 +45,9 @@ postgres = [
 mcp = [
     "mcp>=2",
 ]
+vector = [
+    "numpy>=1.26",   # batched cosine in the pack builder; pure Python without it
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

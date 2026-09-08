@@ -350,3 +350,36 @@ def test_embed_pending_counts_stored_vectors(tmp_path):
 
     with pytest.raises(LLMError):
         embed_pending(store, Short())
+
+
+def test_excerpt_handle_expands_to_neighbouring_passages(tmp_path):
+    """Roadmap phase 4: 'doc_excerpt expansion handles to pull surrounding chunks'."""
+    from loom.context import expand_pack
+    from loom.contracts import Provenance
+    from loom.enrich import chunk_artifacts
+    store = _store(tmp_path)
+    filler = ("It goes on at some length about maintenance windows, change "
+              "tickets and the usual coordination that operations handles. ") * 3
+    paras = [f"Paragraph {i} discusses topic number {i} in detail. {filler}"
+             for i in range(6)]
+    paras[3] = paras[3].replace("topic number 3", "the CVE-2026-1337 exploit on web-01")
+    art = store.store_artifact(DocumentIn(text="\n\n".join(paras), source="pentest",
+                                          observed_at=OBSERVED))
+    store.record_claim(ClaimIn(
+        subject=EntityRef(type="asset", key="web-01"), predicate="mentioned_in",
+        object="report", observed_at=OBSERVED, source="doc:pentest",
+        provenance=Provenance(artifact_id=art.id)))
+    embedder = HashingEmbedder()
+    assert chunk_artifacts(store, embedder) >= 4
+    pack = build_pack(store, AskRequest(
+        subject=EntityRef(type="asset", key="web-01"),
+        question="CVE-2026-1337 exploit", budget=1500), embedder=embedder)
+    handles = [h for h in pack.handles if h.kind == "excerpt"]
+    assert handles
+    around = expand_pack(store, handles[0].id, budget=3000)
+    texts = [i.text for i in around.items]
+    assert len(texts) >= 2 and all(i.kind == "doc_excerpt" for i in around.items)
+    assert any("CVE-2026-1337" in t for t in texts)
+    assert all(i.citations[0].artifact_id == art.id for i in around.items)
+    # a reader scoped away from 'asset' gets nothing from the same handle
+    assert expand_pack(store, handles[0].id, 3000, allowed_types=("host",)).items == []

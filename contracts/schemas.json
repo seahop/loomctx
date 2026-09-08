@@ -633,7 +633,8 @@
             "default": "more",
             "enum": [
               "more",
-              "conflict"
+              "conflict",
+              "excerpt"
             ],
             "title": "Kind",
             "type": "string"
@@ -695,6 +696,19 @@
         ],
         "default": null,
         "title": "As Of"
+      },
+      "valid_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid At"
       },
       "budget": {
         "title": "Budget",
@@ -767,6 +781,12 @@
             },
             "title": "Object Types",
             "type": "array"
+          },
+          "containment": {
+            "default": false,
+            "description": "a 'contains / member of' relation: scopes with no explicit `expand` follow every containment predicate (D-012/D-024)",
+            "title": "Containment",
+            "type": "boolean"
           }
         },
         "required": [
@@ -776,6 +796,7 @@
         "type": "object"
       }
     },
+    "description": "Per-namespace registry (D-024). Registering is additive (a later POST\nmerges by name). Validation on ingest: a registered predicate's\nobject_types are always enforced; with `strict` the namespace also\nrejects unregistered predicates and entity types.",
     "properties": {
       "namespace": {
         "default": "default",
@@ -795,6 +816,11 @@
         },
         "title": "Predicates",
         "type": "array"
+      },
+      "strict": {
+        "default": false,
+        "title": "Strict",
+        "type": "boolean"
       }
     },
     "title": "SchemaRegistration",

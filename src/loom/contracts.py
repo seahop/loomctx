@@ -178,7 +178,7 @@ class ExpansionHandle(BaseModel):
     id: str
     hint: str
     est_tokens: int | None = None
-    kind: Literal["more", "conflict"] = "more"
+    kind: Literal["more", "conflict", "excerpt"] = "more"
 
 
 class ScopeSpec(BaseModel):

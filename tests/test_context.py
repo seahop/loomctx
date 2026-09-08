@@ -163,3 +163,99 @@ def test_query_embedding_is_cached():
     a = embed_query(e, "who logged in?")
     b = embed_query(e, "who logged in?")
     assert a == b and len(calls) == 1
+
+
+def _lease_store(tmp_path):
+    """ip 10.0.4.7: web-01 until Aug 10, then laptop-17; plus an un-windowed fact."""
+    store = SqliteStore(tmp_path / "lease.db")
+    ip = EntityRef(type="ip", key="10.0.4.7")
+    store.record_claim(ClaimIn(
+        subject=ip, predicate="assigned_to", object=EntityRef(type="host", key="web-01"),
+        observed_at=_at(7, 1), valid_from=_at(7, 1), valid_to=_at(8, 10), source="dhcp"))
+    store.record_claim(ClaimIn(
+        subject=ip, predicate="assigned_to", object=EntityRef(type="host", key="laptop-17"),
+        observed_at=_at(8, 10), valid_from=_at(8, 10), source="dhcp"))
+    store.record_claim(ClaimIn(
+        subject=ip, predicate="subnet", object="10.0.4.0/24",
+        observed_at=_at(9, 1), source="ipam"))
+    return store, ip
+
+
+def test_valid_at_answers_what_was_true(tmp_path):
+    """D-024: valid_at is fact time — exactly one lease holder per instant;
+    facts without a validity window are timeless and kept."""
+    store, ip = _lease_store(tmp_path)
+    during = build_pack(store, AskRequest(subject=ip, question="which host?",
+                                          budget=2000, valid_at=_at(8, 1)))
+    text = " | ".join(i.text for i in during.items)
+    assert "web-01" in text and "laptop-17" not in text and "subnet" in text
+    after = build_pack(store, AskRequest(subject=ip, question="which host?",
+                                         budget=2000, valid_at=_at(8, 20)))
+    text = " | ".join(i.text for i in after.items)
+    assert "laptop-17" in text and "web-01" not in text
+    assert after.valid_at is not None
+    # as_of is knowledge time: on Aug 1 we knew only the first lease AND
+    # nothing recorded later (the subnet fact came on Sep 1)
+    known = build_pack(store, AskRequest(subject=ip, question="which host?",
+                                         budget=2000, as_of=_at(8, 1)))
+    text = " | ".join(i.text for i in known.items)
+    assert "web-01" in text and "laptop-17" not in text and "subnet" not in text
+    # handles inherit valid_at
+    tiny = build_pack(store, AskRequest(subject=ip, question="which host?",
+                                        budget=40, valid_at=_at(8, 1)))
+    for h in tiny.handles:
+        assert decode_handle(h.id).get("valid_at")
+
+
+def test_recency_is_time_decayed_not_rank_based(tmp_path):
+    """H-C7: facts seconds apart score alike; a year-old one decays."""
+    from loom.context import _recency
+    from loom.contracts import Observation
+    newest = _at(9, 1)
+
+    def obs(when):
+        return Observation(id="x", namespace="d", subject=EntityRef(type="h", key="k"),
+                           predicate="p", object="v", observed_at=when,
+                           recorded_at=when, source="s", confidence=1.0)
+    close = [_recency(obs(datetime(2026, 9, 1, 12, 0, s, tzinfo=timezone.utc)), newest)
+             for s in (0, 1, 2)]
+    assert max(close) - min(close) < 1e-5
+    assert _recency(obs(_at(8, 2)), newest) < 0.6
+    assert _recency(obs(datetime(2025, 9, 1, tzinfo=timezone.utc)), newest) < 0.1
+
+
+def test_stopwords_do_not_dilute_keyword_relevance(tmp_path):
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(
+        subject=web01, question="what is the os that this host runs?", budget=3000))
+    facts = [i for i in pack.items if i.kind == "fact"]
+    assert "runs_os" in facts[0].text
+
+
+def test_scores_stay_comparable_when_some_vectors_are_missing(tmp_path):
+    """H-C7: with an embedder serving, un-embedded facts use the same formula."""
+    from loom.enrich import embed_pending
+    from loom.llm import HashingEmbedder
+    store, web01 = make_store(tmp_path)
+    embedder = HashingEmbedder()
+    embed_pending(store, embedder, batch=5)  # only SOME observations get vectors
+    store.record_claim(ClaimIn(subject=web01, predicate="logged_in_by",
+                               object=EntityRef(type="user", key="fresh"),
+                               observed_at=_at(9, 2), source="auth-log"))
+    pack = build_pack(store, AskRequest(subject=web01, question="who logged in?",
+                                        budget=3000), embedder=embedder)
+    scores = [i.score for i in pack.items if i.kind == "fact"]
+    assert max(scores) <= 1.0 and min(scores) >= 0.0
+    # nothing scores above the semantic formula's ceiling for a neutral cosine
+    fresh = next(i for i in pack.items if "fresh" in i.text)
+    assert fresh.score <= 0.75
+
+
+def test_numpy_and_python_cosines_agree():
+    from loom.context import _cosine, cosines
+    q = [1.0, 2.0, 3.0]
+    vecs = {"a": [1.0, 2.0, 3.0], "b": [-1.0, 0.0, 0.5], "z": [0.0, 0.0, 0.0],
+            "short": [1.0, 2.0]}
+    got = cosines(q, vecs)
+    for k, v in vecs.items():
+        assert abs(got[k] - _cosine(q, v)) < 1e-9, k

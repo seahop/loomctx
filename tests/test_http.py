@@ -101,3 +101,61 @@ def test_answer_503_when_no_llm_configured(tmp_path, monkeypatch):
         r = client.post("/v1/answer", json={"question": "anything?"})
         assert r.status_code == 503
         assert "LOOM_LLM_MODEL" in r.json()["detail"]
+
+
+REGISTRY = {
+    "namespace": "default",
+    "entity_types": [{"name": "host"}, {"name": "domain"}, {"name": "user"}],
+    "predicates": [
+        {"name": "member_of", "object_types": ["domain"], "containment": True},
+        {"name": "logged_in_by", "object_types": ["user"]},
+        {"name": "runs_os"},
+    ],
+}
+
+
+def test_schema_registry_validates_ingest(tmp_path, monkeypatch):
+    """D-024: registered predicates enforce object types; strict namespaces
+    reject the unregistered; scopes default to containment predicates."""
+    with make_client(tmp_path, monkeypatch) as client:
+        assert client.get("/v1/schemas").status_code == 404
+        r = client.post("/v1/schemas", json=REGISTRY)
+        assert r.status_code == 200 and not r.json()["strict"]
+        assert client.get("/v1/schemas").json()["predicates"][0]["name"] == "member_of"
+
+        ok = client.post("/v1/ingest", json=CLAIM)
+        assert ok.status_code == 200
+        bad = client.post("/v1/ingest", json={**CLAIM, "object": "jdoe"})  # scalar
+        assert bad.status_code == 422 and "expects an entity object" in bad.json()["detail"]
+        bad = client.post("/v1/ingest", json={
+            **CLAIM, "object": {"type": "host", "key": "db-01"}})
+        assert bad.status_code == 422 and "['user']" in bad.json()["detail"]
+        # unregistered predicate/type: fine while not strict
+        assert client.post("/v1/ingest", json={
+            **CLAIM, "predicate": "pinged", "object": {"type": "printer", "key": "p1"}}
+        ).status_code == 200
+
+        # strict: additive re-registration flips the switch
+        r = client.post("/v1/schemas", json={"namespace": "default", "strict": True})
+        assert r.json()["strict"] and len(r.json()["predicates"]) == 3
+        r = client.post("/v1/ingest", json={**CLAIM, "predicate": "pinged"})
+        assert r.status_code == 422 and "not registered" in r.json()["detail"]
+        r = client.post("/v1/ingest", json={
+            **CLAIM, "predicate": "runs_os", "object": "fedora"})
+        assert r.status_code == 200
+
+        # scope with no expand follows the registry's containment predicate
+        client.post("/v1/ingest", json={
+            **CLAIM, "predicate": "member_of",
+            "object": {"type": "domain", "key": "corp.local"}})
+        r = client.post("/v1/ask", json={
+            "scope": {"subjects": [{"type": "domain", "key": "corp.local"}], "depth": 1},
+            "question": "who logged in?", "budget": 2000})
+        assert r.status_code == 200
+        assert {s["key"] for s in r.json()["subjects"]} >= {"corp.local", "web-01"}
+        assert any("jdoe" in i["text"] for i in r.json()["items"])
+
+
+def test_readyz_reports_schema_version(tmp_path, monkeypatch):
+    with make_client(tmp_path, monkeypatch) as client:
+        assert client.get("/readyz").json()["schema_version"] >= 2

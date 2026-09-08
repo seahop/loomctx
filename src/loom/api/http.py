@@ -29,13 +29,16 @@ from ..contracts import (
     ExpandRequest,
     IngestEnvelope,
 )
+from ..contracts import SchemaRegistration
 from ..llm import LLMError, embedder_from_env, llm_from_env
+from ..registry import RegistryCache, validate_claim
 from ..store.factory import store_from_env
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     app.state.store = store_from_env()
+    app.state.registry = RegistryCache(app.state.store)
     app.state.llm = llm_from_env()
     app.state.embedder = embedder_from_env()
     app.state.auth = AuthConfig.from_env()
@@ -119,9 +122,10 @@ def healthz() -> dict:
 
 @app.get("/readyz")
 def readyz(request: Request) -> dict:
-    if not request.app.state.store.ping():
+    store = request.app.state.store
+    if not store.ping():
         raise HTTPException(status_code=503, detail="store unreachable")
-    return {"status": "ready"}
+    return {"status": "ready", "schema_version": store.schema_version()}
 
 
 @app.get("/metrics")
@@ -139,6 +143,13 @@ def ingest(envelope: IngestEnvelope, request: Request):
         _gate_entity_type(grant, envelope.subject.type)
         if isinstance(envelope.object, EntityRef):
             _gate_entity_type(grant, envelope.object.type)
+        # registry validation (D-024): registered predicates enforce their
+        # object types; a strict namespace rejects anything unregistered
+        problem = validate_claim(
+            request.app.state.registry.get(envelope.namespace), envelope)
+        if problem is not None:
+            metrics.REJECTED.labels(reason="schema").inc()
+            raise HTTPException(status_code=422, detail=problem)
         metrics.INGEST.labels(kind=envelope.kind).inc()
         obs = request.app.state.store.record_claim(envelope)
         return {"status": "recorded", "observation_id": obs.id}
@@ -203,6 +214,29 @@ def get_artifact(
 
 def _allowed_types(grant: Grant | None) -> tuple[str, ...] | None:
     return grant.entity_types if grant is not None else None
+
+
+@app.post("/v1/schemas", response_model=SchemaRegistration)
+def register_schema(reg: SchemaRegistration, request: Request) -> SchemaRegistration:
+    """Register (additively) the entity types and predicates of a namespace —
+    the domain knowledge that keeps the core domain-agnostic (D-024).
+    Requires write access to the namespace. Returns the effective registry."""
+    _authorize(request, reg.namespace, "w")
+    merged = request.app.state.store.put_schema(reg)
+    request.app.state.registry.invalidate(reg.namespace)
+    return merged
+
+
+@app.get("/v1/schemas", response_model=SchemaRegistration)
+def get_schema(
+    request: Request,
+    namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+) -> SchemaRegistration:
+    _authorize(request, namespace, "r")
+    schema = request.app.state.store.get_schema(namespace)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="no registry for this namespace")
+    return schema
 
 
 @app.post("/v1/ask", response_model=ContextPack)

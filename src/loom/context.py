@@ -1,10 +1,14 @@
 """The context pack builder — the read path (docs/architecture.md).
 
-Given (subject, question, budget, as_of?) this module gathers observations,
-ranks them, surfaces conflicts, trims to the token budget, and attaches
-citations + expansion handles. v1 ranking is deliberately LLM-free
-(keyword similarity + recency + confidence); embedding similarity slots in
-at _score() when phase 4 lands.
+Given (subject, question, budget, as_of?, valid_at?) this module gathers
+observations, ranks them, surfaces conflicts, trims to the token budget, and
+attaches citations + expansion handles. Ranking is LLM-free: cosine
+similarity when vectors exist (D-018), keyword overlap otherwise, plus
+time-decayed recency and source confidence (D-024).
+
+Two time axes (architecture.md): `as_of` hides what was recorded after T
+("what did we know"); `valid_at` keeps only facts whose validity window
+covers T ("what was true"), leaving un-windowed facts alone.
 
 Expansion handles are stateless: a base64url-encoded JSON descriptor of the
 query they stand for. No server-side handle table to expire or migrate.
@@ -47,6 +51,20 @@ _ITEM_OVERHEAD_TOKENS = 8  # rough JSON/citation framing cost per item
 _GATHER_LIMIT = 1000
 _MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
 _QUERY_CACHE_SIZE = 256
+_RECENCY_HALF_LIFE_DAYS = 30.0  # recency = 1 / (1 + age / half-life)
+
+try:  # optional accelerator (extra "vector"); pure Python otherwise
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised only without the extra
+    _np = None
+
+# Question words that carry no retrieval signal; stripped from the keyword
+# scorer so "what is the operating system" isn't 60% noise (H-C7).
+_STOPWORDS = frozenset("""
+a an and are as at be been by did do does for from had has have how in is it
+its of on or that the this to was were what when where which who whom why
+will with about into over under any all some tell me show give list
+""".split())
 
 
 def embed_query(embedder, question: str) -> list[float]:
@@ -79,6 +97,12 @@ def _tokens(text: str) -> set[str]:
     # question words can match them
     words |= set(_WORD.findall(re.sub(r"[_:./-]", " ", lowered)))
     return words
+
+
+def _question_tokens(question: str) -> set[str]:
+    words = _tokens(question)
+    content = words - _STOPWORDS
+    return content or words  # a question made only of stopwords keeps them
 
 
 def _aware(dt: datetime) -> datetime:
@@ -123,6 +147,8 @@ _EXCERPT_RELATIVE_FLOOR = 0.6  # keep passages scoring >= 60% of the best one
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        return 0.0  # different embedding spaces never compare
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
@@ -131,31 +157,62 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def cosines(query: list[float], vectors: dict[str, list[float]]) -> dict[str, float]:
+    """Cosine of the query against many vectors at once — one matrix
+    product with numpy when installed (H-E1), the scalar loop otherwise."""
+    if _np is None or not vectors:
+        return {k: _cosine(query, v) for k, v in vectors.items()}
+    keys = [k for k, v in vectors.items() if len(v) == len(query)]
+    if not keys:
+        return {k: 0.0 for k in vectors}
+    m = _np.asarray([vectors[k] for k in keys], dtype=float)
+    q = _np.asarray(query, dtype=float)
+    norms = _np.linalg.norm(m, axis=1) * (_np.linalg.norm(q) or 1.0)
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        sims = _np.where(norms > 0, m @ q / norms, 0.0)
+    out = {k: float(s) for k, s in zip(keys, sims)}
+    for k in vectors:
+        out.setdefault(k, 0.0)
+    return out
+
+
+def _recency(obs: Observation, newest: datetime) -> float:
+    """Time-decayed, relative to the newest observation in the gathered
+    set: twenty facts a second apart all score ~1, a year-old one ~0.08.
+    Rank-based decay spread same-day facts across the whole range (H-C7)."""
+    age_days = max(0.0, (newest - _aware(obs.observed_at)).total_seconds() / 86400)
+    return 1.0 / (1.0 + age_days / _RECENCY_HALF_LIFE_DAYS)
+
+
 def _score(
     obs: Observation,
     question_tokens: set[str],
-    rank: int,
-    total: int,
+    recency: float,
     cos: float | None = None,
+    semantic: bool = False,
 ) -> float:
-    recency = 1.0 - (rank / total) if total > 1 else 1.0
-    if not question_tokens and cos is None:
-        return 0.6 * recency + 0.4 * obs.confidence
-    haystack = _tokens(
-        f"{obs.predicate} {_object_text(obs)} {obs.subject.key} "
-        f"{json.dumps(obs.attrs)}"
-    )
-    sim = (
-        len(question_tokens & haystack) / len(question_tokens)
-        if question_tokens else 0.0
-    )
-    if cos is not None:
-        # semantic similarity leads once embeddings exist (phase 4, D-018);
-        # keyword overlap stays as a tie-breaking signal
-        score = (0.5 * (cos + 1) / 2 + 0.15 * sim
-                 + 0.25 * recency + 0.1 * obs.confidence)
+    """`semantic` means an embedder is serving this pack: observations that
+    have no vector yet (freshly ingested) are scored on the SAME formula
+    with cos=0 (neutral), so the two populations stay comparable (H-C7)."""
+    if not question_tokens and not semantic:
+        score = 0.6 * recency + 0.4 * obs.confidence
     else:
-        score = 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
+        haystack = _tokens(
+            f"{obs.predicate} {_object_text(obs)} {obs.subject.key} "
+            f"{json.dumps(obs.attrs)}"
+        )
+        sim = (
+            len(question_tokens & haystack) / len(question_tokens)
+            if question_tokens else 0.0
+        )
+        if semantic:
+            # semantic similarity leads once embeddings exist (D-018);
+            # keyword overlap stays as a tie-breaking signal
+            c = cos if cos is not None else 0.0
+            score = (0.5 * (c + 1) / 2 + 0.15 * sim
+                     + 0.25 * recency + 0.1 * obs.confidence)
+        else:
+            score = 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
     return score * _EXTRACTED_DISCOUNT if _is_extracted(obs) else score
 
 
@@ -229,14 +286,21 @@ def _sign(raw: str, secret: bytes) -> str:
 
 
 def encode_handle(
-    namespace: str, subject: EntityRef, predicate: str, as_of: datetime | None
+    namespace: str, subject: EntityRef, predicate: str, as_of: datetime | None,
+    valid_at: datetime | None = None, excerpt: dict | None = None,
 ) -> str:
+    """`excerpt` = {"artifact_id", "seq", "model"} makes an excerpt handle:
+    expanding it returns the cited passage with its neighbours."""
     payload = {
         "ns": namespace,
         "subject": subject.model_dump(),
         "predicate": predicate,
         "as_of": as_of.isoformat() if as_of else None,
     }
+    if valid_at is not None:
+        payload["valid_at"] = valid_at.isoformat()
+    if excerpt is not None:
+        payload["excerpt"] = excerpt
     raw = base64.urlsafe_b64encode(
         json.dumps(payload, sort_keys=True).encode()
     ).decode().rstrip("=")
@@ -301,17 +365,23 @@ def resolve_scope(
     store: GraphStore, namespace: str, scope: ScopeSpec
 ) -> list[EntityRef]:
     """Expand a scope into a concrete entity list: BFS from the subjects over
-    the named containment predicates, bounded by depth. Deterministic order."""
+    the named containment predicates, bounded by depth. Deterministic order.
+    With no `expand` named, the namespace's registry supplies its
+    containment predicates (D-012 promise, D-024)."""
+    expand = set(scope.expand)
+    if not expand and scope.depth > 0:
+        from .registry import containment_predicates
+        expand = set(containment_predicates(store.get_schema(namespace)))
     seen = {(r.type, r.key) for r in scope.subjects}
     resolved = list(scope.subjects)
     frontier = list(scope.subjects)
     for _ in range(scope.depth):
-        if not scope.expand or not frontier:
+        if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
         for ref in frontier:
             for obs in store.observations_for(namespace, ref, limit=_GATHER_LIMIT):
-                if obs.predicate not in scope.expand:
+                if obs.predicate not in expand:
                     continue
                 ends = [obs.subject]
                 if isinstance(obs.object, EntityRef):
@@ -352,13 +422,14 @@ def build_pack(
     # once, reuse it to score observation vectors AND rank passages from the
     # documents that produced this entity's facts.
     cos_map: dict[str, float] = {}
-    excerpts: list[tuple[float, Citation, str]] = []
-    if embedder is not None and req.question and observations:
+    excerpts: list[tuple[float, Citation, str, int, str]] = []
+    semantic = embedder is not None and bool(req.question) and bool(observations)
+    if semantic:
         query_vec = embed_query(embedder, req.question)
         vectors = store.embeddings_for(
             req.namespace, [o.id for o in observations], embedder.model
         )
-        cos_map = {oid: _cosine(query_vec, vec) for oid, vec in vectors.items()}
+        cos_map = cosines(query_vec, vectors)
 
         artifact_ids = sorted({
             o.provenance.artifact_id for o in observations
@@ -376,7 +447,7 @@ def build_pack(
                 artifact_id=ch["artifact_id"], span_start=ch["span_start"],
                 span_end=ch["span_end"], source=ch["source"], observed_at=observed,
             )
-            excerpts.append((score, cite, ch["text"]))
+            excerpts.append((score, cite, ch["text"], ch["seq"], embedder.model))
         excerpts.sort(key=lambda e: e[0], reverse=True)
         excerpts = excerpts[:_MAX_EXCERPT_CANDIDATES]
 
@@ -402,9 +473,11 @@ def build_pack(
         subjects=subjects,
         question=req.question,
         as_of=req.as_of,
+        valid_at=req.valid_at,
         budget=min(req.budget, max_budget()),
         observations=observations,
         cos_map=cos_map,
+        semantic=semantic,
         briefs=briefs,
         excerpts=excerpts,
     )
@@ -419,6 +492,11 @@ def expand_pack(
     meta = decode_handle(handle)
     subject = EntityRef(**meta["subject"])
     as_of = datetime.fromisoformat(meta["as_of"]) if meta.get("as_of") else None
+    valid_at = (datetime.fromisoformat(meta["valid_at"])
+                if meta.get("valid_at") else None)
+    budget = min(budget, max_budget())
+    if isinstance(meta.get("excerpt"), dict):
+        return _expand_excerpt(store, meta, subject, budget, allowed_types)
     observations = [
         o
         for o in store.observations_for(meta["ns"], subject, limit=_GATHER_LIMIT)
@@ -429,10 +507,48 @@ def expand_pack(
         subjects=[subject],
         question=None,
         as_of=as_of,
-        budget=min(budget, max_budget()),
+        valid_at=valid_at,
+        budget=budget,
         observations=observations,
         with_handles=False,
     )
+
+
+_EXCERPT_NEIGHBOURS = 1  # passages on each side of the cited one
+
+
+def _expand_excerpt(
+    store: GraphStore, meta: dict, subject: EntityRef, budget: int,
+    allowed_types: tuple[str, ...] | None,
+) -> ContextPack:
+    """An excerpt handle: the cited passage plus its neighbours, in document
+    order, so an agent can read around a hit without fetching the whole
+    artifact. A type-scoped reader gets it only if the document backs a
+    fact in their world (same rule as GET /v1/artifacts, H-A6)."""
+    ex = meta["excerpt"]
+    ns = meta["ns"]
+    artifact_id, seq, model = str(ex.get("artifact_id")), int(ex.get("seq", 0)), str(ex.get("model"))
+    items: list[ContextItem] = []
+    allowed = allowed_types is None or store.artifact_cited_within(ns, artifact_id, allowed_types)
+    if allowed:
+        seqs = list(range(max(0, seq - _EXCERPT_NEIGHBOURS), seq + _EXCERPT_NEIGHBOURS + 1))
+        remaining = budget
+        for ch in store.doc_chunks_by_seq(ns, artifact_id, model, seqs):
+            cite = Citation(
+                artifact_id=ch["artifact_id"], span_start=ch["span_start"],
+                span_end=ch["span_end"], source=ch["source"],
+                observed_at=_aware(ch["observed_at"]),
+            )
+            rendered = (f'"{ch["text"]}" [doc:{artifact_id[:8]} '
+                        f'@{ch["span_start"]}-{ch["span_end"]}]')
+            cost = est_tokens(rendered)
+            if cost <= remaining:
+                items.append(ContextItem(
+                    kind="doc_excerpt", text=rendered,
+                    score=1.0 if ch["seq"] == seq else 0.8, citations=[cite]))
+                remaining -= cost
+    return ContextPack(namespace=ns, subject=subject, subjects=[subject],
+                       question=None, budget=budget, items=items, handles=[])
 
 
 def _pack(
@@ -444,11 +560,14 @@ def _pack(
     observations: list[Observation],
     with_handles: bool = True,
     cos_map: dict[str, float] | None = None,
+    semantic: bool = False,
     briefs: list[tuple[EntityRef, str, list[Citation]]] | None = None,
-    excerpts: list[tuple[float, Citation, str]] | None = None,
+    excerpts: list[tuple[float, Citation, str, int, str]] | None = None,
+    valid_at: datetime | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
+        # knowledge time: nothing we learned after T
         as_of = _aware(as_of)
         observations = [
             o
@@ -456,13 +575,24 @@ def _pack(
             if _aware(o.observed_at) <= as_of
             and (o.valid_from is None or _aware(o.valid_from) <= as_of)
         ]
+    if valid_at is not None:
+        # fact time: only what was TRUE at T. Facts that carry no validity
+        # window are timeless as far as we know and are kept (D-024).
+        valid_at = _aware(valid_at)
+        observations = [
+            o
+            for o in observations
+            if (o.valid_from is None or _aware(o.valid_from) <= valid_at)
+            and (o.valid_to is None or _aware(o.valid_to) > valid_at)
+        ]
 
-    question_tokens = _tokens(question) if question else set()
-    total = len(observations)
+    question_tokens = _question_tokens(question) if question else set()
+    newest = max((_aware(o.observed_at) for o in observations), default=None)
     scored = sorted(
         (
-            (_score(obs, question_tokens, rank, total, cos_map.get(obs.id)), obs)
-            for rank, obs in enumerate(observations)
+            (_score(obs, question_tokens, _recency(obs, newest),
+                    cos_map.get(obs.id), semantic), obs)
+            for obs in observations
         ),
         key=lambda pair: pair[0],
         reverse=True,
@@ -476,14 +606,14 @@ def _pack(
     # unaware. One that doesn't fit is never dropped silently — it becomes
     # a 'conflict' handle so the agent knows contested ground exists (H-C4).
     for subj in subjects:
-        for predicate, item in _find_conflicts(subj, observations, as_of):
+        for predicate, item in _find_conflicts(subj, observations, valid_at or as_of):
             cost = est_tokens(item.text)
             if cost <= remaining:
                 items.append(item)
                 remaining -= cost
             elif with_handles:
                 handles.append(ExpansionHandle(
-                    id=encode_handle(namespace, subj, predicate, as_of),
+                    id=encode_handle(namespace, subj, predicate, as_of, valid_at),
                     hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "
                     f"did not fit the budget",
                     est_tokens=cost, kind="conflict",
@@ -505,7 +635,7 @@ def _pack(
     # across embedders (H-C6). Each cites its artifact + span.
     excerpt_budget = remaining // 2
     best = excerpts[0][0] if excerpts else 0.0
-    for score, cite, text in (excerpts or []):
+    for score, cite, text, seq, model in (excerpts or []):
         if score <= 0 or score < best * _EXCERPT_RELATIVE_FLOOR:
             break
         rendered = (f'"{text}" [doc:{cite.artifact_id[:8]} '
@@ -518,6 +648,15 @@ def _pack(
                 citations=[cite]))
             remaining -= cost
             excerpt_budget -= cost
+            if with_handles:  # "read around this hit" (roadmap phase 4)
+                handles.append(ExpansionHandle(
+                    id=encode_handle(namespace, subjects[0], "", as_of, valid_at,
+                                     excerpt={"artifact_id": cite.artifact_id,
+                                              "seq": seq, "model": model}),
+                    hint=f"surrounding passages of doc:{cite.artifact_id[:8]} "
+                    f"around @{cite.span_start}",
+                    est_tokens=cost * (2 * _EXCERPT_NEIGHBOURS + 1), kind="excerpt",
+                ))
 
     included: set[str] = set()
     skipped: dict[tuple[str, str, str], int] = {}  # (subj type, key, predicate)
@@ -546,7 +685,7 @@ def _pack(
             subj = EntityRef(type=stype, key=skey)
             handles.append(
                 ExpansionHandle(
-                    id=encode_handle(namespace, subj, predicate, as_of),
+                    id=encode_handle(namespace, subj, predicate, as_of, valid_at),
                     hint=f"{count} more '{predicate}' observations for "
                     f"{stype}:{skey}",
                     est_tokens=count * 25,
@@ -559,6 +698,7 @@ def _pack(
         subjects=subjects,
         question=question,
         as_of=as_of,
+        valid_at=valid_at,
         budget=budget,
         items=items,
         handles=handles,

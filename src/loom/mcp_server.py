@@ -105,17 +105,20 @@ def ask(
     budget: int = 800,
     namespace: str = "default",
     as_of: str | None = None,
+    valid_at: str | None = None,
 ) -> dict:
     """Question-scoped, token-budgeted, cited context about one entity.
     subject is a 'type:key' handle. Conflicting facts are flagged explicitly;
     'handles' in the result feed the expand tool for more detail. as_of
-    (ISO timestamp) answers as of that moment."""
+    (ISO timestamp) = what was KNOWN at that moment; valid_at = what was
+    TRUE at that moment (e.g. which host held an IP during an incident)."""
     req = AskRequest(
         namespace=namespace,
         subject=_parse_ref(subject),
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
+        valid_at=_parse_time(valid_at),
     )
     return build_pack(
         _get_store(), req, embedder=_get_embedder()
@@ -130,11 +133,13 @@ def ask_scope(
     budget: int = 1200,
     namespace: str = "default",
     as_of: str | None = None,
+    valid_at: str | None = None,
 ) -> dict:
     """Context about SEVERAL entities at once — a set of hosts, or an anchor
     plus its contents ('domain:corp.local' expanded over ['member_of'] covers
     every member). subjects are 'type:key' handles; expand_predicates names
-    the relations to follow outward; depth bounds the traversal."""
+    the relations to follow outward (omit it to follow the namespace's
+    registered containment predicates); depth bounds the traversal."""
     req = AskRequest(
         namespace=namespace,
         scope=ScopeSpec(
@@ -145,6 +150,7 @@ def ask_scope(
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
+        valid_at=_parse_time(valid_at),
     )
     return build_pack(
         _get_store(), req, embedder=_get_embedder()
@@ -211,6 +217,7 @@ def answer(
     subject: str | None = None,
     budget: int = 1200,
     namespace: str = "default",
+    valid_at: str | None = None,
 ) -> dict:
     """Retrieval-grounded LLM answer with citations. Entities named verbatim
     in the question are auto-resolved when subject is omitted. Requires the
@@ -226,6 +233,7 @@ def answer(
         question=question,
         subject=_parse_ref(subject) if subject else None,
         budget=budget,
+        valid_at=_parse_time(valid_at),
     )
     try:
         resp = build_answer(_get_store(), llm, req, embedder=_get_embedder())

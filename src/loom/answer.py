@@ -114,6 +114,7 @@ def build_answer(
             question=req.question,
             budget=req.budget,
             as_of=req.as_of,
+            valid_at=req.valid_at,
         ),
         embedder=embedder,
         allowed_types=allowed_types,
