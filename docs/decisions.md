@@ -585,6 +585,33 @@ scale needed it.
   the image; the compose `postgres` service is `pgvector/pgvector:pg17`.
   A Postgres without the extension simply reports `exact`.
 
+## D-026 · TypeScript SDK generated from the contract schema; privilege-dropping entrypoint (2026-09-08)
+
+- **`sdk/typescript/` is the D-001 escape hatch made real:** `src/contracts.ts`
+  is *generated* from `contracts/schemas.json` (every root that
+  `python -m loom.schemas` exports — now the full read/write surface, not
+  just the envelope) by `scripts/gen.mjs`, and CI regenerates it and fails
+  on drift, exactly like the Go gateway's schema check. The client
+  (`src/client.ts`) is a zero-dependency `fetch` wrapper mirroring the
+  Python SDK method for method (claim/document/registerSchema, observations/
+  artifact/ask/expand/answer/search/semantic/schema/ready, `LoomError`
+  with status + engine detail). Its test runs against a live engine in the
+  compose `sdk` profile; the toolchain lives in a `node:22-alpine` image so
+  nothing installs on the host. No second hand-written client will exist:
+  contract fidelity is the whole compatibility story.
+- **Engine entrypoint.** Running as uid 10001 (D-024) broke any volume
+  created by an earlier root build (the database file was root-owned). The
+  image now starts as root only to `chown` `/data`, then drops to `loom`
+  via `setpriv` (util-linux, already in the base image) before exec'ing
+  the command; a container started as a non-root user already (k8s
+  `runAsUser`, `docker compose run --user`) execs straight through. The
+  entrypoint never writes to stdout, so `python -m loom.schemas > file`
+  stays clean.
+- **MCP exercised by a real client.** `tests/test_mcp_client.py` spawns
+  the server over stdio with the MCP SDK's client — the transport
+  `claude mcp add` uses — and runs the find → ask → expand → record_claim
+  loop against the seed corpus, including the fact-time `valid_at` ask.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

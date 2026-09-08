@@ -11,9 +11,14 @@ RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector]"
 
 # Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
 # /data is created owned by that user, so a fresh named volume inherits it.
+# The entrypoint starts as root only to fix ownership of an older root-owned
+# volume, then drops to `loom` via setpriv (util-linux, already in the base).
 RUN groupadd -r -g 10001 loom && useradd -r -u 10001 -g loom -d /app loom \
     && mkdir -p /data && chown loom:loom /data /app
-USER loom
+COPY deploy/docker-entrypoint.sh /usr/local/bin/loom-entrypoint
+RUN chmod 0755 /usr/local/bin/loom-entrypoint
+ENTRYPOINT ["loom-entrypoint"]
+ENV HOME=/app
 
 ENV LOOM_DB=/data/loom.db
 VOLUME /data

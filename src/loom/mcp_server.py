@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
@@ -405,8 +406,25 @@ TOOLS = (
     get_observations,
     answer,
 )
+def _surface_errors(fn):
+    """The SDK reports unexpected exceptions as an opaque 'Error executing
+    tool'; an agent needs the actual reason (bad handle, scope refusal,
+    provider down) to recover. Wrap our expected failures as ToolError so
+    the message reaches the client verbatim."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, PermissionError, LLMError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapped
+
+
 for _fn in TOOLS:
-    mcp.tool()(_fn)
+    mcp.tool(name=_fn.__name__)(_surface_errors(_fn))
 
 
 def main() -> None:

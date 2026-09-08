@@ -160,6 +160,23 @@ services:
       LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
       LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
 
+  # TypeScript SDK toolchain (D-026): regen-check the generated contract
+  # types, build, and run the client test against the live engine.
+  #   docker compose --profile sdk run --rm sdk-ts
+  sdk-ts:
+    build:
+      context: .
+      dockerfile: sdk/typescript/Dockerfile
+    profiles: ["sdk"]
+    environment:
+      LOOM_URL: http://loom:8000
+    volumes:
+      - ./sdk/typescript/src:/app/src        # so `npm run gen` writes back
+      - ./contracts:/contracts:ro
+    depends_on:
+      loom:
+        condition: service_healthy
+
   # Server-backed store for the database-scaling lane (D-011).
   postgres:
     image: pgvector/pgvector:pg17   # postgres 17 + the vector extension (D-025)

@@ -475,6 +475,313 @@
     "title": "Observation",
     "type": "object"
   },
+  "Entity": {
+    "description": "Canonical graph node produced by entity resolution.",
+    "properties": {
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "type": {
+        "title": "Type",
+        "type": "string"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "aliases": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Aliases",
+        "type": "array"
+      },
+      "provisional": {
+        "default": false,
+        "title": "Provisional",
+        "type": "boolean"
+      },
+      "created_at": {
+        "format": "date-time",
+        "title": "Created At",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "namespace",
+      "type",
+      "key",
+      "created_at"
+    ],
+    "title": "Entity",
+    "type": "object"
+  },
+  "Artifact": {
+    "description": "A stored document: verbatim content plus extraction lifecycle status.\nextraction_attempts counts failed extraction tries (the worker backs off\nper attempt and dead-letters as `failed` after a bound, H-D4).",
+    "properties": {
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "event_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Event Id"
+      },
+      "filename": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Filename"
+      },
+      "content_type": {
+        "title": "Content Type",
+        "type": "string"
+      },
+      "text": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Text"
+      },
+      "content_b64": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Content B64"
+      },
+      "source": {
+        "title": "Source",
+        "type": "string"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "recorded_at": {
+        "format": "date-time",
+        "title": "Recorded At",
+        "type": "string"
+      },
+      "extraction_status": {
+        "default": "pending",
+        "enum": [
+          "pending",
+          "done",
+          "failed",
+          "skipped"
+        ],
+        "title": "Extraction Status",
+        "type": "string"
+      },
+      "extraction_attempts": {
+        "default": 0,
+        "title": "Extraction Attempts",
+        "type": "integer"
+      },
+      "attrs": {
+        "additionalProperties": true,
+        "title": "Attrs",
+        "type": "object"
+      }
+    },
+    "required": [
+      "id",
+      "namespace",
+      "content_type",
+      "source",
+      "observed_at",
+      "recorded_at"
+    ],
+    "title": "Artifact",
+    "type": "object"
+  },
+  "AskRequest": {
+    "$defs": {
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "ScopeSpec": {
+        "description": "The set of entities a question is about \u2014 several computers, or an\nanchor plus everything related to it (\"domain X and its contents\").\n\n`expand` names the containment/relational predicates to follow outward\nfrom the subjects (e.g. [\"member_of\"]); `depth` bounds the traversal.",
+        "properties": {
+          "subjects": {
+            "items": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "minItems": 1,
+            "title": "Subjects",
+            "type": "array"
+          },
+          "expand": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Expand",
+            "type": "array"
+          },
+          "depth": {
+            "default": 1,
+            "maximum": 3,
+            "minimum": 0,
+            "title": "Depth",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subjects"
+        ],
+        "title": "ScopeSpec",
+        "type": "object"
+      }
+    },
+    "description": "Two time axes (docs/architecture.md, D-024): `as_of` = what did we\nKNOW at T (knowledge time \u2014 later-recorded observations are hidden);\n`valid_at` = what was TRUE at T (fact time \u2014 only observations whose\nvalidity window covers T survive, and facts with no window at all are\nkept).",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "subject": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EntityRef"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ScopeSpec"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "question": {
+        "maxLength": 2000,
+        "title": "Question",
+        "type": "string"
+      },
+      "budget": {
+        "default": 800,
+        "description": "token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "As Of"
+      },
+      "valid_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid At"
+      }
+    },
+    "required": [
+      "question"
+    ],
+    "title": "AskRequest",
+    "type": "object"
+  },
+  "ExpandRequest": {
+    "properties": {
+      "handle": {
+        "maxLength": 4096,
+        "title": "Handle",
+        "type": "string"
+      },
+      "budget": {
+        "default": 800,
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "title": "ExpandRequest",
+    "type": "object"
+  },
   "ContextPack": {
     "$defs": {
       "Citation": {
@@ -734,6 +1041,604 @@
       "budget"
     ],
     "title": "ContextPack",
+    "type": "object"
+  },
+  "AnswerRequest": {
+    "$defs": {
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "ScopeSpec": {
+        "description": "The set of entities a question is about \u2014 several computers, or an\nanchor plus everything related to it (\"domain X and its contents\").\n\n`expand` names the containment/relational predicates to follow outward\nfrom the subjects (e.g. [\"member_of\"]); `depth` bounds the traversal.",
+        "properties": {
+          "subjects": {
+            "items": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "minItems": 1,
+            "title": "Subjects",
+            "type": "array"
+          },
+          "expand": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Expand",
+            "type": "array"
+          },
+          "depth": {
+            "default": 1,
+            "maximum": 3,
+            "minimum": 0,
+            "title": "Depth",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subjects"
+        ],
+        "title": "ScopeSpec",
+        "type": "object"
+      }
+    },
+    "description": "Ask + synthesize: retrieve a context pack, then have the configured\nLLM produce a cited answer/decision. With neither subject nor scope,\nsubjects are auto-resolved from entity names mentioned in the question.",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "question": {
+        "maxLength": 2000,
+        "title": "Question",
+        "type": "string"
+      },
+      "subject": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EntityRef"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ScopeSpec"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "budget": {
+        "default": 1200,
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "As Of"
+      },
+      "valid_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid At"
+      },
+      "max_tokens": {
+        "default": 1024,
+        "exclusiveMinimum": 0,
+        "maximum": 8192,
+        "title": "Max Tokens",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "question"
+    ],
+    "title": "AnswerRequest",
+    "type": "object"
+  },
+  "AnswerResponse": {
+    "$defs": {
+      "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
+        "properties": {
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "ContextItem": {
+        "description": "Every item is cited (hard constraint 3): facts and conflicts cite\nobservations, briefs cite the observations they were synthesized from,\nexcerpts cite the artifact span they quote.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "brief",
+              "fact",
+              "relation",
+              "doc_excerpt",
+              "conflict"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/$defs/Citation"
+            },
+            "minItems": 1,
+            "title": "Citations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "score",
+          "citations"
+        ],
+        "title": "ContextItem",
+        "type": "object"
+      },
+      "ContextPack": {
+        "description": "The unit of retrieval: budgeted, ranked, cited, expandable.",
+        "properties": {
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Question"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As Of"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid At"
+          },
+          "budget": {
+            "title": "Budget",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ContextItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "handles": {
+            "items": {
+              "$ref": "#/$defs/ExpansionHandle"
+            },
+            "title": "Handles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "namespace",
+          "budget"
+        ],
+        "title": "ContextPack",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "ExpansionHandle": {
+        "description": "Opaque 'there is more here' pointer; feed back to expand().\nkind says what was left out: more observations of one predicate, or a\nwhole conflict that didn't fit the budget (never silently dropped).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "hint": {
+            "title": "Hint",
+            "type": "string"
+          },
+          "est_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Est Tokens"
+          },
+          "kind": {
+            "default": "more",
+            "enum": [
+              "more",
+              "conflict",
+              "excerpt"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "hint"
+        ],
+        "title": "ExpansionHandle",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "answer": {
+        "title": "Answer",
+        "type": "string"
+      },
+      "model": {
+        "title": "Model",
+        "type": "string"
+      },
+      "pack": {
+        "$ref": "#/$defs/ContextPack"
+      }
+    },
+    "required": [
+      "answer",
+      "model",
+      "pack"
+    ],
+    "title": "AnswerResponse",
+    "type": "object"
+  },
+  "SemanticSearchResponse": {
+    "$defs": {
+      "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
+        "properties": {
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "ContextItem": {
+        "description": "Every item is cited (hard constraint 3): facts and conflicts cite\nobservations, briefs cite the observations they were synthesized from,\nexcerpts cite the artifact span they quote.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "brief",
+              "fact",
+              "relation",
+              "doc_excerpt",
+              "conflict"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/$defs/Citation"
+            },
+            "minItems": 1,
+            "title": "Citations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "score",
+          "citations"
+        ],
+        "title": "ContextItem",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "SemanticMatch": {
+        "description": "An entity surfaced by meaning rather than by name (D-025): the best\nmatching fact is the evidence, cited like any pack item.",
+        "properties": {
+          "entity": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "evidence": {
+            "$ref": "#/$defs/ContextItem"
+          }
+        },
+        "required": [
+          "entity",
+          "score",
+          "evidence"
+        ],
+        "title": "SemanticMatch",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "question": {
+        "title": "Question",
+        "type": "string"
+      },
+      "matches": {
+        "items": {
+          "$ref": "#/$defs/SemanticMatch"
+        },
+        "title": "Matches",
+        "type": "array"
+      }
+    },
+    "required": [
+      "namespace",
+      "question"
+    ],
+    "title": "SemanticSearchResponse",
     "type": "object"
   },
   "SchemaRegistration": {

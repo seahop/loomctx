@@ -27,6 +27,11 @@ jobs:
             test pytest -q tests/test_store.py
       - name: Build gateway (go vet + go test run in the build)
         run: docker compose --profile scale build gateway
+      - name: TypeScript SDK (generated types in sync, build, live test)
+        run: |
+          docker compose up -d --wait loom
+          docker compose --profile sdk run --rm sdk-ts
+          docker compose down
 
   publish-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

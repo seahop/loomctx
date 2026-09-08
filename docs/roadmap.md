@@ -75,7 +75,8 @@ presentable.
 - ✅ stdio for local agents (`claude mcp add loom -- docker compose run --rm
   -T loom python -m loom.mcp_server`) and streamable HTTP via compose
   profile `mcp` (:8300/mcp, boot-verified).
-- ⬜ Exercise from a real agent session end-to-end (part of demo hardening).
+- ✅ Exercised by a real MCP client over stdio in CI (`tests/test_mcp_client.py`,
+  2026-09-08) and by a live Claude Code agent session (see D-026 notes).
 
 ## Governance & operability batch ✅ (2026-09-04, D-013…D-017)
 
@@ -132,8 +133,9 @@ presentable.
   Singular SQLite lane tuned (WAL, NORMAL sync, batched transactions) and
   measured with the new `loom.loadgen` tool: ~507/s SQLite, ~454/s
   Postgres, ~515/s scale-shape intake — all 0 errors, loadgen-bound.
-- Remaining: TypeScript SDK
-  from JSON Schema; Neo4j backend if graph-native traversal demand appears.
+- ✅ TypeScript SDK generated from the JSON Schema (2026-09-08, D-026),
+  built and live-tested in CI via the compose `sdk` profile.
+- Remaining: Neo4j backend if graph-native traversal demand appears.
 - ~~Scale-shape ingestion tier~~ **✅ built 2026-09-03 (pulled forward by the
   user), D-010:** Go ingest gateway validating against
   `contracts/schemas.json` (go tests run in the image build), nginx-balanced

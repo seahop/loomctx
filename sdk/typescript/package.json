@@ -1,0 +1,23 @@
+{
+  "name": "loom-sdk",
+  "version": "0.1.0",
+  "description": "Thin, dependency-free TypeScript client for the Loom context engine",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "src"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "gen": "node scripts/gen.mjs ${LOOM_SCHEMAS:-../../contracts/schemas.json} src/contracts.ts",
+    "check-gen": "node scripts/gen.mjs ${LOOM_SCHEMAS:-../../contracts/schemas.json} /tmp/contracts.ts && diff /tmp/contracts.ts src/contracts.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4",
+    "typescript": "^5.6.0"
+  },
+  "repository": { "type": "git", "url": "https://github.com/seahop/Loom", "directory": "sdk/typescript" }
+}

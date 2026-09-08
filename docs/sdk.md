@@ -165,8 +165,25 @@ LOOM_LLM_API_KEY=sk-ant-...           LOOM_LLM_MODEL=llama3.1:8b
 LOOM_LLM_MODEL=claude-sonnet-5
 ```
 
-Later: a TypeScript SDK generated from the exported JSON Schema (phase 5) — no
-hand-written second client.
+### TypeScript SDK — `sdk/typescript/` (D-026)
+
+Same shape, generated types: `src/contracts.ts` is produced from
+`contracts/schemas.json` and CI fails if it drifts. Zero runtime
+dependencies (platform `fetch`); Node ≥ 18 or any modern runtime.
+
+```ts
+import { Loom, LoomError } from "loom-sdk";
+
+const loom = new Loom("http://localhost:8000", { namespace: "netsec", apiKey: "loomk_..." });
+await loom.claim({ subject: ["host", "web-01"], predicate: "logged_in_by",
+                   object: ["user", "jdoe"], observed_at: "2026-09-01T14:03:00Z", source: "auth-log" });
+const pack = await loom.ask(["host", "web-01"], "who logged in this week?", { budget: 800 });
+const held = await loom.ask(["ip", "10.0.4.7"], "which host?", { valid_at: "2026-08-20T00:00:00Z" });
+const related = await loom.semantic("what looks exploitable?");
+```
+
+Build/test/regenerate inside Docker: `docker compose --profile sdk run --rm sdk-ts`
+(and `... sdk-ts npm run gen` after a contract change).
 
 ## 4. CLI — for humans
 
