@@ -108,10 +108,24 @@ def test_extraction_is_idempotent_via_event_id(tmp_path):
 
 
 def test_extraction_handles_bad_json(tmp_path):
+    """A garbled reply is retried with backoff (models are nondeterministic)
+    and dead-lettered as `failed` after the attempt bound (H-D4/H-D5)."""
+    import pytest
+    from loom import enrich
     store = _store(tmp_path)
     artifact = store.store_artifact(DocumentIn(
         text="whatever", source="s", observed_at=OBSERVED))
-    assert extract_from_artifact(store, ScriptedLLM("not json"), artifact) == 0
+    with pytest.raises(enrich.ExtractionParseError):
+        extract_from_artifact(store, ScriptedLLM("not json"), artifact)
+    assert enrich.extract_pending(store, ScriptedLLM("not json")) == 0
+    art = store.get_artifact("default", artifact.id)
+    assert art.extraction_status == "pending" and art.extraction_attempts == 1
+    assert store.pending_artifacts(10) == []  # backing off
+    for _ in range(enrich.EXTRACTION_MAX_ATTEMPTS):
+        store.defer_extraction("default", artifact.id,
+                               store.get_artifact("default", artifact.id).extraction_attempts,
+                               OBSERVED)  # backoff elapsed
+        enrich.extract_pending(store, ScriptedLLM("still not json"))
     assert store.get_artifact("default", artifact.id).extraction_status == "failed"
 
 
@@ -306,13 +320,13 @@ def test_worker_tick_survives_job_failures(tmp_path):
     assert counts["embedded"] == 0 and counts["dossiers"] == 1  # dossiers still built
 
 
-def test_extraction_backs_off_failing_artifacts(tmp_path, monkeypatch):
+def test_extraction_backs_off_failing_artifacts(tmp_path):
     """H-D4: a document whose extraction keeps failing stops hogging the
-    per-tick slots; others behind it still get processed."""
+    per-tick slots (backoff persisted on the artifact); others behind it
+    still get processed."""
     from loom import enrich
     from loom.llm import LLMError
     store = _store(tmp_path)
-    monkeypatch.setattr(enrich, "_deferred", {})
     bad = store.store_artifact(DocumentIn(text="poison", source="s", observed_at=OBSERVED))
     good = store.store_artifact(DocumentIn(text="fine", source="s", observed_at=OBSERVED))
 
@@ -324,12 +338,11 @@ def test_extraction_backs_off_failing_artifacts(tmp_path, monkeypatch):
                 raise LLMError("boom")
             return '{"claims": []}'
 
-    # tick 1: poison fails (deferred), fine succeeds, both within one call
-    enrich.extract_pending(store, Flaky(), limit=1)
-    enrich.extract_pending(store, Flaky(), limit=1)
+    enrich.extract_pending(store, Flaky(), limit=1)  # poison fails, backs off
+    enrich.extract_pending(store, Flaky(), limit=1)  # fine gets the slot
     assert store.get_artifact("default", bad.id).extraction_status == "pending"
+    assert store.get_artifact("default", bad.id).extraction_attempts == 1
     assert store.get_artifact("default", good.id).extraction_status == "done"
-    assert enrich._deferred[bad.id][0] == 1
 
 
 def test_embed_pending_counts_stored_vectors(tmp_path):
@@ -383,3 +396,101 @@ def test_excerpt_handle_expands_to_neighbouring_passages(tmp_path):
     assert all(i.citations[0].artifact_id == art.id for i in around.items)
     # a reader scoped away from 'asset' gets nothing from the same handle
     assert expand_pack(store, handles[0].id, 3000, allowed_types=("host",)).items == []
+
+
+# ------------------------------------------- windowed extraction (H-D7) #
+
+def test_extraction_covers_the_whole_document_in_windows(tmp_path):
+    from loom import enrich
+    store = _store(tmp_path)
+    filler = ("Routine paragraph about nothing in particular that pads the "
+              "report out to a realistic length for testing purposes.\n\n")
+    head = "web-01 runs fedora.\n\n"
+    tail = "\n\nAppendix: db-02 was patched to rhel-9.4 last night."
+    text = head + filler * 200 + tail            # well past two windows
+    assert len(text) > 2 * enrich.EXTRACT_WINDOW_CHARS
+    art = store.store_artifact(DocumentIn(text=text, source="s", observed_at=OBSERVED))
+    seen_windows = []
+
+    class PerWindow(LLMClient):
+        model = "pw"
+
+        def complete(self, system, user, max_tokens=1024):
+            seen_windows.append(user)
+            claims = []
+            if "web-01 runs fedora" in user:
+                claims.append('{"subject_type":"host","subject_key":"web-01","predicate":"runs_os",'
+                              '"object_value":"fedora","quote":"web-01 runs fedora"}')
+            if "db-02 was patched" in user:
+                claims.append('{"subject_type":"host","subject_key":"db-02","predicate":"patched_to",'
+                              '"object_value":"rhel-9.4","quote":"db-02 was patched to rhel-9.4"}')
+            return '{"claims":[%s]}' % ",".join(claims)
+
+    n = extract_from_artifact(store, PerWindow(), art)
+    assert n == 2 and len(seen_windows) >= 3
+    db = store.observations_for("default", EntityRef(type="host", key="db-02"))[0]
+    assert text[db.provenance.span_start:db.provenance.span_end] == "db-02 was patched to rhel-9.4"
+    assert db.provenance.span_start > enrich.EXTRACT_WINDOW_CHARS  # located past window 1
+    assert enrich._windows("short", size=100) == [(0, "short")]
+    ws = enrich._windows("a" * 250 + ". " + "b" * 250, size=300, overlap=20)
+    assert ws[0][0] == 0 and ws[1][0] < ws[0][0] + len(ws[0][1])  # overlapping
+    assert "".join(w for _, w in ws).count("b") >= 250
+
+
+# ------------------------------------------- fuzzy resolution (D-024) #
+
+def _claim(subject, predicate, obj, source="s"):
+    return ClaimIn(subject=subject, predicate=predicate, object=obj,
+                   observed_at=OBSERVED, source=source)
+
+
+def test_same_type_spelling_drift_auto_merges(tmp_path):
+    store = _store(tmp_path)
+    canonical = EntityRef(type="host", key="web-01")
+    for i in range(3):
+        store.record_claim(_claim(canonical, "logged_in_by", EntityRef(type="user", key=f"u{i}")))
+    store.record_claim(_claim(EntityRef(type="host", key="WEB_01"), "runs_os", "fedora"))
+    store.record_claim(_claim(EntityRef(type="host", key="web01"), "runs_os", "fedora"))
+    store.record_claim(_claim(EntityRef(type="host", key="web-02"), "runs_os", "ubuntu"))
+    assert resolve_entities(store) == 2
+    obs = store.observations_for("default", canonical, limit=50)
+    assert len(obs) == 5
+    assert store.get_entity("default", EntityRef(type="host", key="web01")).key == "web-01"
+    assert store.get_entity("default", EntityRef(type="host", key="web-02")).key == "web-02"
+    assert resolve_entities(store) == 0  # idempotent
+
+
+def test_cross_type_collision_needs_adjudication(tmp_path):
+    from loom.enrich import _declined, adjudicate_entities
+    store = _store(tmp_path)
+    _declined.clear()
+    host = EntityRef(type="host", key="web-01")
+    asset = EntityRef(type="asset", key="web01")
+    user = EntityRef(type="user", key="web.01")   # a person with an unlucky handle
+    for i in range(3):
+        store.record_claim(_claim(host, "logged_in_by", EntityRef(type="user", key=f"u{i}")))
+    store.record_claim(_claim(asset, "cve_finding", "CVE-2026-1337", source="doc:pentest"))
+    store.record_claim(_claim(user, "department", "finance", source="hr"))
+    # spelling alone never merges across types
+    assert resolve_entities(store) == 0
+    assert store.get_entity("default", asset).type == "asset"
+
+    prompts = []
+
+    class Judge(LLMClient):
+        model = "judge"
+
+        def complete(self, system, user_prompt, max_tokens=1024):
+            prompts.append(user_prompt)
+            if "asset:web01" in user_prompt:
+                return '{"same": true, "confidence": 0.95, "reason": "same box"}'
+            return '{"same": false, "confidence": 0.9, "reason": "a person"}'
+
+    assert adjudicate_entities(store, Judge()) == 1
+    assert store.get_entity("default", asset).type == "host"          # folded in
+    assert store.get_entity("default", user).type == "user"           # left alone
+    assert any("logged_in_by" in p for p in prompts)                  # evidence shown
+    asked = len(prompts)
+    assert adjudicate_entities(store, Judge()) == 0 and len(prompts) == asked  # declined pair not re-asked
+    obs = store.observations_for("default", host, limit=50)
+    assert any(o.predicate == "cve_finding" for o in obs)
