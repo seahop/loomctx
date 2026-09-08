@@ -51,10 +51,9 @@ def auto_subjects(
     for token in sorted(_tokens(question)):
         if len(token) < 3:
             continue
-        for entity in store.search_entities(namespace, token, limit=3):
+        for entity in store.search_entities(namespace, token, limit=3,
+                                            types=allowed_types):
             if entity.key.lower() != token:
-                continue
-            if allowed_types is not None and entity.type not in allowed_types:
                 continue
             key = (entity.type, entity.key)
             if key not in seen:

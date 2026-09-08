@@ -154,7 +154,7 @@ def ingest(envelope: IngestEnvelope, request: Request):
     )
 
 
-@app.get("/v1/entities/{etype}/{key}/observations")
+@app.get("/v1/entities/{etype}/{key:path}/observations")  # keys may hold '/'
 def entity_observations(
     etype: str,
     key: str,
@@ -181,10 +181,23 @@ def get_artifact(
     request: Request,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
 ) -> dict:
-    _authorize(request, namespace, "r")
-    artifact = request.app.state.store.get_artifact(namespace, artifact_id)
+    grant = _authorize(request, namespace, "r")
+    store = request.app.state.store
+    artifact = store.get_artifact(namespace, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="unknown artifact")
+    # A document has no entity type of its own; for a type-scoped reader it
+    # is in scope only once it backs a fact about entities they may see
+    # (H-A6). Before extraction, or if it only names other types: 403.
+    if grant is not None and grant.entity_types is not None and not (
+        store.artifact_cited_within(namespace, artifact_id, grant.entity_types)
+    ):
+        metrics.REJECTED.labels(reason="scope").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key {grant.id!r} is not scoped to any entity this "
+            "artifact is cited for",
+        )
     return artifact.model_dump(mode="json")
 
 
@@ -232,10 +245,11 @@ def search_entities(
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
 ) -> dict:
     grant = _authorize(request, namespace, "r")
-    matches = request.app.state.store.search_entities(namespace, q, limit=limit)
-    if grant is not None and grant.entity_types is not None:
-        # scoped keys see a scoped world, not an error
-        matches = [m for m in matches if m.type in grant.entity_types]
+    # scoped keys see a scoped world, not an error — filtered inside the
+    # query so they still get `limit` results (H-C8)
+    matches = request.app.state.store.search_entities(
+        namespace, q, limit=limit, types=_allowed_types(grant)
+    )
     return {
         "query": q,
         "matches": [m.model_dump(mode="json") for m in matches],

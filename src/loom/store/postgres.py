@@ -266,17 +266,57 @@ class PostgresStore(GraphStore):
         return groups
 
     def search_entities(
-        self, namespace: str, query: str, limit: int = 10
+        self, namespace: str, query: str, limit: int = 10,
+        types: tuple[str, ...] | None = None,
     ) -> list[Entity]:
         lowered = query.lower()
+        type_sql, type_args = "", ()
+        if types is not None:
+            type_sql, type_args = " AND type = ANY(%s)", (list(types),)
         with self._tx():
             rows = self._q(
                 "SELECT * FROM entities WHERE namespace = %s"
                 "   AND (LOWER(key) = %s OR LOWER(key) LIKE %s ESCAPE '\\')"
-                " ORDER BY (LOWER(key) != %s), type, key LIMIT %s",
-                (namespace, lowered, common.like_pattern(query), lowered, limit),
+                + type_sql
+                + " ORDER BY (LOWER(key) != %s), type, key LIMIT %s",
+                (namespace, lowered, common.like_pattern(query), *type_args,
+                 lowered, limit),
             )
         return [common.row_to_entity(r) for r in rows]
+
+    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+        with self._tx():
+            entity = self._resolve_entity(namespace, ref)
+            if entity is None:
+                return 0
+            rows = self._q(
+                "SELECT COUNT(*) AS n FROM observations o"
+                " WHERE o.namespace = %s"
+                "   AND (o.subject_id = %s OR o.object_entity_id = %s)"
+                + _NOT_TOMBSTONED,
+                (namespace, entity.id, entity.id),
+            )
+        return int(rows[0]["n"])
+
+    def artifact_cited_within(
+        self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]
+    ) -> bool:
+        if not allowed_types:
+            return False
+        with self._tx():
+            rows = self._q(
+                "SELECT 1 FROM observations o"
+                " JOIN entities s ON s.id = o.subject_id"
+                " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
+                " WHERE o.namespace = %s"
+                "   AND (o.provenance_json::jsonb ->> 'artifact_id') = %s"
+                "   AND s.type = ANY(%s)"
+                "   AND (ob.id IS NULL OR ob.type = ANY(%s))"
+                + _NOT_TOMBSTONED
+                + " LIMIT 1",
+                (namespace, artifact_id, list(allowed_types), list(allowed_types)),
+            )
+        return bool(rows)
 
     def record_claim(self, claim: ClaimIn) -> Observation:
         return self.record_claims([claim])[0]
@@ -522,6 +562,10 @@ class PostgresStore(GraphStore):
             if not rows:
                 return False
             self._put_tombstone(namespace, observation_id, reason, common.now())
+            self._x(
+                "DELETE FROM dossiers WHERE namespace = %s AND observation_ids LIKE %s",
+                (namespace, f'%"{observation_id}"%'),
+            )
             return True
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:

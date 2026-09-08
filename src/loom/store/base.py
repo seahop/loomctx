@@ -69,11 +69,27 @@ class GraphStore(ABC):
 
     @abstractmethod
     def search_entities(
-        self, namespace: str, query: str, limit: int = 10
+        self, namespace: str, query: str, limit: int = 10,
+        types: tuple[str, ...] | None = None,
     ) -> list[Entity]:
         """Entities whose key matches the query exactly or by prefix
         (case-insensitive; LIKE metacharacters in the query are literal).
-        Used to resolve entity names mentioned inside a free-form question."""
+        `types` restricts to those entity types *inside* the query so a
+        scoped caller still gets `limit` results (H-C8). Used to resolve
+        entity names mentioned inside a free-form question."""
+
+    @abstractmethod
+    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+        """Visible observations touching ref (subject or object) — the
+        connectivity signal entity resolution ranks by (H-E3)."""
+
+    @abstractmethod
+    def artifact_cited_within(
+        self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]
+    ) -> bool:
+        """True if some visible observation whose entities all fall inside
+        `allowed_types` carries provenance from this artifact — i.e. the
+        document is part of a type-scoped caller's world (H-A6)."""
 
     @abstractmethod
     def store_artifact(self, doc: DocumentIn) -> Artifact:

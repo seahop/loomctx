@@ -295,8 +295,7 @@ def resolve_entities(store: GraphStore, limit: int = 50) -> int:
         ranked = sorted(
             group,
             key=lambda e: (
-                -len(store.observations_for(
-                    namespace, EntityRef(type=e.type, key=e.key), limit=1000)),
+                -store.count_observations(namespace, EntityRef(type=e.type, key=e.key)),
                 e.created_at,
             ),
         )

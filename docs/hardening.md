@@ -5,7 +5,9 @@ was verified against the code at commit `a2aa1a5`; nothing speculative.
 Status legend: ✅ fixed · 🔨 in progress · ⬜ open · ➖ won't fix (with reason).
 
 Keep this file current: flip markers as items land, and reference the
-commit. Items are grouped by area and ordered by severity within each group.
+commit. **Progress 2026-09-08:** all P1 items and nearly all P2 items landed
+in commits 58300fa…HEAD (D-021/D-022/D-023); what remains is listed with
+⬜/🔨 below. Items are grouped by area and ordered by severity within each group.
 The "P" column is the pre-conference priority: **P1** must land before the
 demo, **P2** should, **P3** after.
 
@@ -18,10 +20,10 @@ demo, **P2** should, **P3** after.
 | H-A3 | P1 | ✅ | `expand_pack` skips the `LOOM_MAX_BUDGET` clamp that `build_pack` applies. |
 | H-A4 | P2 | ✅ | Go gateway rate-limits on the raw key string *before* authenticating (`server.go` `limiters.allow` precedes `grantFor`). Rotating a random header yields a fresh bucket each time and grows the bucket map without bound. Fix: authenticate first when auth is on, key buckets on the grant id, cap/evict the map. |
 | H-A5 | P2 | ✅ | Naive-datetime `expires` in the keys file raises `TypeError` in Python (`auth.py` compares to aware now) → 500 on every request with that key; Go rejects the whole file. Fix: treat naive as UTC in both; validate `perms` in the file path. |
-| H-A6 | P2 | ⬜ | `/v1/artifacts/{id}` has no data gate beyond namespace: a type-scoped reader gets full document text. Fix: gate on whether any observation the key may see cites the artifact, or require an unrestricted grant. |
+| H-A6 | P2 | ✅ | `/v1/artifacts/{id}` has no data gate beyond namespace: a type-scoped reader gets full document text. Fix: gate on whether any observation the key may see cites the artifact, or require an unrestricted grant. |
 | H-A7 | P2 | ✅ | Consumer logs pydantic `errors()` which include `input` (claim values / document text). Use `include_input=False`. |
 | H-A8 | P2 | ✅ | Provider error bodies and base URLs leak into 502 details (`llm.py` → `http.py`). Log the detail, return a generic message. |
-| H-A9 | P3 | ⬜ | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. |
+| H-A9 | P3 | 🔨 | MCP has no auth or scoping; `streamable-http` profile binds 0.0.0.0 with full rw over all namespaces. Documented open item (D-013) — at minimum honor `LOOM_API_KEYS`/`LOOM_AUTH_FILE` with a per-connection key, or document that the profile must sit behind cluster policy in bold. *Done: compose binds the profile to 127.0.0.1 and the warning is in compose + SECURITY.md. Open: per-connection key on the http transport.* |
 | H-A10 | P3 | ⬜ | NATS shape has a single enforcement point (gateway); consumer applies no grants. Acceptable while the queue is cluster-internal; document it, and carry the grant id on the message for audit. |
 | H-A11 | P3 | ✅ | `decode_handle` on a base64 JSON *list* raises `AttributeError` → 500 pre-auth. Catch it. |
 | H-A12 | P3 | ✅ | Broken keys file → re-parse + `log.error` on every request (mtime never advances on failure) in both engines. |
@@ -56,7 +58,7 @@ demo, **P2** should, **P3** after.
 | H-C5 | P2 | ✅ | Extracted (`doc:*`) claims count as an independent source in conflict detection and get no scoring discount → one injected document manufactures a score-1.0 conflict at the top of every pack (see H-D2). |
 | H-C6 | P3 | ✅ | Excerpt threshold 0.15 is meaningless for both the hashing embedder (non-negative bag vectors) and real models (rarely < 0.7): excerpts always consume half the remaining budget. Make it relative (e.g. within X of the best) or per-embedder. |
 | H-C7 | P3 | ⬜ | Recency is ordinal (list rank), so 20 observations one second apart spread like 20 across a year; in multi-subject packs rank is global. Keyword and cosine formulas aren't calibrated against each other for mixed (embedded / not-yet-embedded) sets. No stopword removal in the keyword scorer. |
-| H-C8 | P3 | ⬜ | `search_entities` results are post-filtered after `LIMIT` for scoped keys → fewer than `limit` results. |
+| H-C8 | P3 | ✅ | `search_entities` results are post-filtered after `LIMIT` for scoped keys → fewer than `limit` results. |
 
 ## D. Enrichment worker
 
@@ -69,7 +71,7 @@ demo, **P2** should, **P3** after.
 | H-D5 | P2 | ✅ | `_parse_extraction`: `{"claims": "x"}` or a list of strings raises `AttributeError` out of the loop; prose before the JSON fence → permanent `failed`. Harden parsing (find the first `{`…`}` block; type-check items). |
 | H-D6 | P2 | ✅ | Re-extraction event_ids are index-based (`extract:<artifact>:<n>`); a reordered LLM output silently drops new claims as "duplicates". Key on a content hash of (subject, predicate, object) instead. |
 | H-D7 | P2 | 🔨 | Extraction truncates at 8000 chars with no record. Windowed extraction over the full text (offset-aware), or at least an `attrs.truncated` flag on the artifact. *Done: a warning log names the truncation. Open: windowed extraction.* |
-| H-D8 | P3 | ⬜ | Redaction/merge don't touch derived data: briefs and chunks keep redacted text; merged entities keep orphan dossiers. Invalidate on redact; move/drop on merge. |
+| H-D8 | P3 | ✅ | Redaction/merge don't touch derived data: briefs and chunks keep redacted text; merged entities keep orphan dossiers. Invalidate on redact; move/drop on merge. *Done: redact drops briefs citing the observation; merge drops the folded node's brief. Chunks are per artifact, which redaction doesn't target (purge does).* |
 | H-D9 | P3 | ✅ | `_post_json`: one 120s attempt, no retry/backoff, no 429 handling; a non-JSON 200 body escapes as `JSONDecodeError` (→ 500 instead of 502). |
 | H-D10 | P3 | ✅ | `embed_pending` returns the requested count, not the stored count; a short provider response makes `--once` loop forever re-billing. |
 
@@ -79,7 +81,7 @@ demo, **P2** should, **P3** after.
 | --- | --- | --- | --- |
 | H-E1 | P2 | 🔨 | Every ask: one embedding HTTP round-trip + pure-Python cosine over ≤1000 vectors per subject + every chunk of every cited artifact (uncapped), each vector `json.loads`-decoded per call. Fix now: cap chunks per query, cache the query embedding (LRU by text+model), use numpy if present. Later: sqlite-vec / pgvector (D-002). *Done: query-embedding cache, excerpt candidates capped at 64 after ranking. Open: numpy/sqlite-vec.* |
 | H-E2 | P2 | 🔨 | Worker tick queries do full scans: no index on `artifacts(extraction_status, recorded_at)`, `observations(recorded_at)`; chunk-backlog anti-join can't use `idx_chunk_artifact` (namespace leads). `dossier_candidates` is a full entities⋈observations GROUP BY every tick. *Done: indexes on `observations(recorded_at)`, `artifacts(extraction_status, recorded_at)`, `doc_chunks(artifact_id)`, `entities(namespace, key)`. Open: incremental dossier candidates.* |
-| H-E3 | P3 | ⬜ | Scoped asks read each node's observations twice (BFS + gather); `resolve_entities` loads ≤1000 full observations per candidate just to count. Add a count method / edge-only query. |
+| H-E3 | P3 | ✅ | Scoped asks read each node's observations twice (BFS + gather); `resolve_entities` loads ≤1000 full observations per candidate just to count. Add a count method / edge-only query. |
 | H-E4 | P3 | ⬜ | `iter_*` use `fetchall()` before yielding — export is O(table) memory. Stream with server-side cursors / `fetchmany`. |
 | H-E5 | P3 | ⬜ | Single connection + process lock per backend; Postgres never reconnects after a dropped connection. Pool (psycopg_pool) when replicas need it. |
 | H-E6 | P3 | ⬜ | MCP `answer` rebuilds the LLM client from env per call. |
@@ -94,17 +96,17 @@ demo, **P2** should, **P3** after.
 | H-F4 | P2 | ✅ | k8s NATS has no persistence or probes — a pod restart drops the queue, contradicting "at-least-once". Add a PVC-backed JetStream store dir. |
 | H-F5 | P2 | ✅ | `claude mcp add loom -- docker compose run ...` works only from the repo root. Add `--project-directory` / absolute `-f` in README, sdk.md, tutorial.md. |
 | H-F6 | P2 | ✅ | k8s never wires auth: no manifest sets `LOOM_API_KEYS`/`LOOM_AUTH_FILE`, so every k8s shape runs in open dev mode while `deploy/README.md` says otherwise. Add a Secret mount example. |
-| H-F7 | P2 | ⬜ | All k8s manifests pin `:latest`, which every main push overwrites. Pin the SHA tag in overlays (CI already publishes it). |
+| H-F7 | P2 | ➖ | All k8s manifests pin `:latest`, which every main push overwrites. Pin the SHA tag in overlays (CI already publishes it). *Won't fix in-repo: a hardcoded SHA goes stale on every merge; the pin is a per-deployment choice — `kustomize edit set image ghcr.io/seahop/loom:<sha>` is documented in deploy/README.md.* |
 | H-F8 | P3 | ⬜ | Containers run as root (no `USER`, no `securityContext`); no `HEALTHCHECK`; engine image installs test extras; no lockfile; base image untagged by digest. |
-| H-F9 | P3 | ⬜ | Public-repo hygiene: no CONTRIBUTING / SECURITY / CHANGELOG; `pyproject.toml` lacks license/authors/urls. |
+| H-F9 | P3 | ✅ | Public-repo hygiene: no CONTRIBUTING / SECURITY / CHANGELOG; `pyproject.toml` lacks license/authors/urls. |
 
 ## G. SDK
 
 | ID | P | Status | Item |
 | --- | --- | --- | --- |
-| H-G1 | P2 | ⬜ | `search()` and `observations()` don't URL-encode (`web 01`, keys with `/`). |
-| H-G2 | P2 | ⬜ | Missing: `GET /v1/artifacts/{id}`, `event_id` on `document()`, `X-Loom-LLM-Key` on `answer()`. Server `detail` never surfaced on errors. |
-| H-G3 | P3 | ⬜ | No tests, no `pyproject.toml` under `sdk/python`, not in the image. |
+| H-G1 | P2 | ✅ | `search()` and `observations()` don't URL-encode (`web 01`, keys with `/`). |
+| H-G2 | P2 | ✅ | Missing: `GET /v1/artifacts/{id}`, `event_id` on `document()`, `X-Loom-LLM-Key` on `answer()`. Server `detail` never surfaced on errors. |
+| H-G3 | P3 | ✅ | No tests, no `pyproject.toml` under `sdk/python`, not in the image. |
 
 ## H. Docs drift
 

@@ -41,6 +41,7 @@ services:
     profiles: ["test"]
     environment:
       LOOM_DB: /tmp/loom-test.db
+      PYTHONPATH: /app/sdk/python
       # from .env when present — lets the e2e answer test hit a real provider
       LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
       LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
@@ -48,6 +49,7 @@ services:
       LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
     volumes:
       - ./tests:/app/tests:ro
+      - ./sdk/python:/app/sdk/python:ro   # the SDK is tested against a live engine
     command: pytest -q
 
   # ------------------------------------------------------------------------
@@ -135,13 +137,16 @@ services:
   # MCP over streamable HTTP for remote agents (phase 3). Local agents spawn
   # stdio instead: claude mcp add loom -- docker compose run --rm -T loom
   #   python -m loom.mcp_server
+  # NOTE: this transport carries no API key of its own yet (D-013 open
+  # item) — every connected agent gets full rw across all namespaces. It
+  # binds to localhost; put it behind your own auth before widening that.
   mcp:
     image: loom-engine:local
     profiles: ["mcp"]
     restart: unless-stopped
     command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
     ports:
-      - "8300:8300"
+      - "127.0.0.1:8300:8300"
     volumes:
       - loom-data:/data
     environment:

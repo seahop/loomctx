@@ -409,3 +409,38 @@ def test_dossier_round_trips_its_citations(store):
     store.put_dossier("default", ref, "a brief", 1, [obs.id])
     d = store.get_dossier("default", ref)
     assert d["brief"] == "a brief" and d["observation_ids"] == [obs.id]
+
+
+def test_count_and_artifact_citation_scope(store):
+    """H-E3 / H-A6 store primitives."""
+    from loom.contracts import DocumentIn, Provenance
+    host = EntityRef(type="host", key="web-01")
+    assert store.count_observations("default", host) == 0
+    a = store.record_claim(login_claim())
+    b = store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "x"}))
+    assert store.count_observations("default", host) == 2
+    assert store.count_observations("default", EntityRef(type="user", key="jdoe")) == 1
+    store.redact("default", b.id, "x")
+    assert store.count_observations("default", host) == 1  # tombstones excluded
+
+    art = store.store_artifact(DocumentIn(text="t", source="s", observed_at=OBSERVED))
+    assert store.artifact_cited_within("default", art.id, ("host", "user")) is False
+    store.record_claim(login_claim().model_copy(update={
+        "predicate": "mentioned_in", "object": "doc",
+        "provenance": Provenance(artifact_id=art.id)}))
+    assert store.artifact_cited_within("default", art.id, ("host", "user")) is True
+    assert store.artifact_cited_within("default", art.id, ("vendor",)) is False
+    assert store.artifact_cited_within("default", art.id, ()) is False
+    assert a.id  # keep a referenced
+
+
+def test_redaction_invalidates_briefs_built_on_it(store):
+    """H-D8: a brief that quoted a now-redacted fact is dropped."""
+    host = EntityRef(type="host", key="web-01")
+    obs = store.record_claim(login_claim())
+    other = store.record_claim(login_claim(namespace="other"))
+    store.put_dossier("default", host, "brief mentioning jdoe", 1, [obs.id])
+    store.put_dossier("other", host, "other brief", 1, [other.id])
+    store.redact("default", obs.id, "spill")
+    assert store.get_dossier("default", host) is None
+    assert store.get_dossier("other", host)["brief"] == "other brief"

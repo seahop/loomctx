@@ -388,3 +388,54 @@ def test_oversized_body_is_rejected_before_parsing(tmp_path, monkeypatch):
         assert client.post("/v1/ingest", json=body).status_code == 413
         body["text"] = "small"
         assert client.post("/v1/ingest", json=body).status_code == 202
+
+
+def test_artifact_read_requires_a_citing_fact_in_scope(tmp_path, monkeypatch):
+    """H-A6: a document is in a type-scoped reader's world only once it
+    backs a fact about entities they may see."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch)
+    with client:
+        w = {"X-Loom-Key": writer}
+        r = {"X-Loom-Key": reader}
+        doc = client.post("/v1/ingest", json={
+            "kind": "document", "text": "web-01 was rebuilt; initech billed us",
+            "source": "wiki", "observed_at": OBSERVED.isoformat()}, headers=w)
+        art = doc.json()["artifact_id"]
+        assert client.get(f"/v1/artifacts/{art}", headers=w).status_code == 200
+        # not yet cited by anything -> not in the scoped world
+        assert client.get(f"/v1/artifacts/{art}", headers=r).status_code == 403
+        # cited only by an out-of-scope entity -> still no
+        client.post("/v1/ingest", json={
+            "kind": "claim", "subject": {"type": "vendor", "key": "initech"},
+            "predicate": "billed", "object": "us", "source": "doc:wiki",
+            "observed_at": OBSERVED.isoformat(),
+            "provenance": {"artifact_id": art}}, headers=w)
+        assert client.get(f"/v1/artifacts/{art}", headers=r).status_code == 403
+        # cited by an in-scope host -> readable
+        client.post("/v1/ingest", json={
+            "kind": "claim", "subject": {"type": "host", "key": "web-01"},
+            "predicate": "rebuilt", "object": "true", "source": "doc:wiki",
+            "observed_at": OBSERVED.isoformat(),
+            "provenance": {"artifact_id": art}}, headers=w)
+        assert client.get(f"/v1/artifacts/{art}", headers=r).status_code == 200
+
+
+def test_scoped_search_still_fills_the_limit(tmp_path, monkeypatch):
+    """H-C8: type filtering happens inside the query, not after LIMIT."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch)
+    with client:
+        w = {"X-Loom-Key": writer}
+        for i in range(5):  # vendors sort first by type; would crowd out hosts
+            client.post("/v1/ingest", json={
+                "kind": "claim", "subject": {"type": "a-vendor", "key": f"x-{i}"},
+                "predicate": "p", "object": "v", "source": "s",
+                "observed_at": OBSERVED.isoformat()}, headers=w)
+        for i in range(3):
+            client.post("/v1/ingest", json={
+                "kind": "claim", "subject": {"type": "host", "key": f"x-h{i}"},
+                "predicate": "p", "object": "v", "source": "s",
+                "observed_at": OBSERVED.isoformat()}, headers=w)
+        r = client.get("/v1/entities/search?q=x-&limit=3",
+                       headers={"X-Loom-Key": reader})
+        matches = r.json()["matches"]
+        assert len(matches) == 3 and {m["type"] for m in matches} == {"host"}

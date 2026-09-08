@@ -281,17 +281,59 @@ class SqliteStore(GraphStore):
         return groups
 
     def search_entities(
-        self, namespace: str, query: str, limit: int = 10
+        self, namespace: str, query: str, limit: int = 10,
+        types: tuple[str, ...] | None = None,
     ) -> list[Entity]:
         lowered = query.lower()
+        type_sql, type_args = "", ()
+        if types is not None:
+            type_sql = f" AND type IN ({','.join('?' * len(types))})" if types else " AND 0"
+            type_args = tuple(types)
         with self._tx():
             rows = self._conn.execute(
                 "SELECT * FROM entities WHERE namespace = ?"
                 "   AND (LOWER(key) = ? OR LOWER(key) LIKE ? ESCAPE '\\')"
-                " ORDER BY (LOWER(key) != ?), type, key LIMIT ?",
-                (namespace, lowered, common.like_pattern(query), lowered, limit),
+                + type_sql
+                + " ORDER BY (LOWER(key) != ?), type, key LIMIT ?",
+                (namespace, lowered, common.like_pattern(query), *type_args,
+                 lowered, limit),
             ).fetchall()
         return [common.row_to_entity(r) for r in rows]
+
+    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+        with self._tx():
+            entity = self._resolve_entity(namespace, ref)
+            if entity is None:
+                return 0
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM observations o"
+                " WHERE o.namespace = ?"
+                "   AND (o.subject_id = ? OR o.object_entity_id = ?)"
+                + _NOT_TOMBSTONED,
+                (namespace, entity.id, entity.id),
+            ).fetchone()
+        return int(row["n"])
+
+    def artifact_cited_within(
+        self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]
+    ) -> bool:
+        if not allowed_types:
+            return False
+        marks = ",".join("?" * len(allowed_types))
+        with self._tx():
+            row = self._conn.execute(
+                "SELECT 1 FROM observations o"
+                " JOIN entities s ON s.id = o.subject_id"
+                " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
+                " WHERE o.namespace = ?"
+                "   AND json_extract(o.provenance_json, '$.artifact_id') = ?"
+                f"   AND s.type IN ({marks})"
+                f"   AND (ob.id IS NULL OR ob.type IN ({marks}))"
+                + _NOT_TOMBSTONED
+                + " LIMIT 1",
+                (namespace, artifact_id, *allowed_types, *allowed_types),
+            ).fetchone()
+        return row is not None
 
     def record_claim(self, claim: ClaimIn) -> Observation:
         return self.record_claims([claim])[0]
@@ -531,6 +573,12 @@ class SqliteStore(GraphStore):
             if row is None:
                 return False
             self._put_tombstone(namespace, observation_id, reason, common.now())
+            # a brief synthesized from this observation may still be quoting
+            # it; drop it and let the worker rebuild from what remains (H-D8)
+            self._conn.execute(
+                "DELETE FROM dossiers WHERE namespace = ? AND observation_ids LIKE ?",
+                (namespace, f'%"{observation_id}"%'),
+            )
             return True
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:

@@ -1,3 +1,3 @@
-from .client import Loom
+from .client import Loom, LoomError
 
-__all__ = ["Loom"]
+__all__ = ["Loom", "LoomError"]

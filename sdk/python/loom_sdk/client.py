@@ -1,17 +1,31 @@
 """Thin Python client for Loom. Typed transport only — no logic (docs/sdk.md).
 
 Deliberately stdlib-only (urllib) so pipeline devices can vendor it with zero
-dependencies.
+dependencies. Server errors surface as `LoomError(status, detail)` carrying
+the engine's `detail` message; everything else is a plain dict of the
+contract shape (docs/contracts.md).
 """
 
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Union
 
 EntityTuple = tuple[str, str]  # (type, key)
 ObjectArg = Union[EntityTuple, str, int, float, bool]
+
+
+class LoomError(Exception):
+    """A non-2xx response. `status` is the HTTP code, `detail` the engine's
+    message (e.g. which gate refused a scoped key)."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
 
 
 class Loom:
@@ -21,11 +35,16 @@ class Loom:
         namespace: str = "default",
         api_key: str | None = None,
         timeout: float = 30.0,
+        llm_key: str | None = None,
     ):
+        """`llm_key` is an optional provider key sent as X-Loom-LLM-Key on
+        answer() so LLM spend bills to this caller (D-013a); the Loom
+        `api_key` still governs what data the answer may see."""
         self.base_url = base_url.rstrip("/")
         self.namespace = namespace
         self.api_key = api_key
         self.timeout = timeout
+        self.llm_key = llm_key
 
     # ------------------------------------------------------------- write side
 
@@ -71,6 +90,7 @@ class Loom:
         content_b64: str | None = None,
         content_type: str = "text/plain",
         filename: str | None = None,
+        event_id: str | None = None,
         attrs: dict[str, Any] | None = None,
     ) -> dict:
         return self._post(
@@ -78,6 +98,7 @@ class Loom:
             {
                 "kind": "document",
                 "namespace": self.namespace,
+                "event_id": event_id,
                 "text": text,
                 "content_b64": content_b64,
                 "content_type": content_type,
@@ -91,9 +112,13 @@ class Loom:
     # -------------------------------------------------------------- read side
 
     def observations(self, subject: EntityTuple, limit: int = 100) -> dict:
-        return self._get(
-            f"/v1/entities/{subject[0]}/{subject[1]}/observations?limit={limit}"
-        )
+        etype, key = (urllib.parse.quote(part, safe="") for part in subject)
+        return self._get(f"/v1/entities/{etype}/{key}/observations",
+                         {"limit": limit})
+
+    def artifact(self, artifact_id: str) -> dict:
+        """The stored document, verbatim (text or content_b64)."""
+        return self._get(f"/v1/artifacts/{urllib.parse.quote(artifact_id, safe='')}")
 
     def ask(
         self,
@@ -130,9 +155,11 @@ class Loom:
         scope: dict | None = None,
         budget: int = 1200,
         as_of: str | None = None,
+        max_tokens: int = 1024,
     ) -> dict:
         """Retrieval-grounded LLM answer. With neither subject nor scope,
         entities named in the question are auto-resolved server-side."""
+        headers = {"X-Loom-LLM-Key": self.llm_key} if self.llm_key else {}
         return self._post(
             "/v1/answer",
             {
@@ -144,28 +171,51 @@ class Loom:
                 "scope": scope,
                 "budget": budget,
                 "as_of": as_of,
+                "max_tokens": max_tokens,
             },
+            extra_headers=headers,
         )
 
     def search(self, query: str, limit: int = 10) -> dict:
-        return self._get(f"/v1/entities/search?q={query}&limit={limit}")
+        return self._get("/v1/entities/search", {"q": query, "limit": limit})
+
+    def ready(self) -> bool:
+        """True when the engine is up AND its store answers (GET /readyz)."""
+        try:
+            return self._get("/readyz").get("status") == "ready"
+        except (LoomError, urllib.error.URLError, TimeoutError):
+            return False
 
     # --------------------------------------------------------------- plumbing
 
-    def _post(self, path: str, body: dict) -> dict:
+    def _post(self, path: str, body: dict, extra_headers: dict | None = None) -> dict:
         req = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(body).encode(),
-            headers=self._headers(),
+            headers={**self._headers(), **(extra_headers or {})},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read())
+        return self._send(req)
 
-    def _get(self, path: str) -> dict:
-        req = urllib.request.Request(self.base_url + path, headers=self._headers())
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read())
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        url = self.base_url + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        return self._send(urllib.request.Request(url, headers=self._headers()))
+
+    def _send(self, req: urllib.request.Request) -> dict:
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                detail = json.loads(raw).get("detail", raw.decode(errors="replace"))
+            except ValueError:
+                detail = raw.decode(errors="replace")
+            if not isinstance(detail, str):
+                detail = json.dumps(detail)  # pydantic validation error lists
+            raise LoomError(exc.code, detail) from None
 
     def _headers(self) -> dict:
         headers = {
