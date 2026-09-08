@@ -148,7 +148,7 @@ presentable.
   are in `deploy/README.md`; re-run the loadgen Job on real nodes for the
   quoted figures (D-001a).
 
-## Phase 6 — Enterprise scale ⬜ (direction D-027, 2026-09-08)
+## Phase 6 — Enterprise scale ✅ (D-027…D-033, 2026-09-08)
 
 Infra-side dials for large organizations: more database nodes, HA
 ingestion, tenant isolation of capacity. Contract unchanged throughout.
