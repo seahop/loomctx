@@ -144,3 +144,16 @@ def test_scorecard_ranks_passes_then_cost():
     assert rows[1]["exposure"] == "1/2" and rows[1]["passed"] == 3 and rows[1]["tasks"] == 4
     assert rows[0]["cost"] == 0.4 and rows[0]["cost_total"] == 0.8 and rows[0]["steps"] == 6
     assert "Cost/run" in ae.scorecard_markdown(rows) and "| `flaky/x` | 3/4 | 1/2 | 2/2 |" in ae.scorecard_markdown(rows)
+
+
+def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retries(seeded_db):
+    seen = set()
+    ae._collect_ids('{"citations":[{"artifact_id":"0123456789abcdef0123456789abcdef","span_start":1}]} "[doc:deadbeef @0-10]"', seen)
+    assert {"0123456789abcdef0123456789abcdef", "deadbeef"} <= seen
+    model = Scripted([
+        [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec"})],
+        "",                                                     # transient empty completion
+        lambda messages: "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["observation_id"][:12] + "]",
+    ])
+    r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0]
+    assert r.error is None and r.score["pass"] and r.steps == 3

@@ -435,3 +435,22 @@ def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
     # an ordinary entity reports nothing
     assert build_pack(store, AskRequest(namespace="ns", subject=host, question="x", budget=500)).truncated == []
     store.close()
+
+
+def test_a_failing_query_embedder_degrades_to_keyword_ranking(tmp_path):
+    """D-039: one ask stalled 30 s behind the embedder. Provider failure at
+    ask time means keyword ranking for that ask, not an error or a wait."""
+    from loom.context import _query_cache
+    store, web01 = make_store(tmp_path)
+
+    class Down:
+        model = "down"
+        def embed(self, texts):
+            raise RuntimeError("provider unreachable")
+        def embed_query(self, text):
+            raise RuntimeError("provider unreachable")
+
+    _query_cache.clear()
+    pack = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=800), embedder=Down())
+    assert pack.items and all(i.kind != "doc_excerpt" for i in pack.items)
+    assert any("logged_in_by" in i.text for i in pack.items)

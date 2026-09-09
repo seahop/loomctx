@@ -276,9 +276,9 @@ def _payload_text(result) -> str:
 
 
 def _collect_ids(text: str, seen: set[str]) -> None:
-    for m in re.finditer(r'"observation_id":\s*"([0-9a-f]{32})"', text):
+    for m in re.finditer(r'"(?:observation_id|artifact_id|id)":\s*"([0-9a-f]{32})"', text):
         seen.add(m.group(1))
-    for m in re.finditer(r'"id":\s*"([0-9a-f]{32})"', text):
+    for m in re.finditer(r'\[doc:([0-9a-f]{8})', text):   # excerpt renderings cite a prefix
         seen.add(m.group(1))
 
 
@@ -312,6 +312,11 @@ async def run_task(session, provider: Provider, task: Task, store,
             result.usage["out"] += turn.usage.get("out", 0)
             result.usage["cost"] = round(result.usage.get("cost", 0.0) + turn.usage.get("cost", 0.0), 5)
             if not turn.calls:
+                if not turn.text.strip() and not result.answer:
+                    # a provider returning neither text nor tool calls is a
+                    # transient, not an answer: one retry (D-039)
+                    result.answer = "\x00retry"
+                    continue
                 result.answer = turn.text
                 break
             outputs = []
@@ -336,6 +341,9 @@ async def run_task(session, provider: Provider, task: Task, store,
             result.error = f"no final answer within {MAX_STEPS} steps"
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
+    if result.answer == "\x00retry":
+        result.answer = ""
+        result.error = result.error or "empty completion twice"
     result.seconds = round(time.monotonic() - t0, 1)
     result.truth = task.truth(store)
     result.score = task.score(result.answer, result.truth, seen, store)

@@ -536,7 +536,7 @@ def test_embedder_passes_dimensions_when_configured(monkeypatch):
     from loom import llm
     seen = {}
 
-    def fake_post(url, body, headers, timeout=120):
+    def fake_post(url, body, headers, timeout=120, attempts=3):
         seen.update(body)
         return {"data": [{"index": 0, "embedding": [0.0] * body.get("dimensions", 8)}]}
 
@@ -566,3 +566,42 @@ def test_once_mode_does_not_mistake_a_failed_tick_for_a_drained_backlog():
         assert not stop
     stop, n = once_should_stop({"embedded": FAILED}, n)
     assert stop and n == 20                             # bounded, so a CronJob fails loudly
+
+
+def test_query_embedding_is_single_attempt_with_a_short_timeout(monkeypatch):
+    from loom import llm
+    calls = []
+
+    def fake_post(url, body, headers, timeout=120, attempts=3):
+        calls.append((timeout, attempts, len(body["input"])))
+        return {"data": [{"index": i, "embedding": [0.0] * 4} for i in range(len(body["input"]))]}
+
+    monkeypatch.setattr(llm, "_post_json", fake_post)
+    e = llm.OpenAICompatEmbedder("http://x/v1", "m")
+    e.embed(["a", "b"]); e.embed_query("q")
+    assert calls[0] == (120, 3, 2)
+    assert calls[1] == (llm.QUERY_EMBED_TIMEOUT, 1, 1)
+
+
+def test_excerpts_say_which_entity_they_are_about(tmp_path):
+    """D-039: a small model attributed one CVE's KEV advisory to the kernel
+    CVEs listed next to it. An excerpt now names the entities whose claims
+    cite its document."""
+    from loom.context import build_pack
+    from loom.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef, Provenance
+    from loom.enrich import chunk_artifacts
+    from loom.llm import HashingEmbedder
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "about.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    store.store_artifact(DocumentIn(namespace="ns", event_id="adv", text="Required action: apply the kernel patch now.",
+                                    source="kev", observed_at=t))
+    cve = EntityRef(type="cve", key="CVE-2026-1")
+    store.record_claim(ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True, source="kev",
+                               observed_at=t, provenance=Provenance(artifact_event_id="adv")))
+    e = HashingEmbedder()
+    chunk_artifacts(store, e, limit=5)
+    pack = build_pack(store, AskRequest(namespace="ns", subject=cve, question="required action patch", budget=800), embedder=e)
+    ex = [i for i in pack.items if i.kind == "doc_excerpt"]
+    assert ex and ex[0].text.startswith('[about cve:CVE-2026-1] "Required action')
+    store.close()

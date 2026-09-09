@@ -260,3 +260,12 @@ def test_batch_claims_cite_a_document_in_the_same_batch(tmp_path, monkeypatch):
         # the single-envelope route rejects the same way
         r = client.post("/v1/ingest", json={**CLAIM, "event_id": "c-3", "provenance": {"artifact_event_id": "missing"}})
         assert r.status_code == 422 and "ingest the document first" in r.json()["detail"]
+
+
+def test_search_endpoints_take_namespace_as_a_query_parameter(tmp_path, monkeypatch):
+    with make_client(tmp_path, monkeypatch) as client:
+        client.post("/v1/ingest", json={**CLAIM, "namespace": "netsec", "event_id": "ns-1"})
+        assert client.get("/v1/entities/search", params={"q": "web", "namespace": "netsec"}).json()["matches"]
+        assert not client.get("/v1/entities/search", params={"q": "web"}).json()["matches"]
+        assert client.get("/v1/entities/search", params={"q": "web"},
+                          headers={"X-Loom-Namespace": "netsec"}).json()["matches"]

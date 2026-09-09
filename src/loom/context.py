@@ -25,6 +25,7 @@ sees "their universe", not an error.
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import hmac
 import json
@@ -62,6 +63,8 @@ from .store.common import cosine as _cosine, cosines  # noqa: E402  (re-exported
 
 # Question words that carry no retrieval signal; stripped from the keyword
 # scorer so "what is the operating system" isn't 60% noise (H-C7).
+log = logging.getLogger("loom.context")
+
 _STOPWORDS = frozenset("""
 a an and are as at be been by did do does for from had has have how in is it
 its of on or that the this to was were what when where which who whom why
@@ -76,11 +79,22 @@ def embed_query(embedder, question: str) -> list[float]:
     key = (embedder.model, question)
     vec = _query_cache.get(key)
     if vec is None:
-        vec = embedder.embed([question])[0]
+        one = getattr(embedder, "embed_query", None)
+        vec = one(question) if callable(one) else embedder.embed([question])[0]
         if len(_query_cache) >= _QUERY_CACHE_SIZE:
             _query_cache.pop(next(iter(_query_cache)))
         _query_cache[key] = vec
     return vec
+
+
+def try_embed_query(embedder, question: str) -> list[float] | None:
+    """embed_query, or None when the provider is slow or down: the ask then
+    ranks by keyword instead of failing or stalling (D-039)."""
+    try:
+        return embed_query(embedder, question)
+    except Exception as exc:  # noqa: BLE001 — any provider failure degrades, never breaks
+        log.warning("query embedding unavailable (%s); ranking by keyword for this ask", exc)
+        return None
 
 
 _query_cache: dict[tuple[str, str], list[float]] = {}
@@ -443,8 +457,9 @@ def build_pack(
     cos_map: dict[str, float] = {}
     excerpts: list[tuple[float, Citation, str, int, str]] = []
     semantic = embedder is not None and bool(req.question) and bool(observations)
+    query_vec = try_embed_query(embedder, req.question) if semantic else None
+    semantic = query_vec is not None
     if semantic:
-        query_vec = embed_query(embedder, req.question)
         vectors = store.embeddings_for(
             req.namespace, [o.id for o in observations], embedder.model
         )
@@ -457,6 +472,16 @@ def build_pack(
         horizon = _aware(req.as_of) if req.as_of else None
         # top passages from the documents behind this entity's facts, via
         # the store's ANN index when one exists (D-025)
+        # which entities a document backs: a passage in a multi-subject pack
+        # must say who it is about, or a reader attributes the KEV advisory
+        # for one kernel CVE to the kernel CVEs listed next to it (D-039)
+        about: dict[str, list[str]] = {}
+        for o in observations:
+            if o.provenance and o.provenance.artifact_id:
+                key = f"{o.subject.type}:{o.subject.key}"
+                lst = about.setdefault(o.provenance.artifact_id, [])
+                if key not in lst and len(lst) < 3:
+                    lst.append(key)
         for ch, score in store.nearest_chunks(
             req.namespace, embedder.model, query_vec,
             _MAX_EXCERPT_CANDIDATES, artifact_ids,
@@ -468,7 +493,9 @@ def build_pack(
                 artifact_id=ch["artifact_id"], span_start=ch["span_start"],
                 span_end=ch["span_end"], source=ch["source"], observed_at=observed,
             )
-            excerpts.append((score, cite, ch["text"], ch["seq"], embedder.model))
+            subjects_of = about.get(ch["artifact_id"], [])
+            text = (f"[about {', '.join(subjects_of)}] " if subjects_of else "") + ch["text"]
+            excerpts.append((score, cite, text, ch["seq"], embedder.model))
         excerpts.sort(key=lambda e: e[0], reverse=True)
         excerpts = excerpts[:_MAX_EXCERPT_CANDIDATES]
 
@@ -724,7 +751,11 @@ def _pack(
     for score, cite, text, seq, model in (excerpts or []):
         if score <= 0 or score < best * _EXCERPT_RELATIVE_FLOOR:
             break
-        rendered = (f'"{text}" [doc:{cite.artifact_id[:8]} '
+        about = ""
+        if text.startswith("[about ") and "] " in text:   # attribution goes outside the quotes
+            about, text = text.split("] ", 1)
+            about += "] "
+        rendered = (f'{about}"{text}" [doc:{cite.artifact_id[:8]} '
                     f'@{cite.span_start}-{cite.span_end}]')
         cost = est_tokens(rendered)
         if cost <= excerpt_budget:

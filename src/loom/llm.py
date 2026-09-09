@@ -61,12 +61,13 @@ _MAX_ATTEMPTS = 3
 _MAX_BACKOFF = 8.0
 
 
-def _post_json(url: str, body: dict, headers: dict, timeout: float = 120) -> dict:
+def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
+               attempts: int = _MAX_ATTEMPTS) -> dict:
     """One provider call with bounded retries on transient failures
     (rate limits, 5xx, connection errors), honoring Retry-After (H-D9)."""
     payload = json.dumps(body).encode()
     last: LLMError | None = None
-    for attempt in range(_MAX_ATTEMPTS):
+    for attempt in range(attempts):
         req = urllib.request.Request(
             url, data=payload,
             headers={"content-type": "application/json", **headers},
@@ -93,7 +94,7 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120) -> dic
         except (urllib.error.URLError, TimeoutError) as exc:
             last = LLMError(f"provider unreachable: {exc}",
                             public="LLM provider unreachable")
-        if attempt + 1 < _MAX_ATTEMPTS:
+        if attempt + 1 < attempts:
             time.sleep(delay)
     assert last is not None
     raise last
@@ -156,6 +157,9 @@ class AnthropicClient(LLMClient):
 
 # ------------------------------------------------------------- embeddings #
 
+QUERY_EMBED_TIMEOUT = float(os.environ.get("LOOM_EMBED_QUERY_TIMEOUT", "") or 10.0)
+
+
 class Embedder(ABC):
     """Text -> vector, for semantic ranking (phase 4, D-018)."""
 
@@ -163,6 +167,13 @@ class Embedder(ABC):
 
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+    def embed_query(self, text: str) -> list[float]:
+        """A question at ask time: one text, on the request's critical path.
+        Providers override with a short timeout and no retries — a stalled
+        embedder must degrade an ask to keyword ranking, not hold it for
+        the batch path's 120 s × 3 (D-039: one ask took 30 s)."""
+        return self.embed([text])[0]
 
 
 class OpenAICompatEmbedder(Embedder):
@@ -179,13 +190,19 @@ class OpenAICompatEmbedder(Embedder):
         self.dimensions = dimensions
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, timeout=120, attempts=_MAX_ATTEMPTS)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text], timeout=QUERY_EMBED_TIMEOUT, attempts=1)[0]
+
+    def _embed(self, texts: list[str], timeout: float, attempts: int) -> list[list[float]]:
         headers = {}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
         body: dict = {"model": self.model, "input": texts}
         if self.dimensions:
             body["dimensions"] = self.dimensions
-        data = _post_json(self.base_url + "/embeddings", body, headers)
+        data = _post_json(self.base_url + "/embeddings", body, headers, timeout=timeout, attempts=attempts)
         try:
             rows = sorted(data["data"], key=lambda r: r["index"])
             return [r["embedding"] for r in rows]

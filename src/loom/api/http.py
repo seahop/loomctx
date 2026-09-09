@@ -398,7 +398,9 @@ def search_entities(
     request: Request,
     limit: Annotated[int, Query(gt=0, le=100)] = 10,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> dict:
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     # scoped keys see a scoped world, not an error — filtered inside the
     # query so they still get `limit` results (H-C8)
@@ -417,10 +419,12 @@ def semantic_entities(
     request: Request,
     limit: Annotated[int, Query(gt=0, le=50)] = 10,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> SemanticSearchResponse:
     """Entities related to a question by meaning (D-025): needs an embedder
     on the serving engine (LOOM_EMBED_*) and the worker to have embedded
     the namespace; each match cites its best-matching fact."""
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     embedder = request.app.state.embedder
     if embedder is None:
