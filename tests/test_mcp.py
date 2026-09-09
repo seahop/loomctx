@@ -260,3 +260,10 @@ def test_agent_view_warns_about_partial_coverage(store, monkeypatch):
     view = mcp_server.ask("host:web-01", "who?", budget=2000)
     assert view["truncated"][0]["entity"] == {"type": "host", "key": "web-01"}
     assert "do not conclude" in view["coverage_warning"] and "host:web-01" in view["coverage_warning"]
+
+
+def test_pack_view_offers_a_short_cite_token(store):
+    """D-041: models mangle hand-copied 32-hex ids; a 12-hex token is what to cite."""
+    view = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
+    cites = [c for i in view["items"] for c in i["citations"]]
+    assert cites and all(len(c["cite"]) == 12 and c["observation_id"].startswith(c["cite"]) for c in cites)

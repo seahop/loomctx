@@ -11,12 +11,11 @@ it, so it can be re-run when models change (they change monthly).
 
 | If you want… | Use | Why |
 | --- | --- | --- |
-| one model to start with | **`openai/gpt-5.4-nano`** | 12/12 over three runs, a cent and ~36 s per four-task run, fewest tokens of any model |
-| the same at Google | `google/gemini-3.5-flash-lite` | 12/12, two cents, fastest at 24 s |
-| the model for when answers matter | **`anthropic/claude-sonnet-5`** | 12/12, fewest steps of any flagship, verifies and explains; the pick for the conference demo |
-| that, cheaper | `openai/gpt-5.6-sol` | 12/12 at under half Sonnet's cost |
-| open weights to self-host | `qwen/qwen3.7-plus` or `deepseek/deepseek-v4-pro` | both 12/12; Qwen cheaper and faster, DeepSeek takes the most steps |
-| a model to avoid for multi-hop | `mistral-small-2603`, `z-ai/glm-5.2` (1/3), and be cautious with `claude-haiku-4.5`, `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash` (2/3) | their misses are confident wrong answers ("no, not exposed"), fine for single-entity lookups only |
+| one model to start with | **`google/gemini-3.5-flash-lite`** | 12/12 on both builds, two cents and 25 s per four-task run, the fastest model tested |
+| the same, OpenAI | `openai/gpt-5.6-luna` (12/12, three cents) — `gpt-5.4-nano` is a cent but 11/12 on the current build |
+| the same, open weights | **`qwen/qwen3.7-flash`** (12/12, two cents) or `qwen3.7-plus`, `deepseek-v4-pro`, `z-ai/glm-5.2` (all 12/12) | self-hostable; Qwen flash is the cheapest clean pass |
+| the model for when answers matter | **`openai/gpt-5.6-sol`** (12/12 on both builds) or `anthropic/claude-haiku-4.5` (12/12 now) | verify and explain; `claude-sonnet-5` is 11/12 on this build with a mangled citation, still the pick for the demo's narrative quality |
+| a model to avoid for multi-hop | `z-ai/glm-5.3-flash` (0/3 and invented two CVEs), `moonshotai/kimi-k2.6` (0/3), `google/gemini-3.8-flash` (provider errors in the tool loop), `minimax/minimax-m3` (1/3) | fine for single-entity lookups only |
 
 Measured 2026-09-09 on OpenRouter; the evidence and the command to re-run
 it follow. Model ids age fast — five of these did not exist three months ago.
@@ -43,10 +42,75 @@ table is three full runs per model, so its cells are pass rates; the
 screening table below it is one run per model and is kept as provenance,
 not as a verdict.
 
-## Decision table (2026-09-09, OpenRouter, three full runs per model, 20-step cap)
+## Decision table (2026-09-09 evening, current build, three full runs per model, 20-step cap)
 
-The fourteen models that passed the two-hop task in screening or in the
-30-step retest, run three more times each. Per-task cells are passes out
+Eighteen models, three full runs each, on the build with coverage
+warnings (D-038), the corpus embedded with attributed excerpts and
+keyword fallback (D-039), and passage search in `find_related` (D-040).
+Per-task cells are passes out of three; steps, tokens, time and cost are
+per four-task run. Sorted by pass rate, then cost. `claude-opus-5` was
+left out on cost (about four dollars per run; its one 30-step run on the
+previous build passed) and `llama-4-maverick` because it cannot emit tool
+calls through OpenRouter.
+
+| Model | Passed | 2-hop exposure | lease | conflict | os | Steps/run | Tokens in/out/run | Time/run | Cost/run | Faithful |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `google/gemini-3.5-flash-lite` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 24 | 121,764/1,561 | 25 s | $0.02 | yes |
+| `qwen/qwen3.7-flash` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 28.7 | 616,042/9,291 | 117 s | $0.02 | yes |
+| `openai/gpt-5.6-luna` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 22.7 | 260,846/3,370 | 70 s | $0.03 | yes |
+| `x-ai/grok-4.3` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 19.7 | 81,592/3,063 | 32 s | $0.06 | yes |
+| `qwen/qwen3.7-plus` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23.7 | 584,689/9,654 | 127 s | $0.09 | yes |
+| `deepseek/deepseek-v4-pro` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23 | 299,897/7,725 | 127 s | $0.10 | yes |
+| `z-ai/glm-5.2` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 20.3 | 153,124/5,288 | 74 s | $0.11 | yes |
+| `openai/gpt-5.6-sol` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 25.3 | 429,815/4,613 | 122 s | $0.35 | yes |
+| `anthropic/claude-haiku-4.5` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 22 | 552,433/4,696 | 77 s | $0.58 | yes |
+| `mistralai/mistral-small-2603` | 11/12 | 3/3 | 2/3 | 3/3 | 3/3 | 22 | 131,818/2,258 | 35 s | $0.01 | yes |
+| `openai/gpt-5.4-nano` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 20.7 | 68,008/1,556 | 34 s | $0.01 | yes |
+| `deepseek/deepseek-v4-flash` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 26 | 351,325/7,995 | 108 s | $0.01 | no (1 unseen cites, 0 invented) |
+| `openai/gpt-5.4-mini` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 23.7 | 160,675/1,833 | 46 s | $0.06 | yes |
+| `anthropic/claude-sonnet-5` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 21 | 393,012/8,274 | 133 s | $0.87 | no (1 unseen cites, 0 invented) |
+| `minimax/minimax-m3` | 10/12 | 1/3 | 3/3 | 3/3 | 3/3 | 21.7 | 327,391/8,616 | 65 s | $0.05 | yes |
+| `z-ai/glm-5.3-flash` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 30 | 508,193/6,008 | 224 s | $0.03 | no (0 unseen cites, 2 invented) |
+| `moonshotai/kimi-k2.6` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 33.3 | 724,545/9,062 | 216 s | $0.21 | yes |
+| `google/gemini-3.8-flash` | 8/12 | 0/3 | 3/3 | 3/3 | 2/3 | 28.3 | 554,428/7,564 | 126 s | $0.17 | yes |
+
+**How to read it.** Nine models are 12/12 on this build, up from seven
+on the previous one; `qwen3.7-flash` (two cents), `grok-4.3`, `glm-5.2`
+and `claude-haiku-4.5` all moved up, and `deepseek-v4-flash`, which
+answered the two-hop question wrongly with room to spare before, named
+all three KEV CVEs in one of its runs. What moved them is the surface,
+not the models: attributed excerpts and the KEV advisories in the pack
+give a reader more to hold on to than a bare `exploited_in_wild True`.
+
+**Faithfulness: 216 task-runs, two mangled ids, one invention.**
+`claude-sonnet-5` and `deepseek-v4-flash` each dropped one character
+while hand-copying a 32-hex observation id — an unverifiable citation,
+which the check rightly fails; packs now carry a 12-hex `cite` token so
+agents copy less. `z-ai/glm-5.3-flash` did something no model had done in
+the previous 400-odd runs: it named `CVE-2023-38408` and `CVE-2024-6387`,
+real-world OpenSSH CVEs that are not in the store, from its own memory
+("probe classic KEV entries"). That is the failure Loom's citations exist
+to expose, and the check exposed it.
+
+**The remaining misses.** `gpt-5.4-nano` credited kernel CVEs from an
+`affects` list as KEV-listed in one run (2/3, down from 3/3 — treat the
+two runs as one flipped sample). `mistral-small-2603` passed the two-hop
+task three times and then lost a *lease* run by answering "no host held
+the IP" after reading only web-01's expired lease. `gemini-3.8-flash`
+hit a Google-side "corrupted thought signature" error on tool
+round-trips and answered nothing on three exposure runs — a provider
+compatibility problem with the OpenAI-style tool loop, not a retrieval
+one. `kimi-k2.6` ran out of steps three times without answering.
+
+**Semantic ranking costs about 300 ms on the first ask of each question**
+(one embedding call; repeats are cached) and changes the pack's mix
+toward conflicts and excerpts; the per-run times above include it.
+
+## Previous build (2026-09-09 morning, keyword ranking, before D-038–D-040)
+
+Kept as provenance. The same fourteen models, three runs each, on the
+build *before* coverage warnings, attributed excerpts, passage search and
+semantic ranking — the decision table above supersedes it. Per-task cells are passes out
 of three; steps, tokens, time and cost are per four-task run. Sorted by
 pass rate, then cost. `claude-opus-5` was left out of the repeats on cost
 (about four dollars per run); its one 30-step run passed, see below.
@@ -95,36 +159,30 @@ you can plan on.
 ## Recommendation in full
 
 - **Default agent model for Loom demos and small teams:**
-  `openai/gpt-5.4-nano` — 12/12, one cent and about 36 seconds per
-  four-task run, the fewest tokens of any model. `google/gemini-3.5-flash-lite`
-  (12/12, two cents, fastest at 24 s) is the equivalent pick if you prefer
-  Google, and `openai/gpt-5.6-luna` (12/12, three cents) the next tier up.
-- **When the questions get harder** (deeper scopes, more verification):
-  `anthropic/claude-sonnet-5` — 12/12 with the fewest steps of any flagship
-  and the most output tokens per run, i.e. it verifies and explains — or
-  `openai/gpt-5.6-sol` (12/12) at under half the cost. `deepseek-v4-pro`
-  and `qwen3.7-plus` are the 12/12 open-weight choices if you self-host.
-- **Fine for single-entity lookups, not for multi-hop on this evidence:**
-  `mistral-small-2603` and `z-ai/glm-5.2` (1/3 on the two-hop task);
-  `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash`,
-  `claude-haiku-4.5` (2/3 — usable if a wrong "no" is acceptable, which
-  in security it usually is not). From screening: `glm-5.3-flash`,
-  `deepseek-v4-flash`, `gemini-3.8-flash`, `kimi-k2.6` failed the two-hop
-  task even with 30 steps; `llama-4-maverick` cannot call tools via OpenRouter.
+  `google/gemini-3.5-flash-lite` — 12/12 on both builds, two cents and
+  about 25 seconds per four-task run. `openai/gpt-5.6-luna` (12/12, three
+  cents) if you want OpenAI; `openai/gpt-5.4-nano` is a cent and was
+  12/12 on the previous build, 11/12 on this one.
+- **Open weights, self-hosted:** `qwen/qwen3.7-flash` is the cheapest
+  clean pass at two cents; `qwen3.7-plus`, `deepseek/deepseek-v4-pro` and
+  `z-ai/glm-5.2` are also 12/12 at nine to eleven cents.
+- **When the questions get harder:** `openai/gpt-5.6-sol` (12/12 on both
+  builds) or `anthropic/claude-haiku-4.5` (12/12 now, 58 cents).
+  `anthropic/claude-sonnet-5` is 11/12 here — one two-hop miss and one
+  mangled id — and remains the demo pick for how its answers read.
+- **Not for multi-hop on this evidence:** `z-ai/glm-5.3-flash` (0/3, and
+  the only model to invent entities), `moonshotai/kimi-k2.6` (0/3),
+  `google/gemini-3.8-flash` (provider errors in the tool loop),
+  `minimax/minimax-m3` (1/3). All fine for single-entity lookups.
+  `llama-4-maverick` cannot call tools via OpenRouter at all.
 - **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
-  reader, not an agent: it needs no tool calling, so any model on this
-  page works there; `gpt-5.4-nano` is the sensible default.
+  reader, not an agent: any model on this page works there.
 
-**With embeddings live (D-039).** The tables above were measured with
-keyword ranking (no embedder configured). After embedding the corpus and
-attributing excerpts to their entities, three more runs each:
-`openai/gpt-5.4-nano` 12/12 (3/3 on the two-hop task, $0.01, 37 s per
-run), `anthropic/claude-sonnet-5` 11/12 (2/3, $0.61, 106 s). Before the
-excerpt attribution fix nano was 0/2 — it credited one CVE's advisory to
-the CVEs listed next to it — which is the kind of thing this harness
-exists to catch. Expect the table to age: five of these model ids did not
-exist three months ago. Re-run before quoting a number in a talk — the command is
-below and the whole three-run table cost about seven dollars.
+Two builds, three runs each; a single flipped task is still within
+variance (nano and Sonnet each flipped one). Expect the table to age —
+five of these model ids did not exist three months ago. Re-run before
+quoting a number in a talk; the eighteen-model, three-run table cost about
+twelve dollars and two hours.
 
 ## Screening (one run per model, 14-step cap)
 

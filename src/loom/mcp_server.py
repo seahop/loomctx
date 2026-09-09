@@ -152,8 +152,9 @@ mcp = MCPServer(
         "via handles; multi-hop questions are ask_scope with "
         "expand_predicates), record_claim to write back facts you learn, and "
         "answer for a server-side LLM synthesis when one is configured. Pass "
-        "the same namespace on every call. Conflict items mean sources "
-        "disagree — never resolve them silently."
+        "the same namespace on every call. Cite facts by the `cite` token on "
+        "their citations. Conflict items mean sources disagree — never "
+        "resolve them silently."
     ),
 )
 
@@ -187,6 +188,14 @@ def _agent_view(pack) -> dict:
     the full pack was 69k chars of which 3.7k was fact text, and the subject
     list came before the items (D-036)."""
     d = pack.model_dump(mode="json", exclude_none=True)
+    # a 12-hex `cite` token per citation: two of 216 scorecard task-runs
+    # mangled a hand-copied 32-hex id by one character (D-041); the
+    # answer route already cites by this prefix
+    for item in d.get("items", []):
+        for c in item.get("citations", []):
+            ref = c.get("observation_id") or c.get("artifact_id") or ""
+            if ref:
+                c["cite"] = ref[:12]
     subjects = d.get("subjects", [])
     view = {
         "namespace": d.get("namespace"), "question": d.get("question"),

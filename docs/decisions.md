@@ -1166,6 +1166,26 @@ but never consulted.
   database" returns db-01's port fact and the netflow edges. 0.8–1.5 s per
   search over 465k fact vectors and 3.6k passage vectors.
 
+## D-041 · Scorecard on the current build; short cite tokens (2026-09-09)
+
+The surface changed four times after the D-037 scorecard (coverage
+warnings, attributed excerpts, passage search, semantic ranking on when
+embeddings exist), so the numbers on `docs/models.md` no longer described
+this build. Eighteen models, three runs each (~$12, two hours): nine
+models at 12/12 (was seven), two hand-copied 32-hex ids mangled by one
+character (`claude-sonnet-5`, `deepseek-v4-flash`), and the first
+invented entities in some 400 task-runs — `glm-5.3-flash` named two
+real-world OpenSSH CVEs absent from the store, from memory. The
+faithfulness check caught all three, which is its job.
+
+- MCP pack citations now carry a 12-hex `cite` token (the prefix the
+  answer route already uses) and the server instructions say to cite by
+  it, so agents copy less. Full ids stay for auditing.
+- The previous build's table stays on the page as provenance; the
+  recommendation moved from `gpt-5.4-nano` (11/12 here) to
+  `gemini-3.5-flash-lite` (12/12 on both builds) as the default, with
+  `qwen3.7-flash` as the cheapest open-weight clean pass.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
