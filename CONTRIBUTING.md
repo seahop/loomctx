@@ -28,7 +28,11 @@ get a numbered entry in `decisions.md` rather than a comment.
 
 1. Branch from `main`. Keep `main` green — the repo is public and CI
    publishes images from it.
-2. `docker compose build && docker compose run --rm test`. For store
+2. `scripts/verify.sh` — the suite under CI conditions (no provider
+   variables) plus the contract drift checks; `--pg` adds the Postgres
+   lane. Anything that touches `contracts.py` or `api/http.py` changes
+   `contracts/openapi.json`, and CI fails on drift. By hand:
+   `docker compose build && docker compose run --rm test`; for store
    changes also run the Postgres lane:
    ```bash
    docker compose --profile pg up -d --wait postgres
