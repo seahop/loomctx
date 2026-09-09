@@ -9,8 +9,8 @@ it, so it can be re-run when models change (they change monthly).
 
 ## How it is measured
 
-`python -m loom.agent_eval --models a,b,c --markdown scorecard.md` runs each
-model as an agent over the real MCP transport against the real corpus
+`python -m loom.agent_eval --models a,b,c --repeat 3 --markdown scorecard.md`
+runs each model as an agent over the real MCP transport against the real corpus
 (`docs/real-data.md`: the seed hosts plus CISA KEV, NVD and EPSS). Four
 tasks, no pre-built scope, no hints beyond the server's own instructions:
 
@@ -24,15 +24,18 @@ tasks, no pre-built scope, no hints beyond the server's own instructions:
 A task **passes** only if the right entities are named, none are invented,
 and every id the model cites appeared in a tool result during that run
 ("faithful"). Ground truth is computed from the store. Cost is what
-OpenRouter billed for the run, cache discounts included. One run per
-model — treat single-run differences of one task as noise; the pattern
-across tiers is the signal.
+OpenRouter billed for the run, cache discounts included. The decision
+table is three full runs per model, so its cells are pass rates; the
+screening table below it is one run per model and is kept as provenance,
+not as a verdict.
 
 ## Decision table (2026-09-09, OpenRouter, three full runs per model, 20-step cap)
 
-The fourteen models that passed the two-hop task in screening, run three
-more times each. Per-task cells are passes out of three; steps, tokens,
-time and cost are per four-task run. Sorted by pass rate, then cost.
+The fourteen models that passed the two-hop task in screening or in the
+30-step retest, run three more times each. Per-task cells are passes out
+of three; steps, tokens, time and cost are per four-task run. Sorted by
+pass rate, then cost. `claude-opus-5` was left out of the repeats on cost
+(about four dollars per run); its one 30-step run passed, see below.
 
 | Model | Passed | 2-hop exposure | lease | conflict | os | Steps/run | Tokens in/out per run | Time/run | Cost/run | Faithful |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -138,12 +141,15 @@ three-run table above was measured at the new 20-step default):
 | `moonshotai/kimi-k2.6` | fail (never reached an answer) | 17 | 833,125/10,259 | 316 s | $0.25 |
 
 So the capable models were being thorough, not lost: Opus 5 verified
-candidates one by one and needed 13 turns; Haiku 4.5 passed in an earlier
-run at 13 steps and here at 16 — variance around the cap, not a
-capability gap. The harness default is now 20 steps. The four that still
-fail do so by answering wrongly or not at all, and one of them
-(`deepseek-v4-flash`) asserted a negative it had not checked — the one
-failure mode citations cannot catch, since a claim of absence cites nothing.
+candidates one by one and needed 13 turns; `gpt-5.6-sol` passed in 10 and
+went on to 3/3 in the decision table. The harness default is now 20
+steps. Haiku 4.5 passed here at 16 steps but is 2/3 in the decision
+table, and that miss was a wrong answer at 20 steps, not a step-out — so
+for Haiku the cap was part of the story, not all of it. The four that
+still fail here do so by answering wrongly or not at all, and one of them
+(`deepseek-v4-flash`) asserted a negative it had not checked — the same
+failure mode the decision table's misses show, and the one citations
+cannot catch, since a claim of absence cites nothing.
 
 **Cost is dominated by what the agent reads, not what it writes.** Input
 tokens run 60k to 800k per four-task run because every tool result stays
