@@ -953,6 +953,31 @@
         ],
         "title": "ExpansionHandle",
         "type": "object"
+      },
+      "ScopeTruncation": {
+        "description": "An entity whose observations exceeded the gather limit: only the\nnewest `gathered` of `total` were examined. A reader must not conclude\nabsence about it \u2014 \"no KEV fact among the kernel's CVEs\" means nothing\nwhen 1,740 of 2,740 were never looked at (D-038).",
+        "properties": {
+          "entity": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "gathered": {
+            "minimum": 0,
+            "title": "Gathered",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity",
+          "gathered",
+          "total"
+        ],
+        "title": "ScopeTruncation",
+        "type": "object"
       }
     },
     "description": "The unit of retrieval: budgeted, ranked, cited, expandable.",
@@ -1041,6 +1066,14 @@
         "minimum": 0,
         "title": "Omitted Handles",
         "type": "integer"
+      },
+      "truncated": {
+        "description": "entities whose observations exceeded the gather limit: coverage is partial there, so absence cannot be concluded (D-038)",
+        "items": {
+          "$ref": "#/$defs/ScopeTruncation"
+        },
+        "title": "Truncated",
+        "type": "array"
       }
     },
     "required": [
@@ -1384,6 +1417,14 @@
             "minimum": 0,
             "title": "Omitted Handles",
             "type": "integer"
+          },
+          "truncated": {
+            "description": "entities whose observations exceeded the gather limit: coverage is partial there, so absence cannot be concluded (D-038)",
+            "items": {
+              "$ref": "#/$defs/ScopeTruncation"
+            },
+            "title": "Truncated",
+            "type": "array"
           }
         },
         "required": [
@@ -1451,6 +1492,31 @@
           "hint"
         ],
         "title": "ExpansionHandle",
+        "type": "object"
+      },
+      "ScopeTruncation": {
+        "description": "An entity whose observations exceeded the gather limit: only the\nnewest `gathered` of `total` were examined. A reader must not conclude\nabsence about it \u2014 \"no KEV fact among the kernel's CVEs\" means nothing\nwhen 1,740 of 2,740 were never looked at (D-038).",
+        "properties": {
+          "entity": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "gathered": {
+            "minimum": 0,
+            "title": "Gathered",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity",
+          "gathered",
+          "total"
+        ],
+        "title": "ScopeTruncation",
         "type": "object"
       }
     },

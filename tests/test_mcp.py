@@ -252,3 +252,11 @@ def test_pack_view_is_shaped_for_agents(store):
         assert len(view["subjects"]) == 1 and "2 more" in view["subjects_note"]
     finally:
         mcp_server._SUBJECTS_SHOWN = saved
+
+
+def test_agent_view_warns_about_partial_coverage(store, monkeypatch):
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 1)
+    view = mcp_server.ask("host:web-01", "who?", budget=2000)
+    assert view["truncated"][0]["entity"] == {"type": "host", "key": "web-01"}
+    assert "do not conclude" in view["coverage_warning"] and "host:web-01" in view["coverage_warning"]

@@ -246,6 +246,17 @@ class ExpandRequest(BaseModel):
     budget: int = Field(default=800, gt=0, le=1_000_000)
 
 
+class ScopeTruncation(BaseModel):
+    """An entity whose observations exceeded the gather limit: only the
+    newest `gathered` of `total` were examined. A reader must not conclude
+    absence about it — "no KEV fact among the kernel's CVEs" means nothing
+    when 1,740 of 2,740 were never looked at (D-038)."""
+
+    entity: EntityRef
+    gathered: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
 class ContextPack(BaseModel):
     """The unit of retrieval: budgeted, ranked, cited, expandable."""
 
@@ -262,6 +273,11 @@ class ContextPack(BaseModel):
         default=0, ge=0,
         description="expansion threads that existed beyond the handle cap; "
         "narrow the scope or raise the budget to see them (D-035)",
+    )
+    truncated: list[ScopeTruncation] = Field(
+        default_factory=list,
+        description="entities whose observations exceeded the gather limit: "
+        "coverage is partial there, so absence cannot be concluded (D-038)",
     )
 
 

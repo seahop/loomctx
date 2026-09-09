@@ -195,9 +195,10 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   (read-path namespace scan, quadratic conflicts, handle cap +
   `omitted_handles`, inbound handle aggregation, conflict budget share,
   path-carrying scope facts)
-- ⬜ Scope expansion over hubs: `_GATHER_LIMIT` caps a hub's neighbours at
-  the newest 1,000 silently — surface the truncation (a handle or a count)
-  or page the expansion
+- ✅ Scope expansion over hubs is no longer silent (D-038, 2026-09-09):
+  `ContextPack.truncated` reports gathered/total per capped entity, the
+  MCP view warns, the answer prompt says so — the confident-negative
+  failure mode from the scorecard has a fact to trip over
 - ⬜ Entity resolution on real keys: KEV freehand names vs CPE keys (91/708
   match), one product under two CPE vendors across eras — a resolution
   pass over `product` aliases (D-023 machinery)

@@ -83,6 +83,9 @@ def render_user_prompt(question: str, pack: ContextPack) -> str:
     for handle in pack.handles:
         prefix = "unresolved conflict" if handle.kind == "conflict" else "more available"
         lines.append(f"- {prefix}: {handle.hint}")
+    for t in pack.truncated:  # partial coverage is a fact the reader needs (D-038)
+        lines.append(f"- coverage: only the newest {t.gathered:,} of {t.total:,} observations about "
+                     f"{t.entity.type}:{t.entity.key} were examined; do not conclude absence for it")
     return "\n".join(lines)
 
 

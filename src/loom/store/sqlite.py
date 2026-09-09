@@ -593,12 +593,14 @@ class SqliteStore(GraphStore):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
+            # two indexed halves, like observations_for (D-035/D-038)
             row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM observations o"
-                " WHERE o.namespace = ?"
-                "   AND (o.subject_id = ? OR o.object_entity_id = ?)"
-                + _NOT_TOMBSTONED,
-                (namespace, entity.id, entity.id),
+                "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
+                "          AND o.subject_id = ?" + _NOT_TOMBSTONED + ")"
+                "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
+                "          AND o.object_entity_id = ? AND o.subject_id != ?" + _NOT_TOMBSTONED + ")"
+                " AS n",
+                (namespace, entity.id, namespace, entity.id, entity.id),
             ).fetchone()
         return int(row["n"])
 

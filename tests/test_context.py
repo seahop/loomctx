@@ -403,3 +403,35 @@ def test_handles_are_compact_and_legacy_handles_still_decode():
         {"ns": "netsec", "subject": {"type": "host", "key": "web-01"}, "predicate": "runs_os", "as_of": None}
     ).encode()).decode().rstrip("=")
     assert decode_handle(legacy)["subject"]["key"] == "web-01"
+
+
+def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
+    """D-038: a hub with more observations than the gather limit yields its
+    newest N; the pack says so wherever that happened (subject, scope
+    expansion, expand), so a reader cannot conclude absence from it."""
+    import loom.context as ctx
+    from loom.contracts import ScopeSpec
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "trunc.db")
+    hub = EntityRef(type="product", key="linux:linux_kernel")
+    host = EntityRef(type="host", key="web-01")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=EntityRef(type="cve", key=f"CVE-2026-{i}"), predicate="affects",
+                object=hub, source="nvd", observed_at=t.replace(hour=i)) for i in range(8)
+    ] + [ClaimIn(namespace="ns", subject=host, predicate="runs_software", object=hub, source="inv", observed_at=t)])
+    # single subject on the hub
+    pack = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=2000))
+    assert [(x.entity.key, x.gathered, x.total) for x in pack.truncated] == [("linux:linux_kernel", 5, 9)]
+    # reached through a scope: the host itself is small, the hub is not
+    scope = ScopeSpec(subjects=[host], expand=["runs_software", "affects"], depth=2)
+    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="exploited", budget=3000))
+    assert [x.entity.key for x in pack.truncated] == ["linux:linux_kernel"]
+    assert len(pack.subjects) <= 1 + 1 + 5                    # the cap really did cut the expansion
+    # expanding a handle on the hub carries the note too
+    small = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=1))
+    more = expand_pack(store, small.handles[0].id, budget=3000)
+    assert more.truncated and more.truncated[0].total == 9
+    # an ordinary entity reports nothing
+    assert build_pack(store, AskRequest(namespace="ns", subject=host, question="x", budget=500)).truncated == []
+    store.close()

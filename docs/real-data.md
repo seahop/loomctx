@@ -173,10 +173,10 @@ it out because no KEV fact existed for it.
 
 ## What is still open (roadmap phase 8)
 
-- **Hub truncation is silent.** Scope expansion gathers a node's newest
-  1,000 observations (`_GATHER_LIMIT`); the kernel has 2,740 CVEs this
-  year, so 1,740 of them are never reached and nothing says so. Surface the
-  truncation (a count or a handle) or page the expansion.
+- ~~Hub truncation is silent.~~ Fixed (D-038): packs carry `truncated`
+  (the kernel: 1,000 of 2,740 gathered), the MCP view warns, and the
+  answering prompt says so. The limit itself stays; the point is that a
+  reader can no longer conclude absence from a partial gather.
 - **Entity resolution on real keys.** KEV names products freehand ("NGINX
   Open Source"); NVD keys them by CPE (`nginx:nginx`, and since the F5 era
   `f5:nginx_open_source`; `haxx:curl` vs `curl:curl`). Only 91 of 708 KEV

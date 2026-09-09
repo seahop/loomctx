@@ -1053,6 +1053,31 @@ adopter has on day one, and the D-036 harness made it cheap to answer.
 - Spend for the whole exercise was on the order of twelve dollars, most of
   it the two Opus 5 runs.
 
+## D-038 · Partial coverage is reported, never silent (2026-09-09)
+
+Two findings pointed at one gap. The kernel has 2,740 CVEs this year and
+scope expansion gathers a node's newest 1,000, so 1,740 were never
+reached and nothing said so (open since D-035). And the only agent
+failure the scorecard's citation check could not catch was the confident
+negative: "no, web-01 is not exposed" (D-037) — a claim of absence cites
+nothing. Both are the same fact left unstated: *the reader did not see
+everything*.
+
+- **Contract, additive:** `ContextPack.truncated: list[ScopeTruncation]`
+  (`entity`, `gathered`, `total`). Recorded wherever the gather limit
+  applies — a pack's own subjects, each hop of a scope, an expanded handle.
+  The count is taken only when the limit was actually hit, so ordinary
+  entities pay nothing; a hub costs one indexed COUNT (~1 ms).
+- **Both readers see it.** The MCP agent view adds a `coverage_warning`
+  sentence per pack; `render_user_prompt` adds a `coverage:` line, so the
+  server-side answering model is told too.
+- **`count_observations` had the D-035 bug**: `subject_id = ? OR
+  object_entity_id = ?`, planned as a namespace scan. Rewritten as two
+  indexed COUNTs in both stores; a self-edge counts once.
+- What it does not do: raise the limit. Gathering 2,740 observations for
+  one hop is the wrong answer to "the hub is big"; saying so and offering
+  `valid_at`, a direct ask, or a handle is the right one.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

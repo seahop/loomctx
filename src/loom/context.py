@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from .config import max_budget
 
 from .contracts import (
+    ScopeTruncation,
     AskRequest,
     Citation,
     ContextItem,
@@ -344,6 +345,21 @@ def _in_scope(obs: Observation, allowed_types: tuple[str, ...] | None) -> bool:
 # ------------------------------------------------------------------ builder #
 
 Paths = dict[tuple[str, str], list[Observation]]
+Truncations = dict[tuple[str, str], ScopeTruncation]
+
+
+def _gather(store: GraphStore, namespace: str, ref: EntityRef,
+            truncated: Truncations) -> list[Observation]:
+    """observations_for under the gather limit, recording when the limit
+    cut something off: a hub with 2,740 edges yields its newest 1,000 and
+    the pack must say so (D-038). The count is only taken when the limit
+    was actually hit, so ordinary entities pay nothing."""
+    obs = store.observations_for(namespace, ref, limit=_GATHER_LIMIT)
+    if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
+        total = store.count_observations(namespace, ref)
+        if total > len(obs):
+            truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
+    return obs
 
 
 def resolve_scope(
@@ -357,7 +373,8 @@ def resolve_scope(
 
 
 def resolve_scope_paths(
-    store: GraphStore, namespace: str, scope: ScopeSpec
+    store: GraphStore, namespace: str, scope: ScopeSpec,
+    truncated: Truncations | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
@@ -372,13 +389,14 @@ def resolve_scope_paths(
     resolved = list(scope.subjects)
     frontier = list(scope.subjects)
     paths: Paths = {}
+    truncated = truncated if truncated is not None else {}
     for _ in range(scope.depth):
         if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
         for ref in frontier:
             via = paths.get((ref.type, ref.key), [])
-            for obs in store.observations_for(namespace, ref, limit=_GATHER_LIMIT):
+            for obs in _gather(store, namespace, ref, truncated):
                 if obs.predicate not in expand:
                     continue
                 ends = [obs.subject]
@@ -401,8 +419,9 @@ def build_pack(
     allowed_types: tuple[str, ...] | None = None,
 ) -> ContextPack:
     paths: Paths = {}
+    truncated: Truncations = {}
     if req.scope is not None:
-        subjects, paths = resolve_scope_paths(store, req.namespace, req.scope)
+        subjects, paths = resolve_scope_paths(store, req.namespace, req.scope, truncated)
     else:
         subjects = [req.subject]
     if allowed_types is not None:
@@ -412,7 +431,7 @@ def build_pack(
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
     for ref in subjects:
-        for obs in store.observations_for(req.namespace, ref, limit=_GATHER_LIMIT):
+        for obs in _gather(store, req.namespace, ref, truncated):
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
                 seen_ids.add(obs.id)
                 observations.append(obs)
@@ -484,6 +503,7 @@ def build_pack(
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
         roots=list(req.scope.subjects) if req.scope is not None else [req.subject],
+        truncated=list(truncated.values()),
     )
 
 
@@ -536,9 +556,10 @@ def expand_pack(
     budget = min(budget, max_budget())
     if isinstance(meta.get("excerpt"), dict):
         return _expand_excerpt(store, meta, subject, budget, allowed_types)
+    truncated: Truncations = {}
     observations = [
         o
-        for o in store.observations_for(meta["ns"], subject, limit=_GATHER_LIMIT)
+        for o in _gather(store, meta["ns"], subject, truncated)
         if o.predicate == meta["predicate"] and _in_scope(o, allowed_types)
     ]
     return _pack(
@@ -550,6 +571,7 @@ def expand_pack(
         budget=budget,
         observations=observations,
         with_handles=False,
+        truncated=list(truncated.values()),
     )
 
 
@@ -605,6 +627,7 @@ def _pack(
     valid_at: datetime | None = None,
     paths: dict[tuple[str, str], list[str]] | None = None,
     roots: list[EntityRef] | None = None,
+    truncated: list[ScopeTruncation] | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -804,4 +827,5 @@ def _pack(
         items=items,
         handles=handles[:_MAX_HANDLES],
         omitted_handles=omitted,
+        truncated=truncated or [],
     )

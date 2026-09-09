@@ -588,11 +588,12 @@ class PostgresStore(GraphStore):
             if entity is None:
                 return 0
             rows = self._q(
-                "SELECT COUNT(*) AS n FROM observations o"
-                " WHERE o.namespace = %s"
-                "   AND (o.subject_id = %s OR o.object_entity_id = %s)"
-                + _NOT_TOMBSTONED,
-                (namespace, entity.id, entity.id),
+                "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
+                "          AND o.subject_id = %s" + _NOT_TOMBSTONED + ")"
+                "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
+                "          AND o.object_entity_id = %s AND o.subject_id <> %s" + _NOT_TOMBSTONED + ")"
+                " AS n",
+                (namespace, entity.id, namespace, entity.id, entity.id),
             )
         return int(rows[0]["n"])
 

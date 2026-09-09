@@ -206,6 +206,10 @@ export interface ContextPack {
    * expansion threads that existed beyond the handle cap; narrow the scope or raise the budget to see them (D-035)
    */
   omitted_handles?: number;
+  /**
+   * entities whose observations exceeded the gather limit: coverage is partial there, so absence cannot be concluded (D-038)
+   */
+  truncated?: ScopeTruncation[];
 }
 /**
  * Every item is cited (hard constraint 3): facts and conflicts cite
@@ -253,6 +257,20 @@ export interface ExpansionHandle {
   hint: string;
   est_tokens?: number | null;
   kind?: "more" | "conflict" | "excerpt";
+}
+/**
+ * An entity whose observations exceeded the gather limit: only the
+ * newest `gathered` of `total` were examined. A reader must not conclude
+ * absence about it — "no KEV fact among the kernel's CVEs" means nothing
+ * when 1,740 of 2,740 were never looked at (D-038).
+ *
+ * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * via the `definition` "ScopeTruncation".
+ */
+export interface ScopeTruncation {
+  entity: EntityRef;
+  gathered: number;
+  total: number;
 }
 /**
  * Ask + synthesize: retrieve a context pack, then have the configured

@@ -201,6 +201,13 @@ def _agent_view(pack) -> dict:
     for key in ("subject", "as_of", "valid_at"):
         if d.get(key) is not None:
             view[key] = d[key]
+    if d.get("truncated"):
+        view["truncated"] = d["truncated"]
+        view["coverage_warning"] = "; ".join(
+            f"{t['entity']['type']}:{t['entity']['key']}: only the newest {t['gathered']:,} of "
+            f"{t['total']:,} observations were examined"
+            for t in d["truncated"]
+        ) + " — do not conclude that something is absent for these entities; ask about them directly, narrow with valid_at, or expand a handle"
     return view
 
 

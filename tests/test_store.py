@@ -819,6 +819,8 @@ def test_observations_for_merges_both_sides_newest_first_within_limit(store):
     top = store.observations_for("ns", x, limit=4)
     assert [o.observed_at.hour for o in top] == [12, 5, 4, 3]
     assert {o.predicate for o in top} == {"peer_of", "assigned_to", "logged_in_by"}
+    assert store.count_observations("ns", x) == 7            # self-edge counted once (D-038)
+    assert store.count_observations("ns", EntityRef(type="host", key="nobody")) == 0
 
 
 def test_namespace_summary_counts_entities_by_type(store):

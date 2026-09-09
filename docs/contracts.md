@@ -124,7 +124,10 @@ advance as they mine claims out of the text.
     {"id": "h1_…", "hint": "CONFLICT on host:web-01 runs_os did not fit the budget",
      "est_tokens": 60, "kind": "conflict"}
   ],
-  "omitted_handles": 0
+  "omitted_handles": 0,
+  "truncated": [
+    {"entity": {"type": "product", "key": "linux:linux_kernel"}, "gathered": 1000, "total": 2740}
+  ]
 }
 ```
 
@@ -142,6 +145,12 @@ handle rather than disappearing. Handles feed `POST /v1/expand`; with
 handles ship, in priority order (conflicts, excerpts, then the most
 skipped threads); `omitted_handles` counts the rest, so a scope over a hub
 entity says "and 8,000 more threads" instead of shipping them (D-035).
+`truncated` lists entities whose observations exceeded the gather limit:
+only the newest `gathered` of `total` were examined, at that subject, at
+a hop of a scope, or under an expanded handle. Partial coverage is a fact
+the reader needs — an agent must not conclude absence there (D-038). The
+MCP view renders it as a `coverage_warning`; the answering prompt as a
+`coverage:` line.
 
 ## Schema registry
 

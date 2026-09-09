@@ -109,3 +109,12 @@ def test_llm_factory_selection(monkeypatch):
     monkeypatch.setenv("LOOM_LLM_BASE_URL", "")
     from loom.llm import AnthropicClient
     assert isinstance(llm_from_env(), AnthropicClient)
+
+
+def test_prompt_carries_partial_coverage():
+    from loom.answer import render_user_prompt
+    from loom.contracts import ContextPack, EntityRef, ScopeTruncation
+    pack = ContextPack(namespace="ns", budget=100, truncated=[
+        ScopeTruncation(entity=EntityRef(type="product", key="linux:linux_kernel"), gathered=1000, total=2740)])
+    text = render_user_prompt("exposed?", pack)
+    assert "coverage: only the newest 1,000 of 2,740" in text and "do not conclude absence" in text

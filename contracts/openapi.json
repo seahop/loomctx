@@ -471,6 +471,14 @@
             "title": "Subjects",
             "type": "array"
           },
+          "truncated": {
+            "description": "entities whose observations exceeded the gather limit: coverage is partial there, so absence cannot be concluded (D-038)",
+            "items": {
+              "$ref": "#/components/schemas/ScopeTruncation"
+            },
+            "title": "Truncated",
+            "type": "array"
+          },
           "valid_at": {
             "anyOf": [
               {
@@ -918,6 +926,31 @@
           "subjects"
         ],
         "title": "ScopeSpec",
+        "type": "object"
+      },
+      "ScopeTruncation": {
+        "description": "An entity whose observations exceeded the gather limit: only the\nnewest `gathered` of `total` were examined. A reader must not conclude\nabsence about it \u2014 \"no KEV fact among the kernel's CVEs\" means nothing\nwhen 1,740 of 2,740 were never looked at (D-038).",
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "gathered": {
+            "minimum": 0.0,
+            "title": "Gathered",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity",
+          "gathered",
+          "total"
+        ],
+        "title": "ScopeTruncation",
         "type": "object"
       },
       "SemanticMatch": {
