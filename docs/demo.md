@@ -36,9 +36,9 @@ curl -s localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 ```
 
 Point at: `laptop-17` (not `web-01`, which held it until Aug 10), every
-item's `citations`, the `handles` list, and `budget`. Say: *the agent
-asked for 600 tokens and got 600 tokens of the most relevant, cited
-facts, plus handles to pull threads deeper.*
+item's `citations`, and `budget`. Say: *the agent asked for 600 tokens and
+got the most relevant cited facts that fit; anything cut becomes a handle
+it can pull deeper — you will see those on the next call.*
 
 *"What OS does web-01 run?"* — conflicts ship first:
 
@@ -48,9 +48,10 @@ curl -s localhost:8000/v1/ask -H 'content-type: application/json' -d '{
   "question":"what operating system does this run?","budget":400}' | python3 -m json.tool | head -30
 ```
 
-Point at: item 0 is `kind: conflict`, two sources, two citations. Say:
-*Loom never picks a side silently. The agent sees the disagreement before
-it sees anything else.*
+Point at: item 0 is `kind: conflict`, two sources, two citations; the
+`handles` list at the bottom (77 more logins, each a thread). Say: *Loom
+never picks a side silently. The agent sees the disagreement before it
+sees anything else, and gets handles for what did not fit.*
 
 ## Act 2 — real data (3 min, the vulnerability corpus, `curl`)
 
@@ -124,7 +125,7 @@ then re-ask about web-01 and show the new fact, cited to the agent.
 ## Rehearsal checklist
 
 - [x] Fresh clone, uncached build, seed, first cited answer, connector: 142 s total (2026-09-09, laptop)
-- [ ] All six `curl` commands above return what the script says
+- [x] All four `curl` commands above return what the script says (verified 2026-09-09 against the loaded corpus)
 - [ ] Act 3 run once with Claude Code the morning of the talk; transcript saved
 - [ ] `claude mcp list` shows `loom` connected
 - [ ] Fallback files on the desktop; slides have the two diagrams from `docs/infrastructure.md`
