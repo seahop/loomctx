@@ -207,6 +207,8 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   loom.agent_eval` — real model, real MCP transport, real corpus, ground
   truth from the store; the first live run forced `list_namespaces` /
   `describe_namespace`, the empty-namespace error, `LOOM_MCP_NAMESPACE`
+- ✅ Model scorecard (D-037, 2026-09-09): `--models` mode with billed cost;
+  twenty OpenRouter models across price tiers measured — `docs/models.md`
 - ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
   the obvious non-security one)
 

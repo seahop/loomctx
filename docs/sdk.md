@@ -38,6 +38,8 @@ truth is computed from the store; the score checks the right entities were
 named, none were invented, and every cited id was actually seen in a tool
 result. Provider from `LOOM_LLM_*`, model override `LOOM_AGENT_MODEL`
 (tool-calling required). Results and what they changed: `docs/real-data.md`.
+`--models a,b,c --markdown out.md` compares models with billed cost per
+run — the scorecard in `docs/models.md`.
 
 Hook up a local agent (stdio, spawned per session — nothing on the host):
 

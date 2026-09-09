@@ -63,6 +63,7 @@ findings without touching Loom's code.
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
 | `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
+| `docs/models.md` | Which LLMs drive Loom well as agents: measured scorecard with cost, and how to re-run it |
 | `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
 | `contracts/` | `schemas.json` (JSON Schema) and `openapi.json`, both regenerated and drift-checked in CI |

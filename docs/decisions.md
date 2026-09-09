@@ -1017,6 +1017,33 @@ Haiku 4.5 passes all four tasks including the two-hop question; the
 weaker model still omits `expand_predicates` and wanders. The surface is
 now judged adequate: it answers a correctly formed call in one shot.
 
+## D-037 · Model scorecard: which LLMs drive Loom well as agents (2026-09-09)
+
+User question: is it worth a list of models that work well with the
+platform, measured with the OpenRouter key? Yes — Loom ships no model,
+so "which agent models can actually use these tools" is a question every
+adopter has on day one, and the D-036 harness made it cheap to answer.
+
+- `python -m loom.agent_eval --models a,b,c --markdown out.md` runs the
+  four-task evaluation per model and asks OpenRouter to report billed
+  cost per call (`usage: {include: true}`), so each row carries real
+  dollars. `scorecard()` ranks by passes then cost: the cheapest model
+  that gets it right wins. `LOOM_AGENT_MAX_STEPS` overrides the step cap.
+- Twenty models across price tiers, one run each, then an eight-model
+  retest of the two-hop task at 30 steps. Results and recommendations in
+  `docs/models.md`; the transcripts stayed in the data volume.
+- What the numbers say about Loom rather than about models: faithfulness
+  was 20/20 (no invented entities, no unseen citations) because the pack
+  hands every item an id; the two-hop task is the only discriminator and
+  eleven models pass it cold; input tokens dominate cost, which is why the
+  agent view of packs (D-036) was worth more than prompt tuning; and the
+  one failure mode citations cannot catch is a confident negative
+  ("no KEV data exists") — a claim of absence cites nothing.
+- Harness default step cap raised from 14 to 20: four capable models
+  passed at 13–17 steps once allowed to finish verifying.
+- Spend for the whole exercise was on the order of twelve dollars, most of
+  it the two Opus 5 runs.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

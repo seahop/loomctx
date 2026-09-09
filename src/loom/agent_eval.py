@@ -13,6 +13,7 @@ its citations point at observations it actually saw.
     python -m loom.agent_eval --db /data/loom.db                # every task
     python -m loom.agent_eval --db /data/loom.db --tasks lease  # one task
     LOOM_AGENT_MODEL=anthropic/claude-haiku-4.5 python -m loom.agent_eval ...
+    python -m loom.agent_eval --db ... --models a/x,b/y --markdown models.md   # a scorecard
 
 Provider/key come from LOOM_LLM_* (any OpenAI-compatible endpoint with tool
 calling, or provider=anthropic); LOOM_AGENT_MODEL overrides the model.
@@ -33,7 +34,7 @@ from typing import Any, Callable
 from .contracts import EntityRef
 from .llm import OPENAI_COMPAT_BASES, _env, _post_json
 
-MAX_STEPS = 14
+MAX_STEPS = int(os.environ.get("LOOM_AGENT_MAX_STEPS", "20"))   # model turns per task (D-037: 14 cut off thorough models)
 MAX_TOOL_CHARS = 24_000       # a tool result larger than this is cut, with a marker
 NAMESPACE = "netsec"
 _CVE = re.compile(r"CVE-\d{4}-\d{4,}")
@@ -203,7 +204,7 @@ class Turn:
     text: str
     calls: list[tuple[str, str, dict]]     # (call id, tool name, args)
     raw_message: Any
-    usage: dict
+    usage: dict                            # in, out, and cost (USD) when the provider reports it
 
 
 def _openai_tools(tools) -> list[dict]:
@@ -220,11 +221,14 @@ def _anthropic_tools(tools) -> list[dict]:
 def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int = 1500) -> Turn:
     if p.kind == "openai":
         headers = {"authorization": f"Bearer {p.api_key}"} if p.api_key else {}
-        data = _post_json(p.base_url + "/chat/completions", {
+        body = {
             "model": p.model, "max_tokens": max_tokens, "tools": _openai_tools(tools),
             "tool_choice": "auto",
             "messages": [{"role": "system", "content": system}, *messages],
-        }, headers, timeout=180)
+        }
+        if "openrouter.ai" in p.base_url:
+            body["usage"] = {"include": True}   # billed cost per call, cache discounts included
+        data = _post_json(p.base_url + "/chat/completions", body, headers, timeout=180)
         msg = data["choices"][0]["message"]
         calls = []
         for tc in msg.get("tool_calls") or []:
@@ -236,7 +240,8 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
             calls.append((tc["id"], fn["name"], args))
         u = data.get("usage") or {}
         return Turn(msg.get("content") or "", calls, msg,
-                    {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0)})
+                    {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0),
+                     "cost": float(u.get("cost") or 0.0)})
     data = _post_json(p.base_url + "/v1/messages", {
         "model": p.model, "max_tokens": max_tokens, "system": system,
         "tools": _anthropic_tools(tools), "messages": messages,
@@ -283,7 +288,7 @@ class RunResult:
     answer: str
     steps: int
     tool_calls: list[dict] = field(default_factory=list)
-    usage: dict = field(default_factory=lambda: {"in": 0, "out": 0})
+    usage: dict = field(default_factory=lambda: {"in": 0, "out": 0, "cost": 0.0})
     seconds: float = 0.0
     truth: dict = field(default_factory=dict)
     score: dict = field(default_factory=dict)
@@ -305,6 +310,7 @@ async def run_task(session, provider: Provider, task: Task, store,
             turn = await asyncio.to_thread(caller, provider, system, messages, tools)
             result.usage["in"] += turn.usage.get("in", 0)
             result.usage["out"] += turn.usage.get("out", 0)
+            result.usage["cost"] = round(result.usage.get("cost", 0.0) + turn.usage.get("cost", 0.0), 5)
             if not turn.calls:
                 result.answer = turn.text
                 break
@@ -366,15 +372,64 @@ def evaluate(db: str, task_names: list[str] | None, model: str | None = None,
 
 
 def summarize(results: list[RunResult], model: str) -> str:
-    lines = [f"agent eval — model {model}", "task       pass  steps  calls  tokens(in/out)  secs  detail"]
+    lines = [f"agent eval — model {model}", "task       pass  steps  calls  tokens(in/out)  secs   cost  detail"]
     for r in results:
         detail = {k: v for k, v in r.score.items() if k != "pass"}
         lines.append(f"{r.task:<10} {'PASS' if r.score.get('pass') else 'FAIL':<5} {r.steps:>5}  "
                      f"{len(r.tool_calls):>5}  {r.usage['in']:>6}/{r.usage['out']:<6}  {r.seconds:>5}  "
-                     f"{json.dumps(detail, default=str)[:150]}")
+                     f"${r.usage.get('cost', 0):.3f}  {json.dumps(detail, default=str)[:150]}")
         if r.error:
             lines.append(f"           error: {r.error}")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------- scorecard #
+
+def scorecard(runs: dict[str, list[RunResult]]) -> list[dict]:
+    """One row per model: passes, per-task outcome, totals. Sorted by passes
+    desc, then cost asc — the cheapest model that gets it right wins."""
+    rows = []
+    for model, results in runs.items():
+        by = {r.task: r for r in results}
+        rows.append({
+            "model": model,
+            "passed": sum(1 for r in results if r.score.get("pass")),
+            "tasks": len(results),
+            "exposure": _outcome(by.get("exposure")), "lease": _outcome(by.get("lease")),
+            "conflict": _outcome(by.get("conflict")), "os": _outcome(by.get("os")),
+            "steps": sum(r.steps for r in results),
+            "tool_calls": sum(len(r.tool_calls) for r in results),
+            "tokens_in": sum(r.usage["in"] for r in results),
+            "tokens_out": sum(r.usage["out"] for r in results),
+            "seconds": round(sum(r.seconds for r in results), 1),
+            "cost": round(sum(r.usage.get("cost", 0.0) for r in results), 4),
+            "unseen_citations": sum(r.score.get("citations_unseen", 0) for r in results),
+            "invented": sum(len(r.score.get("invented_cves", [])) for r in results),
+            "errors": [f"{r.task}: {r.error}" for r in results if r.error],
+        })
+    rows.sort(key=lambda r: (-r["passed"], r["cost"]))
+    return rows
+
+
+def _outcome(r: RunResult | None) -> str:
+    if r is None:
+        return "-"
+    if r.error and "steps" not in r.error:
+        return "error"
+    return "pass" if r.score.get("pass") else "fail"
+
+
+def scorecard_markdown(rows: list[dict]) -> str:
+    head = ("| Model | Passed | 2-hop exposure | lease | conflict | os | Steps | Tokens in/out | Time | Cost | Faithful |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    body = []
+    for r in rows:
+        faithful = "yes" if r["unseen_citations"] == 0 and r["invented"] == 0 else \
+            f"no ({r['unseen_citations']} unseen cites, {r['invented']} invented)"
+        body.append(f"| `{r['model']}` | {r['passed']}/{r['tasks']} | {r['exposure']} | {r['lease']} | "
+                    f"{r['conflict']} | {r['os']} | {r['steps']} | {r['tokens_in']:,}/{r['tokens_out']:,} | "
+                    f"{r['seconds']:.0f} s | ${r['cost']:.2f} | {faithful} |")
+    return head + "\n" + "\n".join(body)
 
 
 def main() -> None:
@@ -383,9 +438,31 @@ def main() -> None:
     parser.add_argument("--db", default=os.environ.get("LOOM_DB", "loom.db"))
     parser.add_argument("--tasks", help="comma-separated subset of: " + ",".join(t.name for t in TASKS))
     parser.add_argument("--model", help="override LOOM_AGENT_MODEL / LOOM_LLM_MODEL")
+    parser.add_argument("--models", help="comma-separated models to compare (a scorecard run)")
     parser.add_argument("--out", help="write the full transcript (JSON) here")
+    parser.add_argument("--markdown", help="scorecard runs: also write a Markdown table here")
     args = parser.parse_args()
     names = [n.strip() for n in args.tasks.split(",")] if args.tasks else None
+    if args.models:
+        runs: dict[str, list[RunResult]] = {}
+        for model in [m.strip() for m in args.models.split(",") if m.strip()]:
+            try:
+                runs[model] = evaluate(args.db, names, model)
+            except Exception as exc:  # a model that cannot even start still gets a row
+                runs[model] = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
+                                         score={"pass": False}) for t in TASKS if not names or t.name in names]
+            print(summarize(runs[model], model), flush=True)
+            print(flush=True)
+        rows = scorecard(runs)
+        print(scorecard_markdown(rows))
+        if args.markdown:
+            with open(args.markdown, "w") as fh:
+                fh.write(scorecard_markdown(rows) + "\n")
+        if args.out:
+            with open(args.out, "w") as fh:
+                json.dump({m: [r.__dict__ for r in rs] for m, rs in runs.items()}, fh, indent=2, default=str)
+            print(f"transcripts: {args.out}")
+        return
     results = evaluate(args.db, names, args.model)
     model = Provider.from_env(args.model).model
     print(summarize(results, model))

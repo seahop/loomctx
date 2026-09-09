@@ -117,3 +117,21 @@ def test_live_agent_answers_the_lease_question(seeded_db):
     r = ae.evaluate(seeded_db, ["lease"])[0]
     print(ae.summarize([r], ae.Provider.from_env().model))
     assert r.error is None and r.score["pass"], r.answer
+
+
+def test_scorecard_ranks_passes_then_cost():
+    def rr(task, ok, cost, err=None):
+        r = ae.RunResult(task=task, answer="", steps=3, error=err)
+        r.usage = {"in": 100, "out": 10, "cost": cost}
+        r.score = {"pass": ok, "citations_unseen": 0}
+        return r
+    rows = ae.scorecard({
+        "pricey/good": [rr("exposure", True, 0.5), rr("lease", True, 0.2)],
+        "cheap/good": [rr("exposure", True, 0.05), rr("lease", True, 0.01)],
+        "cheap/bad": [rr("exposure", False, 0.01), rr("lease", True, 0.01)],
+        "broken/x": [rr("exposure", False, 0.0, err="LLMError: 404"), rr("lease", False, 0.0, err="LLMError: 404")],
+    })
+    assert [r["model"] for r in rows] == ["cheap/good", "pricey/good", "cheap/bad", "broken/x"]
+    assert rows[0]["cost"] == 0.06 and rows[3]["exposure"] == "error"
+    md = ae.scorecard_markdown(rows)
+    assert md.count("\n") == 5 and "| `cheap/good` | 2/2 | pass | pass |" in md
