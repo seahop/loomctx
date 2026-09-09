@@ -7,6 +7,20 @@ tools and no other help, find the data and answer faithfully** — and at
 what cost. This page is the measured answer, and the command that produced
 it, so it can be re-run when models change (they change monthly).
 
+## Short answer
+
+| If you want… | Use | Why |
+| --- | --- | --- |
+| one model to start with | **`openai/gpt-5.4-nano`** | 12/12 over three runs, a cent and ~36 s per four-task run, fewest tokens of any model |
+| the same at Google | `google/gemini-3.5-flash-lite` | 12/12, two cents, fastest at 24 s |
+| the model for when answers matter | **`anthropic/claude-sonnet-5`** | 12/12, fewest steps of any flagship, verifies and explains; the pick for the conference demo |
+| that, cheaper | `openai/gpt-5.6-sol` | 12/12 at under half Sonnet's cost |
+| open weights to self-host | `qwen/qwen3.7-plus` or `deepseek/deepseek-v4-pro` | both 12/12; Qwen cheaper and faster, DeepSeek takes the most steps |
+| a model to avoid for multi-hop | `mistral-small-2603`, `z-ai/glm-5.2` (1/3), and be cautious with `claude-haiku-4.5`, `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash` (2/3) | their misses are confident wrong answers ("no, not exposed"), fine for single-entity lookups only |
+
+Measured 2026-09-09 on OpenRouter; the evidence and the command to re-run
+it follow. Model ids age fast — five of these did not exist three months ago.
+
 ## How it is measured
 
 `python -m loom.agent_eval --models a,b,c --repeat 3 --markdown scorecard.md`
@@ -77,6 +91,33 @@ a cent; `mistral-small` fell from 4/4 to 10/12; `gpt-5.6-sol` and
 Three runs still is not many — a 2/3 and a 3/3 are one flipped run apart —
 but a 12/12 across three independent runs at a stable cost is a number
 you can plan on.
+
+## Recommendation in full
+
+- **Default agent model for Loom demos and small teams:**
+  `openai/gpt-5.4-nano` — 12/12, one cent and about 36 seconds per
+  four-task run, the fewest tokens of any model. `google/gemini-3.5-flash-lite`
+  (12/12, two cents, fastest at 24 s) is the equivalent pick if you prefer
+  Google, and `openai/gpt-5.6-luna` (12/12, three cents) the next tier up.
+- **When the questions get harder** (deeper scopes, more verification):
+  `anthropic/claude-sonnet-5` — 12/12 with the fewest steps of any flagship
+  and the most output tokens per run, i.e. it verifies and explains — or
+  `openai/gpt-5.6-sol` (12/12) at under half the cost. `deepseek-v4-pro`
+  and `qwen3.7-plus` are the 12/12 open-weight choices if you self-host.
+- **Fine for single-entity lookups, not for multi-hop on this evidence:**
+  `mistral-small-2603` and `z-ai/glm-5.2` (1/3 on the two-hop task);
+  `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash`,
+  `claude-haiku-4.5` (2/3 — usable if a wrong "no" is acceptable, which
+  in security it usually is not). From screening: `glm-5.3-flash`,
+  `deepseek-v4-flash`, `gemini-3.8-flash`, `kimi-k2.6` failed the two-hop
+  task even with 30 steps; `llama-4-maverick` cannot call tools via OpenRouter.
+- **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
+  reader, not an agent: it needs no tool calling, so any model on this
+  page works there; `gpt-5.4-nano` is the sensible default.
+
+Expect the table to age: five of these model ids did not exist three
+months ago. Re-run before quoting a number in a talk — the command is
+below and the whole three-run table cost about seven dollars.
 
 ## Screening (one run per model, 14-step cap)
 
@@ -161,33 +202,6 @@ to Sonnet 5's 275k for the same tasks.
 OpenRouter** — it wrote `[describe_namespace(namespace='netsec')]` as text.
 Not a Loom problem, but it means 0/4 here; pick a different Llama serving
 path if you need that family.
-
-## Recommendation
-
-- **Default agent model for Loom demos and small teams:**
-  `openai/gpt-5.4-nano` — 12/12, one cent and about 36 seconds per
-  four-task run, the fewest tokens of any model. `google/gemini-3.5-flash-lite`
-  (12/12, two cents, fastest at 24 s) is the equivalent pick if you prefer
-  Google, and `openai/gpt-5.6-luna` (12/12, three cents) the next tier up.
-- **When the questions get harder** (deeper scopes, more verification):
-  `anthropic/claude-sonnet-5` — 12/12 with the fewest steps of any flagship
-  and the most output tokens per run, i.e. it verifies and explains — or
-  `openai/gpt-5.6-sol` (12/12) at under half the cost. `deepseek-v4-pro`
-  and `qwen3.7-plus` are the 12/12 open-weight choices if you self-host.
-- **Fine for single-entity lookups, not for multi-hop on this evidence:**
-  `mistral-small-2603` and `z-ai/glm-5.2` (1/3 on the two-hop task);
-  `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash`,
-  `claude-haiku-4.5` (2/3 — usable if a wrong "no" is acceptable, which
-  in security it usually is not). From screening: `glm-5.3-flash`,
-  `deepseek-v4-flash`, `gemini-3.8-flash`, `kimi-k2.6` failed the two-hop
-  task even with 30 steps; `llama-4-maverick` cannot call tools via OpenRouter.
-- **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
-  reader, not an agent: it needs no tool calling, so any model on this
-  page works there; `gpt-5.4-nano` is the sensible default.
-
-Expect the table to age: five of these model ids did not exist three
-months ago. Re-run before quoting a number in a talk — the command is
-below and the whole three-run table cost about seven dollars.
 
 ## Re-running it
 
