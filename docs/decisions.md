@@ -1049,7 +1049,8 @@ adopter has on day one, and the D-036 harness made it cheap to answer.
   168/168, and every two-hop miss was a confident wrong answer rather
   than a step-out — including `mistral-small-2603`, screening's cheapest
   4/4, at 1/3. The decision table in `docs/models.md` is the repeated
-  one; screening is kept below it as provenance.
+  one; the single-run screening numbers live in this log and in git
+  history (D-041 removed them from the page).
 - Spend for the whole exercise was on the order of twelve dollars, most of
   it the two Opus 5 runs.
 
@@ -1181,10 +1182,13 @@ faithfulness check caught all three, which is its job.
 - MCP pack citations now carry a 12-hex `cite` token (the prefix the
   answer route already uses) and the server instructions say to cite by
   it, so agents copy less. Full ids stay for auditing.
-- The previous build's table stays on the page as provenance; the
-  recommendation moved from `gpt-5.4-nano` (11/12 here) to
-  `gemini-3.5-flash-lite` (12/12 on both builds) as the default, with
-  `qwen3.7-flash` as the cheapest open-weight clean pass.
+- `docs/models.md` now carries only the current build: a TL;DR, the
+  short-answer table, the method, the decision table, and the re-run
+  command. The earlier screening and previous-build tables were internal
+  iterations and live in this log and in git history. The recommendation
+  moved from `gpt-5.4-nano` (11/12 here) to `gemini-3.5-flash-lite`
+  (12/12) as the default, with `qwen3.7-flash` as the cheapest open-weight
+  clean pass.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

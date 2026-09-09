@@ -147,7 +147,7 @@ gateway, Kafka, shippers), context packs with scopes, relation chains and
 coverage reporting (`/v1/ask`, `/v1/expand`), provider-flexible answering
 (`/v1/answer`), an MCP server for agents, async enrichment, opt-in
 Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV, NVD,
-EPSS — `docs/real-data.md`) and with twenty LLM agents over MCP
+EPSS — `docs/real-data.md`) and with eighteen LLM agents over MCP
 (`docs/models.md`). Demo script: `docs/demo.md`. Milestones:
 `docs/roadmap.md` (conference: end of October 2026).
 
