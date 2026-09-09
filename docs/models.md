@@ -115,8 +115,15 @@ you can plan on.
   reader, not an agent: it needs no tool calling, so any model on this
   page works there; `gpt-5.4-nano` is the sensible default.
 
-Expect the table to age: five of these model ids did not exist three
-months ago. Re-run before quoting a number in a talk — the command is
+**With embeddings live (D-039).** The tables above were measured with
+keyword ranking (no embedder configured). After embedding the corpus and
+attributing excerpts to their entities, three more runs each:
+`openai/gpt-5.4-nano` 12/12 (3/3 on the two-hop task, $0.01, 37 s per
+run), `anthropic/claude-sonnet-5` 11/12 (2/3, $0.61, 106 s). Before the
+excerpt attribution fix nano was 0/2 — it credited one CVE's advisory to
+the CVEs listed next to it — which is the kind of thing this harness
+exists to catch. Expect the table to age: five of these model ids did not
+exist three months ago. Re-run before quoting a number in a talk — the command is
 below and the whole three-run table cost about seven dollars.
 
 ## Screening (one run per model, 14-step cap)

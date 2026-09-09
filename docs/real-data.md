@@ -171,6 +171,63 @@ the hint, and then wanders one CVE at a time. Haiku also did something the
 single-shot answer had not: it checked a high-EPSS CVE and correctly ruled
 it out because no KEV fact existed for it.
 
+## Documents (D-039, 2026-09-09)
+
+The last feature never exercised on real data: the 1,699 KEV advisories
+were loaded but never embedded, and every agent run had hit "no embedder
+configured". OpenRouter turned out to serve embeddings, so one key covers
+everything; the run took the afternoon and changed more than expected.
+
+| | |
+| --- | --- |
+| Embedded | 465,085 observations + 3,601 document chunks, `openai/text-embedding-3-small` at 512 dims via OpenRouter |
+| Throughput | four sharded workers at 512 per call: ~13k vectors/min, about 40 minutes, ~$0.40 |
+| Store size | 3.4 GB at 512 dims packed (the JSON-text format it replaced had reached 10.7 GB at half the rows) |
+| Ask latency with semantic ranking | first ask of a question 270–350 ms (one embedding call), repeats 12–20 ms (query cache); keyword-only was 2–5 ms |
+| Semantic entity search | 650–900 ms over 465k vectors |
+| Two-hop scope, web-01 | 1.3 s (was 0.5 s keyword-only) |
+
+**What it exposed, and what changed:**
+
+1. **The advisories could never surface.** Excerpts come from documents
+   that a pack's observations *cite*, and the connector's KEV claims did
+   not cite their advisory — a claim cannot know an artifact id at emit
+   time. `Provenance.artifact_event_id` now lets a claim cite a document
+   by the sender's own event id, resolved at ingest; the connector emits
+   the advisory first and every KEV claim cites it. The dev corpus had to
+   be reloaded: observations are append-only and deduped by event id, so a
+   citation cannot be retrofitted onto an existing row.
+2. **Vectors as JSON text bloated the store tenfold.** Schema v3 stores
+   packed float32 in both stores, reads legacy rows, and `LOOM_EMBED_DIM`
+   asks Matryoshka models for a smaller output.
+3. **A `--once` worker exited on a failed first tick**, mistaking a locked
+   database for a drained backlog. Failures are now distinct from "no
+   work", opens retry, and an up-to-date open takes no write lock.
+4. **One ask stalled 30 s behind the embedder.** Query embeddings are now
+   single-attempt with a 10 s timeout and an ask degrades to keyword
+   ranking when the provider fails — the venue-network failure mode.
+5. **A small model misattributed an excerpt.** With embeddings live,
+   `gpt-5.4-nano` fell from 3/3 to 0/2 on the two-hop task: the pack now
+   carried the KEV advisory for `CVE-2026-53362`, and nano credited it to
+   the kernel CVEs listed next to it. An excerpt now opens with the
+   entities whose claims cite its document (`[about cve:CVE-2026-53362]
+   "..."`). After that: nano 12/12 over three runs, Sonnet 5 11/12 (one
+   "stopped at the software list" miss, the same variance as before).
+
+With excerpts in the pack the two-hop answer improved in kind, not only in
+score: Sonnet's passing runs quote the advisory's required action and due
+date next to the chain. What semantic ranking costs is the budget mix —
+at 1,200 tokens the pack was 574 conflicts / 295 excerpts / 142 relations
+/ 188 facts — and 300 ms of provider latency on the first ask of each
+question.
+
+**What semantic entity search is not yet good for:** "ransomware
+campaigns against web servers" returns KEV CVEs whose best-matching fact
+is `ransomware_campaign_use Unknown` — the vectors are over rendered
+facts, so the search finds the predicate name, not the meaning. Searching
+the document chunks instead (the advisories say which campaigns) is the
+obvious next step for `find_related`.
+
 ## What is still open (roadmap phase 8)
 
 - ~~Hub truncation is silent.~~ Fixed (D-038): packs carry `truncated`

@@ -211,6 +211,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   `describe_namespace`, the empty-namespace error, `LOOM_MCP_NAMESPACE`
 - ✅ Model scorecard (D-037, 2026-09-09): `--models` mode with billed cost;
   twenty OpenRouter models across price tiers measured — `docs/models.md`
+- ✅ Documents on real data (D-039, 2026-09-09): claims cite documents by
+  event id, KEV advisories embedded and surfacing as attributed excerpts,
+  packed vector storage, worker robustness, query-embedding fallback
+- ⬜ `find_related` over document chunks (vectors over rendered facts find
+  predicate names, not meaning)
 - ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
   the obvious non-security one)
 

@@ -1120,6 +1120,21 @@ run hit "no embedder configured". Embedding them exposed a gap first.
   JSON it had to parse. `LOOM_EMBED_DIM` asks a Matryoshka model for a
   smaller output (512 for this corpus: a third of the storage at most of
   the quality).
+- **A stalled embedder must not stall an ask.** Query embeddings are
+  single-attempt with a 10 s timeout (`LOOM_EMBED_QUERY_TIMEOUT`) and any
+  failure degrades that ask to keyword ranking with a warning; the batch
+  path keeps its 120 s × 3. One ask had waited 30 s.
+- **Excerpts name who they are about.** `[about cve:X] "..."` — the
+  entities whose observations cite the document. Without it a small model
+  attributed one CVE's advisory to its neighbours and went from 3/3 to
+  0/2 on the two-hop task; with it, 12/12.
+- **Worker robustness under several writers:** a failed job is `FAILED`,
+  not zero work, so `--once` no longer exits on a failed first tick
+  (bounded retries, non-zero exit after 20); store opens retry on lock; an
+  up-to-date SQLite open takes no write lock; busy timeout 15 s.
+- `/v1/entities/search` and `/v1/entities/semantic` accept `namespace`
+  as a query parameter as well as the header — the docs implied the
+  parameter and it silently answered for `default`.
 - Measurements with embeddings live — excerpt retrieval, `find_related`,
   semantic ranking versus the keyword-only scorecard — are in
   `docs/real-data.md` under "Documents".
