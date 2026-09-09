@@ -360,7 +360,10 @@ async def _session(db: str, fn):
 def evaluate(db: str, task_names: list[str] | None, model: str | None = None,
              caller: Callable = call_model) -> list[RunResult]:
     from .store.factory import store_from_url
-    provider = Provider.from_env(model)
+    # a scripted caller (tests) needs no provider: CI has no LOOM_LLM_* and
+    # must not need one to exercise the loop
+    provider = (Provider.from_env(model) if caller is call_model
+                else Provider("openai", "scripted://", model or "scripted", None))
     tasks = [t for t in TASKS if not task_names or t.name in task_names]
     store = store_from_url(db)
     try:
