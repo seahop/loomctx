@@ -356,3 +356,50 @@ def test_scope_facts_arrive_with_their_path(tmp_path):
     assert [k for k, txt in texts if "runs_software" in txt or "affects" in txt] == ["relation", "relation"]
     assert sum(1 for k, _ in texts if k == "relation") == 2   # edges ship once
     store.close()
+
+
+def test_naming_the_subject_does_not_boost_its_own_facts(tmp_path):
+    """D-036: 'is web-01 exposed to anything exploited in the wild?' — every
+    recent login *about web-01* matched as many question words as the KEV
+    fact two hops away and outranked it on recency. The root subject's own
+    name is the frame of the question, not its topic."""
+    from loom.contracts import ScopeSpec
+    store = SqliteStore(tmp_path / "frame.db")
+    old, new = datetime(2026, 5, 1, tzinfo=timezone.utc), datetime(2026, 9, 2, tzinfo=timezone.utc)
+    host, prod, cve = (EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx"),
+                       EntityRef(type="cve", key="CVE-2026-7"))
+    claims = [
+        ClaimIn(namespace="ns", subject=host, predicate="runs_software", object=prod, source="inv", observed_at=old),
+        ClaimIn(namespace="ns", subject=cve, predicate="affects", object=prod, source="nvd", observed_at=old),
+        ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True, source="kev", observed_at=old),
+    ] + [ClaimIn(namespace="ns", subject=host, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                 source="auth", observed_at=new) for i in range(40)]
+    store.record_claims(claims)
+    scope = ScopeSpec(subjects=[host], expand=["runs_software", "affects"], depth=2)
+    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, budget=400,
+                                       question="is host web-01 exposed to anything exploited in the wild?"))
+    assert any("exploited_in_wild" in i.text for i in pack.items), [i.text for i in pack.items]
+    # a question that is ONLY the subject's name keeps its tokens (nothing else to rank by)
+    pack = build_pack(store, AskRequest(namespace="ns", subject=host, question="web-01", budget=400))
+    assert pack.items
+    store.close()
+
+
+def test_handles_are_compact_and_legacy_handles_still_decode():
+    import base64
+    import json as _json
+    from loom.context import encode_handle
+    ref = EntityRef(type="product", key="linux:linux_kernel")
+    h = encode_handle("netsec", ref, "affects", None, datetime(2026, 8, 20, tzinfo=timezone.utc))
+    legacy_len = len("h1_" + base64.urlsafe_b64encode(_json.dumps(
+        {"ns": "netsec", "subject": ref.model_dump(), "predicate": "affects", "as_of": None,
+         "valid_at": "2026-08-20T00:00:00+00:00"}, sort_keys=True).encode()).decode().rstrip("="))
+    assert len(h) < legacy_len * 0.8
+    assert len(encode_handle("netsec", ref, "affects", None)) < 100
+    meta = decode_handle(h)
+    assert meta["ns"] == "netsec" and meta["subject"] == {"type": "product", "key": "linux:linux_kernel"}
+    assert meta["predicate"] == "affects" and meta["valid_at"].startswith("2026-08-20") and "as_of" not in meta
+    legacy = "h1_" + base64.urlsafe_b64encode(_json.dumps(
+        {"ns": "netsec", "subject": {"type": "host", "key": "web-01"}, "predicate": "runs_os", "as_of": None}
+    ).encode()).decode().rstrip("=")
+    assert decode_handle(legacy)["subject"]["key"] == "web-01"

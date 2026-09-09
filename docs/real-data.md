@@ -122,6 +122,53 @@ facts that were also in the pack — the rendered text `exploited_in_wild
 True (per cisa-kev)` reads less naturally than a score. A friendlier
 rendering of boolean facts is a small follow-up.
 
+## An agent on its own (D-036, 2026-09-09)
+
+`/v1/answer` tests a model as a reader of a pack Loom built. The demo's
+promise is an agent that finds the data itself, so
+`python -m loom.agent_eval --db /data/loom.db` runs a real model over the
+real MCP transport (stdio) with four tasks and no pre-built scope. Ground
+truth is computed from the store; a task passes only if the right entities
+are named, none are invented, and every cited id was seen in a tool result
+during that run.
+
+| Run | Model | Surface | exposure (2-hop) | lease | conflict | os |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | deepseek-chat-v3.1 | as shipped | FAIL — dropped `namespace` after 2 calls, 12 steps against an empty namespace, 130k tokens | PASS | PASS | PASS* |
+| 2 | deepseek-chat-v3.1 | + `list_namespaces` / `describe_namespace`, empty-namespace error | FAIL — right `ask_scope` on the first try, but the 69k-char result was mostly the 1,077-entity subject list and held no KEV fact | PASS | PASS | PASS |
+| 4 | deepseek-chat-v3.1 | + agent pack view, subject-name ranking fix, compact handles | FAIL — called `ask_scope` without `expand_predicates`, reached products only | PASS | PASS | PASS |
+| 5 | claude-haiku-4.5 | same as run 4 | **PASS** — 2 of 3 KEV CVEs named, 0 invented, 6/6 citations faithful, 13 steps, 50 s | PASS 7 s | PASS 9 s | PASS 8 s |
+
+\* run 1's os "failure" was the scorer wanting `ubuntu-22.04` verbatim; the agent had written "Ubuntu 22.04".
+
+What the runs changed in the MCP surface, each with a test:
+
+- **Orientation tools.** `list_namespaces` (entity counts by type) and
+  `describe_namespace` (entity types, registered predicates with
+  descriptions and containment, a multi-hop hint). Before them, an agent
+  had no way to learn that `affects` or `exploited_in_wild` existed.
+- **An empty namespace is an error, not an empty list.** Run 1 lost twelve
+  steps to a dropped argument; now the tool says which namespaces hold
+  data. `LOOM_MCP_NAMESPACE` makes the argument optional for a single-team
+  server.
+- **The agent view of a pack.** Items first, no null citation fields,
+  reached subjects summarized (20 shown + a total). The same two-hop pack
+  went from 69k to 18k chars, and handle ids from 131 to 83 chars.
+- **Naming the subject is not the topic.** "Is web-01 exposed to anything
+  exploited?" made every recent login *about web-01* match as many question
+  words as the KEV fact two hops away, and recency did the rest; the pack
+  held no `exploited_in_wild` fact at all. The root subjects' own name
+  tokens are now excluded from relevance. After the fix the default-budget
+  pack carries `host:web-01 runs_software linux_kernel` → `CVE-2026-53362
+  affects linux_kernel` → `CVE-2026-53362 exploited_in_wild True`.
+
+What is honest about the remaining gap: the surface now delivers the
+answer in one correctly formed call, and a capable small model makes that
+call; a weaker tool-calling model still omits `expand_predicates` despite
+the hint, and then wanders one CVE at a time. Haiku also did something the
+single-shot answer had not: it checked a high-EPSS CVE and correctly ruled
+it out because no KEV fact existed for it.
+
 ## What is still open (roadmap phase 8)
 
 - **Hub truncation is silent.** Scope expansion gathers a node's newest

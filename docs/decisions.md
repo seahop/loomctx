@@ -962,6 +962,61 @@ and one product carries two CPE keys across eras (`nginx:nginx` /
 work, not connector work; the 1,699 KEV documents were loaded but not yet
 embedded in this pass.
 
+## D-036 · Agent end-to-end evaluation, and what it changed in the MCP surface (2026-09-09)
+
+`/v1/answer` tests a model as a *reader* of a pack Loom built; the demo's
+promise is an *agent* that finds the data itself. `python -m loom.agent_eval`
+runs a real model over the real MCP transport (stdio, the transport
+`claude mcp add` uses) against the real corpus with four tasks and no
+pre-built scope. Ground truth comes from the store, never a fixture; the
+score is: right entities named, none invented, every cited id seen in a
+tool result during that run. The harness is provider-agnostic (OpenAI-
+compatible tool calling or Anthropic tool use), CI-tested against a
+scripted model, and live only on request.
+
+The first live run (deepseek-chat-v3.1, four tasks) passed the lease and
+conflict questions with correct, faithful citations and failed the
+two-hop exposure question — not on retrieval: after two calls the agent
+stopped passing `namespace`, every later query hit the empty `default`
+namespace, Loom truthfully returned nothing, and the agent spent twelve
+steps and 130k input tokens looking for CVEs that were one argument away.
+That is a surface problem, so the surface changed:
+
+- **`list_namespaces` and `describe_namespace` tools** — entity types with
+  counts, registered predicates with descriptions and containment flags,
+  and a hint for multi-hop `ask_scope`. Needs `GraphStore.namespace_summary()`
+  (one GROUP BY; sharded stores merge).
+- **An empty namespace is an error, not an empty list**: every read tool
+  checks the namespace holds data and names the ones that do.
+- **`LOOM_MCP_NAMESPACE`** sets the default namespace for a single-team
+  deployment, so the argument becomes optional.
+- **Server instructions** tell agents to orient first and to pass the same
+  namespace every call; the harness forwards them like a real client does.
+- **`expand` explains itself** when handed an observation id instead of a
+  handle (the agent tried that once).
+- **Handles omit a null `as_of`** — agents carry every handle in context.
+
+The second run passed three of four and produced the next three changes:
+the two-hop `ask_scope` result was 69k chars of which 3.7k was fact text
+(the 1,077-entity subject list came first and dwarfed everything), and the
+pack held no KEV fact because the question named the subject and every
+recent fact *about the subject* tied the KEV fact on keyword overlap.
+
+- **Agent view of packs** (`_agent_view` in the MCP server): items first,
+  `exclude_none` citations, subjects summarized to 20 plus a total. The
+  HTTP contract is unchanged; this is presentation. 69k → 18k chars.
+- **Root subjects are the frame, not the topic**: their name tokens are
+  removed from the question's relevance tokens (kept only if nothing else
+  remains). Applies to single-subject asks too — "what os does web-01
+  run?" no longer rewards every fact for mentioning web-01.
+- **Compact handles**: short keys, positional subject, no nulls; legacy
+  long-form handles still decode. 131 → 83 chars average.
+
+Outcome table (five runs, two models) in `docs/real-data.md`. Claude
+Haiku 4.5 passes all four tasks including the two-hop question; the
+weaker model still omits `expand_predicates` and wanders. The surface is
+now judged adequate: it answers a correctly formed call in one shot.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

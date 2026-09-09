@@ -819,3 +819,12 @@ def test_observations_for_merges_both_sides_newest_first_within_limit(store):
     top = store.observations_for("ns", x, limit=4)
     assert [o.observed_at.hour for o in top] == [12, 5, 4, 3]
     assert {o.predicate for o in top} == {"peer_of", "assigned_to", "logged_in_by"}
+
+
+def test_namespace_summary_counts_entities_by_type(store):
+    """D-036: what an agent needs before it can ask anything."""
+    assert store.namespace_summary() == {}
+    store.record_claims([login_claim("alpha"), login_claim("alpha"), login_claim("beta")])
+    summary = store.namespace_summary()
+    assert set(summary) == {"alpha", "beta"}
+    assert summary["alpha"] == {"host": 1, "user": 1} and summary["beta"] == {"host": 1, "user": 1}

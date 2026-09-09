@@ -1029,6 +1029,16 @@ class SqliteStore(GraphStore):
                                ("o.recorded_at", "o.id")):
             yield common.row_to_observation(row)
 
+    def namespace_summary(self) -> dict[str, dict[str, int]]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT namespace, type, COUNT(*) AS n FROM entities"
+                " GROUP BY namespace, type ORDER BY namespace, type").fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for r in rows:
+            out.setdefault(r["namespace"], {})[r["type"]] = int(r["n"])
+        return out
+
     def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
         sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = ?" if namespace else "")
         for row in self._pages(sql, (namespace,) if namespace else (),

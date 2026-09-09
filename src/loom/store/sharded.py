@@ -130,6 +130,14 @@ class ShardedStore(GraphStore):
                            lease: tuple[str, float] | None = None) -> list[tuple[str, EntityRef, int]]:
         return self._fill("dossier_candidates", limit, min_new, min_total, lease=lease)
 
+    def namespace_summary(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for s in self._all:
+            for ns, types in s.namespace_summary().items():
+                for etype, n in types.items():
+                    out.setdefault(ns, {})[etype] = out.get(ns, {}).get(etype, 0) + n
+        return out
+
     def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
         yield from self._iter("iter_observations", namespace)
 

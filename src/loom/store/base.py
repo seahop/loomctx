@@ -68,6 +68,11 @@ class GraphStore(ABC):
     def get_schema(self, namespace: str) -> SchemaRegistration | None: ...
 
     @abstractmethod
+    def namespace_summary(self) -> dict[str, dict[str, int]]:
+        """Every namespace that holds entities -> {entity type: count}. What
+        an agent needs to orient itself before it can ask anything (D-036)."""
+
+    @abstractmethod
     def record_claim(self, claim: ClaimIn) -> Observation:
         """Append one observation (auto-creating subject/object entities).
 

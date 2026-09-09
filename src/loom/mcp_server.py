@@ -26,6 +26,7 @@ Requires the `mcp` extra (installed in the image).
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 from typing import Any
 
@@ -47,6 +48,10 @@ _llm_loaded = False
 _llm = None
 _auth: AuthConfig | None = None
 _transport = "stdio"
+# The namespace tools use when a call names none. A live agent run (D-036)
+# dropped the argument after two calls and spent twelve steps querying an
+# empty 'default'; a deployment that serves one team sets this once.
+_DEFAULT_NS = os.environ.get("LOOM_MCP_NAMESPACE", "").strip() or "default"
 
 
 def _get_embedder():
@@ -138,13 +143,17 @@ class KeyGate:
 mcp = MCPServer(
     "loom",
     instructions=(
-        "Loom is a provenance-tracked context engine. Use find_entity to turn "
-        "names into 'type:key' handles (find_related when you only know what "
-        "you're looking for, not its name), ask/ask_scope for budgeted cited "
-        "context (start small — expand pulls threads deeper via handles), "
-        "record_claim to write back facts you learn, and answer for a "
-        "server-side LLM synthesis when one is configured. Conflict items "
-        "mean sources disagree — never resolve them silently."
+        "Loom is a provenance-tracked context engine. Start with "
+        "list_namespaces and describe_namespace to learn what data exists "
+        "(entity types, predicates, and which relations to expand). Use "
+        "find_entity to turn names into 'type:key' handles (find_related when "
+        "you only know what you're looking for, not its name), ask/ask_scope "
+        "for budgeted cited context (start small — expand pulls threads deeper "
+        "via handles; multi-hop questions are ask_scope with "
+        "expand_predicates), record_claim to write back facts you learn, and "
+        "answer for a server-side LLM synthesis when one is configured. Pass "
+        "the same namespace on every call. Conflict items mean sources "
+        "disagree — never resolve them silently."
     ),
 )
 
@@ -168,6 +177,33 @@ def configure(store: GraphStore, auth: AuthConfig | None = None,
     _transport = transport
 
 
+_SUBJECTS_SHOWN = 20
+
+
+def _agent_view(pack) -> dict:
+    """A ContextPack as an agent should read it: items first, no null
+    citation fields, and the reached-subject list summarized. The HTTP
+    contract is unchanged; this is presentation. On a 1,077-entity scope
+    the full pack was 69k chars of which 3.7k was fact text, and the subject
+    list came before the items (D-036)."""
+    d = pack.model_dump(mode="json", exclude_none=True)
+    subjects = d.get("subjects", [])
+    view = {
+        "namespace": d.get("namespace"), "question": d.get("question"),
+        "budget": d.get("budget"), "items": d.get("items", []),
+        "handles": d.get("handles", []), "omitted_handles": d.get("omitted_handles", 0),
+        "subjects_total": len(subjects),
+        "subjects": subjects[:_SUBJECTS_SHOWN],
+    }
+    if len(subjects) > _SUBJECTS_SHOWN:
+        view["subjects_note"] = (f"{len(subjects) - _SUBJECTS_SHOWN} more reached entities not listed; "
+                                 "the items above already cover the ones relevant to the question")
+    for key in ("subject", "as_of", "valid_at"):
+        if d.get(key) is not None:
+            view[key] = d[key]
+    return view
+
+
 def _parse_ref(handle: str) -> EntityRef:
     etype, sep, key = handle.partition(":")
     if not sep or not etype or not key:
@@ -181,13 +217,56 @@ def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _known_namespace(namespace: str) -> None:
+    """A query against a namespace that holds nothing is almost always a
+    dropped argument, not an empty answer — say so, and say what exists."""
+    summary = _get_store().namespace_summary()
+    if namespace not in summary and _get_store().get_schema(namespace) is None:
+        known = ", ".join(sorted(summary)) or "none yet"
+        raise ValueError(f"namespace {namespace!r} holds no data; namespaces with data: {known}"
+                         " — pass namespace=... on every call")
+
+
 # ------------------------------------------------------------------- tools #
 
-def find_entity(query: str, namespace: str = "default", limit: int = 10,
+def list_namespaces(ctx: Context = None) -> list[dict]:
+    """The namespaces this Loom holds, with entity counts by type — call this
+    first when you don't know where the data lives."""
+    return [{"namespace": ns, "entities": types, "total": sum(types.values())}
+            for ns, types in sorted(_get_store().namespace_summary().items())]
+
+
+def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> dict:
+    """What a namespace contains and how it is connected: entity types with
+    counts, and the registered predicates (description, allowed object types,
+    whether scopes follow it by default). Read this before choosing
+    expand_predicates for a multi-hop ask_scope."""
+    _grant(ctx, namespace, "r")
+    _known_namespace(namespace)
+    store = _get_store()
+    schema = store.get_schema(namespace)
+    counts = store.namespace_summary().get(namespace, {})
+    return {
+        "namespace": namespace,
+        "entity_types": [
+            {"name": t, "count": n,
+             "description": next((e.description for e in (schema.entity_types if schema else [])
+                                  if e.name == t), "")}
+            for t, n in sorted(counts.items(), key=lambda kv: -kv[1])
+        ],
+        "predicates": [p.model_dump(mode="json") for p in (schema.predicates if schema else [])],
+        "strict": bool(schema and schema.strict),
+        "hint": "ask_scope(subjects=[...], expand_predicates=[...], depth=2) follows the named "
+                "predicates in both directions: host -runs_software-> product <-affects- cve.",
+    }
+
+
+def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
                 ctx: Context = None) -> list[dict]:
     """Resolve a name or key fragment to entity handles. Returns matches as
     'type:key' handles usable with the other tools (exact match first)."""
     grant = _grant(ctx, namespace, "r")
+    _known_namespace(namespace)
     return [
         {
             "handle": f"{e.type}:{e.key}",
@@ -200,7 +279,7 @@ def find_entity(query: str, namespace: str = "default", limit: int = 10,
     ]
 
 
-def find_related(question: str, namespace: str = "default", limit: int = 10,
+def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
                  ctx: Context = None) -> dict:
     """Entities related to a question by MEANING rather than by name
     ("what looks exploitable?", "who touched the finance systems?") — use
@@ -219,7 +298,7 @@ def ask(
     subject: str,
     question: str,
     budget: int = 800,
-    namespace: str = "default",
+    namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
     ctx: Context = None,
@@ -232,6 +311,7 @@ def ask(
     grant = _grant(ctx, namespace, "r")
     ref = _parse_ref(subject)
     _gate_type(grant, ref.type)
+    _known_namespace(namespace)
     req = AskRequest(
         namespace=namespace,
         subject=ref,
@@ -240,9 +320,8 @@ def ask(
         as_of=_parse_time(as_of),
         valid_at=_parse_time(valid_at),
     )
-    return build_pack(
-        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)
-    ).model_dump(mode="json")
+    return _agent_view(build_pack(
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)))
 
 
 def ask_scope(
@@ -251,7 +330,7 @@ def ask_scope(
     expand_predicates: list[str] | None = None,
     depth: int = 1,
     budget: int = 1200,
-    namespace: str = "default",
+    namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
     ctx: Context = None,
@@ -265,6 +344,7 @@ def ask_scope(
     refs = [_parse_ref(s) for s in subjects]
     for ref in refs:
         _gate_type(grant, ref.type)
+    _known_namespace(namespace)
     req = AskRequest(
         namespace=namespace,
         scope=ScopeSpec(subjects=refs, expand=expand_predicates or [], depth=depth),
@@ -273,19 +353,23 @@ def ask_scope(
         as_of=_parse_time(as_of),
         valid_at=_parse_time(valid_at),
     )
-    return build_pack(
-        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)
-    ).model_dump(mode="json")
+    return _agent_view(build_pack(
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)))
 
 
 def expand(handle: str, budget: int = 800, ctx: Context = None) -> dict:
     """Pull one thread deeper: pass an expansion handle id from a previous
-    ask/ask_scope result to fetch the observations it stands for."""
-    meta = decode_handle(handle)
+    ask/ask_scope result (the `id` of an entry in its `handles` list) to
+    fetch the observations it stands for."""
+    try:
+        meta = decode_handle(handle)
+    except ValueError as exc:
+        raise ValueError(f"{exc}: expand takes the `id` of an entry in a pack's `handles` list "
+                         "(it starts with h1_ or h2_), not an observation id or an entity handle; "
+                         "for more about an entity use ask, for a raw record use get_observations") from exc
     grant = _grant(ctx, meta["ns"], "r")
     _gate_type(grant, str(meta["subject"].get("type", "")))
-    return expand_pack(_get_store(), handle, budget,
-                       allowed_types=_allowed(grant)).model_dump(mode="json")
+    return _agent_view(expand_pack(_get_store(), handle, budget, allowed_types=_allowed(grant)))
 
 
 def record_claim(
@@ -296,7 +380,7 @@ def record_claim(
     object_ref: str | None = None,
     object_value: str | float | int | bool | None = None,
     confidence: float = 1.0,
-    namespace: str = "default",
+    namespace: str = _DEFAULT_NS,
     valid_from: str | None = None,
     valid_to: str | None = None,
     ctx: Context = None,
@@ -334,7 +418,7 @@ def record_claim(
 
 
 def get_observations(
-    subject: str, namespace: str = "default", limit: int = 50, ctx: Context = None
+    subject: str, namespace: str = _DEFAULT_NS, limit: int = 50, ctx: Context = None
 ) -> dict:
     """Raw observations touching an entity (audit/debug — prefer ask for
     focused context)."""
@@ -359,7 +443,7 @@ def answer(
     question: str,
     subject: str | None = None,
     budget: int = 1200,
-    namespace: str = "default",
+    namespace: str = _DEFAULT_NS,
     valid_at: str | None = None,
     ctx: Context = None,
 ) -> dict:
@@ -392,11 +476,13 @@ def answer(
     return {
         "answer": resp.answer,
         "model": resp.model,
-        "pack": resp.pack.model_dump(mode="json"),
+        "pack": _agent_view(resp.pack),
     }
 
 
 TOOLS = (
+    list_namespaces,
+    describe_namespace,
     find_entity,
     find_related,
     ask,

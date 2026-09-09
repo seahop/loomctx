@@ -12,6 +12,8 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 
 | Tool | Purpose |
 | --- | --- |
+| `list_namespaces()` | Where the data is: every namespace with entity counts by type (D-036) |
+| `describe_namespace(namespace)` | How it connects: entity types with counts, registered predicates (descriptions, object types, containment) and a hint for multi-hop `ask_scope` |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
 | `find_related(question)` | Entities related by meaning, each with its cited matching fact (needs `LOOM_EMBED_*`) |
 | `ask(subject, question, budget, as_of?, valid_at?)` | Budgeted, cited context on one entity (`as_of` = known at T, `valid_at` = true at T) |
@@ -20,6 +22,22 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `record_claim(subject, predicate, ..., object_ref \| object_value)` | Agents write back facts they learn |
 | `get_observations(subject)` | Raw audit view |
 | `answer(question, subject?)` | Server-side LLM synthesis (guides to `ask` when no LLM is configured) |
+
+Every tool takes a `namespace`; a call against a namespace that holds no
+data is an *error naming the namespaces that do*, not an empty list — a
+live agent run dropped the argument after two calls and spent twelve steps
+querying an empty `default` (D-036). A deployment that serves one team
+sets `LOOM_MCP_NAMESPACE=netsec` on the server and the argument becomes
+optional.
+
+**Measuring an agent against Loom** (D-036): `python -m loom.agent_eval
+--db /data/loom.db` runs a real model as an agent over the real MCP
+transport with no pre-built scope — it must find the data, choose
+`ask_scope` and its `expand_predicates`, and answer with citations. Ground
+truth is computed from the store; the score checks the right entities were
+named, none were invented, and every cited id was actually seen in a tool
+result. Provider from `LOOM_LLM_*`, model override `LOOM_AGENT_MODEL`
+(tool-calling required). Results and what they changed: `docs/real-data.md`.
 
 Hook up a local agent (stdio, spawned per session — nothing on the host):
 

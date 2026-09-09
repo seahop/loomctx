@@ -191,3 +191,64 @@ def test_find_related_by_meaning(store, monkeypatch):
         assert out["matches"][0]["evidence"]["citations"]
     finally:
         mcp_server._embedder_loaded = False
+
+
+def test_list_and_describe_namespaces(store):
+    """D-036: an agent can discover where the data is and how it connects."""
+    from loom.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[
+        PredicateDef(name="member_of", object_types=["domain"], containment=True)]))
+    listed = mcp_server.list_namespaces()
+    assert listed == [{"namespace": "default", "entities": {"domain": 1, "host": 2, "user": 2}, "total": 5}]
+    desc = mcp_server.describe_namespace("default")
+    assert [t["name"] for t in desc["entity_types"]][:1] in (["host"], ["user"])   # sorted by count
+    assert desc["predicates"][0]["name"] == "member_of" and desc["predicates"][0]["containment"]
+    assert "expand_predicates" in desc["hint"]
+
+
+def test_unknown_namespace_is_an_error_not_an_empty_answer(store):
+    """D-036: a live agent dropped the namespace argument and spent twelve
+    steps querying an empty 'default'. Now it is told, and told what exists."""
+    with pytest.raises(ValueError, match="holds no data.*default"):
+        mcp_server.find_entity("web-01", namespace="nowhere")
+    with pytest.raises(ValueError, match="pass namespace"):
+        mcp_server.ask("host:web-01", "?", namespace="nowhere")
+    with pytest.raises(ValueError):
+        mcp_server.describe_namespace("nowhere")
+
+
+def test_expand_explains_what_a_handle_is(store):
+    with pytest.raises(ValueError, match="handles.*list.*h1_"):
+        mcp_server.expand("fb5945447eaf409e85fd0f2422b422c8")
+
+
+def test_default_namespace_comes_from_the_environment(store, monkeypatch):
+    import importlib
+    monkeypatch.setenv("LOOM_MCP_NAMESPACE", "default")
+    reloaded = importlib.reload(mcp_server)
+    try:
+        reloaded.configure(store)
+        assert reloaded._DEFAULT_NS == "default"
+        assert reloaded.find_entity("web-01")[0]["handle"] == "host:web-01"
+        monkeypatch.setenv("LOOM_MCP_NAMESPACE", "elsewhere")
+        reloaded = importlib.reload(mcp_server)
+        assert reloaded.ask.__defaults__ is not None and "elsewhere" in reloaded.ask.__defaults__
+    finally:
+        monkeypatch.delenv("LOOM_MCP_NAMESPACE", raising=False)
+        importlib.reload(mcp_server).configure(store)
+
+
+def test_pack_view_is_shaped_for_agents(store):
+    """D-036: items first, no null citation fields, reached subjects summarized."""
+    view = mcp_server.ask_scope(["domain:corp.local"], "who logged in?", expand_predicates=["member_of"],
+                                depth=1, budget=2000)
+    keys = list(view)
+    assert keys.index("items") < keys.index("subjects") and view["subjects_total"] == 3
+    assert all(None not in c.values() for i in view["items"] for c in i["citations"])
+    assert "omitted_handles" in view and "subjects_note" not in view
+    mcp_server._SUBJECTS_SHOWN, saved = 1, mcp_server._SUBJECTS_SHOWN
+    try:
+        view = mcp_server.ask_scope(["domain:corp.local"], "who?", expand_predicates=["member_of"], depth=1)
+        assert len(view["subjects"]) == 1 and "2 more" in view["subjects_note"]
+    finally:
+        mcp_server._SUBJECTS_SHOWN = saved

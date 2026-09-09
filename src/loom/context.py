@@ -262,18 +262,17 @@ def encode_handle(
 ) -> str:
     """`excerpt` = {"artifact_id", "seq", "model"} makes an excerpt handle:
     expanding it returns the cited passage with its neighbours."""
-    payload = {
-        "ns": namespace,
-        "subject": subject.model_dump(),
-        "predicate": predicate,
-        "as_of": as_of.isoformat() if as_of else None,
-    }
+    # Compact keys and no nulls: agents carry every handle of every pack in
+    # their context, and the long form averaged 131 chars per id (D-036).
+    payload: dict = {"n": namespace, "s": [subject.type, subject.key], "p": predicate}
+    if as_of is not None:
+        payload["a"] = as_of.isoformat()
     if valid_at is not None:
-        payload["valid_at"] = valid_at.isoformat()
+        payload["v"] = valid_at.isoformat()
     if excerpt is not None:
-        payload["excerpt"] = excerpt
+        payload["x"] = excerpt
     raw = base64.urlsafe_b64encode(
-        json.dumps(payload, sort_keys=True).encode()
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     ).decode().rstrip("=")
     secret = _handle_secret()
     if secret is None:
@@ -308,7 +307,19 @@ def decode_handle(handle: str) -> dict:
         payload = json.loads(base64.urlsafe_b64decode(raw))
     except (ValueError, UnicodeDecodeError) as exc:  # binascii.Error is a ValueError
         raise ValueError("malformed handle payload") from exc
-    if not isinstance(payload, dict) or not {"ns", "subject", "predicate"} <= payload.keys():
+    if not isinstance(payload, dict):
+        raise ValueError("malformed handle payload")
+    if {"n", "s", "p"} <= payload.keys():  # compact form
+        s = payload["s"]
+        if not (isinstance(s, list) and len(s) == 2 and all(isinstance(x, str) for x in s)) \
+                or not isinstance(payload["n"], str):
+            raise ValueError("malformed handle payload")
+        out = {"ns": payload["n"], "subject": {"type": s[0], "key": s[1]}, "predicate": payload["p"]}
+        for short, long in (("a", "as_of"), ("v", "valid_at"), ("x", "excerpt")):
+            if short in payload:
+                out[long] = payload[short]
+        return out
+    if not {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
         raise ValueError("malformed handle payload")
     if not isinstance(payload["subject"], dict) or not isinstance(payload["ns"], str):
         raise ValueError("malformed handle payload")
@@ -472,6 +483,7 @@ def build_pack(
         briefs=briefs,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
+        roots=list(req.scope.subjects) if req.scope is not None else [req.subject],
     )
 
 
@@ -592,6 +604,7 @@ def _pack(
     excerpts: list[tuple[float, Citation, str, int, str]] | None = None,
     valid_at: datetime | None = None,
     paths: dict[tuple[str, str], list[str]] | None = None,
+    roots: list[EntityRef] | None = None,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -615,6 +628,15 @@ def _pack(
         ]
 
     question_tokens = _question_tokens(question) if question else set()
+    # "Is web-01 exposed to anything exploited?" names the subject; without
+    # this every recent login *about web-01* matched as many question words
+    # as the KEV facts did and outranked them on recency (D-036). The
+    # entities the caller asked about are the frame, not the topic.
+    if question_tokens and roots:
+        named = set()
+        for r in roots:
+            named |= _tokens(f"{r.type} {r.key}")
+        question_tokens = question_tokens - named or question_tokens
     newest = max((_aware(o.observed_at) for o in observations), default=None)
     scored = sorted(
         (

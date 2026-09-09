@@ -203,6 +203,10 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   pass over `product` aliases (D-023 machinery)
 - ⬜ Embed the KEV documents (run the enrichment worker over the real
   corpus with an embedding provider) and measure excerpt quality
+- ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m
+  loom.agent_eval` — real model, real MCP transport, real corpus, ground
+  truth from the store; the first live run forced `list_namespaces` /
+  `describe_namespace`, the empty-namespace error, `LOOM_MCP_NAMESPACE`
 - ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
   the obvious non-security one)
 
