@@ -869,3 +869,23 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
     assert store.schema_version() == 3
+
+
+def test_subjects_citing_maps_documents_back_to_entities(store):
+    """D-040: a passage found by meaning names the entities whose claims cite it."""
+    from loom.contracts import DocumentIn, Provenance
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    a = store.store_artifact(DocumentIn(namespace="ns", event_id="adv-a", text="LockBit targets nginx", source="kev", observed_at=t))
+    b = store.store_artifact(DocumentIn(namespace="ns", event_id="adv-b", text="unrelated", source="kev", observed_at=t))
+    cve = EntityRef(type="cve", key="CVE-2026-9")
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True, source="kev", observed_at=t,
+                provenance=Provenance(artifact_event_id="adv-a")),
+        ClaimIn(namespace="ns", subject=EntityRef(type="host", key="h1"), predicate="mentioned_in", object=cve,
+                source="kev", observed_at=t, provenance=Provenance(artifact_event_id="adv-a")),
+    ])
+    got = store.subjects_citing("ns", [a.id, b.id, "nope"])
+    assert got == {a.id: [cve, EntityRef(type="host", key="h1")]}
+    assert store.subjects_citing("ns", [a.id], allowed_types=("cve",)) == {a.id: [cve]}   # host->cve edge hidden
+    assert store.subjects_citing("ns", [a.id], allowed_types=()) == {}
+    assert store.subjects_citing("ns", []) == {}

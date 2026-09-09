@@ -547,25 +547,45 @@ def semantic_search(
     by its best-matching fact as cited evidence. Scoped keys only see
     facts inside their world."""
     query_vec = embed_query(embedder, question)
+    best: dict[tuple[str, str], tuple[float, EntityRef, ContextItem]] = {}
+
+    def offer(ref: EntityRef, score: float, item: ContextItem) -> None:
+        key = (ref.type, ref.key)
+        if key not in best or score > best[key][0]:
+            best[key] = (score, ref, item)
+
+    # facts: the namespace's nearest rendered observations, by subject
     hits = store.nearest_observations(namespace, embedder.model, query_vec, limit * 4)
     score_by_id = dict(hits)
-    by_subject: dict[tuple[str, str], tuple[float, Observation]] = {}
     for obs in store.observations_by_ids(namespace, list(score_by_id)):
         if not _in_scope(obs, allowed_types):
             continue
-        key = (obs.subject.type, obs.subject.key)
-        score = score_by_id[obs.id]
-        if key not in by_subject or score > by_subject[key][0]:
-            by_subject[key] = (score, obs)
-    ranked = sorted(by_subject.values(), key=lambda pair: pair[0], reverse=True)[:limit]
+        s = round(min(max(score_by_id[obs.id], 0.0), 1.0), 4)
+        offer(obs.subject, s, ContextItem(kind="fact", text=_render_fact(obs), score=s,
+                                          citations=[_citation(obs)]))
+
+    # passages: a document's words carry meaning a rendered fact does not
+    # ("ransomware campaigns" matched the predicate name
+    # ransomware_campaign_use, never the advisory that named the campaign,
+    # D-040). A passage maps to the entities whose claims cite its document.
+    chunks = store.nearest_chunks(namespace, embedder.model, query_vec, limit * 4, None)
+    about = store.subjects_citing(namespace, sorted({ch["artifact_id"] for ch, _ in chunks}), allowed_types)
+    for ch, score in chunks:
+        refs = about.get(ch["artifact_id"], [])
+        if not refs:
+            continue  # a document nobody cites is about nothing an agent can ask for
+        s = round(min(max(score, 0.0), 1.0), 4)
+        cite = Citation(artifact_id=ch["artifact_id"], span_start=ch["span_start"],
+                        span_end=ch["span_end"], source=ch["source"], observed_at=_aware(ch["observed_at"]))
+        names = ", ".join(f"{r.type}:{r.key}" for r in refs)
+        text = f'[about {names}] "{ch["text"]}" [doc:{ch["artifact_id"][:8]} @{ch["span_start"]}-{ch["span_end"]}]'
+        for ref in refs:
+            offer(ref, s, ContextItem(kind="doc_excerpt", text=text, score=s, citations=[cite]))
+
+    ranked = sorted(best.values(), key=lambda t: t[0], reverse=True)[:limit]
     return SemanticSearchResponse(
         namespace=namespace, question=question,
-        matches=[SemanticMatch(
-            entity=obs.subject, score=round(min(max(score, 0.0), 1.0), 4),
-            evidence=ContextItem(kind="fact", text=_render_fact(obs),
-                                 score=round(min(max(score, 0.0), 1.0), 4),
-                                 citations=[_citation(obs)]),
-        ) for score, obs in ranked],
+        matches=[SemanticMatch(entity=ref, score=score, evidence=item) for score, ref, item in ranked],
     )
 
 

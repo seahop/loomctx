@@ -1139,6 +1139,33 @@ run hit "no embedder configured". Embedding them exposed a gap first.
   semantic ranking versus the keyword-only scorecard — are in
   `docs/real-data.md` under "Documents".
 
+## D-040 · Meaning-based search reads documents, not just facts (2026-09-09)
+
+`find_related` / `GET /v1/entities/semantic` searched vectors of rendered
+facts only. On the real corpus "ransomware campaigns against web servers"
+returned CVEs whose best fact was `ransomware_campaign_use Unknown`: a
+rendered fact carries its predicate's *name*, and that is what the vector
+matched. The advisories that actually name campaigns were embedded (D-039)
+but never consulted.
+
+- The search now runs two nearest-neighbour queries in the same embedding
+  space — facts and document passages — and maps a passage to the
+  entities whose claims cite its document (`GraphStore.subjects_citing`,
+  backed by an expression index on the provenance artifact id in both
+  stores). Best score per entity wins; the evidence is the fact or the
+  passage, cited, and a passage opens with `[about …]` (D-039 rule).
+- A document nobody cites maps to nothing and is skipped: an agent can
+  only ask about entities, so a passage with no citing claim has no
+  handle to offer.
+- Scoping holds: a scoped key sees only citing subjects (and objects)
+  inside its entity types — the same rule as `artifact_cited_within`.
+- Real corpus, after: the ransomware question returns advisories about
+  webshell uploads and coerced connections for the CVEs they describe;
+  "remote code execution in VPN appliances used for initial access"
+  returns BeyondTrust and TP-Link summaries; "which hosts talk to the
+  database" returns db-01's port fact and the netflow edges. 0.8–1.5 s per
+  search over 465k fact vectors and 3.6k passage vectors.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

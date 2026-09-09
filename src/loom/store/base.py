@@ -111,6 +111,16 @@ class GraphStore(ABC):
         connectivity signal entity resolution ranks by (H-E3)."""
 
     @abstractmethod
+    def subjects_citing(
+        self, namespace: str, artifact_ids: list[str],
+        allowed_types: tuple[str, ...] | None = None, per_artifact: int = 5,
+    ) -> dict[str, list[EntityRef]]:
+        """artifact_id -> the subjects of visible observations that cite
+        it, so a passage found by meaning maps back to the entities it is
+        about (D-040). Scoped callers see only subjects (and objects) in
+        their types."""
+
+    @abstractmethod
     def artifact_cited_within(
         self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]
     ) -> bool:

@@ -144,6 +144,9 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     model       TEXT NOT NULL DEFAULT ''
 );
 
+CREATE INDEX IF NOT EXISTS idx_obs_prov_artifact
+    ON observations (namespace, ((provenance_json::jsonb ->> 'artifact_id')));
+
 CREATE INDEX IF NOT EXISTS idx_chunk_artifact
     ON doc_chunks (namespace, artifact_id);
 
@@ -608,6 +611,36 @@ class PostgresStore(GraphStore):
                 (namespace, entity.id, namespace, entity.id, entity.id),
             )
         return int(rows[0]["n"])
+
+    def subjects_citing(
+        self, namespace: str, artifact_ids: list[str],
+        allowed_types: tuple[str, ...] | None = None, per_artifact: int = 5,
+    ) -> dict[str, list[EntityRef]]:
+        if not artifact_ids:
+            return {}
+        type_sql, type_args = "", ()
+        if allowed_types is not None:
+            if not allowed_types:
+                return {}
+            type_sql = " AND s.type = ANY(%s) AND (ob.id IS NULL OR ob.type = ANY(%s))"
+            type_args = (list(allowed_types), list(allowed_types))
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT DISTINCT (o.provenance_json::jsonb ->> 'artifact_id') AS aid,"
+                " s.type AS stype, s.key AS skey"
+                " FROM observations o JOIN entities s ON s.id = o.subject_id"
+                " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
+                " WHERE o.namespace = %s"
+                "   AND (o.provenance_json::jsonb ->> 'artifact_id') = ANY(%s)"
+                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
+                (namespace, list(artifact_ids), *type_args),
+            )
+        out: dict[str, list[EntityRef]] = {}
+        for r in rows:
+            lst = out.setdefault(r["aid"], [])
+            if len(lst) < per_artifact:
+                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+        return out
 
     def artifact_cited_within(
         self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]

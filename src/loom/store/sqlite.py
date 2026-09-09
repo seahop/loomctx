@@ -159,6 +159,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_event
 CREATE UNIQUE INDEX IF NOT EXISTS idx_art_event
     ON artifacts (namespace, event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_obs_recorded ON observations (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_obs_prov_artifact
+    ON observations (namespace, json_extract(provenance_json, '$.artifact_id'));
 CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
@@ -606,6 +608,38 @@ class SqliteStore(GraphStore):
                 (namespace, entity.id, namespace, entity.id, entity.id),
             ).fetchone()
         return int(row["n"])
+
+    def subjects_citing(
+        self, namespace: str, artifact_ids: list[str],
+        allowed_types: tuple[str, ...] | None = None, per_artifact: int = 5,
+    ) -> dict[str, list[EntityRef]]:
+        if not artifact_ids:
+            return {}
+        marks = ",".join("?" * len(artifact_ids))
+        type_sql, type_args = "", ()
+        if allowed_types is not None:
+            if not allowed_types:
+                return {}
+            tm = ",".join("?" * len(allowed_types))
+            type_sql = f" AND s.type IN ({tm}) AND (ob.id IS NULL OR ob.type IN ({tm}))"
+            type_args = tuple(allowed_types) * 2
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT DISTINCT json_extract(o.provenance_json, '$.artifact_id') AS aid,"
+                " s.type AS stype, s.key AS skey"
+                " FROM observations o JOIN entities s ON s.id = o.subject_id"
+                " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
+                " WHERE o.namespace = ?"
+                f"   AND json_extract(o.provenance_json, '$.artifact_id') IN ({marks})"
+                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
+                (namespace, *artifact_ids, *type_args),
+            ).fetchall()
+        out: dict[str, list[EntityRef]] = {}
+        for r in rows:
+            lst = out.setdefault(r["aid"], [])
+            if len(lst) < per_artifact:
+                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+        return out
 
     def artifact_cited_within(
         self, namespace: str, artifact_id: str, allowed_types: tuple[str, ...]

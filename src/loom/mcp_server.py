@@ -289,9 +289,11 @@ def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
 def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
                  ctx: Context = None) -> dict:
     """Entities related to a question by MEANING rather than by name
-    ("what looks exploitable?", "who touched the finance systems?") — use
-    when you don't know an entity's key. Each match cites the fact that
-    matched. Needs the server to have an embedder configured."""
+    ("what looks exploitable?", "which campaigns hit web servers?") — use
+    when you don't know an entity's key. Searches both facts and the
+    passages of documents that claims cite; each match carries the fact or
+    the passage that matched, cited. Needs the server to have an embedder
+    configured."""
     grant = _grant(ctx, namespace, "r")
     embedder = _get_embedder()
     if embedder is None:

@@ -221,12 +221,13 @@ at 1,200 tokens the pack was 574 conflicts / 295 excerpts / 142 relations
 / 188 facts — and 300 ms of provider latency on the first ask of each
 question.
 
-**What semantic entity search is not yet good for:** "ransomware
-campaigns against web servers" returns KEV CVEs whose best-matching fact
-is `ransomware_campaign_use Unknown` — the vectors are over rendered
-facts, so the search finds the predicate name, not the meaning. Searching
-the document chunks instead (the advisories say which campaigns) is the
-obvious next step for `find_related`.
+**Meaning-based search now reads the documents too (D-040).** Before,
+"ransomware campaigns against web servers" returned KEV CVEs whose
+best-matching *fact* was `ransomware_campaign_use Unknown`: vectors over
+rendered facts find the predicate name, not the meaning. `find_related`
+now also searches the passages of documents that claims cite and maps a
+passage back to the entities citing it, with the passage as evidence. The
+real-corpus result for that question is in the D-040 entry.
 
 ## What is still open (roadmap phase 8)
 

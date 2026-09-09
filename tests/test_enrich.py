@@ -605,3 +605,34 @@ def test_excerpts_say_which_entity_they_are_about(tmp_path):
     ex = [i for i in pack.items if i.kind == "doc_excerpt"]
     assert ex and ex[0].text.startswith('[about cve:CVE-2026-1] "Required action')
     store.close()
+
+
+def test_find_related_searches_passages_and_maps_them_to_entities(tmp_path):
+    """D-040: 'ransomware campaign' finds the CVE whose advisory names one,
+    with the passage as evidence — not the predicate ransomware_campaign_use."""
+    from loom.context import semantic_search
+    from loom.contracts import ClaimIn, DocumentIn, EntityRef, Provenance
+    from loom.enrich import chunk_artifacts, embed_pending
+    from loom.llm import HashingEmbedder
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "rel.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    store.store_artifact(DocumentIn(namespace="ns", event_id="adv", source="kev", observed_at=t,
+                                    text="The Medusa ransomware campaign exploited this flaw in web servers during March."))
+    target = EntityRef(type="cve", key="CVE-2026-77")
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=target, predicate="exploited_in_wild", object=True, source="kev",
+                observed_at=t, provenance=Provenance(artifact_event_id="adv")),
+        ClaimIn(namespace="ns", subject=EntityRef(type="cve", key="CVE-2026-1"), predicate="ransomware_campaign_use",
+                object="Unknown", source="kev", observed_at=t),
+    ])
+    e = HashingEmbedder()
+    embed_pending(store, e); chunk_artifacts(store, e, limit=5)
+    r = semantic_search(store, "ns", e, "medusa ransomware campaign web servers", limit=3)
+    top = r.matches[0]
+    assert top.entity == target and top.evidence.kind == "doc_excerpt"
+    assert top.evidence.text.startswith('[about cve:CVE-2026-77] "The Medusa ransomware')
+    assert top.evidence.citations[0].artifact_id
+    # scoped callers do not see entities outside their types
+    assert all(m.entity.type == "cve" for m in semantic_search(store, "ns", e, "medusa", limit=3, allowed_types=("cve",)).matches)
+    store.close()

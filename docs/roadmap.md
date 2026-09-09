@@ -214,8 +214,8 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ Documents on real data (D-039, 2026-09-09): claims cite documents by
   event id, KEV advisories embedded and surfacing as attributed excerpts,
   packed vector storage, worker robustness, query-embedding fallback
-- ⬜ `find_related` over document chunks (vectors over rendered facts find
-  predicate names, not meaning)
+- ✅ `find_related` over document passages as well as facts (D-040,
+  2026-09-09): a passage maps back to the entities whose claims cite it
 - ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
   the obvious non-security one)
 

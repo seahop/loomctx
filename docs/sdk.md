@@ -15,7 +15,7 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `list_namespaces()` | Where the data is: every namespace with entity counts by type (D-036) |
 | `describe_namespace(namespace)` | How it connects: entity types with counts, registered predicates (descriptions, object types, containment) and a hint for multi-hop `ask_scope` |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
-| `find_related(question)` | Entities related by meaning, each with its cited matching fact (needs `LOOM_EMBED_*`) |
+| `find_related(question)` | Entities related by meaning — over facts *and* the passages of documents that claims cite — each with the fact or passage that matched, cited (needs `LOOM_EMBED_*`; D-040) |
 | `ask(subject, question, budget, as_of?, valid_at?)` | Budgeted, cited context on one entity (`as_of` = known at T, `valid_at` = true at T) |
 | `ask_scope(subjects, question, expand_predicates?, depth?)` | Several entities, or an anchor + contents ("domain:corp.local" over `member_of`) |
 | `expand(handle, budget)` | Progressive disclosure — pull one thread deeper |
