@@ -28,7 +28,57 @@ OpenRouter billed for the run, cache discounts included. One run per
 model — treat single-run differences of one task as noise; the pattern
 across tiers is the signal.
 
-## Scorecard (2026-09-09, OpenRouter, one run per model)
+## Decision table (2026-09-09, OpenRouter, three full runs per model, 20-step cap)
+
+The fourteen models that passed the two-hop task in screening, run three
+more times each. Per-task cells are passes out of three; steps, tokens,
+time and cost are per four-task run. Sorted by pass rate, then cost.
+
+| Model | Passed | 2-hop exposure | lease | conflict | os | Steps/run | Tokens in/out per run | Time/run | Cost/run | Faithful |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `openai/gpt-5.4-nano` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 19.3 | 63,889/1,430 | 36 s | $0.01 | yes |
+| `google/gemini-3.5-flash-lite` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 24 | 125,341/1,757 | 24 s | $0.02 | yes |
+| `openai/gpt-5.6-luna` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23.7 | 383,315/3,450 | 67 s | $0.03 | yes |
+| `qwen/qwen3.7-plus` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23 | 504,096/8,418 | 119 s | $0.08 | yes |
+| `deepseek/deepseek-v4-pro` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 29.7 | 660,343/11,106 | 206 s | $0.17 | yes |
+| `openai/gpt-5.6-sol` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 24 | 354,441/3,756 | 110 s | $0.28 | yes |
+| `anthropic/claude-sonnet-5` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 20.3 | 280,330/7,117 | 150 s | $0.63 | yes |
+| `qwen/qwen3.7-flash` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 28.7 | 572,344/8,273 | 113 s | $0.02 | yes |
+| `openai/gpt-5.4-mini` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 22 | 119,882/1,865 | 39 s | $0.05 | yes |
+| `x-ai/grok-4.3` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 20.3 | 92,497/2,914 | 36 s | $0.06 | yes |
+| `minimax/minimax-m3` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 20.7 | 359,842/7,653 | 138 s | $0.06 | yes |
+| `anthropic/claude-haiku-4.5` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 24.7 | 647,539/5,445 | 91 s | $0.67 | yes |
+| `mistralai/mistral-small-2603` | 10/12 | 1/3 | 3/3 | 3/3 | 3/3 | 21.7 | 144,695/1,537 | 29 s | $0.01 | yes |
+| `z-ai/glm-5.2` | 10/12 | 1/3 | 3/3 | 3/3 | 3/3 | 22.3 | 440,897/8,011 | 114 s | $0.14 | yes |
+
+**How to read it.** Seven models are 12/12: they answered the two-hop
+question correctly three times out of three, with the chain cited. The
+single-entity tasks are a solved problem for every model on this page
+(42/42 each). Faithfulness was 168/168 task-runs: no invented CVE, no
+citation that did not come from a tool result.
+
+**How the 2/3 and 1/3 rows failed.** None ran out of steps. Every miss
+was a confident wrong answer: either a false negative ("No — web-01 is not
+exposed", from `minimax-m3`, `grok-4.3`, `glm-5.2`) or stopping after
+listing the software without following `affects` to the CVEs
+(`mistral-small-2603` twice, `qwen3.7-flash`, `claude-haiku-4.5`). That is
+the failure mode citations cannot catch — a claim of absence cites
+nothing — and it is why a model's *rate* matters more than its best run:
+`mistral-small-2603` looked like the cheapest 4/4 in screening and is
+1/3 on the task that matters.
+
+**What the repeats changed versus screening.** `gpt-5.4-nano` held 3/3 at
+a cent; `mistral-small` fell from 4/4 to 10/12; `gpt-5.6-sol` and
+`claude-haiku-4.5`, both step-outs in screening, are 3/3 and 2/3 with a
+20-step cap; `gpt-5.4-mini` and `grok-4.3` each dropped one two-hop run.
+Three runs still is not many — a 2/3 and a 3/3 are one flipped run apart —
+but a 12/12 across three independent runs at a stable cost is a number
+you can plan on.
+
+## Screening (one run per model, 14-step cap)
+
+Twenty models across price tiers, one run each, to choose the candidates
+above. Single-run numbers: a flipped task here is not a verdict.
 
 | Model | Passed | 2-hop exposure | lease | conflict | os | Steps | Tokens in/out | Time | Cost | Faithful |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -56,7 +106,7 @@ across tiers is the signal.
 † ran out of the 14-step cap while still investigating, not a wrong
 answer — see the retest below. Cost is the whole four-task run as billed.
 
-## Reading it
+## Reading the screening
 
 **The two-hop task is the discriminator.** Every model that emits
 structured tool calls passed the three single-entity tasks (lease,
@@ -71,9 +121,10 @@ zero citations that did not come from a tool result. The cited-id
 discipline is Loom's, not the model's: the pack hands every item an
 observation id, and no model in this set made one up.
 
-**Fourteen steps under-measures thorough models.** Eight models ran out
-of the step cap on the two-hop task while still investigating. Re-run
-with a 30-step cap, on the exposure task only:
+**Fourteen steps under-measured thorough models.** Eight models ran out
+of the screening's step cap on the two-hop task while still investigating.
+Re-run with a 30-step cap, on the exposure task only (before the
+three-run table above was measured at the new 20-step default):
 
 | Model | 2-hop exposure at 30 steps | Steps | Tokens in/out | Time | Cost |
 | --- | --- | --- | --- | --- | --- |
@@ -108,33 +159,40 @@ path if you need that family.
 ## Recommendation
 
 - **Default agent model for Loom demos and small teams:**
-  `openai/gpt-5.4-nano` or `mistralai/mistral-small-2603` — 4/4, faithful,
-  a cent per four-task run, under a minute. `google/gemini-3.5-flash-lite`
-  and `openai/gpt-5.4-mini` are the next tier up at three to five cents.
+  `openai/gpt-5.4-nano` — 12/12, one cent and about 36 seconds per
+  four-task run, the fewest tokens of any model. `google/gemini-3.5-flash-lite`
+  (12/12, two cents, fastest at 24 s) is the equivalent pick if you prefer
+  Google, and `openai/gpt-5.6-luna` (12/12, three cents) the next tier up.
 - **When the questions get harder** (deeper scopes, more verification):
-  `anthropic/claude-sonnet-5` (4/4, fewest steps of any model at 18) or
-  `openai/gpt-5.6-sol`; `anthropic/claude-haiku-4.5` if you want Claude
-  at a fifth of the price and can give it twenty steps.
-- **Avoid as agents over Loom, on this evidence:** `z-ai/glm-5.3-flash`,
-  `deepseek/deepseek-v4-flash`, `google/gemini-3.8-flash`,
-  `moonshotai/kimi-k2.6` for multi-hop questions (fine for single-entity
-  lookups), and `meta-llama/llama-4-maverick` via OpenRouter at all.
+  `anthropic/claude-sonnet-5` — 12/12 with the fewest steps of any flagship
+  and the most output tokens per run, i.e. it verifies and explains — or
+  `openai/gpt-5.6-sol` (12/12) at under half the cost. `deepseek-v4-pro`
+  and `qwen3.7-plus` are the 12/12 open-weight choices if you self-host.
+- **Fine for single-entity lookups, not for multi-hop on this evidence:**
+  `mistral-small-2603` and `z-ai/glm-5.2` (1/3 on the two-hop task);
+  `gpt-5.4-mini`, `grok-4.3`, `minimax-m3`, `qwen3.7-flash`,
+  `claude-haiku-4.5` (2/3 — usable if a wrong "no" is acceptable, which
+  in security it usually is not). From screening: `glm-5.3-flash`,
+  `deepseek-v4-flash`, `gemini-3.8-flash`, `kimi-k2.6` failed the two-hop
+  task even with 30 steps; `llama-4-maverick` cannot call tools via OpenRouter.
 - **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
-  reader, not an agent: it needs no tool calling, so any model in the
-  table works there; the cheap 4/4 models are the sensible default.
+  reader, not an agent: it needs no tool calling, so any model on this
+  page works there; `gpt-5.4-nano` is the sensible default.
 
-One run per model; a single flipped task is within run-to-run variance
-(Haiku 4.5 passed the two-hop task in two of three runs). Re-run before
-quoting a number in a talk, and expect the table to age: five of these
-model ids did not exist three months ago.
+Expect the table to age: five of these model ids did not exist three
+months ago. Re-run before quoting a number in a talk — the command is
+below and the whole three-run table cost about seven dollars.
 
 ## Re-running it
 
 ```bash
 docker compose exec --user 10001 loom python -m loom.agent_eval --db /data/loom.db \
-    --models anthropic/claude-haiku-4.5,openai/gpt-5.4-mini --markdown /data/scorecard.md
+    --models openai/gpt-5.4-nano,anthropic/claude-sonnet-5 --repeat 3 --markdown /data/scorecard.md
 ```
 
 Any OpenAI-compatible endpoint with tool calling works (`LOOM_LLM_*`;
 `LOOM_AGENT_MODEL` overrides the model), as does `LOOM_LLM_PROVIDER=anthropic`.
 Cost appears only where the provider reports it (OpenRouter does).
+`--repeat 3` gives pass rates instead of single samples; a full
+fourteen-model, three-run table takes about an hour and a half — run it
+detached (`docker compose exec -d … > /data/scorecard.log`).

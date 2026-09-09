@@ -385,49 +385,60 @@ def summarize(results: list[RunResult], model: str) -> str:
 
 # ------------------------------------------------------------- scorecard #
 
-def scorecard(runs: dict[str, list[RunResult]]) -> list[dict]:
-    """One row per model: passes, per-task outcome, totals. Sorted by passes
-    desc, then cost asc — the cheapest model that gets it right wins."""
+def scorecard(runs: dict[str, list[RunResult]], repeat: int = 1) -> list[dict]:
+    """One row per model over `repeat` full runs: pass rate, per-task
+    passes, and per-run averages. Sorted by pass rate desc, then cost per
+    run asc — the cheapest model that gets it right wins."""
     rows = []
     for model, results in runs.items():
-        by = {r.task: r for r in results}
+        by: dict[str, list[RunResult]] = {}
+        for r in results:
+            by.setdefault(r.task, []).append(r)
+        n = max(1, repeat)
         rows.append({
-            "model": model,
+            "model": model, "repeat": n,
             "passed": sum(1 for r in results if r.score.get("pass")),
             "tasks": len(results),
-            "exposure": _outcome(by.get("exposure")), "lease": _outcome(by.get("lease")),
-            "conflict": _outcome(by.get("conflict")), "os": _outcome(by.get("os")),
-            "steps": sum(r.steps for r in results),
-            "tool_calls": sum(len(r.tool_calls) for r in results),
-            "tokens_in": sum(r.usage["in"] for r in results),
-            "tokens_out": sum(r.usage["out"] for r in results),
-            "seconds": round(sum(r.seconds for r in results), 1),
-            "cost": round(sum(r.usage.get("cost", 0.0) for r in results), 4),
+            "exposure": _outcome(by.get("exposure", [])), "lease": _outcome(by.get("lease", [])),
+            "conflict": _outcome(by.get("conflict", [])), "os": _outcome(by.get("os", [])),
+            "steps": round(sum(r.steps for r in results) / n, 1),
+            "tool_calls": round(sum(len(r.tool_calls) for r in results) / n, 1),
+            "tokens_in": round(sum(r.usage["in"] for r in results) / n),
+            "tokens_out": round(sum(r.usage["out"] for r in results) / n),
+            "seconds": round(sum(r.seconds for r in results) / n, 1),
+            "cost": round(sum(r.usage.get("cost", 0.0) for r in results) / n, 4),
+            "cost_total": round(sum(r.usage.get("cost", 0.0) for r in results), 4),
             "unseen_citations": sum(r.score.get("citations_unseen", 0) for r in results),
             "invented": sum(len(r.score.get("invented_cves", [])) for r in results),
             "errors": [f"{r.task}: {r.error}" for r in results if r.error],
         })
-    rows.sort(key=lambda r: (-r["passed"], r["cost"]))
+    rows.sort(key=lambda r: (-(r["passed"] / max(1, r["tasks"])), r["cost"]))
     return rows
 
 
-def _outcome(r: RunResult | None) -> str:
-    if r is None:
+def _outcome(rs: list[RunResult]) -> str:
+    """'pass'/'fail'/'error' for one run; 'k/n' across repeats."""
+    if not rs:
         return "-"
-    if r.error and "steps" not in r.error:
-        return "error"
-    return "pass" if r.score.get("pass") else "fail"
+    if len(rs) == 1:
+        r = rs[0]
+        if r.error and "steps" not in r.error:
+            return "error"
+        return "pass" if r.score.get("pass") else "fail"
+    return f"{sum(1 for r in rs if r.score.get('pass'))}/{len(rs)}"
 
 
 def scorecard_markdown(rows: list[dict]) -> str:
-    head = ("| Model | Passed | 2-hop exposure | lease | conflict | os | Steps | Tokens in/out | Time | Cost | Faithful |\n"
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    multi = any(r.get("repeat", 1) > 1 for r in rows)
+    per = "/run" if multi else ""
+    head = (f"| Model | Passed | 2-hop exposure | lease | conflict | os | Steps{per} | Tokens in/out{per} | "
+            f"Time{per} | Cost{per} | Faithful |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     body = []
     for r in rows:
         faithful = "yes" if r["unseen_citations"] == 0 and r["invented"] == 0 else \
             f"no ({r['unseen_citations']} unseen cites, {r['invented']} invented)"
         body.append(f"| `{r['model']}` | {r['passed']}/{r['tasks']} | {r['exposure']} | {r['lease']} | "
-                    f"{r['conflict']} | {r['os']} | {r['steps']} | {r['tokens_in']:,}/{r['tokens_out']:,} | "
+                    f"{r['conflict']} | {r['os']} | {r['steps']:g} | {r['tokens_in']:,}/{r['tokens_out']:,} | "
                     f"{r['seconds']:.0f} s | ${r['cost']:.2f} | {faithful} |")
     return head + "\n" + "\n".join(body)
 
@@ -439,6 +450,7 @@ def main() -> None:
     parser.add_argument("--tasks", help="comma-separated subset of: " + ",".join(t.name for t in TASKS))
     parser.add_argument("--model", help="override LOOM_AGENT_MODEL / LOOM_LLM_MODEL")
     parser.add_argument("--models", help="comma-separated models to compare (a scorecard run)")
+    parser.add_argument("--repeat", type=int, default=1, help="scorecard runs: full runs per model (pass rates)")
     parser.add_argument("--out", help="write the full transcript (JSON) here")
     parser.add_argument("--markdown", help="scorecard runs: also write a Markdown table here")
     args = parser.parse_args()
@@ -446,14 +458,17 @@ def main() -> None:
     if args.models:
         runs: dict[str, list[RunResult]] = {}
         for model in [m.strip() for m in args.models.split(",") if m.strip()]:
-            try:
-                runs[model] = evaluate(args.db, names, model)
-            except Exception as exc:  # a model that cannot even start still gets a row
-                runs[model] = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
-                                         score={"pass": False}) for t in TASKS if not names or t.name in names]
-            print(summarize(runs[model], model), flush=True)
-            print(flush=True)
-        rows = scorecard(runs)
+            runs[model] = []
+            for rep in range(max(1, args.repeat)):
+                try:
+                    batch = evaluate(args.db, names, model)
+                except Exception as exc:  # a model that cannot even start still gets a row
+                    batch = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
+                                       score={"pass": False}) for t in TASKS if not names or t.name in names]
+                runs[model].extend(batch)
+                print(summarize(batch, f"{model} (run {rep + 1}/{max(1, args.repeat)})"), flush=True)
+                print(flush=True)
+        rows = scorecard(runs, args.repeat)
         print(scorecard_markdown(rows))
         if args.markdown:
             with open(args.markdown, "w") as fh:

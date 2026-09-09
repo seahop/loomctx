@@ -135,3 +135,12 @@ def test_scorecard_ranks_passes_then_cost():
     assert rows[0]["cost"] == 0.06 and rows[3]["exposure"] == "error"
     md = ae.scorecard_markdown(rows)
     assert md.count("\n") == 5 and "| `cheap/good` | 2/2 | pass | pass |" in md
+    # repeats: pass counts per task, per-run averages, sorted by pass RATE
+    rows = ae.scorecard({
+        "flaky/x": [rr("exposure", True, 0.4), rr("lease", True, 0.1), rr("exposure", False, 0.4), rr("lease", True, 0.1)],
+        "solid/y": [rr("exposure", True, 0.3), rr("lease", True, 0.1), rr("exposure", True, 0.3), rr("lease", True, 0.1)],
+    }, repeat=2)
+    assert [r["model"] for r in rows] == ["solid/y", "flaky/x"]
+    assert rows[1]["exposure"] == "1/2" and rows[1]["passed"] == 3 and rows[1]["tasks"] == 4
+    assert rows[0]["cost"] == 0.4 and rows[0]["cost_total"] == 0.8 and rows[0]["steps"] == 6
+    assert "Cost/run" in ae.scorecard_markdown(rows) and "| `flaky/x` | 3/4 | 1/2 | 2/2 |" in ae.scorecard_markdown(rows)

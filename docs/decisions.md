@@ -1041,6 +1041,15 @@ adopter has on day one, and the D-036 harness made it cheap to answer.
   ("no KEV data exists") — a claim of absence cites nothing.
 - Harness default step cap raised from 14 to 20: four capable models
   passed at 13–17 steps once allowed to finish verifying.
+- **Repeats, because one run is not a statistic** (`--repeat N`, pass
+  rates per task, per-run averages, sorted by pass rate then cost). The
+  fourteen two-hop-capable models ran three more times each: seven are
+  12/12 (`gpt-5.4-nano` at one cent per run is the default
+  recommendation; `claude-sonnet-5` the flagship pick), faithfulness was
+  168/168, and every two-hop miss was a confident wrong answer rather
+  than a step-out — including `mistral-small-2603`, screening's cheapest
+  4/4, at 1/3. The decision table in `docs/models.md` is the repeated
+  one; screening is kept below it as provenance.
 - Spend for the whole exercise was on the order of twelve dollars, most of
   it the two Opus 5 runs.
 
