@@ -498,14 +498,30 @@ def _parse_verdict(raw: str) -> dict:
             "reason": str(data.get("reason", ""))}
 
 
+FAILED = -1   # a job that raised: not "no work", so --once must not treat it as drained
+
+
 def _guarded(name: str, fn, *args) -> int:
-    """Run one job; a failure is logged and counts as no work, never a
-    crash — the next tick retries (H-D1)."""
+    """Run one job; a failure is logged and reported as FAILED, never a
+    crash — the next tick retries (H-D1). Callers must not read FAILED as
+    zero work: a locked database on the first tick made a --once worker
+    exit with 465k rows still pending (D-039)."""
     try:
         return fn(*args)
     except Exception:  # noqa: BLE001 — the loop must survive anything
         log.exception("%s failed; will retry next tick", name)
-        return 0
+        return FAILED
+
+
+def once_should_stop(counts: dict[str, int], failures: int, max_failures: int = 20) -> tuple[bool, int]:
+    """--once mode: stop when a whole tick found nothing to do AND nothing
+    failed. A failed job keeps the loop alive (bounded: after max_failures
+    consecutive failing ticks, stop so a CronJob reports the problem)."""
+    failed = any(v == FAILED for v in counts.values())
+    if failed:
+        failures += 1
+        return failures >= max_failures, failures
+    return not any(v > 0 for v in counts.values()), 0
 
 
 def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) -> dict[str, int]:
@@ -523,23 +539,45 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) ->
     }
 
 
+def _open_store(attempts: int = 6) -> GraphStore:
+    """Opening runs migrations; under several writers that can wait on a
+    lock. Retry with backoff instead of dying before the first tick (D-039)."""
+    for attempt in range(attempts):
+        try:
+            return store_from_env()
+        except Exception as exc:  # noqa: BLE001
+            if attempt + 1 == attempts or "locked" not in str(exc).lower():
+                raise
+            delay = 2.0 ** attempt
+            log.warning("store busy on open (%s); retrying in %.0fs", exc, delay)
+            time.sleep(delay)
+    raise RuntimeError("unreachable")
+
+
 def run(once: bool, interval: float) -> None:
-    store = store_from_env()
+    store = _open_store()
     embedder = embedder_from_env()
     llm = llm_from_env()
     if embedder is None:
         log.info("no embedder configured (LOOM_EMBED_*) — skipping embeddings")
     if llm is None:
         log.info("no LLM configured (LOOM_LLM_*) — skipping extraction/dossiers")
+    failures = 0
     try:
         while True:
             counts = tick(store, embedder, llm)
-            work = any(counts.values())
-            if work:
-                log.info(" ".join(f"{k}={v}" for k, v in counts.items()))
-            if once and not work:
-                break
+            work = any(v > 0 for v in counts.values())
+            if work or any(v == FAILED for v in counts.values()):
+                log.info(" ".join(f"{k}={'FAILED' if v == FAILED else v}" for k, v in counts.items()))
             if once:
+                stop, failures = once_should_stop(counts, failures)
+                if stop:
+                    if failures:
+                        log.error("giving up after %d consecutive failing ticks", failures)
+                        raise SystemExit(1)
+                    break
+                if failures:
+                    time.sleep(min(interval, 2.0 ** failures))  # back off, then retry
                 continue  # drain fully in --once mode
             time.sleep(interval)
     finally:

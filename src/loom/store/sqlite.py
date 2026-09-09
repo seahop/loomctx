@@ -197,7 +197,9 @@ class SqliteStore(GraphStore):
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        # 15 s: several enrichment workers writing 512-vector batches can
+        # hold the write lock past 5 s (D-039)
+        self._conn.execute("PRAGMA busy_timeout=15000")
         self._conn.executescript(_TABLES)
         self._migrate()
         self._conn.executescript(_INDEXES)
@@ -248,9 +250,10 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(common.norm_key(r["key"]), r["id"]) for r in rows])
-        self._conn.execute(
-            "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
-            " ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        if current != SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
+                " ('schema_version', ?)", (str(SCHEMA_VERSION),))
         self._conn.commit()
 
     def _meta_version(self) -> int:

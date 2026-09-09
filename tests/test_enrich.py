@@ -12,6 +12,7 @@ from loom.enrich import (
 )
 from loom.llm import HashingEmbedder, LLMClient
 from loom.store.sqlite import SqliteStore
+from loom.enrich import FAILED
 
 OBSERVED = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
@@ -317,7 +318,7 @@ def test_worker_tick_survives_job_failures(tmp_path):
             raise LLMError("provider down")
 
     counts = tick(store, Broken(), ScriptedLLM("brief text"))
-    assert counts["embedded"] == 0 and counts["dossiers"] == 1  # dossiers still built
+    assert counts["embedded"] == FAILED and counts["dossiers"] == 1  # dossiers still built
 
 
 def test_extraction_backs_off_failing_artifacts(tmp_path):
@@ -547,3 +548,21 @@ def test_embedder_passes_dimensions_when_configured(monkeypatch):
     assert len(e.embed(["x"])[0]) == 512 and seen["dimensions"] == 512
     monkeypatch.delenv("LOOM_EMBED_DIM")
     assert "dimensions" not in {**llm.embedder_from_env().__dict__} or llm.embedder_from_env().dimensions is None
+
+
+def test_once_mode_does_not_mistake_a_failed_tick_for_a_drained_backlog():
+    """D-039: a locked database on the first tick made a --once worker exit
+    with 465k rows pending. A failure keeps the loop alive, bounded."""
+    from loom.enrich import FAILED, once_should_stop
+    stop, n = once_should_stop({"embedded": FAILED, "chunked": 0}, 0)
+    assert not stop and n == 1
+    stop, n = once_should_stop({"embedded": 512, "chunked": 0}, n)
+    assert not stop and n == 0                          # success resets the streak
+    stop, n = once_should_stop({"embedded": 0, "chunked": 0}, 0)
+    assert stop and n == 0                              # genuinely drained
+    n = 0
+    for _ in range(19):
+        stop, n = once_should_stop({"embedded": FAILED}, n)
+        assert not stop
+    stop, n = once_should_stop({"embedded": FAILED}, n)
+    assert stop and n == 20                             # bounded, so a CronJob fails loudly
