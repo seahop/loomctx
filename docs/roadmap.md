@@ -16,7 +16,8 @@ presentable.
 | early Sep (done 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
 | early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
 | early Sep (done 2026-09-08) | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
-| early Oct | Demo hardening: scripted walkthrough, k8s run validated on a real cluster (GCP), polish README for public visitors |
+| early Sep (done 2026-09-09) | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
+| early Oct | k8s run validated on a real cluster (GCP): capacity numbers, HA failover on real disks, 24 h soak |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
 

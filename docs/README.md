@@ -22,6 +22,8 @@ Read in this order depending on why you're here.
 - **[models.md](models.md)** — which LLMs drive Loom well as agents: a
   measured scorecard (pass rate, faithfulness, cost) and the command to
   re-run it.
+- **[demo.md](demo.md)** — the conference walkthrough: three acts, every
+  command, expected output, fallbacks, rehearsal checklist.
 - **[contracts.md](contracts.md)** — the wire shapes (the real API); JSON
   Schema export.
 - **[concepts.md](concepts.md)** — glossary: observation, claim, context pack,
