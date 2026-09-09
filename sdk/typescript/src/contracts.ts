@@ -60,13 +60,20 @@ export interface EntityRef {
   key: string;
 }
 /**
- * Where an extracted observation came from: an artifact and a character span.
+ * Where an observation came from: an artifact and, optionally, a span.
+ * Extracted claims carry the artifact's id; a sender that ingests a
+ * document and structured claims about it in the same pipeline does not
+ * know the id yet, so it may cite the document by its own `event_id`
+ * instead — resolved to `artifact_id` at ingest (D-039). The document
+ * must land first (same batch is fine: documents are stored before the
+ * batch's claims); an unresolvable reference rejects the claim.
  *
  * This interface was referenced by `LoomContracts`'s JSON-Schema
  * via the `definition` "Provenance".
  */
 export interface Provenance {
-  artifact_id: string;
+  artifact_id?: string | null;
+  artifact_event_id?: string | null;
   span_start?: number | null;
   span_end?: number | null;
 }

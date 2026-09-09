@@ -529,3 +529,21 @@ def test_worker_shard_from_env_or_ordinal(monkeypatch):
     assert enrich.worker_shard() == (0, 4)
     monkeypatch.delenv("LOOM_WORKER_COUNT")
     assert enrich.worker_shard() == (0, 1)          # a lone worker: everything
+
+
+def test_embedder_passes_dimensions_when_configured(monkeypatch):
+    from loom import llm
+    seen = {}
+
+    def fake_post(url, body, headers, timeout=120):
+        seen.update(body)
+        return {"data": [{"index": 0, "embedding": [0.0] * body.get("dimensions", 8)}]}
+
+    monkeypatch.setattr(llm, "_post_json", fake_post)
+    monkeypatch.setenv("LOOM_EMBED_PROVIDER", "openrouter")
+    monkeypatch.setenv("LOOM_EMBED_MODEL", "openai/text-embedding-3-small")
+    monkeypatch.setenv("LOOM_EMBED_DIM", "512")
+    e = llm.embedder_from_env()
+    assert len(e.embed(["x"])[0]) == 512 and seen["dimensions"] == 512
+    monkeypatch.delenv("LOOM_EMBED_DIM")
+    assert "dimensions" not in {**llm.embedder_from_env().__dict__} or llm.embedder_from_env().dimensions is None

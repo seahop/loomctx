@@ -183,9 +183,8 @@ it out because no KEV fact existed for it.
   product keys match a CPE key in this load. The connector deliberately does
   not paper over that — it is the resolution worker's job (D-023) and the
   demo should show the seam rather than hide it.
-- **KEV documents are loaded but not embedded** in this pass; excerpt
-  retrieval over the 1,699 advisories is the next measurement once an
-  embedding provider is configured for the worker.
+- ~~KEV documents are loaded but not embedded.~~ Done (D-039): see
+  "Documents" below.
 - **Only this year's NVD feed by default.** `--years 2026,2025,…` widens
   it; every year adds ~400k claims and ~25 MB of download.
 

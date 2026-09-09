@@ -41,6 +41,7 @@ from ..contracts import (
 )
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..registry import RegistryCache, validate_claim
+from ..consumer import resolve_provenance
 from ..store.factory import store_from_env
 
 
@@ -161,7 +162,11 @@ def ingest(envelope: IngestEnvelope, request: Request):
             metrics.REJECTED.labels(reason="schema").inc()
             raise HTTPException(status_code=422, detail=problem)
         metrics.INGEST.labels(kind=envelope.kind).inc()
-        obs = request.app.state.store.record_claim(envelope)
+        try:
+            obs = request.app.state.store.record_claim(envelope)
+        except ValueError as exc:  # unresolvable provenance reference (D-039)
+            metrics.REJECTED.labels(reason="provenance").inc()
+            raise HTTPException(status_code=422, detail=str(exc))
         return {"status": "recorded", "observation_id": obs.id}
     metrics.INGEST.labels(kind=envelope.kind).inc()
     artifact = request.app.state.store.store_artifact(envelope)
@@ -241,6 +246,9 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
                 if isinstance(envelope.object, EntityRef):
                     _gate_entity_type(grant, envelope.object.type)
                 problem = validate_claim(registry.get(ns), envelope)
+                if problem is not None:
+                    return problem
+                problem = resolve_provenance(store, envelope)
                 if problem is not None:
                     return problem
         except HTTPException as exc:

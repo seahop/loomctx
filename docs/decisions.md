@@ -1078,6 +1078,52 @@ everything*.
   one hop is the wrong answer to "the hub is big"; saying so and offering
   `valid_at`, a direct ask, or a handle is the right one.
 
+## D-039 · Documents in the loop: claims cite by event id; embeddings measured on real data (2026-09-09)
+
+The last Loom feature never exercised on real data was documents: the
+1,699 CISA KEV advisories were loaded but never embedded, and every agent
+run hit "no embedder configured". Embedding them exposed a gap first.
+
+- **A structured claim can cite the document it came with.**
+  `Provenance.artifact_id` became optional and `artifact_event_id` was
+  added (one of the two is required). The store resolves the event id to
+  the artifact id at write time; the HTTP batch gate, the single route and
+  the queue consumer resolve or reject/skip per item with the same
+  message. Same-batch works because documents are stored before a batch's
+  claims. Without this the KEV connector's flags and the advisory text
+  were unrelated rows: the pack builder only considers passages from
+  documents its observations cite, so the advisories could never surface
+  as excerpts for their CVE. The connector now emits the document first
+  and every KEV claim cites it. The vendor edge (`made_by`) does not — it
+  is derived, not stated in the text.
+- **The enrichment worker got two dials.** `LOOM_EMBED_BATCH` (default
+  128; hosted embedders take 512–2048) and `LOOM_CHUNK_LIMIT` (default 4).
+  At 128 per ~4 s tick the 465k-observation backlog was a four-hour job;
+  four sharded workers at 512 did it in about an hour for ~$0.40.
+- **OpenRouter serves embeddings** (`openai/text-embedding-3-small`,
+  `qwen/qwen3-embedding-8b`), so one key covers the answering LLM, the
+  agent scorecard, and embeddings; `.env.example` says so.
+- **The existing dev corpus was wiped and reloaded** to carry provenance:
+  observations are append-only and deduped by event id, so re-running a
+  connector cannot retrofit a citation onto a row that already exists.
+  That is the right property for production and a known cost for
+  connector upgrades; the CronJob's history stays intact because new
+  revisions get new event ids anyway.
+- **Vectors were stored as JSON text.** 228k 1,536-dim embeddings as
+  `json.dumps(vec)` were ~30 KB each; the SQLite store grew to 10.7 GB
+  with a 10 GB write-ahead log, and wiping it ran for ten minutes before
+  I killed it. Schema v3 stores vectors packed (`\x00f32` + float32
+  little-endian, ~6 KB per row) in both stores; reads accept the packed
+  form, legacy JSON text, and legacy JSON carried through the Postgres
+  TEXT → BYTEA migration (verified on a hand-built v2 database). The
+  sqlite-vec index now receives the float32 buffer directly instead of
+  JSON it had to parse. `LOOM_EMBED_DIM` asks a Matryoshka model for a
+  smaller output (512 for this corpus: a third of the storage at most of
+  the quality).
+- Measurements with embeddings live — excerpt retrieval, `find_related`,
+  semantic ranking versus the keyword-only scorecard — are in
+  `docs/real-data.md` under "Documents".
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -152,6 +152,33 @@ the reader needs — an agent must not conclude absence there (D-038). The
 MCP view renders it as a `coverage_warning`; the answering prompt as a
 `coverage:` line.
 
+## Provenance: a claim that cites a document
+
+`ClaimIn.provenance` names the document a claim came from. An extracted
+claim (the enrichment worker) carries the `artifact_id`. A sender that
+ingests a document and structured claims about it in the same pipeline —
+a scanner report and its findings, an advisory and its flags — does not
+know the artifact id yet, so it may cite the document by its own
+`event_id`:
+
+```json
+{"kind": "document", "event_id": "adv-2026-2441", "text": "...", "source": "cisa-kev", "observed_at": "..."}
+{"kind": "claim", "subject": {"type": "cve", "key": "CVE-2026-2441"}, "predicate": "exploited_in_wild",
+ "object": true, "source": "cisa-kev", "observed_at": "...",
+ "provenance": {"artifact_event_id": "adv-2026-2441"}}
+```
+
+The reference is resolved to `artifact_id` at ingest. The document must
+land first — the same batch is fine, documents are stored before the
+batch's claims — and a reference to a document that was never ingested
+rejects the claim (`422` on `/v1/ingest`, a `rejected` item in a batch, a
+logged skip on the queue path). Once linked, the document's passages are
+candidates for `doc_excerpt` items in packs about the claim's subject
+(D-039). Provenance does not make a claim "extracted": ranking discounts
+apply to claims whose `source` starts with `doc:` or that carry
+`attrs.extracted`, never to a sender's structured claim that cites its
+document.
+
 ## Schema registry
 
 `SchemaRegistration`: per-namespace `entity_types` (name, description, facets) and

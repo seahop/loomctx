@@ -123,6 +123,11 @@ class GraphStore(ABC):
         """Persist a document verbatim; extraction happens asynchronously later."""
 
     @abstractmethod
+    def artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
+        """The document a sender ingested under this event_id, so claims can
+        cite it by that id before they know the artifact id (D-039)."""
+
+    @abstractmethod
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
         """Fetch a stored document by id."""
 

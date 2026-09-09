@@ -40,6 +40,21 @@ DEADLETTER_SUBJECTS = "loom.deadletter.>"
 STREAM_REPLICAS = int(os.environ.get("LOOM_STREAM_REPLICAS", "") or 1)
 
 
+def resolve_provenance(store: GraphStore, claim: ClaimIn) -> str | None:
+    """Turn provenance.artifact_event_id into artifact_id before the claim
+    is written (D-039). Returns the problem, or None when resolved or not
+    applicable. Mutates the claim's provenance in place on success."""
+    prov = claim.provenance
+    if prov is None or prov.artifact_id:
+        return None
+    found = store.artifact_by_event(claim.namespace, prov.artifact_event_id)
+    if found is None:
+        return (f"provenance.artifact_event_id {prov.artifact_event_id!r} does not name a document "
+                f"in namespace {claim.namespace!r}; ingest the document first")
+    claim.provenance = prov.model_copy(update={"artifact_id": found.id})
+    return None
+
+
 def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
     """Write one fetched batch: claims land in a single transaction.
 
@@ -60,6 +75,11 @@ def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
             counts["skipped"] += 1
             continue
         if isinstance(envelope, ClaimIn):
+            problem = resolve_provenance(store, envelope)
+            if problem is not None:
+                log.warning("dropping claim %s: %s", envelope.event_id, problem)
+                counts["skipped"] += 1
+                continue
             claims.append(envelope)
         else:
             store.store_artifact(envelope)

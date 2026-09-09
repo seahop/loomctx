@@ -28,11 +28,24 @@ ObjectValue = Union[EntityRef, Scalar]
 
 
 class Provenance(BaseModel):
-    """Where an extracted observation came from: an artifact and a character span."""
+    """Where an observation came from: an artifact and, optionally, a span.
+    Extracted claims carry the artifact's id; a sender that ingests a
+    document and structured claims about it in the same pipeline does not
+    know the id yet, so it may cite the document by its own `event_id`
+    instead — resolved to `artifact_id` at ingest (D-039). The document
+    must land first (same batch is fine: documents are stored before the
+    batch's claims); an unresolvable reference rejects the claim."""
 
-    artifact_id: str
+    artifact_id: str | None = None
+    artifact_event_id: str | None = Field(default=None, max_length=128)
     span_start: int | None = None
     span_end: int | None = None
+
+    @model_validator(mode="after")
+    def _one_reference(self) -> "Provenance":
+        if not self.artifact_id and not self.artifact_event_id:
+            raise ValueError("provenance needs artifact_id or artifact_event_id")
+        return self
 
 
 class ClaimIn(BaseModel):

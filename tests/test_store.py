@@ -830,3 +830,42 @@ def test_namespace_summary_counts_entities_by_type(store):
     summary = store.namespace_summary()
     assert set(summary) == {"alpha", "beta"}
     assert summary["alpha"] == {"host": 1, "user": 1} and summary["beta"] == {"host": 1, "user": 1}
+
+
+def test_claims_cite_documents_by_event_id(store):
+    """D-039: provenance.artifact_event_id resolves to the artifact id at
+    write time; a reference to a document never ingested is an error."""
+    from loom.contracts import DocumentIn, Provenance
+    art = store.store_artifact(DocumentIn(namespace="ns", event_id="rep-1", text="scan report", source="scanner",
+                                          observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)))
+    claim = ClaimIn(namespace="ns", subject=EntityRef(type="host", key="h"), predicate="open_port", object=22,
+                    source="scanner", observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                    provenance=Provenance(artifact_event_id="rep-1", span_start=3, span_end=9))
+    obs = store.record_claim(claim)
+    assert obs.provenance.artifact_id == art.id and obs.provenance.artifact_event_id == "rep-1"
+    assert store.observations_for("ns", EntityRef(type="host", key="h"))[0].provenance.artifact_id == art.id
+    assert store.artifact_by_event("ns", "rep-1").id == art.id and store.artifact_by_event("ns", "nope") is None
+    bad = claim.model_copy(update={"event_id": "x", "provenance": Provenance(artifact_event_id="nope")})
+    with pytest.raises(ValueError, match="ingest the document first"):
+        store.record_claim(bad)
+
+
+def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
+    """D-039: 1,536-dim vectors as JSON text were ~30 KB each and grew a
+    store to 10 GB; packed float32 is ~6 KB. Old rows keep decoding."""
+    import random
+    from loom.store import common
+    rng = random.Random(7)
+    vec = [rng.uniform(-1, 1) for _ in range(1536)]          # realistic float text (~19 chars each)
+    packed = common.pack_vector(vec)
+    assert len(packed) == 4 + 1536 * 4 < len(json.dumps(vec)) / 3
+    back = common.unpack_vector(packed)
+    assert len(back) == 1536 and abs(back[10] - vec[10]) < 1e-6
+    assert common.unpack_vector(json.dumps(vec[:3])) == vec[:3]                   # legacy TEXT
+    assert common.unpack_vector(json.dumps(vec[:3]).encode()) == vec[:3]          # legacy after TEXT->BYTEA
+    store.record_claims([login_claim("v")])
+    ref = store.observations_for("v", EntityRef(type="host", key="web-01"))[0].id
+    store.put_embeddings("v", "m", [(ref, vec)])
+    got = store.embeddings_for("v", [ref], "m")[ref]
+    assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
+    assert store.schema_version() == 3

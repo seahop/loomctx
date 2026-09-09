@@ -830,11 +830,30 @@
         "type": "object"
       },
       "Provenance": {
-        "description": "Where an extracted observation came from: an artifact and a character span.",
+        "description": "Where an observation came from: an artifact and, optionally, a span.\nExtracted claims carry the artifact's id; a sender that ingests a\ndocument and structured claims about it in the same pipeline does not\nknow the id yet, so it may cite the document by its own `event_id`\ninstead \u2014 resolved to `artifact_id` at ingest (D-039). The document\nmust land first (same batch is fine: documents are stored before the\nbatch's claims); an unresolvable reference rejects the claim.",
         "properties": {
+          "artifact_event_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Event Id"
+          },
           "artifact_id": {
-            "title": "Artifact Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
           },
           "span_end": {
             "anyOf": [
@@ -859,9 +878,6 @@
             "title": "Span Start"
           }
         },
-        "required": [
-          "artifact_id"
-        ],
         "title": "Provenance",
         "type": "object"
       },

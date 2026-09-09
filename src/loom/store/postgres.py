@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     ref_id    TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
     model     TEXT NOT NULL,
-    vector    TEXT NOT NULL
+    vector    BYTEA NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS dossiers (
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     span_start  INTEGER NOT NULL,
     span_end    INTEGER NOT NULL,
     text        TEXT NOT NULL,
-    vector      TEXT NOT NULL,
+    vector      BYTEA NOT NULL,
     model       TEXT NOT NULL DEFAULT ''
 );
 
@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 """
 
-SCHEMA_VERSION = 2  # keep in step with sqlite.py
+SCHEMA_VERSION = 3  # keep in step with sqlite.py (v3: packed vectors, D-039)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -331,7 +331,7 @@ class PostgresStore(GraphStore):
                 " WHERE e.namespace = %s AND e.model = %s AND NOT EXISTS"
                 "   (SELECT 1 FROM tombstones t WHERE t.observation_id = e.ref_id)",
                 (namespace, model))
-            scored = common.cosines(query, {r["ref_id"]: json.loads(r["vector"]) for r in rows})
+            scored = common.cosines(query, {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows})
         return common.top_k(scored, limit)
 
     def nearest_chunks(
@@ -360,7 +360,7 @@ class PostgresStore(GraphStore):
                     params += (list(artifact_ids),)
                 rows = self._q(sql, params)
                 best = common.top_k(
-                    common.cosines(query, {r["id"]: json.loads(r["vector"]) for r in rows}), limit)
+                    common.cosines(query, {r["id"]: common.unpack_vector(r["vector"]) for r in rows}), limit)
             if not best:
                 return []
             rows = self._q(
@@ -392,7 +392,7 @@ class PostgresStore(GraphStore):
                 for r in self._q(sql, (model,)):
                     if r["id"] not in have:
                         by_ns.setdefault(r["namespace"], []).append(
-                            (r["id"], r["artifact_id"], json.loads(r["vector"])))
+                            (r["id"], r["artifact_id"], common.unpack_vector(r["vector"])))
                 for ns, rows in by_ns.items():
                     out[key] += self._vec_upsert(kind, model, ns, rows)
         return out
@@ -416,6 +416,18 @@ class PostgresStore(GraphStore):
                 "UPDATE entities SET norm_key ="
                 " regexp_replace(lower(key), '[^a-z0-9]+', '', 'g')"
                 " WHERE norm_key = ''")
+        if current < 3:
+            # v3 (D-039): vectors as packed float32 in BYTEA. Legacy JSON text
+            # is carried over byte-for-byte and still decodes; only a TEXT
+            # column is altered, so a fresh database is untouched.
+            for table in ("embeddings", "doc_chunks"):
+                cur.execute(
+                    "SELECT data_type FROM information_schema.columns"
+                    " WHERE table_name = %s AND column_name = 'vector'", (table,))
+                row = cur.fetchone()
+                if row and row["data_type"] == "text":
+                    cur.execute(f"ALTER TABLE {table} ALTER COLUMN vector TYPE BYTEA"
+                                " USING convert_to(vector, 'UTF8')")
         cur.execute(
             "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
             " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -672,6 +684,10 @@ class PostgresStore(GraphStore):
                 return self._artifact_by_event(doc.namespace, doc.event_id)
         return artifact
 
+    def artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
+        with self._tx():
+            return self._artifact_by_event(namespace, event_id)
+
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
         with self._tx(read=True):
             return self._get_artifact(namespace, artifact_id)
@@ -701,7 +717,7 @@ class PostgresStore(GraphStore):
                     " ON CONFLICT (ref_id) DO UPDATE SET namespace ="
                     " EXCLUDED.namespace, model = EXCLUDED.model,"
                     " vector = EXCLUDED.vector",
-                    [(ref_id, namespace, model, json.dumps(vec))
+                    [(ref_id, namespace, model, common.pack_vector(vec))
                      for ref_id, vec in items],
                 )
             self._vec_upsert("vobs", model, namespace,
@@ -718,7 +734,7 @@ class PostgresStore(GraphStore):
                 " WHERE namespace = %s AND model = %s AND ref_id = ANY(%s)",
                 (namespace, model, ref_ids),
             )
-        return {r["ref_id"]: json.loads(r["vector"]) for r in rows}
+        return {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows}
 
     # hex value of the id's last character, 0..15: the shard key (D-031)
     _SHARD_EXPR = "(position(right(o.id, 1) in '0123456789abcdef') - 1)"
@@ -839,7 +855,7 @@ class PostgresStore(GraphStore):
                     " text = EXCLUDED.text, vector = EXCLUDED.vector,"
                     " model = EXCLUDED.model",
                     [(f"{artifact_id}:{model}:{seq}", namespace, artifact_id, seq,
-                      start, end, text, json.dumps(vec), model)
+                      start, end, text, common.pack_vector(vec), model)
                      for seq, start, end, text, vec in chunks],
                 )
             self._vec_upsert("vchk", model, namespace,
@@ -1153,6 +1169,19 @@ class PostgresStore(GraphStore):
         )
         return common.row_to_artifact(rows[0]) if rows else None
 
+    def _resolve_provenance(self, claim: ClaimIn):
+        """artifact_event_id -> artifact_id at write time (D-039); a
+        reference to a document that was never ingested is an error, never
+        a silently dropped citation."""
+        prov = claim.provenance
+        if prov is None or prov.artifact_id:
+            return prov
+        found = self._artifact_by_event(claim.namespace, prov.artifact_event_id)
+        if found is None:
+            raise ValueError(f"provenance.artifact_event_id {prov.artifact_event_id!r} does not name a "
+                             f"document in namespace {claim.namespace!r}; ingest the document first")
+        return prov.model_copy(update={"artifact_id": found.id})
+
     def _artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
         rows = self._q(
             "SELECT * FROM artifacts WHERE namespace = %s AND event_id = %s",
@@ -1240,7 +1269,7 @@ class PostgresStore(GraphStore):
             recorded_at=common.now(),
             source=claim.source,
             confidence=claim.confidence,
-            provenance=claim.provenance,
+            provenance=self._resolve_provenance(claim),
             attrs=claim.attrs,
         )
         inserted = self._x(

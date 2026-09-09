@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef,
-                         PredicateDef, SchemaRegistration)
+                         PredicateDef, Provenance, SchemaRegistration)
 
 FEEDS = {
     "kev": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
@@ -291,11 +291,28 @@ def kev_envelopes(entry: dict, namespace: str) -> Iterator[ClaimIn | DocumentIn]
     added = _utc(entry["dateAdded"])
     ref = EntityRef(type="cve", key=cid)
     prefix = f"kev:{cid}:{added.date().isoformat()}"
+    doc_event = f"{prefix}:doc"[:128]
+    # the advisory text first, then the claims citing it by that event id
+    # (D-039) — so the KEV entry's own words rank as excerpts for its CVE
+    text = "\n".join(filter(None, [
+        f"{cid}: {entry.get('vulnerabilityName', '')}".strip(),
+        f"Vendor/project: {entry.get('vendorProject', '')}  Product: {entry.get('product', '')}",
+        "",
+        entry.get("shortDescription", ""),
+        "",
+        f"Required action: {entry.get('requiredAction', '')}",
+        f"Due date: {entry.get('dueDate', '')}",
+        f"Known ransomware campaign use: {entry.get('knownRansomwareCampaignUse', '')}",
+        f"Notes: {entry.get('notes', '')}" if entry.get("notes") else "",
+    ]))
+    yield DocumentIn(namespace=namespace, event_id=doc_event, filename=f"KEV-{cid}.txt",
+                     text=text, source=SOURCE_KEV, observed_at=added, attrs={"cve": cid})
+    cites = Provenance(artifact_event_id=doc_event)
 
     def claim(pred, obj, tag="", **kw):
         return ClaimIn(namespace=namespace, event_id=f"{prefix}:{pred}{tag}"[:128], subject=ref,
                        predicate=pred, object=obj, observed_at=added, valid_from=added,
-                       source=SOURCE_KEV, **kw)
+                       source=SOURCE_KEV, provenance=cites, **kw)
 
     yield claim("exploited_in_wild", True,
                 attrs={"due_date": entry.get("dueDate"),
@@ -314,19 +331,6 @@ def kev_envelopes(entry: dict, namespace: str) -> Iterator[ClaimIn | DocumentIn]
     for cwe in entry.get("cwes", []) or []:
         if isinstance(cwe, str) and cwe.startswith("CWE-"):
             yield claim("has_weakness", EntityRef(type="cwe", key=cwe), tag=f":{cwe}")
-    text = "\n".join(filter(None, [
-        f"{cid}: {entry.get('vulnerabilityName', '')}".strip(),
-        f"Vendor/project: {entry.get('vendorProject', '')}  Product: {entry.get('product', '')}",
-        "",
-        entry.get("shortDescription", ""),
-        "",
-        f"Required action: {entry.get('requiredAction', '')}",
-        f"Due date: {entry.get('dueDate', '')}",
-        f"Known ransomware campaign use: {entry.get('knownRansomwareCampaignUse', '')}",
-        f"Notes: {entry.get('notes', '')}" if entry.get("notes") else "",
-    ]))
-    yield DocumentIn(namespace=namespace, event_id=f"{prefix}:doc"[:128], filename=f"KEV-{cid}.txt",
-                     text=text, source=SOURCE_KEV, observed_at=added, attrs={"cve": cid})
 
 
 def epss_envelopes(lines: Iterable[str], namespace: str,

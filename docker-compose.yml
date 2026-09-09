@@ -31,6 +31,8 @@ services:
       LOOM_EMBED_BASE_URL: ${LOOM_EMBED_BASE_URL:-}
       LOOM_EMBED_MODEL: ${LOOM_EMBED_MODEL:-}
       LOOM_EMBED_API_KEY: ${LOOM_EMBED_API_KEY:-}
+      LOOM_EMBED_DIM: ${LOOM_EMBED_DIM:-}
+      LOOM_EMBED_BATCH: ${LOOM_EMBED_BATCH:-}
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
       LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
@@ -187,6 +189,8 @@ services:
       LOOM_EMBED_BASE_URL: ${LOOM_EMBED_BASE_URL:-}
       LOOM_EMBED_MODEL: ${LOOM_EMBED_MODEL:-}
       LOOM_EMBED_API_KEY: ${LOOM_EMBED_API_KEY:-}
+      LOOM_EMBED_DIM: ${LOOM_EMBED_DIM:-}
+      LOOM_EMBED_BATCH: ${LOOM_EMBED_BATCH:-}
 
   # MCP over streamable HTTP for remote agents (phase 3). Local agents spawn
   # stdio instead: claude mcp add loom -- docker compose run --rm -T loom

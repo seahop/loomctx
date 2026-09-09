@@ -42,6 +42,38 @@ except ImportError:  # pragma: no cover
     _np = None
 
 
+_VEC_MAGIC = b"\x00f32"   # a JSON text never starts with NUL
+
+
+def pack_vector(vec: list[float]) -> bytes:
+    """float32 little-endian with a 4-byte magic prefix: ~6 KB for 1,536
+    dims instead of ~30 KB of JSON text. 228k JSON vectors had grown a
+    store to 10 GB (D-039)."""
+    import array
+    return _VEC_MAGIC + array.array("f", vec).tobytes()
+
+
+def unpack_vector(raw) -> list[float]:
+    """Accepts the packed form, legacy JSON text, and legacy JSON that a
+    TEXT -> BYTEA migration turned into bytes."""
+    import array
+    if isinstance(raw, memoryview):
+        raw = raw.tobytes()
+    if isinstance(raw, (bytes, bytearray)):
+        if raw[:4] == _VEC_MAGIC:
+            arr = array.array("f")
+            arr.frombytes(bytes(raw[4:]))
+            return arr.tolist()
+        raw = bytes(raw).decode("utf-8")
+    return json.loads(raw)
+
+
+def raw_f32(vec: list[float]) -> bytes:
+    """The bare float32 buffer sqlite-vec accepts as a vector literal."""
+    import array
+    return array.array("f", vec).tobytes()
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     if len(a) != len(b):
         return 0.0  # different embedding spaces never compare
@@ -143,7 +175,7 @@ def row_to_chunk(row: Mapping[str, Any]) -> dict:
     return {
         "artifact_id": row["artifact_id"], "seq": row["seq"],
         "span_start": row["span_start"], "span_end": row["span_end"],
-        "text": row["text"], "vector": json.loads(row["vector"]),
+        "text": row["text"], "vector": unpack_vector(row["vector"]),
         "source": row["source"], "observed_at": parse(row["observed_at"]),
     }
 

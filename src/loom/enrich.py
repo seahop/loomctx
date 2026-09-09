@@ -77,6 +77,11 @@ DOSSIER_SYSTEM = (
 # (or ordinal-of-hostname / LOOM_WORKER_COUNT on a StatefulSet). One worker
 # with the defaults behaves exactly as before.
 WORKER_ID = os.environ.get("LOOM_WORKER_ID", "").strip() or socket.gethostname()
+# Observations embedded per provider call. 128 is gentle on a laptop and a
+# self-hosted embedder; hosted APIs take 512–2048 and a 465k-row backlog
+# at 128 per ~4 s tick is four hours (D-039).
+EMBED_BATCH = max(1, int(os.environ.get("LOOM_EMBED_BATCH", "") or 128))
+CHUNK_LIMIT = max(1, int(os.environ.get("LOOM_CHUNK_LIMIT", "") or 4))
 LEASE_SECONDS = float(os.environ.get("LOOM_LEASE_SECONDS", "") or 600)
 
 
@@ -511,9 +516,9 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) ->
         "extracted": _guarded("extraction", extract_pending, store, llm) if llm else 0,
         "resolved": _guarded("resolution", resolve_entities, store)
         + (_guarded("adjudication", adjudicate_entities, store, llm) if llm else 0),
-        "embedded": _guarded("embedding", embed_pending, store, embedder) if embedder else 0,
+        "embedded": _guarded("embedding", embed_pending, store, embedder, EMBED_BATCH) if embedder else 0,
         "indexed": _guarded("vector-index", index_pending, store, embedder) if embedder else 0,
-        "chunked": _guarded("chunking", chunk_artifacts, store, embedder) if embedder else 0,
+        "chunked": _guarded("chunking", chunk_artifacts, store, embedder, CHUNK_LIMIT) if embedder else 0,
         "dossiers": _guarded("dossiers", refresh_dossiers, store, llm) if llm else 0,
     }
 

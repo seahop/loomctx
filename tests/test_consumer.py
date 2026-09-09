@@ -99,3 +99,19 @@ def test_failed_batch_naks_then_deadletters_on_last_delivery():
     assert published[0][0] == "loom.deadletter.claim"
     assert published[0][2]["Loom-Principal"] == "shipper"
     assert published[0][2]["Loom-Error"].startswith("RuntimeError: database is locked")
+
+
+def test_queue_path_skips_a_claim_citing_an_unknown_document(tmp_path):
+    """D-039: the consumer cannot reject per item, so it drops and logs."""
+    import json
+    from loom.consumer import handle_batch
+    store = SqliteStore(tmp_path / "q.db")
+    doc = {"kind": "document", "event_id": "d1", "text": "t", "source": "s", "observed_at": "2026-09-01T00:00:00Z"}
+    base = {"kind": "claim", "subject": {"type": "host", "key": "h"}, "predicate": "p", "object": 1,
+            "observed_at": "2026-09-01T00:00:00Z", "source": "s"}
+    good = {**base, "event_id": "g", "provenance": {"artifact_event_id": "d1"}}
+    bad = {**base, "event_id": "b", "provenance": {"artifact_event_id": "zzz"}}
+    counts = handle_batch(store, [json.dumps(x).encode() for x in (doc, good, bad)])
+    assert counts == {"recorded": 1, "accepted": 1, "skipped": 1}
+    assert store.observations_for("default", EntityRef(type="host", key="h"))[0].provenance.artifact_id
+    store.close()

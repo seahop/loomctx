@@ -104,6 +104,10 @@ def test_kev_mapping_flags_document_and_freehand_product_key():
     assert len(docs) == 1 and docs[0].filename == "KEV-CVE-2026-1337.txt"
     assert "heap overflow" in docs[0].text and "Required action: Apply mitigations." in docs[0].text
     assert docs[0].event_id == "kev:CVE-2026-1337:2026-03-02:doc"
+    # the document comes first and every claim cites it by event id (D-039)
+    assert isinstance(envs[0], DocumentIn)
+    cited = [c for c in claims if c.predicate != "made_by"]           # made_by is derived, not from the text
+    assert cited and all(c.provenance.artifact_event_id == docs[0].event_id for c in cited)
 
 
 def test_epss_filters_to_known_cves_and_reads_the_score_date():
@@ -202,3 +206,25 @@ def test_live_pull_is_conditional(tmp_path):
     second = vulns.pull(cache, [], {"kev"})
     assert first == {"kev": "downloaded"} and second == {"kev": "cached"}
     assert sum(1 for _ in vulns.iter_kev(cache / "kev.json")) > 1000
+
+
+def test_kev_advisory_ranks_as_an_excerpt_for_its_cve(tmp_path):
+    """D-039 end to end: the KEV claims cite their advisory, the worker
+    chunks it, and the CVE's pack carries the advisory's own words."""
+    from loom.enrich import chunk_artifacts
+    from loom.llm import HashingEmbedder
+    cache = tmp_path / "feeds"
+    _write_cache(cache)
+    db = tmp_path / "x.db"
+    load_direct(str(db), vulns.to_lines(vulns.envelopes(cache, "netsec", [2026], {"kev"})), size=100)
+    store = SqliteStore(db)
+    cve = EntityRef(type="cve", key="CVE-2026-1337")
+    kev_obs = [o for o in store.observations_for("netsec", cve) if o.source == "cisa-kev"]
+    assert kev_obs and all(o.provenance and o.provenance.artifact_id for o in kev_obs)
+    embedder = HashingEmbedder()
+    assert chunk_artifacts(store, embedder, limit=10) >= 1
+    pack = build_pack(store, AskRequest(namespace="netsec", subject=cve, budget=1500,
+                                       question="what is the required action?"), embedder=embedder)
+    excerpts = [i for i in pack.items if i.kind == "doc_excerpt"]
+    assert excerpts and "Required action" in excerpts[0].text and excerpts[0].citations[0].artifact_id
+    store.close()

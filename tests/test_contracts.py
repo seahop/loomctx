@@ -59,3 +59,11 @@ def test_document_requires_exactly_one_body():
 def test_confidence_bounds():
     with pytest.raises(ValidationError):
         ENVELOPE.validate_python({**CLAIM, "confidence": 1.5})
+
+
+def test_provenance_needs_a_reference():
+    from loom.contracts import Provenance
+    assert Provenance(artifact_event_id="doc-1").artifact_id is None
+    assert Provenance(artifact_id="abc").artifact_event_id is None
+    with pytest.raises(ValidationError):
+        Provenance(span_start=1)

@@ -157,6 +157,8 @@ simple as it is. Turn them when a measurement says to.
 | Ingest buffer cap | `LOOM_STREAM_MAX_BYTES`, `LOOM_STREAM_DISCARD` | 1 GiB / old (`scale-pg`: 4 GiB) | storms degrade predictably instead of filling disks |
 | Redelivery | `LOOM_ACK_WAIT`, `LOOM_MAX_DELIVER` (consumer) | 30 s / 5 | after the bound a message is parked on `LOOM_DEADLETTER` with the error, never dropped |
 | Enrichment workers | `loom-enrich` StatefulSet replicas + `LOOM_WORKER_COUNT` (raise together) | 2 in `scale-pg` | document/LLM backlog grows; leases + sharding prevent double spend |
+| Embedding throughput | `LOOM_EMBED_BATCH` (observations per embedder call, default 128) and `LOOM_CHUNK_LIMIT` (documents chunked per tick, default 4) | 128 / 4 | a hosted embedder takes 512–2048 per call; a 465k-observation backlog went from ~4 h to ~1 h with four sharded workers at 512 (D-039) |
+| Embedding storage | `LOOM_EMBED_DIM` (Matryoshka output size, e.g. 512) | model native (1536 for text-embedding-3-small) | vectors are packed float32 (schema v3): 6 KB per 1,536-dim row plus the ANN index's copy; 512 dims is a third of that at most of the quality (D-039) |
 | Tenant shards | `LOOM_SHARDS` (namespace → DSN map; engines, consumers, workers) | unset | a heavy tenant needs its own database; move with `lifecycle export`/`import`, then flip the map |
 | Artifact offload | `LOOM_BLOB_THRESHOLD` + `LOOM_BLOB_DIR` or `LOOM_BLOB_S3_BUCKET`/`_ENDPOINT` | unset | documents bloat the database; bodies above the threshold live in object storage, reinflated on every read |
 

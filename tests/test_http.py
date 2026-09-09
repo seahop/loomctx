@@ -239,3 +239,24 @@ def test_openapi_document_exports(tmp_path, monkeypatch):
     assert {"/v1/ingest", "/v1/ingest/batch", "/v1/ask", "/v1/expand", "/v1/answer",
             "/v1/schemas", "/v1/entities/semantic", "/readyz"} <= paths
     assert "IngestBatchResponse" in doc["components"]["schemas"]
+
+
+def test_batch_claims_cite_a_document_in_the_same_batch(tmp_path, monkeypatch):
+    """D-039: a document and structured claims about it arrive together; the
+    claims cite it by event id and land with the resolved artifact id. An
+    unknown reference rejects that item only."""
+    with make_client(tmp_path, monkeypatch) as client:
+        items = [
+            {"kind": "document", "event_id": "adv-1", "text": "Apply the vendor patch.", "source": "kev",
+             "observed_at": "2026-09-02T09:00:00Z"},
+            {**CLAIM, "event_id": "c-1", "provenance": {"artifact_event_id": "adv-1"}},
+            {**CLAIM, "event_id": "c-2", "provenance": {"artifact_event_id": "missing"}},
+        ]
+        body = client.post("/v1/ingest/batch", json=items).json()
+        assert [x["status"] for x in body["results"]] == ["accepted", "recorded", "rejected"]
+        assert "ingest the document first" in body["results"][2]["detail"]
+        obs = client.get("/v1/entities/host/web-01/observations").json()["observations"]
+        assert obs[0]["provenance"]["artifact_id"] == body["results"][0]["artifact_id"]
+        # the single-envelope route rejects the same way
+        r = client.post("/v1/ingest", json={**CLAIM, "event_id": "c-3", "provenance": {"artifact_event_id": "missing"}})
+        assert r.status_code == 422 and "ingest the document first" in r.json()["detail"]

@@ -168,20 +168,24 @@ class Embedder(ABC):
 class OpenAICompatEmbedder(Embedder):
     """POST {base}/embeddings — OpenAI, Mistral, Together, Ollama, vLLM..."""
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None):
+    def __init__(self, base_url: str, model: str, api_key: str | None = None,
+                 dimensions: int | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        # Matryoshka models (text-embedding-3-*, qwen3-embedding) accept a
+        # smaller output size; 512 keeps most of the quality at a third of
+        # the storage and index cost (D-039)
+        self.dimensions = dimensions
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         headers = {}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
-        data = _post_json(
-            self.base_url + "/embeddings",
-            {"model": self.model, "input": texts},
-            headers,
-        )
+        body: dict = {"model": self.model, "input": texts}
+        if self.dimensions:
+            body["dimensions"] = self.dimensions
+        data = _post_json(self.base_url + "/embeddings", body, headers)
         try:
             rows = sorted(data["data"], key=lambda r: r["index"])
             return [r["embedding"] for r in rows]
@@ -231,6 +235,7 @@ def embedder_from_env() -> Embedder | None:
     LOOM_EMBED_BASE_URL: custom/self-hosted endpoint (overrides shortcut)
     LOOM_EMBED_MODEL:    required for API providers
     LOOM_EMBED_API_KEY:  when the endpoint needs one
+    LOOM_EMBED_DIM:      optional output size for Matryoshka models (e.g. 512)
     """
     provider = (_env("LOOM_EMBED_PROVIDER") or "").lower() or None
     base_url = _env("LOOM_EMBED_BASE_URL")
@@ -243,7 +248,9 @@ def embedder_from_env() -> Embedder | None:
         base_url = OPENAI_COMPAT_BASES.get(provider)
     if base_url is None or model is None:
         return None
-    return OpenAICompatEmbedder(base_url=base_url, model=model, api_key=api_key)
+    dim = _env("LOOM_EMBED_DIM")
+    return OpenAICompatEmbedder(base_url=base_url, model=model, api_key=api_key,
+                                dimensions=int(dim) if dim else None)
 
 
 def llm_from_env() -> LLMClient | None:

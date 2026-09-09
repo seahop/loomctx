@@ -167,7 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # v3: vectors stored packed (D-039); reads accept legacy JSON
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -313,7 +313,7 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 f"INSERT INTO {name} (ref_id, namespace, artifact_id, embedding)"
                 " VALUES (?, ?, ?, ?)",
-                [(rid, namespace, aid or "", json.dumps(vec)) for rid, aid, vec in group])
+                [(rid, namespace, aid or "", common.raw_f32(vec)) for rid, aid, vec in group])
             written += len(group)
         return written
 
@@ -352,7 +352,7 @@ class SqliteStore(GraphStore):
                     "SELECT ref_id, vector FROM embeddings WHERE namespace = ? AND model = ?",
                     (namespace, model)).fetchall()
                 scored = common.cosines(
-                    query, {r["ref_id"]: json.loads(r["vector"]) for r in rows})
+                    query, {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows})
             if not scored:
                 return []
             marks = ",".join("?" * len(scored))
@@ -384,7 +384,7 @@ class SqliteStore(GraphStore):
                     sql += f" AND artifact_id IN ({','.join('?' * len(wanted))})"
                     params += tuple(wanted)
                 rows = self._conn.execute(sql, params).fetchall()
-                scored = common.cosines(query, {r["id"]: json.loads(r["vector"]) for r in rows})
+                scored = common.cosines(query, {r["id"]: common.unpack_vector(r["vector"]) for r in rows})
             best = common.top_k(scored, limit)
             if not best:
                 return []
@@ -418,7 +418,7 @@ class SqliteStore(GraphStore):
                 for r in self._conn.execute(sql, (model,)):
                     if r["id"] not in have:
                         by_ns.setdefault(r["namespace"], []).append(
-                            (r["id"], r["artifact_id"], json.loads(r["vector"])))
+                            (r["id"], r["artifact_id"], common.unpack_vector(r["vector"])))
                 for ns, rows in by_ns.items():
                     out[key] += self._vec_upsert(kind, model, ns, rows)
         return out
@@ -682,6 +682,10 @@ class SqliteStore(GraphStore):
                 return self._artifact_by_event(doc.namespace, doc.event_id)
         return artifact
 
+    def artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
+        with self._tx():
+            return self._artifact_by_event(namespace, event_id)
+
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
         with self._tx():
             return self._get_artifact(namespace, artifact_id)
@@ -704,7 +708,7 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "INSERT OR REPLACE INTO embeddings (ref_id, namespace, model,"
                 " vector) VALUES (?, ?, ?, ?)",
-                [(ref_id, namespace, model, json.dumps(vec))
+                [(ref_id, namespace, model, common.pack_vector(vec))
                  for ref_id, vec in items],
             )
             self._vec_upsert("vobs", model, namespace,
@@ -724,7 +728,7 @@ class SqliteStore(GraphStore):
                     (namespace, model, *chunk),
                 ).fetchall()
                 for row in rows:
-                    result[row["ref_id"]] = json.loads(row["vector"])
+                    result[row["ref_id"]] = common.unpack_vector(row["vector"])
         return result
 
     # hex value of the id's last character, 0..15: the shard key (D-031)
@@ -835,7 +839,7 @@ class SqliteStore(GraphStore):
                 " seq, span_start, span_end, text, vector, model)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(f"{artifact_id}:{model}:{seq}", namespace, artifact_id, seq,
-                  start, end, text, json.dumps(vec), model)
+                  start, end, text, common.pack_vector(vec), model)
                  for seq, start, end, text, vec in chunks],
             )
             self._vec_upsert("vchk", model, namespace,
@@ -1161,6 +1165,19 @@ class SqliteStore(GraphStore):
         ).fetchone()
         return common.row_to_artifact(row) if row else None
 
+    def _resolve_provenance(self, claim: ClaimIn):
+        """artifact_event_id -> artifact_id at write time (D-039); a
+        reference to a document that was never ingested is an error, never
+        a silently dropped citation."""
+        prov = claim.provenance
+        if prov is None or prov.artifact_id:
+            return prov
+        found = self._artifact_by_event(claim.namespace, prov.artifact_event_id)
+        if found is None:
+            raise ValueError(f"provenance.artifact_event_id {prov.artifact_event_id!r} does not name a "
+                             f"document in namespace {claim.namespace!r}; ingest the document first")
+        return prov.model_copy(update={"artifact_id": found.id})
+
     def _artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
         row = self._conn.execute(
             "SELECT * FROM artifacts WHERE namespace = ? AND event_id = ?",
@@ -1249,7 +1266,7 @@ class SqliteStore(GraphStore):
             recorded_at=common.now(),
             source=claim.source,
             confidence=claim.confidence,
-            provenance=claim.provenance,
+            provenance=self._resolve_provenance(claim),
             attrs=claim.attrs,
         )
         cur = self._conn.execute(
