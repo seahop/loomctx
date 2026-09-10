@@ -8,10 +8,11 @@ cd "$(dirname "$0")/.."
 
 docker compose build loom >/dev/null
 echo "== test suite (CI conditions: no LOOM_LLM_* / LOOM_EMBED_*)"
-docker compose run --rm -T \
+out=$(docker compose run --rm -T \
   -e LOOM_LLM_PROVIDER= -e LOOM_LLM_MODEL= -e LOOM_LLM_API_KEY= -e LOOM_LLM_BASE_URL= \
   -e LOOM_EMBED_PROVIDER= -e LOOM_EMBED_MODEL= -e LOOM_EMBED_API_KEY= -e LOOM_EMBED_DIM= \
-  test 2>&1 | tail -1
+  test 2>&1) || { echo "$out" | grep -E "^FAILED|^ERROR|passed|failed|error" | tail -20; echo "== test suite FAILED"; exit 1; }
+echo "$out" | grep -E "passed|failed" | tail -1
 
 echo "== contracts in sync"
 docker compose run --rm -T loom python -m loom.schemas | diff -q - contracts/schemas.json && echo "schemas.json ok"

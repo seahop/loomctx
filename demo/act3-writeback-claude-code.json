@@ -1,0 +1,38 @@
+{
+  "note": "Act 3 follow-up rehearsal: the same Claude Code session records a triage fact and reads it back, 2026-09-10.",
+  "model": "claude-fable-5-1",
+  "num_turns": 4,
+  "duration_ms": 20179,
+  "cost_usd": 0.4299925,
+  "tool_calls": [
+    {
+      "tool": "ToolSearch",
+      "args": {
+        "query": "select:mcp__loom__record_claim",
+        "max_results": 1
+      }
+    },
+    {
+      "tool": "record_claim",
+      "args": {
+        "subject": "host:web-01",
+        "predicate": "triaged_by",
+        "object_ref": "user:jdoe",
+        "observed_at": "2026-09-10T00:00:00Z",
+        "valid_from": "2026-09-10T00:00:00Z",
+        "source": "agent-writeback",
+        "namespace": "netsec"
+      }
+    },
+    {
+      "tool": "ask",
+      "args": {
+        "subject": "host:web-01",
+        "question": "who triaged this host?",
+        "namespace": "netsec",
+        "budget": 400
+      }
+    }
+  ],
+  "answer": "Recorded and read back. The new claim is the top-ranked fact for the question, right after the standing OS conflict.\n\n**What was written** (namespace netsec):\n\n```\nhost:web-01  triaged_by  user:jdoe\nobserved_at 2026-09-10T00:00:00Z   valid_from 2026-09-10   source agent-writeback\nobservation_id 556248ad2af2419aa8bb8f4b0ed7a0c7\n```\n\nI used the predicate `triaged_by` with an edge to the existing `user:jdoe` entity rather than a scalar, so the fact is traversable from the user side too. The namespace is non-strict, so the unregistered predicate was accepted without a schema entry.\n\n**What Loom returned** for \"who triaged this host?\" on host:web-01:\n\n| Fact | Source | Observed | Cite | Observation id |\n|---|---|---|---|---|\n| host:web-01 triaged_by user:jdoe, valid 2026-09-10 to present | agent-writeback | 2026-09-10 | 556248ad2af2 | 556248ad2af2419aa8bb8f4b0ed7a0c7 |\n\nIt scored 0.75, the highest of any fact in the pack. The only item above it is the runs_os conflict, which Loom always pins to the top for this host. The remaining items are the usual login and netflow context, with jdoe's SSH logins on 2026-09-01 and 2026-09-02 as the nearest supporting facts.\n\nOne thing to consider: `triaged_by` is not in the netsec schema registry, so it will not appear in describe_namespace output for other agents. If triage attribution becomes a standing predicate, it should be registered there."
+}

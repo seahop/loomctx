@@ -293,7 +293,9 @@ def entity_observations(
     request: Request,
     limit: Annotated[int, Query(gt=0, le=1000)] = 100,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> dict:
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     _gate_entity_type(grant, etype)
     observations = request.app.state.store.observations_for(
@@ -312,7 +314,9 @@ def get_artifact(
     artifact_id: str,
     request: Request,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> dict:
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     store = request.app.state.store
     artifact = store.get_artifact(namespace, artifact_id)
@@ -352,7 +356,9 @@ def register_schema(reg: SchemaRegistration, request: Request) -> SchemaRegistra
 def get_schema(
     request: Request,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> SchemaRegistration:
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
     _authorize(request, namespace, "r")
     schema = request.app.state.store.get_schema(namespace)
     if schema is None:

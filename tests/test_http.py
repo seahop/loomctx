@@ -269,3 +269,13 @@ def test_search_endpoints_take_namespace_as_a_query_parameter(tmp_path, monkeypa
         assert not client.get("/v1/entities/search", params={"q": "web"}).json()["matches"]
         assert client.get("/v1/entities/search", params={"q": "web"},
                           headers={"X-Loom-Namespace": "netsec"}).json()["matches"]
+        # the same on observations, artifacts and the schema
+        assert client.get("/v1/entities/host/web-01/observations", params={"namespace": "netsec"}).json()["count"] == 1
+        assert client.get("/v1/entities/host/web-01/observations").json()["count"] == 0
+        art = client.post("/v1/ingest", json={"kind": "document", "text": "t", "source": "s", "namespace": "netsec",
+                                              "observed_at": "2026-09-02T09:00:00Z"}).json()["artifact_id"]
+        assert client.get(f"/v1/artifacts/{art}", params={"namespace": "netsec"}).status_code == 200
+        assert client.get(f"/v1/artifacts/{art}").status_code == 404
+        client.post("/v1/schemas", json={"namespace": "netsec", "predicates": [{"name": "logged_in_by"}]})
+        assert client.get("/v1/schemas", params={"namespace": "netsec"}).json()["namespace"] == "netsec"
+        assert client.get("/v1/schemas").status_code == 404

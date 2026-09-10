@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "loom": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "--project-directory",
+        ".",
+        "run",
+        "--rm",
+        "-T",
+        "loom",
+        "python",
+        "-m",
+        "loom.mcp_server"
+      ]
+    }
+  }
+}

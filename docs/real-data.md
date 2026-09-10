@@ -240,7 +240,12 @@ real-corpus result for that question is in the D-040 entry.
   `f5:nginx_open_source`; `haxx:curl` vs `curl:curl`). Only 91 of 708 KEV
   product keys match a CPE key in this load. The connector deliberately does
   not paper over that — it is the resolution worker's job (D-023) and the
-  demo should show the seam rather than hide it.
+  demo should show the seam rather than hide it. The seam showed itself
+  in the 2026-09-10 rehearsal: asked about web-01, Claude Code reported
+  unprompted that the KEV connector keys the kernel as `linux:kernel`
+  while NVD and the inventory use `linux:linux_kernel`, and that about 25
+  kernel KEV entries hang off the other key — then verified three of them
+  (`demo/act3-claude-code.json`).
 - ~~KEV documents are loaded but not embedded.~~ Done (D-039): see
   "Documents" below.
 - **Only this year's NVD feed by default.** `--years 2026,2025,…` widens

@@ -18,6 +18,7 @@ docker compose exec loom python -m loom.seed load                          # 591
 docker compose exec --user 10001 loom python -m loom.connectors.vulns load \
     --db /data/loom.db --bridge-seed-hosts                                 # 110 s incl. feed download, ~525k envelopes
 claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
+# or, without touching your Claude Code config: claude --mcp-config demo/mcp.json --strict-mcp-config
 ```
 
 Set `LOOM_MCP_NAMESPACE=netsec` in `.env` if you want the agent to skip
@@ -91,17 +92,34 @@ In the `claude` terminal, type exactly:
 Narrate the tool calls as they scroll: `describe_namespace` (*it learns
 the schema — Loom is domain-agnostic, the domain is data*), `find_entity`
 (*names to handles*), `ask_scope` with `expand_predicates` (*two hops:
-host → software ← CVE, in one call*), then the answer. Expected: the
-kernel CVE `CVE-2026-53362` and Heartbleed `CVE-2014-0160` via OpenSSL,
-each with the chain and observation ids, and a note that coverage of the
-kernel was partial. Measured with fourteen models: the strong ones do
-this in 10 to 20 tool calls (`docs/models.md`).
+host → software ← CVE, in one call*), `ask` on each candidate CVE (*it
+verifies*), `find_related` (*meaning-based search over the advisories*),
+then the answer.
+
+Rehearsed 2026-09-10 with Claude Code (the account's default model,
+`claude-fable-5-1`): 22 tool calls, 151 seconds, $4.53, and an answer
+that named all three KEV CVEs — kernel `CVE-2026-53362` and
+`CVE-2026-31431`, Heartbleed `CVE-2014-0160` via OpenSSL — each with the
+`affects` link and the KEV observation id, nineteen citations all
+verifiable, nothing invented. Then it found something we had not planted:
+*"the kernel is double-keyed — the KEV connector files kernel entries
+under `linux:kernel`, NVD and the inventory use `linux:linux_kernel`;
+about 25 more kernel KEV CVEs hang off the KEV key and never reach web-01
+through the graph"*, and verified three of them directly. That is the
+entity-resolution seam from `docs/real-data.md`, discovered live by the
+agent. If it happens on stage, let it: *the agent just found a data
+quality problem in a public feed, with citations.* Transcript:
+`demo/act3-claude-code.json`. Cheaper models do this in 20 to 30 tool
+calls for a few cents (`docs/models.md`).
 
 If time allows, ask a follow-up that uses write-back:
 
-> Record that web-01 was triaged by user jdoe today, source agent-writeback.
+> Record that web-01 was triaged by user jdoe today, source agent-writeback, namespace netsec. Then ask about web-01 again with the question "who triaged this host?" and show me the new fact with its citation.
 
-then re-ask about web-01 and show the new fact, cited to the agent.
+Rehearsed: 3 tool calls, 23 seconds, $0.43; it records `host:web-01
+triaged_by user:jdoe` as an edge to the existing user entity, re-asks,
+and shows the new fact ranked first after the standing OS conflict, with
+its `cite` token. Transcript: `demo/act3-writeback-claude-code.json`.
 
 ## Close (1 min)
 
@@ -116,7 +134,7 @@ then re-ask about web-01 and show the new fact, cited to the agent.
 
 | If | Then |
 | --- | --- |
-| The venue network is down | Acts 1 and 2 need no network. For Act 3 use the local Claude Code session if it is authenticated, else open the saved transcript `demo/agent-transcript.json` (an `agent_eval` run) and walk through it |
+| The venue network is down | Acts 1 and 2 need no network. For Act 3 use the local Claude Code session if it is authenticated, else open the saved transcripts `demo/act3-claude-code.json` (the rehearsal) or `demo/agent-transcript.json` (a Sonnet 5 `agent_eval` run) and walk through them |
 | The connector load was skipped | Act 2 falls back to the seed data: `initech` contract-owner conflict in `procurement`, and the incident report document `IR-4432` |
 | Claude Code misbehaves | `docker compose exec loom python -m loom.agent_eval --db /data/loom.db --tasks exposure` prints the same tool sequence and answer with the configured model in ~40 s |
 | Someone asks "what if the model lies?" | Every item carries an observation id; 168 of 168 task-runs across fourteen models cited only ids they had seen. The one thing citations cannot catch is a confident "no" — which is why `truncated` exists |
@@ -126,6 +144,7 @@ then re-ask about web-01 and show the new fact, cited to the agent.
 
 - [x] Fresh clone, uncached build, seed, first cited answer, connector: 142 s total (2026-09-09, laptop)
 - [x] All four `curl` commands above return what the script says (verified 2026-09-09 against the loaded corpus)
-- [ ] Act 3 run once with Claude Code the morning of the talk; transcript saved
-- [ ] `claude mcp list` shows `loom` connected
+- [x] Act 3 run with Claude Code on the current build (2026-09-10); transcripts saved in `demo/`
+- [ ] Act 3 re-run the morning of the talk
+- [ ] `claude mcp list` shows `loom` connected (or pass `--mcp-config demo/mcp.json --strict-mcp-config`)
 - [ ] Fallback files on the desktop; slides have the two diagrams from `docs/infrastructure.md`
