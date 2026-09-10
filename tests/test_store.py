@@ -889,3 +889,24 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
     assert store.subjects_citing("ns", [a.id], allowed_types=("cve",)) == {a.id: [cve]}   # host->cve edge hidden
     assert store.subjects_citing("ns", [a.id], allowed_types=()) == {}
     assert store.subjects_citing("ns", []) == {}
+
+
+def test_postgres_retries_a_lost_deadlock_then_gives_up():
+    """D-043: a bulk loader lost a deadlock to a pod's open-time DDL on GKE.
+    The transaction was rolled back whole and writes are idempotent, so the
+    store retries it, bounded."""
+    pytest.importorskip("psycopg")
+    from psycopg import errors
+    from loom.store.postgres import retry_on_deadlock
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise errors.DeadlockDetected("deadlock detected")
+        return "ok"
+
+    assert retry_on_deadlock(flaky, backoff=(0.0, 0.0, 0.0)) == "ok" and calls["n"] == 3
+    calls["n"] = -10
+    with pytest.raises(errors.DeadlockDetected):
+        retry_on_deadlock(flaky, backoff=(0.0,))

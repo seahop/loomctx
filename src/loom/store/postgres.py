@@ -37,6 +37,8 @@ from ..contracts import (
     SchemaRegistration,
 )
 from . import common
+
+log = logging.getLogger("loom.store")
 from .base import GraphStore
 
 _SCHEMA = """
@@ -202,6 +204,25 @@ _ON_EVENT_CONFLICT = (
 # Replicas start concurrently; serialize the idempotent DDL so two of them
 # don't race on CREATE TABLE IF NOT EXISTS (pg_type uniqueness errors).
 _SCHEMA_LOCK_ID = 0x4C4F4F4D  # "LOOM"
+_DEADLOCK_BACKOFF = (0.2, 0.6, 1.5)
+
+
+def retry_on_deadlock(fn, backoff: tuple[float, ...] = _DEADLOCK_BACKOFF):
+    """Run a whole transaction again when Postgres aborts it as the loser
+    of a deadlock or a serialization conflict: the transaction rolled back
+    entirely and every write here is idempotent by event_id, so a retry is
+    safe. Bounded; the last failure propagates (D-043)."""
+    import time as _time
+    from psycopg import errors
+    for attempt, delay in enumerate(backoff + (None,)):
+        try:
+            return fn()
+        except (errors.DeadlockDetected, errors.SerializationFailure) as exc:
+            if delay is None:
+                raise
+            log.warning("transaction lost a deadlock/serialization race (%s); retry %d in %.1fs",
+                        exc.__class__.__name__, attempt + 1, delay)
+            _time.sleep(delay)
 
 
 class PostgresStore(GraphStore):
@@ -233,12 +254,29 @@ class PostgresStore(GraphStore):
         self._read_pool = pool(read_dsn) if read_dsn and read_dsn != dsn else None
         self._vec_tables: dict[str, int] = {}
         self._vec = self._load_vec()
-        with self._tx():
-            self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
-            self._x(_SCHEMA)
-            with self._conn.cursor() as cur:
-                self._migrate(cur)
-            self._refresh_vec_tables()
+        if self._schema_current():
+            # An up-to-date database gets no DDL on open. The idempotent
+            # ALTER TABLE ... IF NOT EXISTS / CREATE INDEX IF NOT EXISTS
+            # statements still take AccessExclusive locks, and on GKE a
+            # pod opening the store deadlocked a bulk loader mid-batch
+            # (D-043). Only a fresh or outdated database is migrated.
+            with self._tx():
+                self._refresh_vec_tables()
+        else:
+            with self._tx():
+                self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
+                self._x(_SCHEMA)
+                with self._conn.cursor() as cur:
+                    self._migrate(cur)
+                self._refresh_vec_tables()
+
+    def _schema_current(self) -> bool:
+        try:
+            with self._tx(read=False):
+                rows = self._q("SELECT value FROM loom_meta WHERE key = 'schema_version'")
+            return bool(rows) and int(rows[0]["value"]) == SCHEMA_VERSION
+        except Exception:  # noqa: BLE001 — no loom_meta yet: a fresh database
+            return False
 
     @property
     def _conn(self):
@@ -666,8 +704,10 @@ class PostgresStore(GraphStore):
         return self.record_claims([claim])[0]
 
     def record_claims(self, claims: list[ClaimIn]) -> list[Observation]:
-        with self._tx():
-            return [self._record_claim(c) for c in claims]
+        def once() -> list[Observation]:
+            with self._tx():
+                return [self._record_claim(c) for c in claims]
+        return retry_on_deadlock(once)
 
     def observations_for(
         self, namespace: str, ref: EntityRef, limit: int = 100
@@ -692,6 +732,9 @@ class PostgresStore(GraphStore):
             return [common.row_to_observation(r) for r in rows]
 
     def store_artifact(self, doc: DocumentIn) -> Artifact:
+        return retry_on_deadlock(lambda: self._store_artifact(doc))
+
+    def _store_artifact(self, doc: DocumentIn) -> Artifact:
         with self._tx():
             if doc.event_id is not None:
                 existing = self._artifact_by_event(doc.namespace, doc.event_id)

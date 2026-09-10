@@ -96,4 +96,9 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 1Gi
+            # JetStream refuses a stream larger than its store: the gateway
+            # asks for LOOM_STREAM_MAX_BYTES (4 GiB) x LOOM_STREAM_REPLICAS,
+            # so the PVC must hold that plus headroom. A 1Gi claim only
+            # worked on k3s because local-path reports the host disk; GKE
+            # enforced it ("insufficient storage resources", D-043).
+            storage: 8Gi
