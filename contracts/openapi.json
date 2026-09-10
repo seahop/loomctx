@@ -1175,6 +1175,22 @@
             }
           },
           {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Loom-Namespace",
             "required": false,
@@ -1442,6 +1458,22 @@
             }
           },
           {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Loom-Namespace",
             "required": false,
@@ -1591,6 +1623,22 @@
       "get": {
         "operationId": "get_schema_v1_schemas_get",
         "parameters": [
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          },
           {
             "in": "header",
             "name": "X-Loom-Namespace",

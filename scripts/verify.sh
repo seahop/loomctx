@@ -15,8 +15,10 @@ out=$(docker compose run --rm -T \
 echo "$out" | grep -E "passed|failed" | tail -1
 
 echo "== contracts in sync"
-docker compose run --rm -T loom python -m loom.schemas | diff -q - contracts/schemas.json && echo "schemas.json ok"
-docker compose run --rm -T loom python -m loom.schemas openapi | diff -q - contracts/openapi.json && echo "openapi.json ok"
+docker compose run --rm -T loom python -m loom.schemas | diff -q - contracts/schemas.json >/dev/null \
+  && echo "schemas.json ok" || { echo "schemas.json DRIFTED: docker compose run --rm -T loom python -m loom.schemas > contracts/schemas.json"; exit 1; }
+docker compose run --rm -T loom python -m loom.schemas openapi | diff -q - contracts/openapi.json >/dev/null \
+  && echo "openapi.json ok" || { echo "openapi.json DRIFTED: docker compose run --rm -T loom python -m loom.schemas openapi > contracts/openapi.json"; exit 1; }
 docker compose --profile sdk run --rm -T sdk-ts npm run gen >/dev/null 2>&1
 git diff --quiet -- sdk/typescript/src/contracts.ts && echo "contracts.ts ok" || { echo "contracts.ts drifted (regenerated; commit it)"; exit 1; }
 
