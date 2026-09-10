@@ -235,12 +235,13 @@ real-corpus result for that question is in the D-040 entry.
   (the kernel: 1,000 of 2,740 gathered), the MCP view warns, and the
   answering prompt says so. The limit itself stays; the point is that a
   reader can no longer conclude absence from a partial gather.
-- **Entity resolution on real keys.** KEV names products freehand ("NGINX
-  Open Source"); NVD keys them by CPE (`nginx:nginx`, and since the F5 era
-  `f5:nginx_open_source`; `haxx:curl` vs `curl:curl`). Only 91 of 708 KEV
-  product keys match a CPE key in this load. The connector deliberately does
-  not paper over that — it is the resolution worker's job (D-023) and the
-  demo should show the seam rather than hide it. The seam showed itself
+- ~~Entity resolution on real keys.~~ Tier 3 landed (D-042): structural
+  alias candidates for `vendor:product` keys, adjudicated by an LLM with
+  both records' facts. On this corpus, 58 merges for three cents (the
+  kernel, curl, php, sudo, Pulse Secure → Ivanti, …), 223 declines
+  (Android kernel, Cisco and Confluence groupings, …). KEV CVEs reachable
+  from web-01 went from 3 to 29. The remaining unmatched KEV keys have no
+  counterpart in a one-year NVD feed; `--years` is the lever. The seam showed itself
   in the 2026-09-10 rehearsal: asked about web-01, Claude Code reported
   unprompted that the KEV connector keys the kernel as `linux:kernel`
   while NVD and the inventory use `linux:linux_kernel`, and that about 25

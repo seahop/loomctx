@@ -1190,6 +1190,47 @@ faithfulness check caught all three, which is its job.
   (12/12) as the default, with `qwen3.7-flash` as the cheapest open-weight
   clean pass.
 
+## D-042 · Entity resolution tier 3: structural aliases, adjudicated (2026-09-10)
+
+The rehearsal (D-041) had the agent discover the seam itself: the KEV
+connector keys the kernel as `linux:kernel`, NVD as `linux:linux_kernel`,
+so 25-odd kernel KEV entries never reached a host through the graph.
+Tiers 1 and 2 (D-019, D-024) only merge keys that collide exactly once
+normalized; these do not.
+
+- **Candidates are structural, decisions are the LLM's.** For entity
+  types named in `LOOM_ALIAS_TYPES` (off by default — each candidate is a
+  model call), keys of the form `vendor:product` are compared by shape:
+  the vendor name repeated inside the product (`linux:kernel` ~
+  `linux:linux_kernel`), the same product token under exactly one other
+  vendor when the token is specific or one vendor *is* the product
+  (`haxx:curl` ~ `curl:curl`), or a bare family name with exactly one
+  longer key of its vendor whose remainder is not a version marker. Any
+  ambiguity — two longer keys, a versioned suffix — yields no candidate.
+  The existing adjudicator then sees both records' facts and a stricter
+  system prompt (same product line: yes; edition, version line or
+  sibling: no); the less-connected key merges into the more-connected one
+  on a confident yes, which is how a freehand KEV key becomes an alias of
+  the CPE product and its `affects` edges repoint.
+- `python -m loom.enrich resolve [--dry-run]` runs the spelling tiers and
+  this one once, outside the worker loop; the worker runs it each tick
+  when `LOOM_ALIAS_TYPES` is set. Declines are remembered per process (as
+  in D-023); persisting them is a known gap.
+- **Measured on the corpus** with `google/gemini-3.5-flash-lite` as judge:
+  283 candidates, 58 merged, 223 declined, 2 deferred, about three cents.
+  Every merge reviewed by hand reads as correct (curl, php, sudo,
+  grafana, Pulse Secure → Ivanti, Docker Desktop, the kernel); the
+  declines include the ones that had to be declined (Android kernel,
+  DirectX vs its graphics kernel, the Cisco and Confluence groupings).
+  KEV product keys matching an NVD key: 105 → 128 of 689. KEV CVEs
+  reachable from a seed host: web-01 3 → 29, db-01 3 → 29, laptop-17
+  14 → 40. The rest of the unmatched keys have no counterpart in a
+  one-year NVD feed at all; loading more years is the lever there, not
+  matching.
+- What it does not do: guess. `microsoft:windows` stays unmerged next to
+  ten Windows keys, and a sibling like `cisco:ios` ~ `cisco:ios_xe` is
+  offered and declined, not assumed.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

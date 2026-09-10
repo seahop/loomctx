@@ -200,9 +200,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   `ContextPack.truncated` reports gathered/total per capped entity, the
   MCP view warns, the answer prompt says so — the confident-negative
   failure mode from the scorecard has a fact to trip over
-- ⬜ Entity resolution on real keys: KEV freehand names vs CPE keys (91/708
-  match), one product under two CPE vendors across eras — a resolution
-  pass over `product` aliases (D-023 machinery)
+- ✅ Entity resolution tier 3 (D-042, 2026-09-10): structural alias
+  candidates for `vendor:product` keys, LLM-adjudicated; 58 merges on the
+  corpus, KEV CVEs reachable from web-01 3 → 29
+- ⬜ Persist adjudication declines across worker restarts (D-023/D-042
+  remember them per process)
 - ⬜ Embed the KEV documents (run the enrichment worker over the real
   corpus with an embedding provider) and measure excerpt quality
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m

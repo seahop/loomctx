@@ -105,11 +105,13 @@ verifiable, nothing invented. Then it found something we had not planted:
 *"the kernel is double-keyed — the KEV connector files kernel entries
 under `linux:kernel`, NVD and the inventory use `linux:linux_kernel`;
 about 25 more kernel KEV CVEs hang off the KEV key and never reach web-01
-through the graph"*, and verified three of them directly. That is the
+through the graph"*, and verified three of them directly. That was the
 entity-resolution seam from `docs/real-data.md`, discovered live by the
-agent. If it happens on stage, let it: *the agent just found a data
-quality problem in a public feed, with citations.* Transcript:
-`demo/act3-claude-code.json`. Cheaper models do this in 20 to 30 tool
+agent — and since closed (D-042): the alias is merged, and web-01 now
+reaches 29 KEV CVEs instead of 3, so expect a longer list with the kernel
+entries at the top. If a new seam shows up on stage, let it: *the agent
+just found a data quality problem in a public feed, with citations.*
+Transcript of the rehearsal before the merge: `demo/act3-claude-code.json`. Cheaper models do this in 20 to 30 tool
 calls for a few cents (`docs/models.md`).
 
 If time allows, ask a follow-up that uses write-back:

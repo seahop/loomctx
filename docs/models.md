@@ -43,7 +43,9 @@ observations), no hints beyond the server's own instructions.
 | a model to avoid for multi-hop | `z-ai/glm-5.3-flash` (0/3 and invented two CVEs), `moonshotai/kimi-k2.6` (0/3), `google/gemini-3.8-flash` (provider errors in the tool loop), `minimax/minimax-m3` (1/3) | fine for single-entity lookups only |
 
 Model ids age fast — five of these did not exist three months ago. The
-evidence and the command to re-run it follow.
+evidence and the command to re-run it follow. The corpus gained alias
+merges after this table was measured (D-042: the two-hop task now has 29
+target CVEs instead of 3), so a re-run will not be identical.
 
 ## How it is measured
 

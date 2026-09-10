@@ -1,5 +1,6 @@
 """Phase 4 enrichment: embeddings, claim extraction, dossiers (D-018)."""
 
+import json
 from datetime import datetime, timezone
 
 from loom.context import build_pack
@@ -635,4 +636,68 @@ def test_find_related_searches_passages_and_maps_them_to_entities(tmp_path):
     assert top.evidence.citations[0].artifact_id
     # scoped callers do not see entities outside their types
     assert all(m.entity.type == "cve" for m in semantic_search(store, "ns", e, "medusa", limit=3, allowed_types=("cve",)).matches)
+    store.close()
+
+
+def _alias_store(tmp_path):
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "alias.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    def cve(n): return EntityRef(type="cve", key=f"CVE-2026-{n}")
+    def prod(k): return EntityRef(type="product", key=k)
+    claims = []
+    # NVD side: many CVEs affect linux:linux_kernel; a few affect cisco:ios and cisco:ios_xe
+    for n in range(6):
+        claims.append(ClaimIn(namespace="ns", subject=cve(n), predicate="affects", object=prod("linux:linux_kernel"), source="nvd", observed_at=t))
+    for k in ("cisco:ios", "cisco:ios_xe", "atlassian:confluence_server", "atlassian:confluence_data_center",
+              "curl:curl", "microsoft:windows_10", "microsoft:windows_11"):
+        claims.append(ClaimIn(namespace="ns", subject=cve(100 + len(claims)), predicate="affects", object=prod(k), source="nvd", observed_at=t))
+    # KEV side: freehand keys
+    for k, n in (("linux:kernel", 900), ("haxx:curl", 901), ("atlassian:confluence", 902), ("microsoft:windows", 903)):
+        claims.append(ClaimIn(namespace="ns", subject=cve(n), predicate="affects", object=prod(k), source="cisa-kev", observed_at=t))
+        claims.append(ClaimIn(namespace="ns", subject=cve(n), predicate="exploited_in_wild", object=True, source="cisa-kev", observed_at=t))
+    store.record_claims(claims)
+    return store
+
+
+def test_alias_candidates_are_structural_and_unambiguous(tmp_path):
+    """D-042: vendor repeated in the product, same product under another
+    vendor, a bare family name with one longer key — and never a guess when
+    several keys could match."""
+    from loom.enrich import alias_candidates
+    store = _alias_store(tmp_path)
+    pairs = {tuple(sorted((a.key, b.key))) for a, b in alias_candidates(store, "ns", "product")}
+    assert ("linux:kernel", "linux:linux_kernel") in pairs           # R1
+    assert ("curl:curl", "haxx:curl") in pairs                       # R2
+    assert not any("windows" in a for a, b in pairs)                  # windows -> windows_10 / _11: ambiguous
+    assert not any("confluence" in a for a, b in pairs)               # two longer keys: ambiguous
+    assert ("cisco:ios", "cisco:ios_xe") in pairs                     # a sibling IS offered; the adjudicator must decline it
+    store.close()
+
+
+def test_alias_adjudication_merges_on_yes_and_repoints_kev_edges(tmp_path, monkeypatch):
+    from loom import enrich
+    from loom.enrich import adjudicate_aliases
+    store = _alias_store(tmp_path)
+    asked = []
+
+    class Judge:
+        model = "fake"
+        def complete(self, system, user, max_tokens=200):
+            asked.append(user)
+            same = "linux:kernel" in user and "linux:linux_kernel" in user
+            return json.dumps({"same": same, "confidence": 0.95 if same else 0.9, "reason": "test"})
+
+    monkeypatch.setattr(enrich, "_declined", set())
+    counts = adjudicate_aliases(store, Judge(), "ns", ("product",), limit=10)
+    assert counts["merged"] == 1 and counts["declined"] == counts["asked"] - 1 and counts["asked"] >= 2
+    # the stray KEV key folded into the connected CPE key: its KEV CVE now hangs off linux:linux_kernel
+    edges = store.observations_for("ns", EntityRef(type="product", key="linux:linux_kernel"), limit=100)
+    assert any(o.subject.key == "CVE-2026-900" and o.source == "cisa-kev" for o in edges)
+    # declined pairs are not re-asked
+    before = len(asked)
+    adjudicate_aliases(store, Judge(), "ns", ("product",), limit=10)
+    assert len(asked) == before
+    # dry run asks nothing
+    assert adjudicate_aliases(store, Judge(), "ns", ("product",), limit=10, dry_run=True)["asked"] == 0
     store.close()

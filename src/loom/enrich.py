@@ -482,6 +482,115 @@ def adjudicate_entities(store: GraphStore, llm: LLMClient, limit: int = 50) -> i
     return merged
 
 
+# ------------------------------------------------ tier 3: structured aliases (D-042)
+
+# Which entity types get structural alias candidates. Keys of the form
+# vendor:product (CPE 2.3 style) are compared by structure; anything else
+# is left to the spelling tiers above. Off unless set: every candidate is
+# an LLM call.
+ALIAS_TYPES = tuple(t.strip() for t in os.environ.get("LOOM_ALIAS_TYPES", "").split(",") if t.strip())
+_VERSIONISH = re.compile(r"^(v?\d|server_?\d|\d{4}|[a-z]{1,2}\d)")
+
+ALIAS_SYSTEM = ADJUDICATE_SYSTEM + (
+    " Keys follow vendor:product (CPE 2.3 style). A freehand or differently "
+    "vendored key for the SAME product line (linux:kernel and "
+    "linux:linux_kernel; haxx:curl and curl:curl) is the same thing. A "
+    "different edition, version line or sibling product (ios vs ios_xe, "
+    "windows vs windows_10, confluence vs confluence_data_center) is NOT."
+)
+
+
+def alias_candidates(store: GraphStore, namespace: str, entity_type: str) -> list[tuple[EntityRef, EntityRef]]:
+    """(stray, candidate) pairs of vendor:product keys that look like the
+    same product under a different key — same vendor with the vendor name
+    repeated in the product, the same product token under another vendor,
+    or a bare family name with exactly one longer key of its vendor. Only
+    pairs with a single plausible counterpart are offered: ambiguity is
+    left alone, never guessed. Measured on the KEV↔NVD join (D-042)."""
+    keys = [e.key for e in store.iter_entities(namespace) if e.type == entity_type and e.key.count(":") == 1]
+    have = set(keys)
+    by_product: dict[str, list[str]] = {}
+    by_vendor: dict[str, list[str]] = {}
+    for k in keys:
+        v, _, p = k.partition(":")
+        by_product.setdefault(p, []).append(k)
+        by_vendor.setdefault(v, []).append(k)
+    pairs: list[tuple[EntityRef, EntityRef]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def offer(a: str, b: str) -> None:
+        key = (a, b) if a < b else (b, a)
+        if a != b and key not in seen:
+            seen.add(key)
+            pairs.append((EntityRef(type=entity_type, key=a), EntityRef(type=entity_type, key=b)))
+
+    for k in keys:
+        v, _, p = k.partition(":")
+        # R1: vendor repeated in the product token, either way round
+        if f"{v}:{v}_{p}" in have:
+            offer(k, f"{v}:{v}_{p}")
+        if p.startswith(v + "_") and f"{v}:{p[len(v) + 1:]}" in have:
+            offer(k, f"{v}:{p[len(v) + 1:]}")
+        # R2: same product token under exactly one other vendor — and the
+        # token is specific enough to mean something ("desktop", "agent",
+        # "calendar" collide across unrelated vendors), or one vendor IS
+        # the product (curl:curl ~ haxx:curl)
+        others = [o for o in by_product.get(p, []) if o != k]
+        if len(others) == 1 and (len(p) >= 6 or v == p or others[0].startswith(p + ":")):
+            offer(k, others[0])
+        # R3: bare family name with exactly one longer key of the same
+        # vendor, and the remainder is not a version or edition marker
+        longer = [o for o in by_vendor.get(v, []) if o.startswith(k + "_")]
+        if len(longer) == 1 and not _VERSIONISH.match(longer[0][len(k) + 1:]):
+            offer(k, longer[0])
+    return pairs
+
+
+def adjudicate_aliases(store: GraphStore, llm: LLMClient, namespace: str | None = None,
+                       types: tuple[str, ...] = ALIAS_TYPES, limit: int = ADJUDICATIONS_PER_TICK,
+                       dry_run: bool = False) -> dict[str, int]:
+    """Tier 3: ask the LLM about each structural alias candidate, with both
+    records' facts; merge the less-connected key into the more-connected
+    one on a confident yes. Declined pairs are remembered for the worker's
+    lifetime. Returns counts: candidates, asked, merged, declined."""
+    counts = {"candidates": 0, "asked": 0, "merged": 0, "declined": 0}
+    namespaces = [namespace] if namespace else sorted(store.namespace_summary())
+    for ns in namespaces:
+        for etype in types:
+            for a, b in alias_candidates(store, ns, etype):
+                counts["candidates"] += 1
+                pair = (ns, f"{a.type}:{a.key}", f"{b.type}:{b.key}")
+                if pair in _declined or (pair[0], pair[2], pair[1]) in _declined:
+                    continue
+                if dry_run:
+                    log.info("alias candidate %s ~ %s", pair[1], pair[2])
+                    continue
+                if counts["asked"] >= limit:
+                    continue
+                counts["asked"] += 1
+                prompt = (f"Record A: {a.type}:{a.key}\n{_facts_for(store, ns, a)}\n\n"
+                          f"Record B: {b.type}:{b.key}\n{_facts_for(store, ns, b)}")
+                try:
+                    verdict = _parse_verdict(llm.complete(ALIAS_SYSTEM, prompt, max_tokens=200))
+                except (LLMError, ValueError) as exc:
+                    log.warning("alias adjudication deferred for %s vs %s: %s", pair[1], pair[2], exc)
+                    continue
+                if verdict["same"] and verdict["confidence"] >= ADJUDICATE_MIN_CONFIDENCE:
+                    ea = store.get_entity(ns, a); eb = store.get_entity(ns, b)
+                    canonical, stray = _ranked(store, ns, [ea, eb])
+                    into, frm = EntityRef(type=canonical.type, key=canonical.key), EntityRef(type=stray.type, key=stray.key)
+                    if store.merge_entities(ns, frm, into):
+                        counts["merged"] += 1
+                        log.info("alias merge %s:%s -> %s:%s (%.2f): %s", frm.type, frm.key, into.type, into.key,
+                                 verdict["confidence"], verdict.get("reason", ""))
+                else:
+                    counts["declined"] += 1
+                    _declined.add(pair)
+                    log.info("alias declined %s vs %s (%.2f): %s", pair[1], pair[2],
+                             verdict["confidence"], verdict.get("reason", ""))
+    return counts
+
+
 def _parse_verdict(raw: str) -> dict:
     text = raw.strip()
     fenced = _FENCE.search(text)
@@ -531,7 +640,9 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) ->
     return {
         "extracted": _guarded("extraction", extract_pending, store, llm) if llm else 0,
         "resolved": _guarded("resolution", resolve_entities, store)
-        + (_guarded("adjudication", adjudicate_entities, store, llm) if llm else 0),
+        + (_guarded("adjudication", adjudicate_entities, store, llm) if llm else 0)
+        + (_guarded("aliases", lambda s, l: adjudicate_aliases(s, l)["merged"], store, llm)
+           if llm and ALIAS_TYPES else 0),
         "embedded": _guarded("embedding", embed_pending, store, embedder, EMBED_BATCH) if embedder else 0,
         "indexed": _guarded("vector-index", index_pending, store, embedder) if embedder else 0,
         "chunked": _guarded("chunking", chunk_artifacts, store, embedder, CHUNK_LIMIT) if embedder else 0,
@@ -593,7 +704,26 @@ def main() -> None:
     p_run.add_argument("--once", action="store_true",
                        help="drain the backlog and exit (cron/k8s Job mode)")
     p_run.add_argument("--interval", type=float, default=30.0)
+    p_res = sub.add_parser("resolve", help="entity resolution only: spelling tiers + structural aliases (D-042)")
+    p_res.add_argument("--namespace")
+    p_res.add_argument("--types", default=",".join(ALIAS_TYPES) or "product",
+                       help="entity types whose vendor:product keys get structural alias candidates")
+    p_res.add_argument("--limit", type=int, default=500, help="max LLM adjudications this run")
+    p_res.add_argument("--dry-run", action="store_true", help="list candidates, ask nothing, merge nothing")
     args = parser.parse_args()
+    if args.command == "resolve":
+        store = _open_store()
+        llm = llm_from_env()
+        try:
+            merged = resolve_entities(store, limit=500)
+            types = tuple(t.strip() for t in args.types.split(",") if t.strip())
+            if llm is None and not args.dry_run:
+                raise SystemExit("resolve: no LLM configured (LOOM_LLM_*); use --dry-run to list candidates")
+            counts = adjudicate_aliases(store, llm, args.namespace, types, args.limit, args.dry_run)
+            print(json.dumps({"spelling_merges": merged, **counts}))
+        finally:
+            store.close()
+        return
     run(once=args.once, interval=args.interval)
 
 
