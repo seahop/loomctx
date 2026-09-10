@@ -112,6 +112,38 @@ kubectl -n loom exec deploy/loom -- python -m loom.seed load
 Pin a specific version by editing `images:` in `deploy/k8s/kustomization.yaml`
 to a SHA tag instead of `latest`.
 
+### Validated on GKE (2026-09-10, D-043)
+
+One zonal Standard cluster, `3 × e2-standard-4` in `us-central1-a`, the
+`scale-pg-ha` overlay with CloudNativePG 1.26 on `standard-rwo` disks,
+images from Artifact Registry, the seed plus the full vulnerability corpus
+(482k observations) loaded, enrichment workers embedding. What a real
+cloud enforces that a laptop cluster does not, and the recipe for each:
+
+| It | On GKE | Recipe |
+| --- | --- | --- |
+| Image pulls | a new project's default compute service account has no roles | `gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:NUM-compute@developer.gserviceaccount.com --role=roles/artifactregistry.reader` (or pull from GHCR) |
+| Your own build | CI images lag local commits | `docker tag loom-engine:local REGION-docker.pkg.dev/PROJECT/loom/loom:tag && docker push …`, then an overlay `images:` entry with `newName`, and roll by **digest** so a re-pushed tag is not served from the node cache |
+| JetStream storage | PVC sizes are real; a 4 GiB stream on a 1 Gi claim is refused | NATS PVC is 8 Gi in the shipped manifest; keep `LOOM_STREAM_MAX_BYTES × LOOM_STREAM_REPLICAS` under it |
+| Postgres storage | 2 Gi filled up under the corpus with vectors | 20 Gi in the shipped manifest. To grow a running cluster: `kubectl patch cluster loom-pg --type merge -p '{"spec":{"storage":{"size":"40Gi"}}}'`. If the instances are already down on a full disk the operator waits for the volume and the volume waits for a mount: patch the PVCs, mount each from a throwaway pod (busybox with the claim) until `kubectl get pvc` shows the new capacity, delete the pods, and the operator restarts the cluster |
+| Provider keys | the engine and workers need `LOOM_LLM_*` / `LOOM_EMBED_*` | `kubectl -n loom create secret generic loom-llm --from-env-file=.env` and an `envFrom: [secretRef: {name: loom-llm}]` patch on `loom` and `loom-enrich` |
+
+**Measured** (one run each; treat as floors for this machine class):
+
+| Path | Result |
+| --- | --- |
+| Direct load into the HA primary, one loader (`loom.connectors.vulns load --db`) | 715 envelopes/s, 530k in 12.4 min |
+| Gateway → JetStream (3 replicas) → 2 consumers → Postgres, single envelopes | 175/s at concurrency 32 (p50 126 ms, p99 771 ms); 189/s at 128 (p50 596 ms) — every pod's CPU idle: the replicated stream acknowledgement over persistent disks is the bound |
+| Same path, `POST /v1/ingest/batch` of 500 (what shippers send) | 660 envelopes/s accepted |
+| `/v1/ask`, 2 engine replicas × 2 workers, reads on replicas, 482k observations | 287/s, p50 54 ms, p99 86 ms, 0 errors at concurrency 16 |
+| Single-entity ask, first / cached question | 430–860 ms / 30–130 ms (the first pays one embedding call) |
+| Two-hop scope, 1,077 entities reached | 1.4–2.4 s (was 5–6 s before the batched gather) |
+| Primary pod deleted under 20,000 in-flight ingests | 0 client errors, 55,000/55,000 rows present, nothing redelivered or dead-lettered — the queue absorbed it |
+| Write availability through `loom-pg-rw` during that deletion (probe every 0.5 s) | **190 s** of failed writes before the operator promoted a replica, with CloudNativePG defaults. Reads on `-ro` continued. Tuning the operator's failover delay and probes is open work; the ingest path does not need it (writes queue), `record_claim` from agents does |
+
+The consumers lost two deadlocks to each other on entity upserts during
+the run and retried them; no row was lost.
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

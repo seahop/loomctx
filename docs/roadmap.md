@@ -17,7 +17,8 @@ presentable.
 | early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
 | early Sep (done 2026-09-08) | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
 | early Sep (done 2026-09-09) | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
-| early Oct | k8s run validated on a real cluster (GCP): capacity numbers, HA failover on real disks, 24 h soak |
+| early Sep (done 2026-09-10) | Validated on GKE (D-043): five laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, HA failover measured (190 s write outage with operator defaults — open) |
+| early Oct | 24 h soak on GKE with the enrichment worker running; CNPG failover tuning |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
 
@@ -205,6 +206,10 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   corpus, KEV CVEs reachable from web-01 3 → 29
 - ⬜ Persist adjudication declines across worker restarts (D-023/D-042
   remember them per process)
+- ⬜ CloudNativePG failover timing: deleting the primary under load cost
+  190 s of write availability with operator defaults (D-043); tune
+  `failoverDelay`, probes and `smartShutdownTimeout`, re-measure with the
+  probe in the deploy guide
 - ⬜ Embed the KEV documents (run the enrichment worker over the real
   corpus with an embedding provider) and measure excerpt quality
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m

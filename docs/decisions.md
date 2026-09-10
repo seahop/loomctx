@@ -1231,6 +1231,60 @@ normalized; these do not.
   ten Windows keys, and a sibling like `cisco:ios` ~ `cisco:ios_xe` is
   offered and declined, not assumed.
 
+## D-043 · Validated on GKE: what a real cloud found that k3s could not (2026-09-10)
+
+Project `loom1-508221`, one zonal GKE Standard cluster (3 × e2-standard-4,
+us-central1-a), the `scale-pg-ha` overlay with CloudNativePG 1.26 on
+`standard-rwo` disks, images pushed from the local build to Artifact
+Registry, the seed plus the full vulnerability corpus loaded, the
+enrichment workers embedding with the OpenRouter key from a Secret. About
+four hours and under five dollars for the session. Every item below is a
+difference between a laptop cluster and a real one; each is fixed in the
+repo or written into the deploy guide.
+
+- **Nodes could not pull.** A new project's default compute service
+  account has no roles; the nodes need `roles/artifactregistry.reader`
+  (or GHCR). Deploy guide.
+- **JetStream refused the stream.** The gateway asks for a 4 GiB stream ×
+  3 replicas; the NATS PVC was 1 Gi, which local-path never enforced and
+  GKE did (`insufficient storage resources`). NATS PVC is now 8 Gi.
+- **Open-time DDL deadlocked the loader.** The Postgres store ran its
+  idempotent `ALTER TABLE … IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
+  on every open; those take AccessExclusive locks even as no-ops, and a
+  pod opening the store while a bulk loader was mid-batch produced
+  `deadlock detected` on `observations`. An up-to-date database now gets
+  no DDL on open (one SELECT of `schema_version`), and `record_claims` /
+  `store_artifact` retry a transaction that loses a deadlock or a
+  serialization race — validated in the field: two writer consumers
+  deadlocked each other on entity upserts, retried once, and every row
+  landed.
+- **Postgres ran out of disk.** The HA manifest gave each instance 2 Gi;
+  the corpus with vectors needs more, and GKE enforced it: two instances
+  crash-looped with `Not enough disk space`. Now 20 Gi. The recovery is in
+  the deploy guide because the operator will not expand a volume for a
+  cluster that is down: patch the PVCs, mount each from a throwaway pod so
+  the filesystem grows, and the operator restarts the instances.
+- **The N+1 that a laptop hides.** The pack builder fetched each reached
+  entity's observations with its own query — 1,077 round trips for the
+  two-hop scope, 0.1 ms each in-process and 5 ms each across a network:
+  5–6 s on GKE. `GraphStore.observations_for_many` does one round trip per
+  400 entities (a window function gives the per-entity limit, aliases are
+  followed, a ref that resolves to nothing is absent); scope frontiers and
+  subject lists use it. Two-hop on GKE: 5.3–6.2 s → 1.4–2.4 s; on the
+  laptop it also got faster.
+
+**Measured** (details and the reproduction in `deploy/README.md`):
+direct load 715 envelopes/s into the HA primary from one loader; gateway
+single-envelope ingest 175–189/s with every pod's CPU idle — the
+three-replica JetStream acknowledgement over persistent disks is the
+bound, concurrency 128 only raised latency (p50 126 → 596 ms); the batch
+endpoint through the same gateway 660/s; asks 287/s at p99 86 ms on 482k
+observations with two engine replicas; primary pod deleted under 20,000
+in-flight ingests: 0 client errors, 55,000 of 55,000 rows present, the
+queue absorbed the outage with no redeliveries lost and nothing
+dead-lettered. The write-availability window during a primary loss is in
+the deploy guide.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
