@@ -94,6 +94,16 @@ class GraphStore(ABC):
     ) -> list[Observation]:
         """Observations where ref is subject OR object, newest observed first."""
 
+    def observations_for_many(
+        self, namespace: str, refs: list[EntityRef], limit: int = 100
+    ) -> dict[tuple[str, str], list[Observation]]:
+        """observations_for for many refs at once: (type, key) -> its newest
+        `limit` observations. Backends override with one round trip per
+        chunk; a 1,077-entity scope was 1,077 round trips, 5 s on Postgres
+        over a network versus 0.5 s in-process (D-043). Refs that resolve
+        to nothing are absent from the result."""
+        return {(r.type, r.key): self.observations_for(namespace, r, limit) for r in refs}
+
     @abstractmethod
     def search_entities(
         self, namespace: str, query: str, limit: int = 10,

@@ -910,3 +910,27 @@ def test_postgres_retries_a_lost_deadlock_then_gives_up():
     calls["n"] = -10
     with pytest.raises(errors.DeadlockDetected):
         retry_on_deadlock(flaky, backoff=(0.0,))
+
+
+def test_observations_for_many_matches_one_by_one(store):
+    """D-043: one round trip per chunk, same answer as observations_for per
+    ref — per-ref limit, newest first, self-edges once, aliases followed,
+    unknown refs absent."""
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    hub, other = EntityRef(type="host", key="hub"), EntityRef(type="host", key="other")
+    claims = [ClaimIn(namespace="m", subject=hub, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                      observed_at=t.replace(hour=i), source="s") for i in range(6)]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="ip", key=f"10.0.0.{i}"), predicate="assigned_to", object=hub,
+                       observed_at=t.replace(hour=10 + i), source="s") for i in range(3)]
+    claims += [ClaimIn(namespace="m", subject=hub, predicate="peer_of", object=hub, observed_at=t.replace(hour=20), source="s"),
+               ClaimIn(namespace="m", subject=other, predicate="runs_os", object="x", observed_at=t, source="s")]
+    store.record_claims(claims)
+    store.merge_entities("m", EntityRef(type="host", key="other"), hub)   # 'other' becomes an alias of hub
+    many = store.observations_for_many("m", [hub, EntityRef(type="host", key="other"), EntityRef(type="host", key="nope")], limit=4)
+    assert set(many) == {("host", "hub"), ("host", "other")}
+    assert [o.observed_at.hour for o in many[("host", "hub")]] == [20, 12, 11, 10]
+    assert many[("host", "hub")] == store.observations_for("m", hub, limit=4)
+    assert many[("host", "other")][0].observed_at.hour == 20            # alias resolved to the canonical entity
+    full = store.observations_for_many("m", [hub], limit=100)[("host", "hub")]
+    assert len(full) == 11 and sum(1 for o in full if o.predicate == "peer_of") == 1
+    assert store.observations_for_many("m", [], limit=5) == {}

@@ -368,12 +368,22 @@ def _gather(store: GraphStore, namespace: str, ref: EntityRef,
     cut something off: a hub with 2,740 edges yields its newest 1,000 and
     the pack must say so (D-038). The count is only taken when the limit
     was actually hit, so ordinary entities pay nothing."""
-    obs = store.observations_for(namespace, ref, limit=_GATHER_LIMIT)
-    if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
-        total = store.count_observations(namespace, ref)
-        if total > len(obs):
-            truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
-    return obs
+    return _gather_many(store, namespace, [ref], truncated).get((ref.type, ref.key), [])
+
+
+def _gather_many(store: GraphStore, namespace: str, refs: list[EntityRef],
+                 truncated: Truncations) -> dict[tuple[str, str], list[Observation]]:
+    """One round trip per chunk for a whole frontier or subject list, with
+    the same truncation accounting (D-043: a 1,077-entity scope was 1,077
+    round trips — 5 s on Postgres across a network)."""
+    got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT)
+    for ref in refs:
+        obs = got.get((ref.type, ref.key), [])
+        if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
+            total = store.count_observations(namespace, ref)
+            if total > len(obs):
+                truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
+    return got
 
 
 def resolve_scope(
@@ -408,9 +418,10 @@ def resolve_scope_paths(
         if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
+        gathered = _gather_many(store, namespace, frontier, truncated)
         for ref in frontier:
             via = paths.get((ref.type, ref.key), [])
-            for obs in _gather(store, namespace, ref, truncated):
+            for obs in gathered.get((ref.type, ref.key), []):
                 if obs.predicate not in expand:
                     continue
                 ends = [obs.subject]
@@ -444,8 +455,9 @@ def build_pack(
         subjects = [s for s in subjects if s.type in allowed_types]
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
+    gathered = _gather_many(store, req.namespace, subjects, truncated)
     for ref in subjects:
-        for obs in _gather(store, req.namespace, ref, truncated):
+        for obs in gathered.get((ref.type, ref.key), []):
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
                 seen_ids.add(obs.id)
                 observations.append(obs)

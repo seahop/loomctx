@@ -179,6 +179,12 @@ _OBS_SELECT = (
     "SELECT o.*, e.type AS subj_type, e.key AS subj_key"
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
 )
+# the same projection plus the entity an observation was fetched FOR, so a
+# batched gather can partition per entity (D-043)
+_OBS_SELECT_ENT = (
+    "SELECT o.*, e.type AS subj_type, e.key AS subj_key, {ent} AS ent"
+    " FROM observations o JOIN entities e ON e.id = o.subject_id"
+)
 
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
@@ -692,6 +698,65 @@ class SqliteStore(GraphStore):
                 (namespace, entity.id, limit, namespace, entity.id, entity.id, limit, limit),
             ).fetchall()
             return [common.row_to_observation(r) for r in rows]
+
+    _MANY_CHUNK = 400
+
+    def _resolve_many(self, namespace: str, refs: list[EntityRef]) -> dict[str, list[EntityRef]]:
+        """entity id -> the ref that asked for it, following aliases (D-043)."""
+        out: dict[str, list[EntityRef]] = {}
+        pending = list(refs)
+        for start in range(0, len(pending), self._MANY_CHUNK):
+            chunk = pending[start:start + self._MANY_CHUNK]
+            marks = ",".join("(?, ?)" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT id, type, key FROM entities WHERE namespace = ? AND (type, key) IN (VALUES {marks})",
+                (namespace, *[v for r in chunk for v in (r.type, r.key)])).fetchall()
+            found = {(r["type"], r["key"]): r["id"] for r in rows}
+            missing = [r for r in chunk if (r.type, r.key) not in found]
+            for r in chunk:
+                if (r.type, r.key) in found:
+                    out.setdefault(found[(r.type, r.key)], []).append(r)
+            if missing:
+                amarks = ",".join("?" for _ in missing)
+                arows = self._conn.execute(
+                    f"SELECT a.alias, a.entity_id FROM aliases a WHERE a.namespace = ? AND a.alias IN ({amarks})",
+                    (namespace, *[f"{r.type}:{r.key}" for r in missing])).fetchall()
+                by_alias = {r["alias"]: r["entity_id"] for r in arows}
+                for r in missing:
+                    eid = by_alias.get(f"{r.type}:{r.key}")
+                    if eid:
+                        out.setdefault(eid, []).append(r)
+        return out
+
+    def observations_for_many(
+        self, namespace: str, refs: list[EntityRef], limit: int = 100
+    ) -> dict[tuple[str, str], list[Observation]]:
+        result: dict[tuple[str, str], list[Observation]] = {}
+        if not refs:
+            return result
+        with self._tx():
+            owners = self._resolve_many(namespace, refs)
+            ids = list(owners)
+            for start in range(0, len(ids), self._MANY_CHUNK):
+                chunk = ids[start:start + self._MANY_CHUNK]
+                marks = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    "WITH hits AS ("
+                    + _OBS_SELECT_ENT.format(ent="o.subject_id") +
+                    f" WHERE o.namespace = ? AND o.subject_id IN ({marks})" + _NOT_TOMBSTONED +
+                    " UNION ALL "
+                    + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
+                    f" WHERE o.namespace = ? AND o.object_entity_id IN ({marks})"
+                    "   AND o.subject_id != o.object_entity_id" + _NOT_TOMBSTONED +
+                    "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
+                    " SELECT * FROM ranked WHERE rn <= ? ORDER BY ent, observed_at DESC",
+                    (namespace, *chunk, namespace, *chunk, limit),
+                ).fetchall()
+                for row in rows:
+                    obs = common.row_to_observation(row)
+                    for ref in owners[row["ent"]]:
+                        result.setdefault((ref.type, ref.key), []).append(obs)
+        return result
 
     def store_artifact(self, doc: DocumentIn) -> Artifact:
         with self._tx():

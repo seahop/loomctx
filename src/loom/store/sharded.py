@@ -138,6 +138,10 @@ class ShardedStore(GraphStore):
                     out.setdefault(ns, {})[etype] = out.get(ns, {}).get(etype, 0) + n
         return out
 
+    def observations_for_many(self, namespace: str, refs: list[EntityRef], limit: int = 100
+                              ) -> dict[tuple[str, str], list[Observation]]:
+        return self.shard_for(namespace).observations_for_many(namespace, refs, limit)
+
     def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
         yield from self._iter("iter_observations", namespace)
 

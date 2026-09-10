@@ -18,7 +18,13 @@ spec:
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector;
   storage:
-    size: 2Gi
+    # Size for the corpus, not the demo: 465k observations with 512-dim
+    # vectors is ~3.4 GB in SQLite and more in Postgres with the pgvector
+    # index, plus WAL. 2Gi looked fine on k3s only because local-path
+    # never enforces a claim; GKE did, and the cluster hit "Not enough disk
+    # space" under load (D-043). Expandable online where the storage class
+    # allows it (GKE standard-rwo does).
+    size: 20Gi
   resources:
     requests:
       cpu: 100m
