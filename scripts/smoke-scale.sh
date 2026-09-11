@@ -7,7 +7,12 @@ cd "$(dirname "$0")/.."
 cleanup() { docker compose --profile scale stop >/dev/null 2>&1 || true; docker compose --profile scale rm -f nats gateway lb consumer >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
-docker compose --profile scale up -d --build --scale gateway=2 --wait --wait-timeout 180 loom nats gateway lb consumer >/dev/null
+# Build first so compose never tries to pull the shared local image; --wait only on the
+# services with healthchecks (the consumer disables its own, and newer Compose fails
+# --wait on that rather than treating "running" as enough).
+docker compose --profile scale build loom gateway >/dev/null
+docker compose --profile scale up -d --scale gateway=2 --wait --wait-timeout 180 loom nats gateway lb >/dev/null
+docker compose --profile scale up -d consumer >/dev/null
 EID="smoke-$(date +%s)"
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST http://localhost:8081/v1/ingest \
   -H 'content-type: application/json' \
