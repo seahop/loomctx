@@ -11,6 +11,14 @@ spec:
   instances: 3
   imageName: ghcr.io/cloudnative-pg/postgresql:17
   primaryUpdateStrategy: unsupervised
+  # How long a stopping primary waits for clients to disconnect before a fast
+  # shutdown. The operator default is 180 s, and the replicas keep streaming
+  # from the old primary until it is actually down, so with engines and
+  # workers holding pooled connections a primary deletion (node drain, upgrade)
+  # took 183 s to fail over on GKE; with 10 s the operator promotes in 13 s and
+  # writes resume after 17 s (D-045). Writes in
+  # flight at the cut are rolled back and retried by the queue.
+  smartShutdownTimeout: 10
   bootstrap:
     initdb:
       database: loom

@@ -148,6 +148,7 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 | JetStream storage | PVC sizes are real; a 4 GiB stream on a 1 Gi claim is refused | NATS PVC is 8 Gi in the shipped manifest; keep `LOOM_STREAM_MAX_BYTES × LOOM_STREAM_REPLICAS` under it |
 | Postgres storage | 2 Gi filled up under the corpus with vectors | 20 Gi in the shipped manifest. To grow a running cluster: `kubectl patch cluster loom-pg --type merge -p '{"spec":{"storage":{"size":"40Gi"}}}'`. If the instances are already down on a full disk the operator waits for the volume and the volume waits for a mount: patch the PVCs, mount each from a throwaway pod (busybox with the claim) until `kubectl get pvc` shows the new capacity, delete the pods, and the operator restarts the cluster |
 | Provider keys | the engine and workers need `LOOM_LLM_*` / `LOOM_EMBED_*` | `kubectl -n loom create secret generic loom-llm --from-env-file=.env` and an `envFrom: [secretRef: {name: loom-llm}]` patch on `loom` and `loom-enrich`. **Strip inline comments and quotes first**: compose tolerates `LOOM_LLM_PROVIDER=openrouter  # …`, kubectl keeps the comment in the value, and the LLM is then silently unconfigured (the worker logs "no LLM configured") |
+| A primary deletion takes three minutes to fail over | the stopping primary waits `smartShutdownTimeout` (operator default 180 s) for pooled client connections to close, and the replicas stay attached to it until then | the shipped `postgres-cluster.yaml` sets `smartShutdownTimeout: 10`; measured 183 s → 13 s to promote, 17 s write gap end to end (D-045) |
 | A worker starting while Postgres is failing over | pool initialization times out after 180 s and the pod restarts (CrashLoopBackOff) until the primary is back | expected; nothing to do — it recovers on its own, but a long back-off can add minutes after the database returns: `kubectl -n loom delete pod -l app=loom-enrich` resets it |
 
 **Measured** (one run each; treat as floors for this machine class):
@@ -161,7 +162,7 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 | Single-entity ask, first / cached question | 430–860 ms / 30–130 ms (the first pays one embedding call) |
 | Two-hop scope, 1,077 entities reached | 1.4–2.4 s (was 5–6 s before the batched gather) |
 | Primary pod deleted under 20,000 in-flight ingests | 0 client errors, 55,000/55,000 rows present, nothing redelivered or dead-lettered — the queue absorbed it |
-| Write availability during a primary deletion | **11 s**, measured two ways on a clean cluster: a `psql` probe with `connect_timeout=2` through `loom-pg-rw`, and HTTP `POST /v1/ingest` through the engine every 0.5 s (3 failed requests of 617). Operator defaults; `smartShutdownTimeout` made no difference. The first measurement said 190 s — that was the *client* hanging in a TCP connect to the vanished primary, not the operator. Loom's pool now sets `connect_timeout=5` and TCP keepalives so engines and workers fail over with the database instead of waiting on the kernel |
+| Write availability during a primary deletion | **11 s**, measured two ways on a clean cluster: a `psql` probe with `connect_timeout=2` through `loom-pg-rw`, and HTTP `POST /v1/ingest` through the engine every 0.5 s (3 failed requests of 617). Operator defaults with idle pools; with the workers holding connections the same deletion took 183 s to promote until `smartShutdownTimeout: 10` was set (D-045, 13 s to promote, 17 s write gap). The first measurement said 190 s — that was the *client* hanging in a TCP connect to the vanished primary, not the operator. Loom's pool now sets `connect_timeout=5` and TCP keepalives so engines and workers fail over with the database instead of waiting on the kernel |
 
 The consumers lost two deadlocks to each other on entity upserts during
 the run and retried them; no row was lost.
@@ -172,6 +173,14 @@ vector-index backfill OOM-killed every few minutes at 200k vectors —
 fixed (D-043), and the workers now run at the shipped 512 MiB limit. Give
 workers 512 MiB; give Postgres 20 GiB per instance for a corpus this size
 (2.1 GB used after the soak).
+
+**Release gate (2026-09-11, D-045):** the image CI published for the tagged
+build was re-deployed from GHCR onto a fresh cluster with the shipped
+overlay and, with both enrichment workers live, loaded the corpus at 421/s,
+took single-envelope ingest at 202/s and asks at 186/s with no errors, ran
+every worker stage at 49 MiB resident under the 512 MiB limit with no
+restarts, and survived two primary deletions with 16 s write gaps. Numbers
+and the failover finding are in `docs/decisions.md`.
 
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 

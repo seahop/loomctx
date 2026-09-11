@@ -1411,6 +1411,46 @@ true but unproven, and each is cheap to prove permanently.
   `image: ghcr.io/seahop/...` in the manifests needs a pull secret
   (recipe in `deploy/README.md`). The gate uses one.
 
+**Gate run, 2026-09-11.** Image `ghcr.io/seahop/loom@sha256:338df448…`
+(CI's build of `0eba95c`; gateway `@sha256:02d61194…`), pulled from GHCR
+through the pull secret onto a fresh `loom-gate` cluster (3 × e2-standard-4,
+CloudNativePG 1.26, the shipped `scale-pg-ha` overlay plus the provider
+Secret and `LOOM_ALIAS_TYPES=product`). Everything below ran with both
+enrichment workers live against the same primary, which is the
+production condition; D-043's numbers were taken with idle pools.
+
+| Check | Result |
+| --- | --- |
+| Corpus load, one loader into the HA primary | 535,737 envelopes in 21.3 min (421/s) while the workers extracted, embedded and adjudicated against the same primary (715/s idle in D-043) |
+| Gateway → JetStream → consumers → Postgres, single envelopes, 5,000 at concurrency 32 | 202/s, p50 109 ms, p99 653 ms, 0 errors; 2,000 more after both failovers at 191/s; all 7,000 rows present |
+| `/v1/ask`, 1,500 at concurrency 16, 2 engines × 2 workers | 186/s, p50 57 ms, p99 383 ms, 0 errors (287/s with idle workers in D-043) |
+| Real answers | CVE-2026-0544 conflict first in 0.39 s cold, 20 ms cached; two-hop scope from web-01 3.2 s cold, 1.75 s again, 32 handles, one truncated entity |
+| Workers at the shipped 512 MiB limit | every stage ran (extraction, embedding, chunking, dossiers, spelling merges, alias merges and declines) over 18 ticks; 49 MiB resident; 0 restarts |
+| Failover 1, operator defaults | the operator promoted **183 s** after the primary pod was deleted; writes kept landing on the old primary until then, then a 15.6 s write gap (6 failed requests) plus 2 timeouts at the cut, 8 of 553; 551 rows for 545 acknowledgements — 6 commits whose reply was lost, harmless under event-id dedupe |
+| Failover 2, `smartShutdownTimeout: 10` | promoted in **12.6 s**, write gap 16.6 s, 6 failed of 267; 0 engine, worker or consumer restarts either time; the only error lines are the pool's connection refused / timeout during the cut |
+| Restarts overall | engines 2 and gateways 1 during the first rollout, before Postgres and NATS existed (readiness-driven, expected); none after |
+| Cost | about 50 minutes of cluster, roughly $1, plus a few cents of LLM calls |
+
+The one finding is the failover delay, and it corrects D-043. "`smartShutdownTimeout` made
+no difference" was measured with idle connection pools. A stopping primary
+waits `smartShutdownTimeout` (default 180 s) for clients to disconnect, the
+replicas keep streaming from it until it is actually down, and the operator
+will not elect a new primary while their WAL receivers are attached — so
+with engines and workers holding pooled connections, deleting the primary
+(a node drain, an upgrade) leaves the old pod serving for three minutes
+before the real 13 s failover happens. Nothing is lost in that window, but
+a drain that should take seconds takes minutes. The shipped
+`postgres-cluster.yaml` now sets `smartShutdownTimeout: 10`; the pool's
+`connect_timeout=5` (D-043) is what turns the cut into a 17 s gap instead
+of a hang.
+
+**Verdict:** the published image passes the gate. The tag moves to the head
+of this work rather than to `0eba95c` because the tag-push re-tagging lives
+in the workflow file at the tagged commit; the image inputs (`src/`,
+`Dockerfile`, `pyproject.toml`, `gateway/`) are byte-identical between the
+two commits, and the head's CI build is compared layer by layer against the
+gated digest once it exists.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
