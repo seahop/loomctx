@@ -1,4 +1,4 @@
-"""Loom (working name): a context engine for AI agents.
+"""Loom: a context engine for AI agents.
 
 Start with README.md and docs/architecture.md; contracts.py is the API.
 """

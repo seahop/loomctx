@@ -1,4 +1,4 @@
-# Loom (working name) — context engine for AI agents
+# Loom — context engine for AI agents
 
 Absorbs data about entities over time (structured claims + documents) and serves
 agents token-budgeted, cited, question-scoped "context packs".

@@ -1,10 +1,8 @@
-# Loom (working name)
+# Loom
 
 **A context engine for AI agents.** Loom absorbs pieces of data about entities as they
 arrive over time — structured events *and* unstructured documents — and hands agents
 small, question-scoped, token-budgeted slices of that knowledge instead of raw dumps.
-
-> Working name is provisional. Rename freely; nothing in the docs depends on it emotionally.
 
 ## The problem
 

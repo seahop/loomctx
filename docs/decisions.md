@@ -84,13 +84,17 @@ in background tasks inside the engine container. A real queue (e.g. Redis + work
 container) is added only when measured ingestion volume demands it. No speculative
 infrastructure.
 
-## D-005 · Working name "Loom"
+## D-005 · The name is Loom (settled 2026-09-11)
 
-Provisional; chosen for the weaving metaphor and a short CLI name. Known collision
-with loom.com — acceptable since there is no website planned for this project
-(2026-09-03), but revisit the name before the conference for slide/branding
-purposes. Repo is public at github.com/seahop/Loom.
-Python package: `loom` internally; PyPI-safe name TBD (e.g. `loom-ctx`) if published.
+Chosen on 2026-09-03 for the weaving metaphor and a short CLI name, carried
+as a "working name" through the build, and confirmed as the public name
+with the v0.1.0 tag: the repo (github.com/seahop/Loom), the image
+(`ghcr.io/seahop/loom`), the MCP server name, the Python package (`loom`)
+and every doc use it, and nothing depends on renaming. The known
+collision with loom.com is accepted; there is no website for this
+project. The distribution name on PyPI, if it is ever published, is
+`loom-ctx` (the `loom` name is taken there); that does not change the
+import.
 
 ## D-006 · API surface order: HTTP first, MCP second, SDK third, CLI alongside
 
@@ -1377,4 +1381,4 @@ infrastructure-ecosystem norm. Canonical text in `LICENSE`.
 - **OQ-4:** Embedding model choice + dimensionality (affects sqlite-vec schema).
 - **OQ-5:** ~~Retention/TTL policy~~ Mechanism shipped (D-016 purge/redact);
   remaining is per-team policy defaults and a scheduled sweep (cron/k8s Job).
-- **OQ-6:** Public name (D-005).
+- **OQ-6:** ~~Public name~~ Settled: Loom (D-005, 2026-09-11).

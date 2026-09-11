@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "loom-ctx"
 version = "0.1.0"
-description = "Loom (working name): a context engine for AI agents"
+description = "Loom: a context engine for AI agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
