@@ -1327,8 +1327,8 @@ endpoint through the same gateway 660/s; asks 287/s at p99 86 ms on 482k
 observations with two engine replicas; primary pod deleted under 20,000
 in-flight ingests: 0 client errors, 55,000 of 55,000 rows present, the
 queue absorbed the outage with no redeliveries lost and nothing
-dead-lettered. The write-availability window during a primary loss is in
-the deploy guide.
+dead-lettered. Write availability during a primary loss: 11 s (see the
+correction above).
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

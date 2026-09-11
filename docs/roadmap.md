@@ -17,8 +17,8 @@ presentable.
 | early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
 | early Sep (done 2026-09-08) | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
 | early Sep (done 2026-09-09) | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
-| early Sep (done 2026-09-10) | Validated on GKE (D-043): five laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, HA failover measured (190 s write outage with operator defaults — open) |
-| early Oct | 24 h soak on GKE with the enrichment worker running; CNPG failover tuning |
+| early Sep (done 2026-09-11) | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
+| early Oct | Push the branch, cut the tag, final rehearsal |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
 
@@ -206,10 +206,10 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   corpus, KEV CVEs reachable from web-01 3 → 29
 - ⬜ Persist adjudication declines across worker restarts (D-023/D-042
   remember them per process)
-- ⬜ CloudNativePG failover timing: deleting the primary under load cost
-  190 s of write availability with operator defaults (D-043); tune
-  `failoverDelay`, probes and `smartShutdownTimeout`, re-measure with the
-  probe in the deploy guide
+- ✅ CloudNativePG failover timing (2026-09-11): the 190 s was the probe
+  hanging in TCP, not the operator — true outage 11 s with defaults,
+  measured through the engine; Loom's pool gained `connect_timeout` and
+  keepalives so clients fail over with the database
 - ⬜ Dossier candidate selection: weigh structured activity, not raw
   volume — the first real run summarized the loadtest hosts (D-043)
 - ⬜ Extraction type vocabulary: the extractor invents entity types
