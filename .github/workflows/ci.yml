@@ -42,6 +42,14 @@ jobs:
           docker compose --profile sdk run --rm sdk-go
           docker compose down
 
+  scale-smoke:
+    # The scale shape end to end (D-045): lb -> 2 gateways -> JetStream -> consumer -> store -> engine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: One claim through the queue and back out of the engine
+        run: scripts/smoke-scale.sh
+
   python-matrix:
     # The image ships on the current stable Python (Dockerfile ARG); the
     # older interpreters the package still supports are checked here.

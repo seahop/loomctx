@@ -42,6 +42,14 @@ First tagged release: the conference build.
   ground truth and a citation-faithfulness check; twenty-model scorecard
   with billed cost (D-036, D-037)
 
+### Validation
+- Validated on GKE: capacity on real nodes, 18 h soak, HA failover at 11 s
+  end to end (D-043); worker quality fixes from the soak (D-044)
+- Release gate: the scale shape (lb → gateways → JetStream → consumer →
+  store) smoke-tested in CI on every push; store migrations proven on a
+  populated database; the published image re-validated on GKE before the
+  tag moves (D-045)
+
 ### Measured on this release
 - 511k envelopes loaded in 81 s to SQLite; single-entity ask 2–5 ms at
   465k observations; two-hop scope over 1,077 entities in 0.5 s

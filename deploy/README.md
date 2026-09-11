@@ -51,6 +51,15 @@ SQLite trade documented in D-008.
   same on every engine replica) alongside it so expansion handles are signed
   (D-021).
 
+- **Upgrading:** the engine migrates its store in place on first open
+  (schema version in `schema_meta`; a current schema takes a no-DDL fast
+  path). Every schema bump is proven on a populated database before it is
+  tagged, not just on a fresh one (D-045): seed Postgres with the image
+  from the previous schema's last commit, open the same database with the
+  new image, check counts, the new tables, an `ask`, and that the second
+  open is fast. Roll the engine first; workers and gateways tolerate both
+  versions during the roll.
+
 **HPA prerequisite:** the cluster must run metrics-server (managed clusters
 usually do; on kind/minikube enable it). Resource *requests* are set on every
 container — HPA percentage targets are meaningless without them.

@@ -1363,6 +1363,40 @@ after it.
   (namespace, a, b, reason, decided_at; canonical order), schema v4 in
   both stores, a per-process read-through cache in front of it.
 
+## D-045 · Release gate: the three gaps between "CI is green" and "this image is what we tested" (2026-09-11)
+
+Assessing the build after the Python bump found three things that were
+true but unproven, and each is cheap to prove permanently.
+
+- **The scale shape runs in CI.** Every laptop and GKE measurement went
+  through lb → gateway → JetStream → consumer → store, but CI only ever
+  exercised the single-container shape, so a Go gateway or consumer
+  regression would have reached a tag. `scripts/smoke-scale.sh` brings
+  up the compose `scale` profile with two gateways, posts one claim to
+  the load balancer, waits for it to land in the store (observed: 1 s)
+  and asks the engine for it, asserting a cited item. New CI job
+  `scale-smoke` on every push. Runs locally too; it stops and removes
+  only the scale services and never drops volumes (an earlier draft used
+  `down -v`, which deleted the local corpus — disposable, but not twice).
+- **The store migration is tested on a populated database, not an empty
+  one.** The schema-version bump in D-044 (v3 → v4) was covered only by
+  fresh-open tests. Verified by hand, and worth repeating for every
+  schema bump: build the image at the last v3 commit (`770c20b`), seed
+  Postgres with it, then open the same database with the current image.
+  Result: schema 4, 553 observations and 3 artifacts intact, the
+  `resolution_declines` table usable, `ask` returns the planted web-01
+  conflict, and a second open takes the no-DDL fast path. The same
+  recipe is in `deploy/README.md` under *Upgrading*.
+- **The published image is the soaked image.** The 18 h soak and the
+  failover measurement (D-043) ran on an image built from the working
+  tree; the `v0.1.0` tag was then pushed at `4022aec` and three commits
+  landed after it (name settled, Python 3.14 base, this entry). The
+  release gate is a short run of the GKE recipe against the image CI
+  actually published (`ghcr.io/seahop/loom:<sha>`): scale-pg-ha,
+  loadgen ingest and ask, the worker through every stage at its 512 MiB
+  limit, one failover. Results are appended to this entry, and the tag
+  moves to the gated commit.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
