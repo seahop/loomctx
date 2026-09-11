@@ -250,8 +250,14 @@ class PostgresStore(GraphStore):
             # compose ordering are best-effort): wait for a bounded time
             # instead of crash-looping — the same courtesy the NATS clients
             # extend. check= drops connections the server closed.
+            # connect_timeout + TCP keepalives (D-043): during a Postgres
+            # failover the primary's address vanishes; without these a new
+            # connection hangs in TCP for ~2 minutes and a held one waits
+            # for the kernel — the operator promoted a replica in 11 s.
             p = ConnectionPool(url, min_size=1, max_size=max(1, size), open=False,
-                               kwargs={"row_factory": dict_row},
+                               kwargs={"row_factory": dict_row, "connect_timeout": 5,
+                                       "keepalives": 1, "keepalives_idle": 15,
+                                       "keepalives_interval": 5, "keepalives_count": 3},
                                check=ConnectionPool.check_connection)
             p.open(wait=True, timeout=self._CONNECT_WAIT_SECONDS)
             return p

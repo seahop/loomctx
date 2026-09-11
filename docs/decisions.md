@@ -1305,6 +1305,19 @@ dossiers — on the real corpus, the first time all of it ran unattended):
   20 GiB volumes; asks against the busy primary stayed under a second
   for single entities and under 4 s for the two-hop scope.
 
+**The failover number was wrong, and the correction is a fix.** The
+190 s "write outage" (and a 137 s repeat on a clean cluster) came from a
+probe whose `psql` hung in a TCP connect to the deleted primary's address
+until the kernel gave up; CloudNativePG's `smartShutdownTimeout` was my
+hypothesis and changing it changed nothing. With `connect_timeout=2` on
+the probe the operator promotes a replica in **11 s** with its defaults —
+and through a real engine, `POST /v1/ingest` every 0.5 s across the
+deletion failed 3 requests of 617, an 11 s window. Loom's own pool had the
+same gap as the probe, so it now sets `connect_timeout=5` and TCP
+keepalives (`keepalives_idle=15`, `interval=5`, `count=3`): a connection
+to a vanished primary fails in seconds and a held one is detected within
+half a minute, instead of hanging for two minutes.
+
 **Measured** (details and the reproduction in `deploy/README.md`):
 direct load 715 envelopes/s into the HA primary from one loader; gateway
 single-envelope ingest 175–189/s with every pod's CPU idle — the

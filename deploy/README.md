@@ -140,7 +140,7 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 | Single-entity ask, first / cached question | 430–860 ms / 30–130 ms (the first pays one embedding call) |
 | Two-hop scope, 1,077 entities reached | 1.4–2.4 s (was 5–6 s before the batched gather) |
 | Primary pod deleted under 20,000 in-flight ingests | 0 client errors, 55,000/55,000 rows present, nothing redelivered or dead-lettered — the queue absorbed it |
-| Write availability through `loom-pg-rw` during that deletion (probe every 0.5 s) | **190 s** of failed writes before the operator promoted a replica, with CloudNativePG defaults. Reads on `-ro` continued. Tuning the operator's failover delay and probes is open work; the ingest path does not need it (writes queue), `record_claim` from agents does |
+| Write availability during a primary deletion | **11 s**, measured two ways on a clean cluster: a `psql` probe with `connect_timeout=2` through `loom-pg-rw`, and HTTP `POST /v1/ingest` through the engine every 0.5 s (3 failed requests of 617). Operator defaults; `smartShutdownTimeout` made no difference. The first measurement said 190 s — that was the *client* hanging in a TCP connect to the vanished primary, not the operator. Loom's pool now sets `connect_timeout=5` and TCP keepalives so engines and workers fail over with the database instead of waiting on the kernel |
 
 The consumers lost two deadlocks to each other on entity upserts during
 the run and retried them; no row was lost.
