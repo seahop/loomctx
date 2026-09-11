@@ -17,6 +17,7 @@ docker compose up -d --build loom                                          # 26 
 docker compose exec loom python -m loom.seed load                          # 591 claims, 5 docs
 docker compose exec --user 10001 loom python -m loom.connectors.vulns load \
     --db /data/loom.db --bridge-seed-hosts                                 # 110 s incl. feed download, ~525k envelopes
+docker compose exec loom python -m loom.enrich resolve                     # alias pass (D-042): KEV keys onto CPE keys, ~3 cents, 27 min of LLM calls — start it first, it can overlap
 claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
 # or, without touching your Claude Code config: claude --mcp-config demo/mcp.json --strict-mcp-config
 ```
