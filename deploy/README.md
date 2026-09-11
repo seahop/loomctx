@@ -145,6 +145,13 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 The consumers lost two deadlocks to each other on entity upserts during
 the run and retried them; no row was lost.
 
+**Overnight soak (18 h, full enrichment pipeline on the real corpus):**
+every tier at zero restarts except the enrichment workers, which the
+vector-index backfill OOM-killed every few minutes at 200k vectors —
+fixed (D-043), and the workers now run at the shipped 512 MiB limit. Give
+workers 512 MiB; give Postgres 20 GiB per instance for a corpus this size
+(2.1 GB used after the soak).
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

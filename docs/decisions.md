@@ -1273,6 +1273,38 @@ repo or written into the deploy guide.
   subject lists use it. Two-hop on GKE: 5.3–6.2 s → 1.4–2.4 s; on the
   laptop it also got faster.
 
+**The overnight soak** (18 h with the enrichment workers running the
+full pipeline — extraction, resolution, alias adjudication, embedding,
+dossiers — on the real corpus, the first time all of it ran unattended):
+
+- **The vector-index backfill OOM-killed the worker every ~6 minutes**,
+  117 and 111 restarts. `ensure_vector_index` ran every tick and, to find
+  rows missing from the ANN index, loaded every indexed id into a Python
+  set and then every vector row in the table into memory: a transient
+  400 MB at 200k vectors against a 512 MiB limit, and minutes of wasted
+  work per tick even when nothing was missing. It is now an SQL anti-join
+  streamed in 1,000-row chunks, skipped outright when the counts already
+  match, in both stores. The worker kept making progress between kills
+  (913 documents extracted, 196k vectors), which is why nothing else
+  noticed.
+- **Extraction's loose entity types hijacked a structured key.** The
+  extractor named `ip_address:10.0.4.7`; tier-1 resolution merges same
+  key across types into the most-connected side, the extracted side had
+  as many facts as the DHCP log, and the tie-break made `ip:10.0.4.7` the
+  alias. Ranking now puts a structured-backed entity first, then count,
+  then age: a sender's key absorbs an extracted one, never the reverse.
+  The 1,506 `ip_address`, 624 `vulnerability`, 107 `url` entities the
+  extractor created are the case for `strict` registries on namespaces
+  fed by extraction (D-024), left as an operator choice.
+- **Dossiers ran for the first time on real data** — 23 briefs — and
+  spent them on the synthetic loadtest hosts, which had the most new
+  facts. Correct by the rule, useless in practice; candidate selection
+  should weigh structured activity, not volume. Roadmap.
+- Nothing else restarted in 18 hours: engine, consumers, gateways, NATS
+  and Postgres all at zero restarts; the database grew to 2.1 GB on
+  20 GiB volumes; asks against the busy primary stayed under a second
+  for single entities and under 4 s for the two-hop scope.
+
 **Measured** (details and the reproduction in `deploy/README.md`):
 direct load 715 envelopes/s into the HA primary from one loader; gateway
 single-envelope ingest 175–189/s with every pod's CPU idle — the

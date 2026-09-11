@@ -210,6 +210,12 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   190 s of write availability with operator defaults (D-043); tune
   `failoverDelay`, probes and `smartShutdownTimeout`, re-measure with the
   probe in the deploy guide
+- ⬜ Dossier candidate selection: weigh structured activity, not raw
+  volume — the first real run summarized the loadtest hosts (D-043)
+- ⬜ Extraction type vocabulary: the extractor invents entity types
+  (`ip_address`, `vulnerability`, `url`); registries can be `strict`, but
+  a gentler default (map to registered types when the key matches) would
+  keep the demo namespace clean without operator work
 - ⬜ Embed the KEV documents (run the enrichment worker over the real
   corpus with an embedding provider) and measure excerpt quality
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m
