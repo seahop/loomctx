@@ -111,7 +111,9 @@ agent — and since closed (D-042): the alias is merged, and web-01 now
 reaches 29 KEV CVEs instead of 3, so expect a longer list with the kernel
 entries at the top. If a new seam shows up on stage, let it: *the agent
 just found a data quality problem in a public feed, with citations.*
-Transcript of the rehearsal before the merge: `demo/act3-claude-code.json`. Cheaper models do this in 20 to 30 tool
+Transcripts: before the merge `demo/act3-claude-code.json` (3 CVEs, the
+seam discovered); after it `demo/act3-claude-code-after-aliases.json`
+(30 CVEs named, 40 citations all verifiable, 26 tool calls, 175 s). Cheaper models do this in 20 to 30 tool
 calls for a few cents (`docs/models.md`).
 
 If time allows, ask a follow-up that uses write-back:
