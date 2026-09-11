@@ -412,26 +412,40 @@ class SqliteStore(GraphStore):
         out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
         if not self._vec:
             return out
+        # The backfill used to load every indexed id into a set and then
+        # every vector row into memory to diff them — a 400 MB spike per
+        # tick at 200k vectors that OOM-killed the worker every few minutes
+        # on GKE (D-043). Now: the diff is an anti-join in SQL, rows stream
+        # in chunks, and a table whose count already matches is skipped.
         with self._tx():
             self._refresh_vec_tables()
-            for kind, key, sql in (
-                ("vobs", "observations",
-                 "SELECT ref_id AS id, namespace, NULL AS artifact_id, vector"
-                 " FROM embeddings WHERE model = ?"),
-                ("vchk", "chunks",
-                 "SELECT id, namespace, artifact_id, vector FROM doc_chunks WHERE model = ?"),
+            for kind, key, table, id_col, art_col in (
+                ("vobs", "observations", "embeddings", "ref_id", "NULL"),
+                ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                have: set[str] = set()
-                for name in self._vec_tables:
-                    if name.startswith(f"{kind}_"):
-                        have |= {r["ref_id"] for r in self._conn.execute(f"SELECT ref_id FROM {name}")}
-                by_ns: dict[str, list] = {}
-                for r in self._conn.execute(sql, (model,)):
-                    if r["id"] not in have:
+                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE model = ?", (model,)).fetchone()["n"]
+                indexed = sum(self._conn.execute(f"SELECT COUNT(*) AS n FROM {n}").fetchone()["n"]
+                              for n in vec_tables)
+                if total <= indexed:
+                    continue
+                not_in = " AND ".join(f"t.{id_col} NOT IN (SELECT ref_id FROM {n})" for n in vec_tables) or "1=1"
+                last = ""
+                while True:
+                    rows = self._conn.execute(
+                        f"SELECT t.{id_col} AS id, t.namespace, {art_col} AS artifact_id, t.vector"
+                        f" FROM {table} t WHERE t.model = ? AND t.{id_col} > ? AND {not_in}"
+                        f" ORDER BY t.{id_col} LIMIT 1000", (model, last)).fetchall()
+                    if not rows:
+                        break
+                    by_ns: dict[str, list] = {}
+                    for r in rows:
                         by_ns.setdefault(r["namespace"], []).append(
                             (r["id"], r["artifact_id"], common.unpack_vector(r["vector"])))
-                for ns, rows in by_ns.items():
-                    out[key] += self._vec_upsert(kind, model, ns, rows)
+                    for ns, batch in by_ns.items():
+                        out[key] += self._vec_upsert(kind, model, ns, batch)
+                    last = rows[-1]["id"]
         return out
 
     def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:

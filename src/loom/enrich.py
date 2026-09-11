@@ -376,12 +376,24 @@ def refresh_dossiers(
     return built
 
 
+def _structured_weight(store: GraphStore, namespace: str, e) -> int:
+    """How many of an entity's newest facts a sender asserted (as opposed
+    to an LLM extracting them from text). Overnight on GKE, extraction's
+    `ip_address:10.0.4.7` out-counted the DHCP log's `ip:10.0.4.7` and the
+    structured key became the alias (D-043). Structured wins first; count
+    decides only among equals."""
+    ref = EntityRef(type=e.type, key=e.key)
+    return sum(1 for o in store.observations_for(namespace, ref, limit=50)
+               if not (o.attrs.get("extracted") or o.source.startswith("doc:")))
+
+
 def _ranked(store: GraphStore, namespace: str, group: list) -> list:
-    """Most-connected first (most observations), ties broken by earliest
-    creation — the established structured entity absorbs the stray one."""
+    """Structured-backed first, then most-connected, then earliest created —
+    the established entity absorbs the stray one, never the reverse."""
     return sorted(
         group,
         key=lambda e: (
+            -_structured_weight(store, namespace, e),
             -store.count_observations(namespace, EntityRef(type=e.type, key=e.key)),
             e.created_at,
         ),

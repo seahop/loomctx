@@ -701,3 +701,22 @@ def test_alias_adjudication_merges_on_yes_and_repoints_kev_edges(tmp_path, monke
     # dry run asks nothing
     assert adjudicate_aliases(store, Judge(), "ns", ("product",), limit=10, dry_run=True)["asked"] == 0
     store.close()
+
+
+def test_structured_entity_absorbs_the_extracted_one_even_when_outnumbered(tmp_path):
+    """D-043: extraction's ip_address:10.0.4.7 out-counted the DHCP log's
+    ip:10.0.4.7 and the structured key became the alias. Never again."""
+    from loom.enrich import resolve_entities
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "abs.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    ip = EntityRef(type="ip", key="10.0.4.7"); loose = EntityRef(type="ip_address", key="10.0.4.7")
+    store.record_claims([ClaimIn(namespace="ns", subject=ip, predicate="assigned_to", object=EntityRef(type="host", key="h"),
+                                 source="dhcp-log", observed_at=t)])
+    store.record_claims([ClaimIn(namespace="ns", subject=loose, predicate=f"mentioned_{i}", object="x", source="doc:extract",
+                                 observed_at=t, attrs={"extracted": True}) for i in range(12)])
+    assert resolve_entities(store) == 1
+    assert store.get_entity("ns", ip) is not None and store.get_entity("ns", ip).type == "ip"
+    keys = {(o.subject.type, o.subject.key) for o in store.observations_for("ns", ip, limit=50)}
+    assert keys == {("ip", "10.0.4.7")}          # every fact now reads under the structured key
+    store.close()

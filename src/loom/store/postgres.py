@@ -422,26 +422,36 @@ class PostgresStore(GraphStore):
         out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
         if not self._vec:
             return out
+        # anti-join in SQL, streamed in chunks, skipped when counts match —
+        # the set-diff-in-Python version OOM-killed the worker on GKE (D-043)
         with self._tx():
             self._refresh_vec_tables()
-            for kind, key, sql in (
-                ("vobs", "observations",
-                 "SELECT ref_id AS id, namespace, NULL AS artifact_id, vector"
-                 " FROM embeddings WHERE model = %s"),
-                ("vchk", "chunks",
-                 "SELECT id, namespace, artifact_id, vector FROM doc_chunks WHERE model = %s"),
+            for kind, key, table, id_col, art_col in (
+                ("vobs", "observations", "embeddings", "ref_id", "NULL"),
+                ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                have: set[str] = set()
-                for name in self._vec_tables:
-                    if name.startswith(f"{kind}_"):
-                        have |= {r["ref_id"] for r in self._q(f"SELECT ref_id FROM {name}")}
-                by_ns: dict[str, list] = {}
-                for r in self._q(sql, (model,)):
-                    if r["id"] not in have:
+                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                total = self._q(f"SELECT COUNT(*) AS n FROM {table} WHERE model = %s", (model,))[0]["n"]
+                indexed = sum(self._q(f"SELECT COUNT(*) AS n FROM {n}")[0]["n"] for n in vec_tables)
+                if total <= indexed:
+                    continue
+                not_in = " AND ".join(f"NOT EXISTS (SELECT 1 FROM {n} v WHERE v.ref_id = t.{id_col})"
+                                      for n in vec_tables) or "TRUE"
+                last = ""
+                while True:
+                    rows = self._q(
+                        f"SELECT t.{id_col} AS id, t.namespace, {art_col} AS artifact_id, t.vector"
+                        f" FROM {table} t WHERE t.model = %s AND t.{id_col} > %s AND {not_in}"
+                        f" ORDER BY t.{id_col} LIMIT 1000", (model, last))
+                    if not rows:
+                        break
+                    by_ns: dict[str, list] = {}
+                    for r in rows:
                         by_ns.setdefault(r["namespace"], []).append(
                             (r["id"], r["artifact_id"], common.unpack_vector(r["vector"])))
-                for ns, rows in by_ns.items():
-                    out[key] += self._vec_upsert(kind, model, ns, rows)
+                    for ns, batch in by_ns.items():
+                        out[key] += self._vec_upsert(kind, model, ns, batch)
+                    last = rows[-1]["id"]
         return out
 
     def observations_by_ids(self, namespace: str, ids: list[str]) -> list[Observation]:
