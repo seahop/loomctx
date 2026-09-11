@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS tombstones (
     recorded_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS resolution_declines (
+    namespace  TEXT NOT NULL,
+    a          TEXT NOT NULL,
+    b          TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, a, b)
+);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     ref_id    TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
@@ -179,7 +188,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 """
 
-SCHEMA_VERSION = 3  # keep in step with sqlite.py (v3: packed vectors, D-039)
+SCHEMA_VERSION = 4  # keep in step with sqlite.py (v3: packed vectors; v4: resolution_declines, D-044)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -1093,6 +1102,8 @@ class PostgresStore(GraphStore):
         moment = common.now()
         with self._tx():
             rows = self._q(
+                # richness over volume (D-044): several predicates from several
+                # senders outrank a one-predicate firehose, which gets no brief
                 "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh"
                 " FROM entities e"
                 " JOIN observations o ON o.subject_id = e.id"
@@ -1103,9 +1114,10 @@ class PostgresStore(GraphStore):
                 " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
                 "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < %s)"
                 " GROUP BY e.id, d.observation_count"
-                " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s)"
+                " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s AND COUNT(DISTINCT o.predicate) >= 2)"
                 "     OR (d.observation_count IS NOT NULL AND COUNT(o.id) >= %s)"
-                " ORDER BY COUNT(o.id) DESC, e.created_at LIMIT %s",
+                " ORDER BY COUNT(DISTINCT o.predicate) * COUNT(DISTINCT o.source) DESC, COUNT(o.id) DESC,"
+                "          e.created_at LIMIT %s",
                 (common.iso(moment), min_total, min_new, limit),
             )
             out = []
@@ -1225,6 +1237,20 @@ class PostgresStore(GraphStore):
         for r in rows:
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
+
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+        a, b = sorted((a, b))
+        with self._tx():
+            self._x(
+                "INSERT INTO resolution_declines (namespace, a, b, reason, decided_at)"
+                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (namespace, a, b) DO UPDATE SET"
+                " reason = EXCLUDED.reason, decided_at = EXCLUDED.decided_at",
+                (namespace, a, b, reason[:500], common.iso(common.now())))
+
+    def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
+        with self._tx(read=True):
+            rows = self._q("SELECT a, b FROM resolution_declines WHERE namespace = %s", (namespace,))
+        return {(r["a"], r["b"]) for r in rows}
 
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
         with self._tx():

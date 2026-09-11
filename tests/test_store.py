@@ -542,9 +542,10 @@ def test_exports_stream_across_pages(store, monkeypatch):
 
 def test_dossier_candidates_only_count_fresh_observations(store):
     host = EntityRef(type="host", key="web-01")
-    for i in range(5):
+    for i in range(4):
         store.record_claim(login_claim().model_copy(
             update={"object": EntityRef(type="user", key=f"u{i}")}))
+    store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-44"}))  # a second kind of fact (D-044)
     cands = store.dossier_candidates(min_new=3, min_total=5)
     assert [(c[1], c[2]) for c in cands] == [(host, 5)]
     store.put_dossier("default", host, "brief", 5, [])
@@ -732,10 +733,12 @@ def test_chunk_and_dossier_leases(store):
     assert store.artifacts_needing_chunks("m", 4, lease=("b", 300)) == []  # done, not just released
 
     for host in ("h1", "h2"):
-        for i in range(5):
+        for i in range(4):
             store.record_claim(login_claim().model_copy(update={
                 "subject": EntityRef(type="host", key=host),
                 "object": EntityRef(type="user", key=f"u{i}")}))
+        store.record_claim(login_claim().model_copy(update={
+            "subject": EntityRef(type="host", key=host), "predicate": "runs_os", "object": "x"}))
     first = store.dossier_candidates(min_new=20, min_total=5, lease=("a", 300))
     assert {c[1].key for c in first} == {"h1", "h2"}
     assert store.dossier_candidates(min_new=20, min_total=5, lease=("b", 300)) == []
@@ -868,7 +871,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 3
+    assert store.schema_version() == 4
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -934,3 +937,11 @@ def test_observations_for_many_matches_one_by_one(store):
     full = store.observations_for_many("m", [hub], limit=100)[("host", "hub")]
     assert len(full) == 11 and sum(1 for o in full if o.predicate == "peer_of") == 1
     assert store.observations_for_many("m", [], limit=5) == {}
+
+
+def test_declines_are_stored_symmetrically(store):
+    store.remember_decline("ns", "product:b", "product:a", "different vendors")
+    assert store.declined_pairs("ns") == {("product:a", "product:b")}
+    store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
+    assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
+    assert store.schema_version() == 4

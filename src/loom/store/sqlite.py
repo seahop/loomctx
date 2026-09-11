@@ -116,6 +116,15 @@ CREATE TABLE IF NOT EXISTS tombstones (
     recorded_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS resolution_declines (
+    namespace  TEXT NOT NULL,
+    a          TEXT NOT NULL,
+    b          TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, a, b)
+);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     ref_id    TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
@@ -169,7 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
-SCHEMA_VERSION = 3  # v3: vectors stored packed (D-039); reads accept legacy JSON
+SCHEMA_VERSION = 4  # v3: packed vectors (D-039); v4: resolution_declines (D-044)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -1042,8 +1051,13 @@ class SqliteStore(GraphStore):
             # "new", so the scan is bounded by fresh rows, not the whole
             # table (H-E2). Total counts for the few winners come after.
             rows = self._conn.execute(
+                # Richness over volume (D-044): the first real run briefed
+                # the load generator's hosts because they had the most rows.
+                # A brief is for an entity with several kinds of fact from
+                # several senders; a one-predicate firehose gets none.
                 "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
-                "       d.observation_count AS have"
+                "       d.observation_count AS have,"
+                "       COUNT(DISTINCT o.predicate) AS preds, COUNT(DISTINCT o.source) AS srcs"
                 " FROM entities e"
                 " JOIN observations o ON o.subject_id = e.id"
                 "   AND NOT EXISTS (SELECT 1 FROM tombstones t"
@@ -1053,8 +1067,8 @@ class SqliteStore(GraphStore):
                 " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
                 "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
                 " GROUP BY e.id"
-                " HAVING (have IS NULL AND fresh >= ?) OR (have IS NOT NULL AND fresh >= ?)"
-                " ORDER BY fresh DESC, e.created_at LIMIT ?",
+                " HAVING (have IS NULL AND fresh >= ? AND preds >= 2) OR (have IS NOT NULL AND fresh >= ?)"
+                " ORDER BY preds * srcs DESC, fresh DESC, e.created_at LIMIT ?",
                 (common.iso(moment), min_total, min_new, limit),
             ).fetchall()
             out = []
@@ -1185,6 +1199,19 @@ class SqliteStore(GraphStore):
         for r in rows:
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
+
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+        a, b = sorted((a, b))
+        with self._tx():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO resolution_declines (namespace, a, b, reason, decided_at)"
+                " VALUES (?, ?, ?, ?, ?)", (namespace, a, b, reason[:500], common.iso(common.now())))
+
+    def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT a, b FROM resolution_declines WHERE namespace = ?", (namespace,)).fetchall()
+        return {(r["a"], r["b"]) for r in rows}
 
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
         with self._tx():

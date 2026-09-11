@@ -204,18 +204,15 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ Entity resolution tier 3 (D-042, 2026-09-10): structural alias
   candidates for `vendor:product` keys, LLM-adjudicated; 58 merges on the
   corpus, KEV CVEs reachable from web-01 3 → 29
-- ⬜ Persist adjudication declines across worker restarts (D-023/D-042
-  remember them per process)
+- ✅ Adjudication declines persist in the store (D-044, schema v4)
 - ✅ CloudNativePG failover timing (2026-09-11): the 190 s was the probe
   hanging in TCP, not the operator — true outage 11 s with defaults,
   measured through the engine; Loom's pool gained `connect_timeout` and
   keepalives so clients fail over with the database
-- ⬜ Dossier candidate selection: weigh structured activity, not raw
-  volume — the first real run summarized the loadtest hosts (D-043)
-- ⬜ Extraction type vocabulary: the extractor invents entity types
-  (`ip_address`, `vulnerability`, `url`); registries can be `strict`, but
-  a gentler default (map to registered types when the key matches) would
-  keep the demo namespace clean without operator work
+- ✅ Dossier candidates ranked by richness (distinct predicates × sources),
+  single-predicate firehoses excluded (D-044)
+- ✅ Extraction adopts a registered type when the key already exists under
+  one; strict registries drop the rest (D-044)
 - ⬜ Embed the KEV documents (run the enrichment worker over the real
   corpus with an embedding provider) and measure excerpt quality
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m

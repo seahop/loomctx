@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from .context import _render_fact
 from .contracts import Artifact, ClaimIn, EntityRef, Provenance
 from .llm import Embedder, LLMClient, LLMError, embedder_from_env, llm_from_env
+from .registry import validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
 
@@ -255,12 +256,36 @@ class ExtractionParseError(ValueError):
     error (models are nondeterministic), dead-lettered after the bound."""
 
 
+def _conform_type(store: GraphStore, namespace: str, ref: EntityRef,
+                  registered: set[str], cache: dict) -> EntityRef | None:
+    """An extractor names types freely (ip_address, vulnerability, URL). When
+    the namespace has a registry, an unregistered type whose exact key
+    already exists under exactly one registered type takes that type — the
+    DHCP log's ip:10.0.4.7 wins over the extractor's ip_address:10.0.4.7
+    (D-044). With no match: kept as named unless the registry is strict,
+    in which case the claim is dropped (None) rather than smuggled past
+    the gate the HTTP path enforces."""
+    if not registered or ref.type in registered:
+        return ref
+    key = (ref.type, ref.key)
+    if key not in cache:
+        matches = {e.type for e in store.search_entities(namespace, ref.key, limit=20)
+                   if e.key == ref.key and e.type in registered}
+        cache[key] = EntityRef(type=next(iter(matches)), key=ref.key) if len(matches) == 1 else None
+    return cache[key] if cache[key] is not None else ref
+
+
 def extract_from_artifact(
     store: GraphStore, llm: LLMClient, artifact: Artifact
 ) -> int:
     if not artifact.text or not artifact.text.strip():
         store.set_extraction_status(artifact.namespace, artifact.id, "skipped")
         return 0
+    schema = store.get_schema(artifact.namespace)
+    registered = {t.name for t in schema.entity_types} if schema else set()
+    strict = bool(schema and schema.strict)
+    conform_cache: dict = {}
+    dropped = 0
     text = artifact.text
     windows = _windows(text)
     if len(windows) > EXTRACT_MAX_WINDOWS:
@@ -288,6 +313,13 @@ def extract_from_artifact(
                 else:
                     obj = str(c.get("object_value", ""))
                 subject = EntityRef(type=str(c["subject_type"]), key=str(c["subject_key"]))
+                subject = _conform_type(store, artifact.namespace, subject, registered, conform_cache)
+                if isinstance(obj, EntityRef):
+                    obj = _conform_type(store, artifact.namespace, obj, registered, conform_cache)
+                if strict and (subject.type not in registered
+                               or (isinstance(obj, EntityRef) and obj.type not in registered)):
+                    dropped += 1
+                    continue
                 predicate = str(c["predicate"])
                 quote = str(c.get("quote") or "")
                 # locate the quote in its window first (offset-corrected),
@@ -318,6 +350,14 @@ def extract_from_artifact(
             except (KeyError, ValueError, TypeError) as exc:
                 log.warning("skipping malformed extracted claim %d of %s: %s",
                             index, artifact.id, exc)
+    if strict and claims:
+        # a strict registry also rejects unregistered predicates on ingest;
+        # extraction honours the same gate
+        kept = {k: c for k, c in claims.items() if validate_claim(schema, c) is None}
+        dropped += len(claims) - len(kept)
+        claims = kept
+    if dropped:
+        log.info("artifact %s: %d extracted claims dropped by the strict registry", artifact.id, dropped)
     if claims:
         store.record_claims(list(claims.values()))
     store.set_extraction_status(artifact.namespace, artifact.id, "done")
@@ -437,9 +477,26 @@ def resolve_entities(store: GraphStore, limit: int = 50) -> int:
     return merged
 
 
-# (namespace, type:key, type:key) pairs an adjudicator already declined,
-# so the same question isn't re-billed every tick
-_declined: set[tuple[str, str, str]] = set()
+def _is_declined(store: GraphStore, namespace: str, a: str, b: str) -> bool:
+    """Declines persist in the store (D-044): a worker restart — or a
+    nightly CronJob — must not re-bill the same question."""
+    x, y = sorted((a, b))
+    cache = _declined_cache.setdefault(namespace, None)
+    if cache is None:
+        cache = _declined_cache[namespace] = store.declined_pairs(namespace)
+    return (x, y) in cache
+
+
+def _decline(store: GraphStore, namespace: str, a: str, b: str, reason: str) -> None:
+    store.remember_decline(namespace, a, b, reason)
+    x, y = sorted((a, b))
+    _declined_cache.setdefault(namespace, set())
+    if _declined_cache[namespace] is not None:
+        _declined_cache[namespace].add((x, y))
+
+
+# per-process read-through cache of the store's declines, by namespace
+_declined_cache: dict[str, set[tuple[str, str]] | None] = {}
 
 
 def _facts_for(store: GraphStore, namespace: str, ref: EntityRef, n: int = 5) -> str:
@@ -466,7 +523,7 @@ def adjudicate_entities(store: GraphStore, llm: LLMClient, limit: int = 50) -> i
         into = EntityRef(type=canonical.type, key=canonical.key)
         for other in others:
             pair = (namespace, f"{canonical.type}:{canonical.key}", f"{other.type}:{other.key}")
-            if pair in _declined or asked >= ADJUDICATIONS_PER_TICK:
+            if _is_declined(store, namespace, pair[1], pair[2]) or asked >= ADJUDICATIONS_PER_TICK:
                 continue
             asked += 1
             candidate = EntityRef(type=other.type, key=other.key)
@@ -488,7 +545,7 @@ def adjudicate_entities(store: GraphStore, llm: LLMClient, limit: int = 50) -> i
                              pair[1], verdict["confidence"], verdict.get("reason", ""))
                     merged += 1
             else:
-                _declined.add(pair)
+                _decline(store, namespace, pair[1], pair[2], verdict.get("reason", ""))
                 log.info("adjudication declined %s vs %s (%.2f): %s", pair[1],
                          pair[2], verdict["confidence"], verdict.get("reason", ""))
     return merged
@@ -563,8 +620,8 @@ def adjudicate_aliases(store: GraphStore, llm: LLMClient, namespace: str | None 
                        dry_run: bool = False) -> dict[str, int]:
     """Tier 3: ask the LLM about each structural alias candidate, with both
     records' facts; merge the less-connected key into the more-connected
-    one on a confident yes. Declined pairs are remembered for the worker's
-    lifetime. Returns counts: candidates, asked, merged, declined."""
+    one on a confident yes. Declined pairs are remembered in the store, so
+    no worker ever re-asks. Returns counts: candidates, asked, merged, declined."""
     counts = {"candidates": 0, "asked": 0, "merged": 0, "declined": 0}
     namespaces = [namespace] if namespace else sorted(store.namespace_summary())
     for ns in namespaces:
@@ -572,7 +629,7 @@ def adjudicate_aliases(store: GraphStore, llm: LLMClient, namespace: str | None 
             for a, b in alias_candidates(store, ns, etype):
                 counts["candidates"] += 1
                 pair = (ns, f"{a.type}:{a.key}", f"{b.type}:{b.key}")
-                if pair in _declined or (pair[0], pair[2], pair[1]) in _declined:
+                if _is_declined(store, ns, pair[1], pair[2]):
                     continue
                 if dry_run:
                     log.info("alias candidate %s ~ %s", pair[1], pair[2])
@@ -597,7 +654,7 @@ def adjudicate_aliases(store: GraphStore, llm: LLMClient, namespace: str | None 
                                  verdict["confidence"], verdict.get("reason", ""))
                 else:
                     counts["declined"] += 1
-                    _declined.add(pair)
+                    _decline(store, ns, pair[1], pair[2], verdict.get("reason", ""))
                     log.info("alias declined %s vs %s (%.2f): %s", pair[1], pair[2],
                              verdict["confidence"], verdict.get("reason", ""))
     return counts

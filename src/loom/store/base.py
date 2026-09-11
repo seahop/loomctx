@@ -331,6 +331,17 @@ class GraphStore(ABC):
         for every merge alias (D-019) — part of a faithful export."""
 
     @abstractmethod
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+        """Record that an adjudicator judged entity handles a and b (type:key)
+        NOT the same thing, so no worker asks the model again (D-044). Order
+        of a and b does not matter."""
+
+    @abstractmethod
+    def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
+        """Every (a, b) pair declined in this namespace, in canonical order
+        (a < b)."""
+
+    @abstractmethod
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
         """{'namespace', 'observation_id', 'reason', 'recorded_at'} for every
         redaction (D-016) — exported so a restore never un-redacts."""

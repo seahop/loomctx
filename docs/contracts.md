@@ -186,8 +186,11 @@ document.
 `strict`. Registered at runtime via `POST /v1/schemas` (additive by name;
 `GET /v1/schemas` reads it back). A registered predicate's `object_types`
 are enforced on ingest; a strict namespace rejects unregistered predicates
-and entity types; containment predicates are what a scope follows when the
-caller names none (D-024). This is what keeps the core domain-agnostic.
+and entity types — on the HTTP path and for claims the enrichment worker
+extracts from documents alike (D-044); containment predicates are what a
+scope follows when the caller names none (D-024). An extracted entity
+whose type is unregistered but whose key already exists under exactly one
+registered type takes that type. This is what keeps the core domain-agnostic.
 
 ## Time axes on reads
 

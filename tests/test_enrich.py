@@ -243,11 +243,13 @@ def test_budget_cap_is_configurable(tmp_path, monkeypatch):
 def test_dossier_built_and_served_as_brief(tmp_path):
     store = _store(tmp_path)
     host = EntityRef(type="host", key="web-01")
-    for i in range(6):
+    for i in range(5):
         store.record_claim(ClaimIn(
             subject=host, predicate="logged_in_by",
             object=EntityRef(type="user", key=f"u{i}"),
             observed_at=OBSERVED, source="auth"))
+    store.record_claim(ClaimIn(subject=host, predicate="runs_os", object="fedora-44",
+                               observed_at=OBSERVED, source="inventory"))   # a second kind of fact (D-044)
     llm = ScriptedLLM("web-01 is a busy host with many distinct logins.")
     assert refresh_dossiers(store, llm, min_new=20, min_total=5) == 1
     pack = build_pack(store, AskRequest(
@@ -307,10 +309,12 @@ def test_worker_tick_survives_job_failures(tmp_path):
     from loom.enrich import tick
     from loom.llm import Embedder, LLMError
     store = _store(tmp_path)
-    for i in range(6):
+    for i in range(5):
         store.record_claim(ClaimIn(
             subject=EntityRef(type="host", key="web-01"), predicate="logged_in_by",
             object=EntityRef(type="user", key=f"u{i}"), observed_at=OBSERVED, source="auth"))
+    store.record_claim(ClaimIn(subject=EntityRef(type="host", key="web-01"), predicate="runs_os", object="fedora-44",
+                               observed_at=OBSERVED, source="inventory"))
 
     class Broken(Embedder):
         model = "broken"
@@ -463,9 +467,9 @@ def test_same_type_spelling_drift_auto_merges(tmp_path):
 
 
 def test_cross_type_collision_needs_adjudication(tmp_path):
-    from loom.enrich import _declined, adjudicate_entities
+    from loom.enrich import _declined_cache, adjudicate_entities
     store = _store(tmp_path)
-    _declined.clear()
+    _declined_cache.clear()
     host = EntityRef(type="host", key="web-01")
     asset = EntityRef(type="asset", key="web01")
     user = EntityRef(type="user", key="web.01")   # a person with an unlucky handle
@@ -688,7 +692,7 @@ def test_alias_adjudication_merges_on_yes_and_repoints_kev_edges(tmp_path, monke
             same = "linux:kernel" in user and "linux:linux_kernel" in user
             return json.dumps({"same": same, "confidence": 0.95 if same else 0.9, "reason": "test"})
 
-    monkeypatch.setattr(enrich, "_declined", set())
+    enrich._declined_cache.clear()
     counts = adjudicate_aliases(store, Judge(), "ns", ("product",), limit=10)
     assert counts["merged"] == 1 and counts["declined"] == counts["asked"] - 1 and counts["asked"] >= 2
     # the stray KEV key folded into the connected CPE key: its KEV CVE now hangs off linux:linux_kernel
@@ -719,4 +723,81 @@ def test_structured_entity_absorbs_the_extracted_one_even_when_outnumbered(tmp_p
     assert store.get_entity("ns", ip) is not None and store.get_entity("ns", ip).type == "ip"
     keys = {(o.subject.type, o.subject.key) for o in store.observations_for("ns", ip, limit=50)}
     assert keys == {("ip", "10.0.4.7")}          # every fact now reads under the structured key
+    store.close()
+
+
+def test_dossiers_prefer_rich_entities_over_firehoses(tmp_path):
+    """D-044: the first real run briefed the load generator's hosts (100 rows,
+    one predicate, one source). Several kinds of fact from several senders
+    win; a single-predicate stream gets no brief at all."""
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "rich.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    fire = EntityRef(type="host", key="load-01"); rich = EntityRef(type="host", key="web-01")
+    store.record_claims([ClaimIn(namespace="ns", subject=fire, predicate="tick", object=i, source="loadgen", observed_at=t)
+                         for i in range(60)])
+    store.record_claims([ClaimIn(namespace="ns", subject=rich, predicate=p, object=o, source=src, observed_at=t)
+                         for p, o, src in (("runs_os", "fedora-44", "inventory"), ("listens_on_port", 443, "nmap"),
+                                           ("logged_in_by", EntityRef(type="user", key="jdoe"), "auth"),
+                                           ("logged_in_by", EntityRef(type="user", key="asmith"), "auth"),
+                                           ("member_of", EntityRef(type="domain", key="corp"), "inventory"))])
+    cands = store.dossier_candidates(min_new=20, min_total=5, limit=4)
+    assert [c[1].key for c in cands] == ["web-01"]          # the firehose is not a candidate
+    store.close()
+
+
+def test_adjudication_declines_persist_across_workers(tmp_path):
+    """D-044: a second worker (fresh process, empty cache) must not re-ask."""
+    from loom import enrich
+    from loom.enrich import adjudicate_aliases
+    store = _alias_store(tmp_path)
+    asked = []
+
+    class Judge:
+        model = "fake"
+        def complete(self, system, user, max_tokens=200):
+            asked.append(user)
+            return json.dumps({"same": False, "confidence": 0.9, "reason": "test"})
+
+    enrich._declined_cache.clear()
+    first = adjudicate_aliases(store, Judge(), "ns", ("product",), limit=50)
+    assert first["declined"] >= 2 and store.declined_pairs("ns")
+    enrich._declined_cache.clear()                         # a new worker process
+    again = adjudicate_aliases(store, Judge(), "ns", ("product",), limit=50)
+    assert again["asked"] == 0 and len(asked) == first["asked"]
+    store.close()
+
+
+def test_extraction_adopts_registered_types_and_strict_drops_the_rest(tmp_path):
+    """D-044: the extractor said ip_address:10.0.4.7; the registry knows ip
+    and ip:10.0.4.7 exists, so the claim lands on the structured key. A
+    strict registry drops what cannot be conformed, like the HTTP gate."""
+    from loom.contracts import DocumentIn, EntityTypeDef, PredicateDef, SchemaRegistration
+    from loom.enrich import extract_from_artifact
+    from loom.store.sqlite import SqliteStore
+    store = SqliteStore(tmp_path / "conform.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    store.record_claim(ClaimIn(namespace="ns", subject=EntityRef(type="ip", key="10.0.4.7"), predicate="assigned_to",
+                               object=EntityRef(type="host", key="web-01"), source="dhcp", observed_at=t))
+    store.put_schema(SchemaRegistration(namespace="ns", entity_types=[EntityTypeDef(name="ip"), EntityTypeDef(name="host")],
+                                        predicates=[PredicateDef(name="mentions")]))
+    art = store.store_artifact(DocumentIn(namespace="ns", text="Traffic from 10.0.4.7 hit web-01. Vuln X seen.", source="ir", observed_at=t))
+    llm = ScriptedLLM(json.dumps({"claims": [
+        {"subject_type": "ip_address", "subject_key": "10.0.4.7", "predicate": "mentions", "object_entity_type": "host",
+         "object_entity_key": "web-01", "object_value": None, "quote": "Traffic from 10.0.4.7 hit web-01", "confidence": 0.8},
+        {"subject_type": "vulnerability", "subject_key": "Vuln X", "predicate": "mentions", "object_entity_type": None,
+         "object_entity_key": None, "object_value": "seen", "quote": "Vuln X seen", "confidence": 0.6}]}))
+    assert extract_from_artifact(store, llm, art) == 2
+    ip_facts = store.observations_for("ns", EntityRef(type="ip", key="10.0.4.7"), limit=10)
+    assert any(o.predicate == "mentions" and o.subject.type == "ip" for o in ip_facts)     # conformed
+    assert store.get_entity("ns", EntityRef(type="ip_address", key="10.0.4.7")) is None
+    assert store.get_entity("ns", EntityRef(type="vulnerability", key="Vuln X")) is not None  # kept: non-strict
+    # strict: the unconformable claim is dropped
+    store.put_schema(SchemaRegistration(namespace="ns", strict=True))
+    art2 = store.store_artifact(DocumentIn(namespace="ns", text="Vuln Y seen.", source="ir", observed_at=t))
+    llm2 = ScriptedLLM(json.dumps({"claims": [{"subject_type": "vulnerability", "subject_key": "Vuln Y", "predicate": "mentions",
+                                              "object_entity_type": None, "object_entity_key": None, "object_value": "seen",
+                                              "quote": "Vuln Y seen", "confidence": 0.6}]}))
+    assert extract_from_artifact(store, llm2, art2) == 0
+    assert store.get_entity("ns", EntityRef(type="vulnerability", key="Vuln Y")) is None
     store.close()

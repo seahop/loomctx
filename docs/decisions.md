@@ -1330,6 +1330,35 @@ queue absorbed the outage with no redeliveries lost and nothing
 dead-lettered. Write availability during a primary loss: 11 s (see the
 correction above).
 
+## D-044 · Worker quality: what the soak asked for (2026-09-11)
+
+Three changes in the enrichment worker, each traced to a specific
+observation from the GKE soak (D-043), done before the tag rather than
+after it.
+
+- **Dossiers go to rich entities, not loud ones.** Candidate selection
+  ordered by fresh-observation count, so the first real run briefed the
+  load generator's hosts (100 rows of one predicate from one source). It
+  now requires at least two distinct predicates for a *first* brief and
+  orders by distinct predicates × distinct sources, then count: several
+  kinds of fact from several senders is what a brief is for; a
+  one-predicate firehose never gets one. Refreshes of an existing brief
+  need only enough new facts. Same query shape in both stores.
+- **Extraction adopts registered types.** The extractor names entity
+  types freely (`ip_address`, `vulnerability`, `URL`). When the namespace
+  has a registry, an unregistered type whose exact key already exists
+  under exactly one registered type takes that type, so the DHCP log's
+  `ip:10.0.4.7` absorbs the extractor's mention instead of spawning a
+  twin (and the D-043 structured-first ranking never has to arbitrate).
+  With no match the type is kept as named — unless the registry is
+  `strict`, in which case the claim is dropped and logged, the same gate
+  the HTTP path enforces; extraction no longer has a side door.
+- **Adjudication declines persist.** Tiers 2 and 3 remembered declined
+  pairs per process; a restarted worker or a nightly CronJob re-asked the
+  model the same 223 questions. New table `resolution_declines`
+  (namespace, a, b, reason, decided_at; canonical order), schema v4 in
+  both stores, a per-process read-through cache in front of it.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
