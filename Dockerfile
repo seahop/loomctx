@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# The image runs the current stable Python; 3.12 and 3.13 are tested in CI (see ci.yml).
+ARG PYTHON_VERSION=3.14
+FROM python:${PYTHON_VERSION}-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

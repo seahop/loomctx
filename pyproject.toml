@@ -16,6 +16,8 @@ classifiers = [
     "Framework :: FastAPI",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -67,3 +69,8 @@ packages = ["src/loom"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # starlette's TestClient (1.6.0) still imports anyio.abc.BlockingPortal; anyio 4.15 deprecates
+    # the alias. Third-party and harmless; drop this once starlette moves to anyio.from_thread.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+]

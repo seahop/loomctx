@@ -20,7 +20,7 @@ is revisited, strike it here and add the replacement — don't rewrite history.
 6. **Domain-agnostic core.** Domain knowledge lives in the schema registry and
    plugins (see "malleable" in `concepts.md`), never in core code.
 
-## D-001 · Core language: Python 3.12
+## D-001 · Core language: Python (3.12+; the image runs 3.14 as of 2026-09-11)
 
 - **Why:** best MCP + LLM ecosystem (official MCP SDK, every model provider),
   Pydantic v2 gives contracts-as-code with JSON Schema export for free, and it is the

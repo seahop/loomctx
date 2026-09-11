@@ -42,6 +42,24 @@ jobs:
           docker compose --profile sdk run --rm sdk-go
           docker compose down
 
+  python-matrix:
+    # The image ships on the current stable Python (Dockerfile ARG); the
+    # older interpreters the package still supports are checked here.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build on Python ${{ matrix.python }}
+        run: docker build --build-arg PYTHON_VERSION=${{ matrix.python }} -t loom-py${{ matrix.python }} .
+      - name: Test on Python ${{ matrix.python }}
+        run: |
+          docker run --rm -e LOOM_DB=/tmp/t.db -e PYTHONPATH=/app/sdk/python \
+            -v "$PWD/tests:/app/tests:ro" -v "$PWD/sdk/python:/app/sdk/python:ro" \
+            loom-py${{ matrix.python }} pytest -q
+
   publish-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
