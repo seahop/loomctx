@@ -19,6 +19,7 @@ presentable.
 | early Sep (done 2026-09-09) | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
 | early Sep (done 2026-09-11) | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
 | early Sep (done 2026-09-11) | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
+| early Oct | Lock dependencies (uv or pip-compile lock consumed by the Dockerfile) so a rebuild is byte-identical to the gated image — D-045 found a boto3 patch drift between two builds of the same commit |
 | early Oct | Final rehearsal the morning of the talk (`docs/demo.md`) |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |

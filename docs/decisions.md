@@ -1451,6 +1451,19 @@ in the workflow file at the tagged commit; the image inputs (`src/`,
 two commits, and the head's CI build is compared layer by layer against the
 gated digest once it exists.
 
+**After the push (2026-09-11, tag at `5a9f16b`).** The tag run re-tagged
+instead of rebuilding: `loom:v0.1.0` and `loom-gateway:v0.1.0` are manifest
+lists wrapping exactly the head commit's manifests (`b4853584…`,
+`7ab170cf…`), so the tag serves the same bytes as the head's `main` build.
+That build against the gated one: Python 3.14.7 and every `.py` under
+`/app/src` identical, 60 packages installed in both, one difference —
+`boto3`/`botocore` 1.43.92 in the gated image, 1.43.93 in the tagged one,
+because the dependency set is not locked and pip resolved the patch
+released in between. The gate exercised nothing in boto3 beyond import
+(S3 artifact offload is off in the overlay), so the tag stands; but this
+is the case for a lock file, added to the roadmap: a rebuild should be the
+same image, not a fresh resolution.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
