@@ -1396,6 +1396,20 @@ true but unproven, and each is cheap to prove permanently.
   loadgen ingest and ask, the worker through every stage at its 512 MiB
   limit, one failover. Results are appended to this entry, and the tag
   moves to the gated commit.
+- **The tag never had an image.** Found while preparing the gate: the
+  publish job ran only for pushes to `main`, so both `v0.1.0` tag pushes
+  built nothing and `ghcr.io/seahop/loom:v0.1.0` did not exist; the
+  `ref_name` tag line only ever produced `:main`. Rebuilding on the tag
+  push would have been the obvious fix and the wrong one — a second
+  build is a second image. Now a tag push re-tags the commit's already
+  published `:<sha>` manifest (`docker buildx imagetools create`), so the
+  release tag is byte-for-byte the gated image, and it builds only if
+  that commit never went through `main`. Publishing also now waits for
+  the scale smoke.
+- **Pulling while the repository is private.** GHCR packages inherit the
+  repository's visibility; until Loom is flipped to public, every
+  `image: ghcr.io/seahop/...` in the manifests needs a pull secret
+  (recipe in `deploy/README.md`). The gate uses one.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

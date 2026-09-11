@@ -69,8 +69,11 @@ jobs:
             loom-py${{ matrix.python }} pytest -q
 
   publish-image:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: test
+    # main: build and push :latest + :<sha>. Tag push: re-tag the commit's already
+    # published :<sha> image as :<tag> so the release image is byte-for-byte the one
+    # that was gated (D-045); build only if that commit never went through main.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    needs: [test, scale-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,19 +85,43 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Re-tag the published commit image as the release tag
+        id: retag
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          o=ghcr.io/${{ github.repository_owner }}
+          build=false
+          for img in loom loom-gateway; do
+            if docker buildx imagetools inspect "$o/$img:${{ github.sha }}" >/dev/null 2>&1; then
+              docker buildx imagetools create -t "$o/$img:${{ github.ref_name }}" "$o/$img:${{ github.sha }}"
+              echo "$img:${{ github.ref_name }} -> $(docker buildx imagetools inspect "$o/$img:${{ github.ref_name }}" --format '{{json .Manifest.Digest}}')"
+            else
+              echo "$o/$img:${{ github.sha }} was never published; building"; build=true
+            fi
+          done
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+      - name: Image tags
+        id: tags
+        run: |
+          o=ghcr.io/${{ github.repository_owner }}
+          if [ "${{ github.ref_type }}" = tag ]; then
+            echo "engine=$o/loom:${{ github.sha }},$o/loom:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "gateway=$o/loom-gateway:${{ github.sha }},$o/loom-gateway:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "engine=$o/loom:latest,$o/loom:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "gateway=$o/loom-gateway:latest,$o/loom-gateway:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
+        if: github.ref_type != 'tag' || steps.retag.outputs.build == 'true'
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/loom:latest
-            ghcr.io/${{ github.repository_owner }}/loom:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/loom:${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.engine }}
       - uses: docker/build-push-action@v6
+        if: github.ref_type != 'tag' || steps.retag.outputs.build == 'true'
         with:
           context: .
           file: gateway/Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/loom-gateway:latest
-            ghcr.io/${{ github.repository_owner }}/loom-gateway:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.gateway }}

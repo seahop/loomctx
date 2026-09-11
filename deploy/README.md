@@ -104,7 +104,19 @@ replicas. The `scale-pg` run used an in-cluster `pgvector/pgvector:pg17`
 Deployment behind the `loom-db` Secret.
 
 CI publishes the image to `ghcr.io/seahop/loom` (`latest` + per-commit SHA tags)
-on every push to `main`. Then:
+on every push to `main`; a `vX.Y.Z` tag push re-tags that commit's
+already-published image as `:vX.Y.Z` rather than rebuilding it (D-045).
+While the repository is private the packages are too, so the nodes need
+a pull secret — a GitHub token with `read:packages`, attached to the
+namespace's default ServiceAccount so no manifest changes:
+
+```bash
+kubectl -n loom create secret docker-registry ghcr --docker-server=ghcr.io \
+  --docker-username=GITHUB_USER --docker-password="$GHCR_TOKEN"
+kubectl -n loom patch serviceaccount default -p '{"imagePullSecrets":[{"name":"ghcr"}]}'
+```
+
+Then:
 
 ```bash
 kubectl apply -k deploy/k8s
