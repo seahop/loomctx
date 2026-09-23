@@ -240,7 +240,11 @@ class ScopeSpec(BaseModel):
     from the subjects (e.g. ["member_of"]); `depth` bounds the traversal.
     """
 
-    subjects: list[EntityRef] = Field(min_length=1)
+    subjects: list[EntityRef] = Field(
+        min_length=1, max_length=500,
+        description="anchors of the scope; bounded so one request cannot "
+        "name a whole namespace (expansion is how a scope grows, D-046)",
+    )
     expand: list[str] = Field(default_factory=list)
     depth: int = Field(default=1, ge=0, le=3)
     follow_extracted: bool = Field(

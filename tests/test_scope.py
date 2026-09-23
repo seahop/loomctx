@@ -172,3 +172,11 @@ def test_extracted_edges_do_not_steer_expansion_by_default(tmp_path):
         scope=ScopeSpec(subjects=[host], expand=["runs_software", "affects"], depth=2, follow_extracted=True),
         question="exploited", budget=3000))
     assert ("cve", "CVE-2026-666") in _reached(opted)
+
+
+def test_scope_subjects_are_bounded():
+    import pytest
+    from pydantic import ValidationError
+    ScopeSpec(subjects=[EntityRef(type="host", key=f"h{i}") for i in range(500)])
+    with pytest.raises(ValidationError):
+        ScopeSpec(subjects=[EntityRef(type="host", key=f"h{i}") for i in range(501)])
