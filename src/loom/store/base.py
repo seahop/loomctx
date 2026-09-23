@@ -42,6 +42,31 @@ class GraphStore(ABC):
         or they are the same entity."""
 
     @abstractmethod
+    def unmerge(self, namespace: str, alias: EntityRef) -> bool:
+        """Reverse the merge that folded `alias` (type:key) away — D-019's
+        "reversible & lossless", backed by the merge log (schema v5):
+        recreate the entity, repoint exactly the observations that merge
+        moved, restore their rendered object refs, point the aliases that
+        had named it back at it, remove its own alias record, drop both
+        entities' dossiers and delete the log rows. False when no merge of
+        that ref is on record."""
+
+    @abstractmethod
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        """One record per reversible merge, oldest first:
+        {'id', 'namespace', 'from': {'type','key'}, 'into': {'type','key'},
+        'from_id', 'from_provisional', 'from_created_at', 'prior_aliases',
+        'recorded_at', 'observations': [{'observation_id',
+        'prior_subject_id', 'prior_object_entity_id', 'prior_object_json'}]}
+        — exported so a restore keeps merges reversible. The prior_* ids
+        are the folded entity's id at the time; unmerge uses their presence
+        as the side flag and repoints to the recreated entity's id."""
+
+    @abstractmethod
+    def restore_merge(self, record: dict) -> None:
+        """Insert an exported merge record verbatim (idempotent by id)."""
+
+    @abstractmethod
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
@@ -66,6 +91,11 @@ class GraphStore(ABC):
 
     @abstractmethod
     def get_schema(self, namespace: str) -> SchemaRegistration | None: ...
+
+    @abstractmethod
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        """Every namespace's effective registry — part of a faithful
+        export (a restore without it would run unregistered)."""
 
     @abstractmethod
     def namespace_summary(self) -> dict[str, dict[str, int]]:
@@ -193,6 +223,14 @@ class GraphStore(ABC):
         """Visible observations for the given ids (tombstoned excluded),
         in no particular order."""
 
+    @abstractmethod
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        """Visible observations whose id starts with `prefix` — how a
+        12-hex cite token from a pack resolves back to its observation —
+        ordered by id and capped at 20 rows (an ambiguous token is a
+        caller problem, not an unbounded read). An empty prefix returns
+        nothing. Served by the primary-key index on both backends."""
+
     # ------------------------------------------------ vector index (D-025)
     # The JSON `embeddings` / `doc_chunks` tables remain the portable source
     # of truth; each backend keeps an ANN index beside them (sqlite-vec /
@@ -238,10 +276,23 @@ class GraphStore(ABC):
 
     @abstractmethod
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         """Record a failed extraction attempt and when to try again (H-D4);
-        survives worker restarts, unlike in-memory backoff."""
+        survives worker restarts, unlike in-memory backoff. Releases the
+        extraction lease. With `worker_id`, only if that worker still holds
+        the lease (a worker whose lease expired and was re-claimed must not
+        clobber the new holder's state); returns whether it applied."""
+
+    @abstractmethod
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        """Push the extraction lease `seconds` further out for the worker
+        that holds it (a long extraction renews per window instead of
+        guessing the whole job's length up front). False if the lease is
+        held by someone else or the artifact is no longer pending."""
 
     @abstractmethod
     def doc_chunks_by_seq(
@@ -268,9 +319,12 @@ class GraphStore(ABC):
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         """Store (seq, span_start, span_end, text, vector) passages embedded
-        with `model`."""
+        with `model`; the rows are idempotent by (artifact, model, seq) so
+        they always land. Releases the chunking lease — with `worker_id`,
+        only if that worker holds it."""
 
     @abstractmethod
     def doc_chunks_for_artifacts(
@@ -283,8 +337,12 @@ class GraphStore(ABC):
 
     @abstractmethod
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None: ...
+        self, namespace: str, artifact_id: str, status: str,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Set the extraction status and release the lease. With
+        `worker_id`, only while that worker holds the lease; returns
+        whether it applied (None = unconditional, for ops and tests)."""
 
     @abstractmethod
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
@@ -296,7 +354,11 @@ class GraphStore(ABC):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None: ...
+        worker_id: str | None = None,
+    ) -> bool:
+        """Store the brief and release the dossier lease. With `worker_id`,
+        only while that worker holds the lease (the re-claimer's brief is
+        the one that should land); returns whether it was written."""
 
     @abstractmethod
     def dossier_candidates(
@@ -341,15 +403,25 @@ class GraphStore(ABC):
         for every merge alias (D-019) — part of a faithful export."""
 
     @abstractmethod
-    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+    def remember_decline(
+        self, namespace: str, a: str, b: str, reason: str,
+        decided_at: datetime | None = None,
+    ) -> None:
         """Record that an adjudicator judged entity handles a and b (type:key)
         NOT the same thing, so no worker asks the model again (D-044). Order
-        of a and b does not matter."""
+        of a and b does not matter. `decided_at` defaults to now; an import
+        passes the exported instant."""
 
     @abstractmethod
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         """Every (a, b) pair declined in this namespace, in canonical order
         (a < b)."""
+
+    @abstractmethod
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        """{'namespace', 'a', 'b', 'reason', 'decided_at'} for every
+        adjudication decline — exported so a restored worker does not ask
+        the model the same questions again."""
 
     @abstractmethod
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:

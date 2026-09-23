@@ -8,42 +8,75 @@ is behind the interface.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from .base import GraphStore
 
+# `read_url` left at this sentinel means "whatever LOOM_DB_READ says"; an
+# explicit None means "no replica" — a shard must not inherit the default
+# database's replica, which serves a different cluster.
+_FROM_ENV: Any = object()
 
-def store_from_url(url: str, read_url: str | None = None) -> GraphStore:
+
+def store_from_url(url: str, read_url: str | None = _FROM_ENV) -> GraphStore:
     if url.startswith(("postgres://", "postgresql://")):
         from .postgres import PostgresStore
 
         # LOOM_DB_READ (D-028): a replica DSN for the read path; pool size
         # is LOOM_DB_POOL. Both are optional dials — unset means one primary.
-        return PostgresStore(url, read_dsn=read_url or os.environ.get("LOOM_DB_READ") or None)
+        if read_url is _FROM_ENV:
+            read_url = os.environ.get("LOOM_DB_READ") or None
+        return PostgresStore(url, read_dsn=read_url or None)
     from .sqlite import SqliteStore
 
     return SqliteStore(url)
 
 
+def shard_specs(raw: str) -> dict[str, tuple[str, str | None]]:
+    """Parse LOOM_SHARDS (inline JSON or a file path) into
+    namespace -> (dsn, read_dsn). A value is either a connection string or
+    {"dsn": ..., "read": ...}; `read` is that shard's own replica and is
+    the only way a shard gets one (LOOM_DB_READ belongs to LOOM_DB)."""
+    import json
+
+    mapping = json.loads(raw if raw.startswith(("{", "[")) else open(raw).read())
+    if not isinstance(mapping, dict):
+        raise ValueError("LOOM_SHARDS must be a JSON object of namespace -> url")
+    specs: dict[str, tuple[str, str | None]] = {}
+    for namespace, value in mapping.items():
+        if isinstance(value, str):
+            specs[str(namespace)] = (value, None)
+        elif isinstance(value, dict) and isinstance(value.get("dsn"), str):
+            read = value.get("read")
+            if read is not None and not isinstance(read, str):
+                raise ValueError(f"LOOM_SHARDS[{namespace!r}].read must be a string")
+            specs[str(namespace)] = (value["dsn"], read or None)
+        else:
+            raise ValueError(f"LOOM_SHARDS[{namespace!r}] must be a url or {{\"dsn\": ..., \"read\": ...}}")
+    return specs
+
+
 def store_from_env() -> GraphStore:
     """LOOM_DB, plus — when LOOM_SHARDS is set (D-032) — a namespace ->
     connection-string map, inline JSON or a path to a JSON file, e.g.
-    {"acme": "postgresql://.../acme", "globex": "/data/globex.db"}."""
-    default = store_from_url(os.environ.get("LOOM_DB", "loom.db"))
+    {"acme": "postgresql://.../acme", "globex": "/data/globex.db",
+     "initech": {"dsn": "postgresql://.../initech", "read": "postgresql://replica/initech"}}."""
+    default_url = os.environ.get("LOOM_DB", "loom.db")
+    default = store_from_url(default_url)
     raw = os.environ.get("LOOM_SHARDS", "").strip()
     if not raw:
         return _with_offload(default)
-    import json
     from .sharded import ShardedStore
 
-    mapping = json.loads(open(raw).read() if not raw.startswith("{") else raw)
-    if not isinstance(mapping, dict):
-        raise ValueError("LOOM_SHARDS must be a JSON object of namespace -> url")
-    by_url: dict[str, GraphStore] = {os.environ.get("LOOM_DB", "loom.db"): default}
+    by_url: dict[tuple[str, str | None], GraphStore] = {}
     shards: dict[str, GraphStore] = {}
-    for namespace, url in mapping.items():
-        if url not in by_url:
-            by_url[url] = store_from_url(url)
-        shards[str(namespace)] = by_url[url]
+    for namespace, (url, read) in shard_specs(raw).items():
+        if url == default_url and read is None:
+            shards[namespace] = default   # the same database: share the store
+            continue
+        if (url, read) not in by_url:
+            by_url[(url, read)] = store_from_url(url, read_url=read)
+        shards[namespace] = by_url[(url, read)]
     return _with_offload(ShardedStore(default, shards))
 
 

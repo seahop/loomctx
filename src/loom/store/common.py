@@ -18,22 +18,51 @@ from ..contracts import (
 )
 
 _NORM = re.compile(r"[^a-z0-9]+")
+_WS = re.compile(r"\s+")
+# digit-dominated keys — IPs, CIDRs, ports, versions — where the punctuation
+# IS the structure: stripping it made 10.0.4.7, 100.4.7 and 1.0.0.47 collide
+_NUMERIC = re.compile(r"^[\d.:/\-]+$")
 
 
 def norm_key(key: str) -> str:
-    """The fuzzy-match key: lowercase, punctuation/whitespace stripped, so
-    web-01 / WEB_01 / web01 collide (D-024 entity resolution tier 2)."""
-    return _NORM.sub("", key.lower())
+    """The fuzzy-match key (D-024 entity resolution tier 2): lowercase with
+    punctuation/whitespace stripped, so web-01 / WEB_01 / web01 collide.
+    A key made only of digits and `. : / -` keeps those characters (only
+    case and whitespace fold): 10.0.4.7 and 100.4.7 are different things."""
+    lowered = _WS.sub("", key.lower())
+    if _NUMERIC.match(lowered):
+        return lowered
+    return _NORM.sub("", lowered)
+
+
+def norm_key_may_change(key: str) -> bool:
+    """Cheap pre-filter for the v5 norm_key recompute: only keys carrying
+    one of the characters the numeric rule preserves can differ."""
+    return any(c in key for c in ".:/-")
 
 
 _SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def vec_slug(model: str) -> str:
+    """The embedding model's table-name slug."""
+    return _SLUG.sub("_", model.lower()).strip("_")
 
 
 def vec_table(kind: str, model: str, dim: int) -> str:
     """Name of the ANN index table (D-025): vobs_/vchk_ + a slug of the
     embedding model + the dimension, so vectors from different models — or
     a model that changed size — never share an index."""
-    return f"{kind}_{_SLUG.sub('_', model.lower()).strip('_')}_{int(dim)}"
+    return f"{kind}_{vec_slug(model)}_{int(dim)}"
+
+
+def vec_tables_for(kind: str, model: str, names) -> list[str]:
+    """The index tables that belong to exactly this (kind, model) — one per
+    dimension it has been seen with. A prefix test matched every model
+    (`vobs_m_` is a prefix of `vobs_m2_...` only by luck of naming, but
+    `vobs_text_embedding_3_` is a prefix of `vobs_text_embedding_3_large_`)."""
+    pattern = re.compile(rf"^{re.escape(kind)}_{re.escape(vec_slug(model))}_\d+$")
+    return [n for n in names if pattern.match(n)]
 
 
 try:  # optional accelerator (extra "vector"); pure Python otherwise
@@ -122,6 +151,18 @@ def iso(dt: datetime | None) -> str | None:
 
 def parse(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
+
+
+def prefix_bounds(prefix: str) -> tuple[str, str | None]:
+    """(lo, hi) such that `lo <= s < hi` holds exactly for the strings that
+    start with `prefix`: hi is the prefix with its last code point
+    incremented (a range the primary-key index serves on both backends,
+    where LIKE would not: SQLite's default LIKE is case-insensitive and
+    skips BINARY-collated indexes). hi is None when no bound exists."""
+    stem = prefix.rstrip("\U0010ffff")
+    if not stem:
+        return prefix, None
+    return prefix, stem[:-1] + chr(ord(stem[-1]) + 1)
 
 
 def like_pattern(query: str) -> str:
@@ -219,6 +260,48 @@ def row_to_artifact(row: Mapping[str, Any]) -> Artifact:
         ),
         attrs=json.loads(row["attrs_json"]),
     )
+
+
+def merge_record(parent: Mapping[str, Any], children) -> dict:
+    """The exported shape of one merge_log row and its per-observation rows
+    (GraphStore.iter_merges); both backends store identical columns."""
+    return {
+        "id": parent["id"],
+        "namespace": parent["namespace"],
+        "from": {"type": parent["from_type"], "key": parent["from_key"]},
+        "into": {"type": parent["into_type"], "key": parent["into_key"]},
+        "from_id": parent["from_id"],
+        "from_provisional": bool(parent["from_provisional"]),
+        "from_created_at": parent["from_created_at"],
+        "prior_aliases": json.loads(parent["prior_aliases_json"] or "[]"),
+        "recorded_at": parent["recorded_at"],
+        "observations": [
+            {"observation_id": c["observation_id"],
+             "prior_subject_id": c["prior_subject_id"],
+             "prior_object_entity_id": c["prior_object_entity_id"],
+             "prior_object_json": c["prior_object_json"]}
+            for c in children
+        ],
+    }
+
+
+def merge_rows(record: dict) -> tuple[tuple, list[tuple]]:
+    """The inverse of merge_record: (parent row values, child row values)
+    in the tables' column order, for restore_merge."""
+    parent = (
+        record["id"], record["namespace"],
+        record["from"]["type"], record["from"]["key"],
+        record["into"]["type"], record["into"]["key"],
+        record["from_id"], bool(record.get("from_provisional", False)),
+        record["from_created_at"], json.dumps(list(record.get("prior_aliases", []))),
+        record["recorded_at"],
+    )
+    children = [
+        (record["id"], c["observation_id"], c.get("prior_subject_id"),
+         c.get("prior_object_entity_id"), c.get("prior_object_json"))
+        for c in record.get("observations", [])
+    ]
+    return parent, children
 
 
 def row_to_schema(row: Mapping[str, Any]) -> SchemaRegistration:

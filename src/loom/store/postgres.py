@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at  TEXT NOT NULL,
     norm_key    TEXT NOT NULL DEFAULT '',
     dossier_claimed_until TEXT,
+    dossier_claimed_by    TEXT,
     UNIQUE (namespace, type, key)
 );
 
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extract_claimed_by    TEXT,
     extract_claimed_until TEXT,
     chunk_claimed_until   TEXT,
+    chunk_claimed_by      TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -124,6 +126,30 @@ CREATE TABLE IF NOT EXISTS resolution_declines (
     reason     TEXT NOT NULL,
     decided_at TEXT NOT NULL,
     PRIMARY KEY (namespace, a, b)
+);
+
+-- merge reversal log (schema v5): see sqlite.py for the column semantics
+CREATE TABLE IF NOT EXISTS merge_log (
+    id                 TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL,
+    from_type          TEXT NOT NULL,
+    from_key           TEXT NOT NULL,
+    into_type          TEXT NOT NULL,
+    into_key           TEXT NOT NULL,
+    from_id            TEXT NOT NULL,
+    from_provisional   BOOLEAN NOT NULL DEFAULT FALSE,
+    from_created_at    TEXT NOT NULL,
+    prior_aliases_json TEXT NOT NULL DEFAULT '[]',
+    recorded_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_log_observations (
+    merge_id               TEXT NOT NULL REFERENCES merge_log (id),
+    observation_id         TEXT NOT NULL,
+    prior_subject_id       TEXT,
+    prior_object_entity_id TEXT,
+    prior_object_json      TEXT,
+    PRIMARY KEY (merge_id, observation_id)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -172,6 +198,8 @@ ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS extract_claimed_by TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS extract_claimed_until TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_until TEXT;
+ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_by TEXT;
+ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_by TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -182,13 +210,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_event
 CREATE UNIQUE INDEX IF NOT EXISTS idx_art_event
     ON artifacts (namespace, event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_obs_recorded ON observations (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_obs_id_pattern ON observations (id text_pattern_ops);
 CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
+CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key) text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 """
 
-SCHEMA_VERSION = 4  # keep in step with sqlite.py (v3: packed vectors; v4: resolution_declines, D-044)
+# search_entities: a half-open range with the text_pattern_ops operators —
+# byte-wise, collation-free comparisons, so the expression index is used
+# and the semantics match the SQLite store's BINARY range exactly.
+_SEARCH_SQL = (
+    "SELECT * FROM entities WHERE namespace = %s"
+    "   AND lower(key) ~>=~ %s AND lower(key) ~<~ %s"
+)
+_PREFIX_END = "\U0010ffff"
+
+SCHEMA_VERSION = 5  # keep in step with sqlite.py (v5: merge_log, lease owners, lower(key) index, norm_key recompute)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -301,12 +341,22 @@ class PostgresStore(GraphStore):
                 self._refresh_vec_tables()
 
     def _schema_current(self) -> bool:
+        """True when no DDL is needed: the database is at this build's
+        version — or a newer one (an older image opening a newer database
+        serves what it understands, runs no DDL and never writes the
+        version down, H-B12)."""
         try:
             with self._tx(read=False):
                 rows = self._q("SELECT value FROM loom_meta WHERE key = 'schema_version'")
-            return bool(rows) and int(rows[0]["value"]) == SCHEMA_VERSION
         except Exception:  # noqa: BLE001 — no loom_meta yet: a fresh database
             return False
+        if not rows:
+            return False
+        current = int(rows[0]["value"])
+        if current > SCHEMA_VERSION:
+            log.warning("postgres: schema version %d is newer than this build's %d;"
+                        " running without migrations — upgrade the image", current, SCHEMA_VERSION)
+        return current >= SCHEMA_VERSION
 
     @property
     def _conn(self):
@@ -318,16 +368,36 @@ class PostgresStore(GraphStore):
 
     # ------------------------------------------------- vector index (D-025)
 
+    _iterative_scan = False   # pgvector >= 0.8: hnsw.iterative_scan exists
+
     def _load_vec(self) -> bool:
         try:
             with self._tx():
                 self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
                 self._x("CREATE EXTENSION IF NOT EXISTS vector")
-            return True
+                rows = self._q("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
         except self._psycopg.Error as exc:
             logging.getLogger("loom.store").info(
                 "pgvector unavailable (%s): vector search uses exact scans", exc)
             return False
+        try:
+            major, minor = (int(x) for x in rows[0]["extversion"].split(".")[:2])
+            self._iterative_scan = (major, minor) >= (0, 8)
+        except (IndexError, ValueError, KeyError):  # unparseable version: stay conservative
+            self._iterative_scan = False
+        return True
+
+    def _tune_hnsw(self, limit: int) -> None:
+        """HNSW post-filters WHERE namespace = ...: with the default
+        ef_search (40) every candidate can come from the majority tenant
+        and a small namespace gets a short or empty answer. Widen the
+        candidate set per query (SET LOCAL: this transaction only) and,
+        on pgvector >= 0.8, let the scan keep going until the filter is
+        satisfied. Callers still fall back to an exact scan when the index
+        returns fewer than `limit` rows."""
+        self._x(f"SET LOCAL hnsw.ef_search = {min(1000, max(limit * 4, 100))}")
+        if self._iterative_scan:
+            self._x("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
 
     def vector_backend(self) -> str:
         return "pgvector" if self._vec else "exact"
@@ -390,13 +460,17 @@ class PostgresStore(GraphStore):
         name = common.vec_table("vobs", model, len(query))
         with self._tx(read=True):
             if self._has_index(name):
+                self._tune_hnsw(limit)
                 rows = self._q(
                     f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name} v"
                     " WHERE namespace = %s AND NOT EXISTS"
                     "   (SELECT 1 FROM tombstones t WHERE t.observation_id = v.ref_id)"
                     " ORDER BY embedding <=> %s::vector LIMIT %s",
                     (self._vlit(query), namespace, self._vlit(query), limit))
-                return [(r["ref_id"], float(r["score"])) for r in rows]
+                hits = sorted(((r["ref_id"], float(r["score"])) for r in rows), key=lambda h: -h[1])
+                if len(hits) >= limit:
+                    return hits
+                # the post-filter starved the index: scan exactly, like the SQLite store
             rows = self._q(
                 "SELECT e.ref_id, e.vector FROM embeddings e"
                 " WHERE e.namespace = %s AND e.model = %s AND NOT EXISTS"
@@ -413,7 +487,9 @@ class PostgresStore(GraphStore):
             return []
         name = common.vec_table("vchk", model, len(query))
         with self._tx(read=True):
+            best: list[tuple[str, float]] = []
             if self._has_index(name):
+                self._tune_hnsw(limit)
                 sql = (f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name}"
                        " WHERE namespace = %s")
                 params: tuple = (self._vlit(query), namespace)
@@ -422,8 +498,9 @@ class PostgresStore(GraphStore):
                     params += (list(artifact_ids),)
                 sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
                 params += (self._vlit(query), limit)
-                best = [(r["ref_id"], float(r["score"])) for r in self._q(sql, params)]
-            else:
+                best = sorted(((r["ref_id"], float(r["score"])) for r in self._q(sql, params)),
+                              key=lambda h: -h[1])
+            if len(best) < limit:   # no index, or the post-filter starved it: exact scan
                 sql = "SELECT id, vector FROM doc_chunks WHERE namespace = %s AND model = %s"
                 params = (namespace, model)
                 if artifact_ids is not None:
@@ -454,7 +531,7 @@ class PostgresStore(GraphStore):
                 ("vobs", "observations", "embeddings", "ref_id", "NULL"),
                 ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                vec_tables = common.vec_tables_for(kind, model, self._vec_tables)   # this model only
                 total = self._q(f"SELECT COUNT(*) AS n FROM {table} WHERE model = %s", (model,))[0]["n"]
                 indexed = sum(self._q(f"SELECT COUNT(*) AS n FROM {n}")[0]["n"] for n in vec_tables)
                 if total <= indexed:
@@ -487,6 +564,23 @@ class PostgresStore(GraphStore):
                 (namespace, list(ids)))
         return [common.row_to_observation(r) for r in rows]
 
+    _PREFIX_CAP = 20
+
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        if not prefix:
+            return []
+        lo, hi = common.prefix_bounds(prefix)
+        with self._tx(read=True):
+            # byte-wise operators + the text_pattern_ops index: the database's
+            # collation (en_US in the stock image) would otherwise order
+            # punctuation differently from SQLite's BINARY range
+            rows = self._q(
+                _OBS_SELECT + " WHERE o.namespace = %s AND o.id ~>=~ %s"
+                + (" AND o.id ~<~ %s" if hi is not None else "") + _NOT_TOMBSTONED
+                + " ORDER BY o.id COLLATE \"C\" LIMIT %s",
+                (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP))
+        return [common.row_to_observation(r) for r in rows]
+
     def _migrate(self, cur) -> None:
         """One-shot versioned steps (H-B12); idempotent DDL lives in _SCHEMA."""
         cur.execute("SELECT value FROM loom_meta WHERE key = 'schema_version'")
@@ -509,10 +603,19 @@ class PostgresStore(GraphStore):
                 if row and row["data_type"] == "text":
                     cur.execute(f"ALTER TABLE {table} ALTER COLUMN vector TYPE BYTEA"
                                 " USING convert_to(vector, 'UTF8')")
-        cur.execute(
-            "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
-            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (str(SCHEMA_VERSION),))
+        if current < 5:
+            # v5: numeric keys keep their punctuation in norm_key; recompute
+            # the rows that can differ, in Python, where the rule lives.
+            cur.execute("SELECT id, key, norm_key FROM entities WHERE key ~ '[.:/-]'")
+            changed = [(nk, r["id"]) for r in cur.fetchall()
+                       if (nk := common.norm_key(r["key"])) != r["norm_key"]]
+            if changed:
+                cur.executemany("UPDATE entities SET norm_key = %s WHERE id = %s", changed)
+        if current < SCHEMA_VERSION:   # never written down (H-B12)
+            cur.execute(
+                "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
+                " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (str(SCHEMA_VERSION),))
 
     def schema_version(self) -> int:
         with self._tx(read=True):
@@ -560,7 +663,7 @@ class PostgresStore(GraphStore):
 
     def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
         with self._tx():
-            target = self._get_entity(namespace, into)
+            target = self._resolve_entity(namespace, into)   # `into` may itself be an alias by now
             if target is None:
                 return
             self._put_alias(namespace, f"{alias.type}:{alias.key}", target.id)
@@ -573,18 +676,122 @@ class PostgresStore(GraphStore):
             dst = self._get_entity(namespace, into_ref)
             if src is None or dst is None or src.id == dst.id:
                 return False
-            self._x("UPDATE observations SET subject_id = %s WHERE subject_id = %s",
-                    (dst.id, src.id))
+            self._log_merge(namespace, src, dst)
+            self._x("UPDATE observations SET subject_id = %s WHERE namespace = %s AND subject_id = %s",
+                    (dst.id, namespace, src.id))
             self._x("UPDATE observations SET object_entity_id = %s, object_json = %s"
-                    " WHERE object_entity_id = %s",
-                    (dst.id, json.dumps({"type": dst.type, "key": dst.key}), src.id))
-            self._x("UPDATE aliases SET entity_id = %s WHERE entity_id = %s",
-                    (dst.id, src.id))
+                    " WHERE namespace = %s AND object_entity_id = %s",
+                    (dst.id, json.dumps({"type": dst.type, "key": dst.key}), namespace, src.id))
+            self._x("UPDATE aliases SET entity_id = %s WHERE namespace = %s AND entity_id = %s",
+                    (dst.id, namespace, src.id))
             self._put_alias(namespace, f"{src.type}:{src.key}", dst.id)
             self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
                     (namespace, src.id, dst.id))
             self._x("DELETE FROM entities WHERE id = %s", (src.id,))
             return True
+
+    def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
+        """What merge_entities is about to change, so unmerge can put it
+        back (D-019: reversible & lossless); see sqlite.py."""
+        touched = self._q(
+            "SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = %s AND subject_id = %s"
+            " UNION SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = %s AND object_entity_id = %s",
+            (namespace, src.id, namespace, src.id))
+        aliases = [r["alias"] for r in self._q(
+            "SELECT alias FROM aliases WHERE namespace = %s AND entity_id = %s", (namespace, src.id))]
+        merge_id = uuid.uuid4().hex
+        self._x(
+            "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type, into_key,"
+            " from_id, from_provisional, from_created_at, prior_aliases_json, recorded_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (merge_id, namespace, src.type, src.key, dst.type, dst.key, src.id,
+             bool(src.provisional), common.iso(src.created_at), json.dumps(aliases),
+             common.iso(common.now())))
+        if touched:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO merge_log_observations (merge_id, observation_id, prior_subject_id,"
+                    " prior_object_entity_id, prior_object_json) VALUES (%s, %s, %s, %s, %s)",
+                    [(merge_id, r["id"],
+                      src.id if r["subject_id"] == src.id else None,
+                      src.id if r["object_entity_id"] == src.id else None,
+                      r["object_json"] if r["object_entity_id"] == src.id else None)
+                     for r in touched])
+
+    def unmerge(self, namespace: str, alias: EntityRef) -> bool:
+        with self._tx():
+            rows = self._q(
+                "SELECT * FROM merge_log WHERE namespace = %s AND from_type = %s AND from_key = %s"
+                " ORDER BY recorded_at DESC, id DESC LIMIT 1",
+                (namespace, alias.type, alias.key))
+            if not rows:
+                return False
+            m = rows[0]
+            from_ref = EntityRef(type=m["from_type"], key=m["from_key"])
+            self._x(
+                "INSERT INTO entities (id, namespace, type, key, provisional, created_at, norm_key)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (m["from_id"], namespace, from_ref.type, from_ref.key,
+                 bool(m["from_provisional"]), m["from_created_at"], common.norm_key(from_ref.key)))
+            src = self._get_entity(namespace, from_ref) or self._upsert_entity(namespace, from_ref)
+            # only rows still on the merge target move back (chained merges;
+            # see sqlite.py)
+            dst = self._resolve_entity(namespace, EntityRef(type=m["into_type"], key=m["into_key"]))
+            hold = dst.id if dst else None
+            moved = self._q("SELECT * FROM merge_log_observations WHERE merge_id = %s", (m["id"],))
+            with self._conn.cursor() as cur:
+                subj = [(src.id, r["observation_id"], hold, hold)
+                        for r in moved if r["prior_subject_id"] is not None]
+                if subj:
+                    cur.executemany("UPDATE observations SET subject_id = %s WHERE id = %s"
+                                    " AND (%s::text IS NULL OR subject_id = %s)", subj)
+                obj = [(src.id, r["prior_object_json"] or json.dumps({"type": src.type, "key": src.key}),
+                        r["observation_id"], hold, hold)
+                       for r in moved if r["prior_object_entity_id"] is not None]
+                if obj:
+                    cur.executemany(
+                        "UPDATE observations SET object_entity_id = %s, object_json = %s WHERE id = %s"
+                        " AND (%s::text IS NULL OR object_entity_id = %s)", obj)
+                back = [(src.id, namespace, a) for a in json.loads(m["prior_aliases_json"] or "[]")]
+                if back:
+                    cur.executemany(
+                        "UPDATE aliases SET entity_id = %s WHERE namespace = %s AND alias = %s", back)
+            self._x("DELETE FROM aliases WHERE namespace = %s AND alias = %s",
+                    (namespace, f"{from_ref.type}:{from_ref.key}"))
+            self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
+                    (namespace, src.id, dst.id if dst else src.id))
+            self._x("DELETE FROM merge_log_observations WHERE merge_id = %s", (m["id"],))
+            self._x("DELETE FROM merge_log WHERE id = %s", (m["id"],))
+            return True
+
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            parents = self._q(
+                "SELECT * FROM merge_log" + (" WHERE namespace = %s" if namespace else "")
+                + " ORDER BY recorded_at, id", (namespace,) if namespace else ())
+            records = []
+            for m in parents:
+                kids = self._q("SELECT * FROM merge_log_observations WHERE merge_id = %s"
+                               " ORDER BY observation_id", (m["id"],))
+                records.append(common.merge_record(m, kids))
+        yield from records
+
+    def restore_merge(self, record: dict) -> None:
+        parent, children = common.merge_rows(record)
+        with self._tx():
+            self._x(
+                "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type,"
+                " into_key, from_id, from_provisional, from_created_at, prior_aliases_json,"
+                " recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (id) DO NOTHING", parent)
+            if children:
+                with self._conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO merge_log_observations (merge_id, observation_id,"
+                        " prior_subject_id, prior_object_entity_id, prior_object_json)"
+                        " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", children)
 
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -635,6 +842,15 @@ class PostgresStore(GraphStore):
             )
         return common.row_to_schema(rows[0]) if rows else None
 
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT registration_json FROM schemas"
+                + (" WHERE namespace = %s" if namespace else "") + " ORDER BY namespace",
+                (namespace,) if namespace else ())
+        for r in rows:
+            yield common.row_to_schema(r)
+
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
@@ -666,12 +882,8 @@ class PostgresStore(GraphStore):
             type_sql, type_args = " AND type = ANY(%s)", (list(types),)
         with self._tx(read=True):
             rows = self._q(
-                "SELECT * FROM entities WHERE namespace = %s"
-                "   AND (LOWER(key) = %s OR LOWER(key) LIKE %s ESCAPE '\\')"
-                + type_sql
-                + " ORDER BY (LOWER(key) != %s), type, key LIMIT %s",
-                (namespace, lowered, common.like_pattern(query), *type_args,
-                 lowered, limit),
+                _SEARCH_SQL + type_sql + " ORDER BY (lower(key) <> %s), type, key LIMIT %s",
+                (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             )
         return [common.row_to_entity(r) for r in rows]
 
@@ -706,21 +918,24 @@ class PostgresStore(GraphStore):
             type_sql = " AND s.type = ANY(%s) AND (ob.id IS NULL OR ob.type = ANY(%s))"
             type_args = (list(allowed_types), list(allowed_types))
         with self._tx(read=True):
+            # the per-artifact cut happens in SQL (see sqlite.py)
             rows = self._q(
-                "SELECT DISTINCT (o.provenance_json::jsonb ->> 'artifact_id') AS aid,"
+                "WITH cited AS ("
+                " SELECT DISTINCT (o.provenance_json::jsonb ->> 'artifact_id') AS aid,"
                 " s.type AS stype, s.key AS skey"
                 " FROM observations o JOIN entities s ON s.id = o.subject_id"
                 " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
                 " WHERE o.namespace = %s"
                 "   AND (o.provenance_json::jsonb ->> 'artifact_id') = ANY(%s)"
-                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
-                (namespace, list(artifact_ids), *type_args),
+                + _NOT_TOMBSTONED + type_sql + "),"
+                " ranked AS (SELECT *, row_number() OVER (PARTITION BY aid ORDER BY stype, skey) AS rn"
+                "            FROM cited)"
+                " SELECT aid, stype, skey FROM ranked WHERE rn <= %s ORDER BY aid, stype, skey",
+                (namespace, list(artifact_ids), *type_args, per_artifact),
             )
         out: dict[str, list[EntityRef]] = {}
         for r in rows:
-            lst = out.setdefault(r["aid"], [])
-            if len(lst) < per_artifact:
-                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+            out.setdefault(r["aid"], []).append(EntityRef(type=r["stype"], key=r["skey"]))
         return out
 
     def artifact_cited_within(
@@ -970,25 +1185,39 @@ class PostgresStore(GraphStore):
                 )
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
+    # lease ownership (D-031): see sqlite.py
+    _OWNS_EXTRACT = " AND (%s::text IS NULL OR extract_claimed_by = %s)"
+
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._x(
+            return self._x(
                 "UPDATE artifacts SET extraction_attempts = %s, next_attempt_at = %s,"
-                " extract_claimed_until = NULL WHERE namespace = %s AND id = %s",
-                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
-            )
+                " extract_claimed_until = NULL WHERE namespace = %s AND id = %s" + self._OWNS_EXTRACT,
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id, worker_id, worker_id),
+            ) > 0
 
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None:
+        self, namespace: str, artifact_id: str, status: str, worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._x(
+            return self._x(
                 "UPDATE artifacts SET extraction_status = %s, extract_claimed_until = NULL"
-                " WHERE namespace = %s AND id = %s",
-                (status, namespace, artifact_id),
-            )
+                " WHERE namespace = %s AND id = %s" + self._OWNS_EXTRACT,
+                (status, namespace, artifact_id, worker_id, worker_id),
+            ) > 0
+
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        with self._tx():
+            return self._x(
+                "UPDATE artifacts SET extract_claimed_until = %s WHERE namespace = %s AND id = %s"
+                " AND extract_claimed_by = %s AND extraction_status = 'pending'",
+                (common.iso(common.now() + timedelta(seconds=seconds)), namespace, artifact_id, worker_id),
+            ) > 0
 
     _NEEDS_CHUNKS = (
         "a.text IS NOT NULL"
@@ -1015,14 +1244,15 @@ class PostgresStore(GraphStore):
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < %s)"
                     "   ORDER BY a.recorded_at LIMIT %s FOR UPDATE SKIP LOCKED)"
-                    " UPDATE artifacts a SET chunk_claimed_until = %s"
+                    " UPDATE artifacts a SET chunk_claimed_until = %s, chunk_claimed_by = %s"
                     " FROM picked WHERE a.id = picked.id RETURNING a.*",
-                    (model, common.iso(moment), limit, until))
+                    (model, common.iso(moment), limit, until, lease[0]))
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         with self._tx():
             with self._conn.cursor() as cur:
@@ -1041,8 +1271,9 @@ class PostgresStore(GraphStore):
             self._vec_upsert("vchk", model, namespace,
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
-            self._x("UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = %s",
-                    (artifact_id,))
+            self._x("UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = %s"
+                    " AND (%s::text IS NULL OR chunk_claimed_by = %s)",
+                    (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -1093,11 +1324,14 @@ class PostgresStore(GraphStore):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
-                namespace, ref
-            )
+            entity = self._resolve_or_create(namespace, ref)
+            if worker_id is not None:
+                holder = self._q("SELECT dossier_claimed_by FROM entities WHERE id = %s", (entity.id,))
+                if not holder or holder[0]["dossier_claimed_by"] != worker_id:
+                    return False   # re-claimed by another worker: its brief is the one to land
             self._x(
                 "INSERT INTO dossiers (namespace, entity_id, brief,"
                 " observation_count, observation_ids, updated_at)"
@@ -1112,6 +1346,7 @@ class PostgresStore(GraphStore):
             )
             self._x("UPDATE entities SET dossier_claimed_until = NULL WHERE id = %s",
                     (entity.id,))
+            return True
 
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
@@ -1142,9 +1377,9 @@ class PostgresStore(GraphStore):
             for r in rows:
                 if lease is not None:
                     claimed = self._x(
-                        "UPDATE entities SET dossier_claimed_until = %s WHERE id = %s"
+                        "UPDATE entities SET dossier_claimed_until = %s, dossier_claimed_by = %s WHERE id = %s"
                         " AND (dossier_claimed_until IS NULL OR dossier_claimed_until < %s)",
-                        (common.iso(moment + timedelta(seconds=lease[1])), r["eid"],
+                        (common.iso(moment + timedelta(seconds=lease[1])), lease[0], r["eid"],
                          common.iso(moment)))
                     if not claimed:
                         continue
@@ -1194,6 +1429,12 @@ class PostgresStore(GraphStore):
                 " (SELECT subject_id FROM observations WHERE namespace = %s)",
                 (namespace, namespace),
             )
+            if self._vec:   # ANN rows whose source row is gone (see sqlite.py)
+                self._refresh_vec_tables()
+                for name in self._vec_tables:
+                    source = "observations" if name.startswith("vobs_") else "doc_chunks"
+                    self._x(f"DELETE FROM {name} v WHERE v.namespace = %s AND NOT EXISTS"
+                            f" (SELECT 1 FROM {source} s WHERE s.id = v.ref_id)", (namespace,))
         return removed
 
     _PAGE = 1000
@@ -1256,14 +1497,25 @@ class PostgresStore(GraphStore):
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
 
-    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str,
+                         decided_at: datetime | None = None) -> None:
         a, b = sorted((a, b))
         with self._tx():
             self._x(
                 "INSERT INTO resolution_declines (namespace, a, b, reason, decided_at)"
                 " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (namespace, a, b) DO UPDATE SET"
                 " reason = EXCLUDED.reason, decided_at = EXCLUDED.decided_at",
-                (namespace, a, b, reason[:500], common.iso(common.now())))
+                (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT * FROM resolution_declines"
+                + (" WHERE namespace = %s" if namespace else "") + " ORDER BY namespace, a, b",
+                (namespace,) if namespace else ())
+        for r in rows:
+            yield {"namespace": r["namespace"], "a": r["a"], "b": r["b"],
+                   "reason": r["reason"], "decided_at": r["decided_at"]}
 
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         with self._tx(read=True):
@@ -1285,11 +1537,12 @@ class PostgresStore(GraphStore):
 
     def restore_observation(self, obs: Observation) -> None:
         with self._tx():
-            subject = self._upsert_entity(obs.namespace, obs.subject)
+            subject = self._resolve_or_create(obs.namespace, obs.subject)
             object_entity_id = None
             if isinstance(obs.object, EntityRef):
-                object_entity_id = self._upsert_entity(obs.namespace, obs.object).id
-                object_json = json.dumps(obs.object.model_dump())
+                target = self._resolve_or_create(obs.namespace, obs.object)
+                object_entity_id = target.id
+                object_json = json.dumps({"type": target.type, "key": target.key})
             else:
                 object_json = json.dumps(obs.object)
             # targetless ON CONFLICT covers the id PK and the event_id index
@@ -1327,8 +1580,9 @@ class PostgresStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities",
-                          "schemas", *self._vec_tables):
+                          "merge_log_observations", "merge_log", "observations",
+                          "aliases", "artifacts", "entities", "schemas",
+                          "resolution_declines", *self._vec_tables):
                 self._x(f"DELETE FROM {table}")
 
     def close(self) -> None:
@@ -1385,6 +1639,11 @@ class PostgresStore(GraphStore):
             (namespace, event_id),
         )
         return common.row_to_artifact(rows[0]) if rows else None
+
+    def _resolve_or_create(self, namespace: str, ref: EntityRef) -> Entity:
+        """The entity a write should attach to: the exact node, else the
+        canonical one an alias points at, else a new node."""
+        return self._resolve_entity(namespace, ref) or self._upsert_entity(namespace, ref)
 
     def _upsert_entity(self, namespace: str, ref: EntityRef) -> Entity:
         existing = self._get_entity(namespace, ref)
@@ -1445,11 +1704,17 @@ class PostgresStore(GraphStore):
                 metrics.INGEST_DEDUPED.inc()
                 return existing
 
-        subject = self._upsert_entity(claim.namespace, claim.subject)
+        # A ref that was merged away resolves to its canonical entity: a
+        # claim naming the old `ip_address:10.0.4.7` lands on `ip:10.0.4.7`
+        # instead of resurrecting the folded node beside its alias.
+        subject = self._resolve_or_create(claim.namespace, claim.subject)
         object_entity_id = None
+        obj = claim.object
         if isinstance(claim.object, EntityRef):
-            object_entity_id = self._upsert_entity(claim.namespace, claim.object).id
-            object_json = json.dumps(claim.object.model_dump())
+            target = self._resolve_or_create(claim.namespace, claim.object)
+            object_entity_id = target.id
+            obj = EntityRef(type=target.type, key=target.key)
+            object_json = json.dumps(obj.model_dump())
         else:
             object_json = json.dumps(claim.object)
 
@@ -1457,9 +1722,9 @@ class PostgresStore(GraphStore):
             id=uuid.uuid4().hex,
             namespace=claim.namespace,
             event_id=claim.event_id,
-            subject=claim.subject,
+            subject=EntityRef(type=subject.type, key=subject.key),
             predicate=claim.predicate,
-            object=claim.object,
+            object=obj,
             observed_at=claim.observed_at,
             valid_from=claim.valid_from,
             valid_to=claim.valid_to,

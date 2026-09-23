@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import abc
 import inspect
+import logging
 import os
 from pathlib import Path
 from typing import Any, Iterator, Protocol
@@ -24,7 +25,21 @@ from typing import Any, Iterator, Protocol
 from ..contracts import Artifact, DocumentIn
 from .base import GraphStore
 
+log = logging.getLogger("loom.store")
+
 _MARK = "_blob"   # attrs key: {"backend": ..., "key": ..., "field": "text"|"content_b64"}
+_MISSING = "_blob_missing"   # attrs marker: the pointer's blob is gone; the body is None
+
+
+def _body_size(field: str, body: str) -> int:
+    """Bytes the body represents: UTF-8 length for text, the *decoded*
+    length for base64 (the text is a third larger than the file it
+    encodes, so comparing it to a byte threshold offloaded too early)."""
+    if field == "text":
+        return len(body.encode())
+    stripped = body.strip()
+    padding = 2 if stripped.endswith("==") else 1 if stripped.endswith("=") else 0
+    return len(stripped) * 3 // 4 - padding
 
 
 def _stub(field: str, key: str) -> dict:
@@ -136,15 +151,27 @@ class BlobOffloadStore(GraphStore):
 
     # ------------------------------------------------------------ offload
 
-    def _offload(self, namespace: str, artifact_id: str, text: str | None,
-                 b64: str | None, attrs: dict) -> tuple[str | None, str | None, dict]:
+    def _plan(self, namespace: str, artifact_id: str, text: str | None,
+              b64: str | None, attrs: dict) -> tuple[str, str, str, dict] | None:
+        """(field, body, key, attrs-with-pointer) when the body is above the
+        threshold, else None. Decides only; nothing is written here."""
         field, body = ("text", text) if text is not None else ("content_b64", b64)
-        if body is None or len(body.encode()) <= self._threshold:
-            return text, b64, attrs
+        if body is None or _body_size(field, body) <= self._threshold:
+            return None
         key = f"{namespace}/{artifact_id}"
+        return field, body, key, {**attrs, _MARK: {"backend": self._blobs.name, "key": key, "field": field}}
+
+    def _write_through(self, key: str, body: str, insert):
+        """Put the blob, then the row; a row that never landed must not
+        leave a blob behind, and a row that landed must never point at a
+        blob that was not written — so the blob goes first and is removed
+        if the insert raises."""
         self._blobs.put(key, body.encode())
-        attrs = {**attrs, _MARK: {"backend": self._blobs.name, "key": key, "field": field}}
-        return (None, None, attrs)
+        try:
+            return insert()
+        except BaseException:
+            self._blobs.delete(key)
+            raise
 
     def _inflate(self, artifact: Artifact) -> Artifact:
         mark = artifact.attrs.get(_MARK)
@@ -152,7 +179,13 @@ class BlobOffloadStore(GraphStore):
             return artifact
         data = self._blobs.get(mark["key"])
         if data is None:
-            return artifact  # pointer to a vanished blob: body stays absent, row survives
+            # The row survives with its pointer (an operator can see what
+            # vanished); the body is reported absent rather than served as
+            # the stub text, which readers would otherwise take for content.
+            log.warning("artifact %s/%s: blob %s is missing from the %s store; body unavailable",
+                        artifact.namespace, artifact.id, mark["key"], mark.get("backend", "?"))
+            return artifact.model_copy(update={
+                "text": None, "content_b64": None, "attrs": {**artifact.attrs, _MISSING: True}})
         attrs = {k: v for k, v in artifact.attrs.items() if k != _MARK}
         return artifact.model_copy(update={mark["field"]: data.decode(), "attrs": attrs})
 
@@ -165,29 +198,28 @@ class BlobOffloadStore(GraphStore):
 
     def store_artifact(self, doc: DocumentIn) -> Artifact:
         import uuid
-        artifact_id = uuid.uuid4().hex
-        text, b64, attrs = self._offload(doc.namespace, artifact_id, doc.text,
-                                         doc.content_b64, doc.attrs)
-        if text is None and b64 is None:
-            # keep the DocumentIn contract (exactly one body) with a stub in
-            # the same field; the real body is behind the pointer
-            slim = doc.model_copy(update={**_stub(attrs[_MARK]["field"], attrs[_MARK]["key"]),
-                                          "attrs": attrs})
-        else:
-            slim = doc
-        stored = self._inner.store_artifact(slim)
-        if stored.id != artifact_id and _MARK in attrs and stored.attrs.get(_MARK) != attrs[_MARK]:
+        plan = self._plan(doc.namespace, uuid.uuid4().hex, doc.text, doc.content_b64, doc.attrs)
+        if plan is None:
+            return self._inflate(self._inner.store_artifact(doc))
+        field, body, key, attrs = plan
+        # keep the DocumentIn contract (exactly one body) with a stub in the
+        # same field; the real body is behind the pointer
+        slim = doc.model_copy(update={**_stub(field, key), "attrs": attrs})
+        stored = self._write_through(key, body, lambda: self._inner.store_artifact(slim))
+        if stored.attrs.get(_MARK) != attrs[_MARK]:
             # the inner store deduped to an earlier artifact: drop our orphan blob
-            self._blobs.delete(attrs[_MARK]["key"])
+            self._blobs.delete(key)
         return self._inflate(stored)
 
     def restore_artifact(self, artifact: Artifact) -> None:
-        text, b64, attrs = self._offload(artifact.namespace, artifact.id,
-                                         artifact.text, artifact.content_b64, artifact.attrs)
-        if _MARK in attrs and _MARK not in artifact.attrs:
-            artifact = artifact.model_copy(
-                update={**_stub(attrs[_MARK]["field"], attrs[_MARK]["key"]), "attrs": attrs})
-        self._inner.restore_artifact(artifact)
+        plan = self._plan(artifact.namespace, artifact.id, artifact.text,
+                          artifact.content_b64, artifact.attrs)
+        if plan is None or _MARK in artifact.attrs:   # small, or already a pointer (raw export)
+            self._inner.restore_artifact(artifact)
+            return
+        field, body, key, attrs = plan
+        slim = artifact.model_copy(update={**_stub(field, key), "attrs": attrs})
+        self._write_through(key, body, lambda: self._inner.restore_artifact(slim))
 
     def purge_older_than(self, namespace, before) -> int:
         # blobs of purged artifacts are removed by key; walk the candidates first
@@ -218,8 +250,13 @@ def _delegate_iter(name: str):
     return method
 
 
+# Every public GraphStore method the wrapper does not define itself is
+# delegated — the concrete defaults too. Delegating only the abstract ones
+# left `record_claims` on the base class's one-transaction-per-claim
+# fallback and `observations_for_many` on one round trip per ref whenever
+# offload was configured (the D-043 regression, reintroduced by the wrapper).
 for _name, _fn in list(vars(GraphStore).items()):
-    if not getattr(_fn, "__isabstractmethod__", False) or _name in vars(BlobOffloadStore):
+    if _name.startswith("_") or not callable(_fn) or _name in vars(BlobOffloadStore):
         continue
     setattr(BlobOffloadStore, _name,
             _delegate_iter(_name) if inspect.isgeneratorfunction(_fn) or _name.startswith("iter_")

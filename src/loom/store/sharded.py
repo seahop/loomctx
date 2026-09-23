@@ -85,6 +85,9 @@ class ShardedStore(GraphStore):
     def restore_entity(self, entity: Entity) -> None:
         self.shard_for(entity.namespace).restore_entity(entity)
 
+    def restore_merge(self, record: dict) -> None:
+        self.shard_for(record["namespace"]).restore_merge(record)
+
     # ------------------------------------------------ fan-out (admin/worker)
 
     def _fan(self, name: str, *args, **kwargs) -> list:
@@ -158,6 +161,15 @@ class ShardedStore(GraphStore):
 
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
         yield from self._iter("iter_tombstones", namespace)
+
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        yield from self._iter("iter_schemas", namespace)
+
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        yield from self._iter("iter_declines", namespace)
+
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        yield from self._iter("iter_merges", namespace)
 
     def _iter(self, name: str, namespace: str | None):
         if namespace is not None:

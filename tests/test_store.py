@@ -46,6 +46,23 @@ def _raw(store):
     return store
 
 
+def _exec(store, sql, params=()):
+    """Raw SQL against a backend for setup/inspection; `?` placeholders are
+    translated for Postgres. Returns rows as dicts (empty for statements)."""
+    with store._tx():
+        if isinstance(store, SqliteStore):
+            return [dict(r) for r in store._conn.execute(sql, params).fetchall()]
+        return store._q(sql.replace("?", "%s"), params)
+
+
+def _reopen(store, tmp_path):
+    """A second store instance on the same database (migration tests)."""
+    if isinstance(store, SqliteStore):
+        return SqliteStore(tmp_path / "test.db")
+    from loom.store.postgres import PostgresStore
+    return PostgresStore(os.environ["LOOM_TEST_POSTGRES_URL"])
+
+
 def login_claim(namespace="default"):
     return ClaimIn(
         namespace=namespace,
@@ -164,6 +181,44 @@ def test_merge_folds_and_aliases_resolve(store):
     # the stray node is gone
     assert store.get_entity(
         "default", EntityRef(type="ip_address", key="10.0.4.7")).type == "ip"
+
+
+def test_claim_for_a_merged_away_ref_lands_on_the_canonical(store):
+    """After ip_address:10.0.4.7 is folded into ip:10.0.4.7, a claim (or a
+    restored observation) naming the old ref must attach to the canonical
+    entity, not resurrect the folded node beside its own alias."""
+    from loom.contracts import Observation
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    store.record_claim(ClaimIn(subject=a, predicate="noted", object="x", observed_at=OBSERVED, source="s"))
+    store.record_claim(ClaimIn(subject=b, predicate="assigned_to", object=EntityRef(type="host", key="web-01"),
+                               observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", a, b)
+    obs = store.record_claim(ClaimIn(subject=a, predicate="seen", object="y", observed_at=OBSERVED, source="s"))
+    assert obs.subject == b                                  # the canonical ref, not the alias
+    edge = store.record_claim(ClaimIn(subject=EntityRef(type="host", key="db-01"), predicate="uses",
+                                      object=a, observed_at=OBSERVED, source="s"))
+    assert edge.object == b
+    store.restore_observation(Observation(
+        id="restored-1", namespace="default", subject=a, predicate="imported", object=a,
+        observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    got = store.observations_for("default", b)
+    assert {o.predicate for o in got} == {"noted", "assigned_to", "seen", "uses", "imported"}
+    assert all(o.subject != a and o.object != a for o in got)
+    assert [e for e in store.iter_entities("default") if e.type == "ip_address"] == []   # not resurrected
+    assert store.get_entity("default", a).type == "ip"
+
+
+def test_add_alias_into_a_merged_away_ref_follows_the_alias(store):
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    for ref in (a, b):
+        store.record_claim(ClaimIn(subject=ref, predicate="p", object="x", observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", a, b)
+    stray = EntityRef(type="ipaddr", key="10.0.4.7")
+    store.add_alias("default", stray, into=a)                # `into` is itself an alias by now
+    assert store.get_entity("default", stray).type == "ip"
+    assert len(store.observations_for("default", stray)) == 2
+    store.add_alias("default", stray, into=EntityRef(type="ip", key="nope"))   # unknown: still a no-op
+    assert store.get_entity("default", stray).type == "ip"
 
 
 def test_merge_candidates_finds_cross_type_keys(store):
@@ -638,6 +693,72 @@ def test_vector_index_backfill_and_exact_fallback_agree(store):
     assert {o.id for o in store.observations_by_ids("default", ids[:2])} == set(ids[:2])
 
 
+def test_vector_index_backfill_is_per_model_and_purge_drops_stale_rows(store):
+    """ensure_vector_index counted every model's index rows as `model`'s
+    (a bare vobs_/vchk_ prefix), so a model whose index did not exist yet
+    was skipped as already indexed; and purge left the ANN rows of purged
+    observations and chunks behind, still answering searches."""
+    _raw(store)
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    ids = [store.record_claim(login_claim().model_copy(update={
+        "object": EntityRef(type="user", key=f"u{i}"), "event_id": f"pm{i}"})).id for i in range(3)]
+    store.put_embeddings("default", "m2", [(oid, _unit(1, 0, 0)) for oid in ids])   # m2: indexed
+    backend = store.vector_backend()
+    store._vec = False                                                              # m: JSON only
+    store.put_embeddings("default", "m", [(oid, _unit(0, 1, 0)) for oid in ids])
+    store._vec = backend != "exact"
+    counts = store.ensure_vector_index("m")
+    if backend != "exact":
+        assert counts["observations"] == 3            # m2's rows are not m's
+        assert store.ensure_vector_index("m")["observations"] == 0
+    assert {h[0] for h in store.nearest_observations("default", "m", _unit(0, 1, 0), 3)} == set(ids)
+
+    old = OBSERVED - timedelta(days=400)
+    gone = store.record_claim(_claim(observed=old, event_id="gone"))
+    store.put_embeddings("default", "m", [(gone.id, _unit(0, 1, 0))])
+    art_old = store.store_artifact(DocumentIn(text="old", source="s", observed_at=old))
+    art_new = store.store_artifact(DocumentIn(text="new", source="s", observed_at=OBSERVED))
+    store.put_doc_chunks("default", art_old.id, "m", [(0, 0, 3, "old", _unit(1, 0))])
+    store.put_doc_chunks("default", art_new.id, "m", [(0, 0, 3, "new", _unit(0, 1))])
+    assert store.purge_older_than("default", OBSERVED - timedelta(days=90)) == 2
+    assert gone.id not in {h[0] for h in store.nearest_observations("default", "m", _unit(0, 1, 0), 10)}
+    assert [c["text"] for c, _ in store.nearest_chunks("default", "m", _unit(1, 0), limit=1)] == ["new"]
+    if backend != "exact":
+        for name in store._vec_tables:
+            assert _exec(store, f"SELECT COUNT(*) AS n FROM {name} WHERE ref_id IN (?, ?)",
+                         (gone.id, f"{art_old.id}:m:0"))[0]["n"] == 0
+
+
+def test_nearest_search_in_a_minority_namespace_is_complete(store):
+    """The ANN index post-filters on namespace: with a few hundred vectors
+    in one tenant, a three-vector tenant came back short or empty on
+    Postgres (HNSW's default 40 candidates were all the big tenant's).
+    Both stores now widen the candidate set and fall back to an exact scan
+    when the index returns fewer than `limit` rows."""
+    import random
+    from loom.contracts import DocumentIn
+    rng = random.Random(3)
+
+    def vec():
+        return _unit(*[rng.uniform(-1, 1) for _ in range(4)])
+
+    big = store.record_claims([ClaimIn(namespace="big", subject=EntityRef(type="h", key=f"h{i}"), predicate="p",
+                                       object=str(i), observed_at=OBSERVED, source="s") for i in range(300)])
+    store.put_embeddings("big", "m", [(o.id, vec()) for o in big])
+    small = store.record_claims([ClaimIn(namespace="small", subject=EntityRef(type="h", key=f"s{i}"), predicate="p",
+                                         object=str(i), observed_at=OBSERVED, source="s") for i in range(3)])
+    store.put_embeddings("small", "m", [(o.id, vec()) for o in small])
+    assert {h[0] for h in store.nearest_observations("small", "m", _unit(1, 0, 0, 0), limit=3)} == {o.id for o in small}
+    assert len(store.nearest_observations("small", "m", _unit(1, 0, 0, 0), limit=10)) == 3
+    assert len(store.nearest_observations("big", "m", _unit(1, 0, 0, 0), limit=10)) == 10
+    for ns, n in (("big", 300), ("small", 3)):
+        art = store.store_artifact(DocumentIn(namespace=ns, text="t", source="s", observed_at=OBSERVED))
+        store.put_doc_chunks(ns, art.id, "m", [(i, 0, 1, f"c{i}", vec()) for i in range(n)])
+    assert len(store.nearest_chunks("small", "m", _unit(1, 0, 0, 0), limit=3)) == 3
+    assert len(store.nearest_chunks("small", "m", _unit(1, 0, 0, 0), limit=10)) == 3
+
+
 # ------------------------------------------------ concurrency (D-028) #
 
 def test_concurrent_writers_and_readers(store):
@@ -746,6 +867,53 @@ def test_chunk_and_dossier_leases(store):
     assert store.dossier_candidates(min_new=20, min_total=5) == []  # h1 built, h2 leased
 
 
+def test_lease_release_honours_ownership(store):
+    """A worker whose lease expired and was re-claimed must not clobber the
+    new holder's state; a holder can renew per extraction window."""
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="doc", source="s", observed_at=OBSERVED))
+    now = OBSERVED
+    assert [a.id for a in store.pending_artifacts(1, now=now, lease=("a", 300))] == [art.id]
+    assert store.extend_extraction_lease("default", art.id, "a", 600) is True   # renews from the real clock
+    assert store.extend_extraction_lease("default", art.id, "b", 600) is False   # not b's
+    later = datetime.now(timezone.utc) + timedelta(seconds=901)                  # a's renewal ran out
+    assert [a.id for a in store.pending_artifacts(1, now=later, lease=("b", 300))] == [art.id]
+    assert store.set_extraction_status("default", art.id, "done", worker_id="a") is False
+    assert store.get_artifact("default", art.id).extraction_status == "pending"
+    assert store.defer_extraction("default", art.id, 3, later, worker_id="a") is False
+    assert store.get_artifact("default", art.id).extraction_attempts == 0
+    assert store.set_extraction_status("default", art.id, "done", worker_id="b") is True
+    assert store.get_artifact("default", art.id).extraction_status == "done"
+    assert store.extend_extraction_lease("default", art.id, "b", 600) is False   # nothing left to hold
+    assert store.set_extraction_status("default", art.id, "pending") is True      # unconditional: ops/tests
+    assert store.defer_extraction("default", art.id, 1, later) is True
+    assert store.set_extraction_status("default", "nope", "done") is False
+
+
+def test_chunk_and_dossier_release_honour_ownership(store):
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="hello world", source="s", observed_at=OBSERVED))
+    assert [x.id for x in store.artifacts_needing_chunks("m", 4, lease=("a", 300))] == [art.id]
+    # a stranger's chunks land (idempotent rows) but the lease stays a's
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 11, "hello world", [1.0])], worker_id="c")
+    assert len(store.doc_chunks_for_artifacts("default", [art.id], "m")) == 1
+    assert store.artifacts_needing_chunks("m2", 4, lease=("b", 300)) == []       # still leased
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 11, "hello world", [1.0])], worker_id="a")
+    assert [x.id for x in store.artifacts_needing_chunks("m2", 4, lease=("b", 300))] == [art.id]
+
+    h1 = EntityRef(type="host", key="h1")
+    for i in range(4):
+        store.record_claim(login_claim().model_copy(update={"subject": h1, "object": EntityRef(type="user", key=f"u{i}")}))
+    store.record_claim(login_claim().model_copy(update={"subject": h1, "predicate": "runs_os", "object": "x"}))
+    assert [c[1] for c in store.dossier_candidates(min_new=20, min_total=5, lease=("a", 300))] == [h1]
+    assert store.put_dossier("default", h1, "b's brief", 5, [], worker_id="b") is False
+    assert store.get_dossier("default", h1) is None
+    assert store.put_dossier("default", h1, "a's brief", 5, [], worker_id="a") is True
+    assert store.get_dossier("default", h1)["brief"] == "a's brief"
+    assert store.put_dossier("default", h1, "ops brief", 5, []) is True            # unconditional
+
+
 def test_embedding_backlog_shards_partition_the_work(store):
     host = EntityRef(type="host", key="web-01")
     ids = {store.record_claim(login_claim().model_copy(update={
@@ -794,6 +962,44 @@ def test_sharded_store_from_env(tmp_path, monkeypatch):
     s.close()
     monkeypatch.delenv("LOOM_SHARDS")
     assert isinstance(store_from_env(), SqliteStore)
+
+
+def test_shards_never_inherit_the_default_read_replica(tmp_path, monkeypatch):
+    """LOOM_DB_READ names the replica of LOOM_DB. A Postgres shard on another
+    cluster must not be handed that replica; it gets one only from its own
+    {"dsn", "read"} entry."""
+    from loom.store import factory
+    from loom.store.sharded import ShardedStore
+    made = []
+
+    def fake_store_from_url(url, read_url=factory._FROM_ENV):
+        effective = os.environ.get("LOOM_DB_READ") if read_url is factory._FROM_ENV else read_url
+        made.append((url, effective))
+        return SqliteStore(tmp_path / f"{len(made)}.db")
+
+    monkeypatch.setattr(factory, "store_from_url", fake_store_from_url)
+    monkeypatch.setenv("LOOM_DB", "postgresql://primary/loom")
+    monkeypatch.setenv("LOOM_DB_READ", "postgresql://replica/loom")
+    monkeypatch.setenv("LOOM_SHARDS", json.dumps({
+        "acme": "postgresql://acme-db/loom",
+        "globex": {"dsn": "postgresql://globex-db/loom", "read": "postgresql://globex-replica/loom"},
+        "initech": {"dsn": "postgresql://globex-db/loom"},
+        "home": "postgresql://primary/loom",
+    }))
+    s = factory.store_from_env()
+    assert isinstance(s, ShardedStore)
+    assert made[0] == ("postgresql://primary/loom", "postgresql://replica/loom")   # LOOM_DB keeps its replica
+    assert ("postgresql://acme-db/loom", None) in made                              # a plain shard: no replica
+    assert ("postgresql://globex-db/loom", "postgresql://globex-replica/loom") in made
+    assert ("postgresql://globex-db/loom", None) in made                            # same dsn, no read: its own store
+    assert s.describe()["home"] == 0                                                 # LOOM_DB itself is shared, not reopened
+    assert len(made) == 4
+    s.close()
+    assert factory.shard_specs('{"a": "x"}') == {"a": ("x", None)}
+    with pytest.raises(ValueError):
+        factory.shard_specs('{"a": {"read": "only"}}')
+    with pytest.raises(ValueError):
+        factory.shard_specs('["not", "a", "map"]')
 
 
 def test_observations_for_merges_both_sides_newest_first_within_limit(store):
@@ -871,7 +1077,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -892,6 +1098,38 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
     assert store.subjects_citing("ns", [a.id], allowed_types=("cve",)) == {a.id: [cve]}   # host->cve edge hidden
     assert store.subjects_citing("ns", [a.id], allowed_types=()) == {}
     assert store.subjects_citing("ns", []) == {}
+    # the per-artifact cut is applied in the query, in (type, key) order
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=EntityRef(type="host", key=f"h{i}"), predicate="mentioned_in",
+                object=cve, source="kev", observed_at=t, provenance=Provenance(artifact_event_id="adv-a"))
+        for i in range(2, 9)])
+    assert store.subjects_citing("ns", [a.id], per_artifact=2) == {a.id: [cve, EntityRef(type="host", key="h1")]}
+    assert len(store.subjects_citing("ns", [a.id], per_artifact=100)[a.id]) == 9
+
+
+def test_observations_by_prefix_resolves_cite_tokens(store):
+    """A 12-hex token from a pack finds its observation; tombstoned rows
+    and other namespaces never surface; the read is capped."""
+    from loom.contracts import Observation
+    obs = [store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"u{i}")}))
+           for i in range(3)]
+    assert [o.id for o in store.observations_by_prefix("default", obs[0].id[:12])] == [obs[0].id]
+    assert store.observations_by_prefix("default", obs[0].id) == store.observations_by_prefix("default", obs[0].id[:12])
+    assert store.observations_by_prefix("other", obs[0].id[:12]) == []
+    assert store.observations_by_prefix("default", "") == []
+    store.redact("default", obs[1].id, "x")
+    assert store.observations_by_prefix("default", obs[1].id[:12]) == []
+    for i in range(25):   # crafted ids that share a prefix: the cap holds, LIKE metacharacters are literal
+        store.restore_observation(Observation(
+            id=f"tok_{i:03d}", namespace="default", subject=EntityRef(type="host", key="web-01"),
+            predicate="p", object="x", observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    store.restore_observation(Observation(
+        id="tokX010", namespace="default", subject=EntityRef(type="host", key="web-01"),
+        predicate="p", object="x", observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    got = store.observations_by_prefix("default", "tok_")
+    assert len(got) == 20 and [o.id for o in got] == sorted(o.id for o in got)
+    assert [o.id for o in store.observations_by_prefix("default", "tok_01")] == [f"tok_{i:03d}" for i in range(10, 20)]
+    assert [o.id for o in store.observations_by_prefix("default", "tokX")] == ["tokX010"]
 
 
 def test_postgres_retries_a_lost_deadlock_then_gives_up():
@@ -944,4 +1182,230 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
+
+
+# ------------------------------------------------------- schema v5 #
+
+def test_norm_key_keeps_the_structure_of_numeric_keys():
+    """web-01 / WEB_01 / web01 still collide; IPs, CIDRs and versions do not
+    (10.0.4.7, 100.4.7 and 1.0.0.47 all normalized to 10047)."""
+    from loom.store.common import norm_key
+    assert norm_key("web-01") == norm_key("WEB_01") == norm_key("web01") == "web01"
+    assert len({norm_key(k) for k in ("10.0.4.7", "100.4.7", "1.0.0.47")}) == 3
+    assert norm_key("10.0.4.7") == norm_key(" 10.0.4.7 ") == "10.0.4.7"
+    assert norm_key("10.0.0.0/8") == "10.0.0.0/8" and norm_key("1.2.3") == "1.2.3"
+    assert norm_key("10.0.4.7:443") == "10.0.4.7:443" and norm_key("2026-09-01") == "2026-09-01"
+    assert norm_key("v1.2.3") == "v123"          # letters: spelling, not structure
+    assert norm_key("10_0_4_7") == "10047"       # underscores are spelling
+
+
+def test_fuzzy_candidates_do_not_group_distinct_ips(store):
+    for key in ("10.0.4.7", "100.4.7", "1.0.0.47"):
+        store.upsert_entity("default", EntityRef(type="ip", key=key))
+    store.upsert_entity("default", EntityRef(type="host", key="web-01"))
+    store.upsert_entity("default", EntityRef(type="host", key="web01"))
+    groups = store.fuzzy_merge_candidates("default")
+    assert [{e.key for e in g} for g in groups] == [{"web-01", "web01"}]
+
+
+def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    store.upsert_entity("default", EntityRef(type="ip", key="10.0.4.7"))
+    store.upsert_entity("default", EntityRef(type="host", key="web-01"))
+    _exec(store, "UPDATE entities SET norm_key = '10047' WHERE key = '10.0.4.7'")   # as v4 wrote it
+    _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
+    again = _reopen(store, tmp_path)
+    try:
+        assert again.schema_version() == SCHEMA_VERSION == 5
+        rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
+        assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
+    finally:
+        again.close()
+
+
+def test_schema_version_is_never_written_down(store, tmp_path, caplog):
+    """An older image opening a newer database serves what it understands,
+    runs no DDL, warns — and leaves the version alone (H-B12)."""
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),))
+    try:
+        with caplog.at_level("WARNING", logger="loom.store"):
+            newer = _reopen(store, tmp_path)
+        try:
+            assert newer.schema_version() == SCHEMA_VERSION + 1
+            assert "newer than this build" in caplog.text
+            newer.record_claim(login_claim())
+            assert len(newer.observations_for("default", EntityRef(type="host", key="web-01"))) == 1
+        finally:
+            newer.close()
+    finally:
+        _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
+    assert store.schema_version() == SCHEMA_VERSION
+
+
+def test_search_entities_uses_the_lower_key_index(store):
+    _raw(store)
+    for key in ("web-01", "Web-02", "db-01"):
+        store.upsert_entity("default", EntityRef(type="host", key=key))
+    assert {e.key for e in store.search_entities("default", "WEB")} == {"web-01", "Web-02"}
+    assert [e.key for e in store.search_entities("default", "web-02")] == ["Web-02"]
+    assert store.search_entities("default", "") != []           # empty prefix: everything
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._SEARCH_SQL, ("default", "web", "web" + sq._PREFIX_END))
+        assert any("idx_entity_lower_key" in r["detail"] for r in plan), plan
+    else:
+        from loom.store import postgres as pg
+        assert _exec(store, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_entity_lower_key'")
+        with store._tx():   # one transaction: the planner hint and the EXPLAIN share a connection
+            store._x("SET LOCAL enable_seqscan = off")
+            plan = store._q("EXPLAIN " + pg._SEARCH_SQL, ("default", "web", "web" + pg._PREFIX_END))
+        assert any("idx_entity_lower_key" in r["QUERY PLAN"] for r in plan), plan
+
+
+def test_wipe_clears_declines_and_the_merge_log(store):
+    store.remember_decline("ns", "a:1", "b:2", "no")
+    a, b = EntityRef(type="ip", key="1.1.1.1"), EntityRef(type="ip_address", key="1.1.1.1")
+    for ref in (a, b):
+        store.record_claim(ClaimIn(subject=ref, predicate="p", object="x", observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", b, a) and list(store.iter_merges())
+    store.wipe()
+    assert store.declined_pairs("ns") == set()
+    assert list(store.iter_merges()) == [] and store.unmerge("default", b) is False
+
+
+# --------------------------------------------- reversible merges (D-019, v5) #
+
+def _snapshot(store, ns, ref):
+    return sorted((o.id, o.subject, o.predicate, o.object) for o in store.observations_for(ns, ref, limit=100))
+
+
+def test_unmerge_restores_both_entities_exactly(store):
+    """merge, claim, unmerge: the folded entity is back with exactly the
+    observations it had (both as subject and as object, object refs
+    rendered as before), the canonical keeps only what was its own plus
+    what arrived after the merge, the alias is gone, briefs are dropped."""
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims([
+        ClaimIn(subject=a, predicate="mentioned_in", object="IR-4432", observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=host, predicate="uses_ip", object=a, observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=a, predicate="peer_of", object=a, observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=b, predicate="assigned_to", object=host, observed_at=OBSERVED, source="dhcp"),
+    ])
+    before_a, before_b = _snapshot(store, "default", a), _snapshot(store, "default", b)
+    a_id = store.get_entity("default", a).id
+    store.add_alias("default", EntityRef(type="ipaddr", key="10.0.4.7"), into=a)   # an alias that names a
+    store.put_dossier("default", a, "brief a", 3, [])
+    assert store.merge_entities("default", a, b)
+    assert len(store.observations_for("default", b, limit=100)) == 4
+    later = store.record_claim(ClaimIn(subject=b, predicate="scanned", object="clean",
+                                       observed_at=OBSERVED, source="scanner"))
+    store.put_dossier("default", b, "merged brief", 5, [])
+    assert [m["from"] for m in store.iter_merges("default")] == [{"type": "ip_address", "key": "10.0.4.7"}]
+
+    assert store.unmerge("default", a) is True
+    assert _snapshot(store, "default", a) == before_a
+    assert _snapshot(store, "default", b) == sorted(before_b + [(later.id, b, "scanned", "clean")])
+    restored = store.get_entity("default", a)
+    assert restored.type == "ip_address" and restored.id == a_id         # its own node, its own id
+    assert store.get_entity("default", EntityRef(type="ipaddr", key="10.0.4.7")).id == a_id   # alias followed it back
+    assert [al["alias"] for al in store.iter_aliases("default")] == ["ipaddr:10.0.4.7"]         # the merge's alias is gone
+    assert store.get_dossier("default", a) is None and store.get_dossier("default", b) is None
+    assert list(store.iter_merges("default")) == []
+    assert store.unmerge("default", a) is False                          # nothing left to reverse
+    # and the pair can be merged again, reversibly
+    assert store.merge_entities("default", a, b) and store.unmerge("default", a)
+    assert _snapshot(store, "default", a) == before_a
+
+
+def test_unmerge_after_a_chained_merge(store):
+    """A folded into B, then B into C: unmerging A takes back exactly A's
+    observations from C; B stays an alias of C."""
+    a, b, c = (EntityRef(type="ip_address", key="1.1.1.1"), EntityRef(type="ip", key="1.1.1.1"),
+               EntityRef(type="ipv4", key="1.1.1.1"))
+    for ref in (a, b, c):
+        store.record_claim(ClaimIn(subject=ref, predicate=f"from_{ref.type}", object="x",
+                                   observed_at=OBSERVED, source="s"))
+    before_a = _snapshot(store, "default", a)
+    assert store.merge_entities("default", a, b) and store.merge_entities("default", b, c)
+    assert len(store.observations_for("default", c)) == 3
+    assert store.unmerge("default", a)
+    assert _snapshot(store, "default", a) == before_a
+    assert {o.predicate for o in store.observations_for("default", c)} == {"from_ip", "from_ipv4"}
+    assert store.get_entity("default", b).type == "ipv4"                # B is still folded into C
+    assert store.unmerge("default", b)
+    assert {o.predicate for o in store.observations_for("default", b)} == {"from_ip"}
+    assert {o.predicate for o in store.observations_for("default", c)} == {"from_ipv4"}
+
+
+def test_export_import_round_trips_schemas_declines_and_merges(store, tmp_path):
+    """A restore is only faithful if the registries, the adjudication
+    memory and the merge log come along — and a merge stays reversible
+    on the restored store."""
+    import io
+    from loom.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
+    from loom.lifecycle import export_jsonl, import_jsonl
+    store.put_schema(SchemaRegistration(namespace="netsec", strict=True,
+                                        entity_types=[EntityTypeDef(name="host")],
+                                        predicates=[PredicateDef(name="runs_os")]))
+    store.remember_decline("netsec", "product:b", "product:a", "different vendors",
+                           decided_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    store.record_claims([
+        ClaimIn(namespace="netsec", subject=a, predicate="noted", object="x", observed_at=OBSERVED, source="doc"),
+        ClaimIn(namespace="netsec", subject=EntityRef(type="host", key="h"), predicate="uses", object=a,
+                observed_at=OBSERVED, source="doc"),
+        ClaimIn(namespace="netsec", subject=b, predicate="assigned", object="y", observed_at=OBSERVED, source="dhcp"),
+    ])
+    before_a = _snapshot(store, "netsec", a)
+    assert store.merge_entities("netsec", a, b)
+    buf = io.StringIO()
+    counts = export_jsonl(store, buf, None)
+    assert counts["schemas"] == 1 and counts["declines"] == 1 and counts["merges"] == 1
+    kinds = [json.loads(l)["type"] for l in buf.getvalue().splitlines()]
+    assert kinds.index("merge") > kinds.index("alias") > kinds.index("observation")
+
+    dst = SqliteStore(tmp_path / "restored.db")
+    try:
+        buf.seek(0)
+        got = import_jsonl(dst, buf)
+        assert got["schemas"] == 1 and got["declines"] == 1 and got["merges"] == 1 and got["skipped"] == 0
+        assert dst.get_schema("netsec") == store.get_schema("netsec")
+        assert dst.declined_pairs("netsec") == {("product:a", "product:b")}
+        assert next(dst.iter_declines("netsec"))["decided_at"] == "2026-09-02T00:00:00+00:00"
+        assert [m["from"] for m in dst.iter_merges("netsec")] == [{"type": "ip_address", "key": "10.0.4.7"}]
+        buf.seek(0)
+        assert import_jsonl(dst, buf)["merges"] == 1 and len(list(dst.iter_merges())) == 1   # idempotent
+        assert dst.unmerge("netsec", a)                                  # reversible after the restore
+        assert _snapshot(dst, "netsec", a) == before_a
+        assert {o.predicate for o in dst.observations_for("netsec", b)} == {"assigned"}
+    finally:
+        dst.close()
+
+
+def test_sqlite_transactions_are_reentrant(store):
+    """A public method that calls another public method must not deadlock
+    on the store's own lock, and the inner call must not commit the outer
+    transaction half-way: the outermost `_tx` is the only one that commits
+    or rolls back."""
+    if not isinstance(store, SqliteStore):
+        pytest.skip("SQLite-internal")
+    with store._tx():
+        store.record_claim(login_claim())            # nested public call: no deadlock
+        with pytest.raises(RuntimeError):
+            with store._tx():
+                store.record_claim(login_claim(namespace="inner"))
+                raise RuntimeError("inner failure")
+    # the outer block exited cleanly (the exception was caught inside it),
+    # so everything it wrote — including the inner block's row — committed
+    assert len(store.observations_for("default", EntityRef(type="host", key="web-01"))) == 1
+    assert len(store.observations_for("inner", EntityRef(type="host", key="web-01"))) == 1
+    with pytest.raises(RuntimeError):
+        with store._tx():
+            store.record_claim(login_claim(namespace="lost"))
+            raise RuntimeError("outer failure")
+    assert store.observations_for("lost", EntityRef(type="host", key="web-01")) == []

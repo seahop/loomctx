@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at  TEXT NOT NULL,
     norm_key    TEXT NOT NULL DEFAULT '',
     dossier_claimed_until TEXT,
+    dossier_claimed_by    TEXT,
     UNIQUE (namespace, type, key)
 );
 
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extract_claimed_by    TEXT,
     extract_claimed_until TEXT,
     chunk_claimed_until   TEXT,
+    chunk_claimed_by      TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -123,6 +125,33 @@ CREATE TABLE IF NOT EXISTS resolution_declines (
     reason     TEXT NOT NULL,
     decided_at TEXT NOT NULL,
     PRIMARY KEY (namespace, a, b)
+);
+
+-- What a merge changed, so unmerge can put it back exactly (D-019's
+-- "reversible & lossless", made real in schema v5). One parent row per
+-- merge; one child row per observation it repointed, recording which
+-- side(s) named the folded entity and the object ref as rendered before.
+CREATE TABLE IF NOT EXISTS merge_log (
+    id                 TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL,
+    from_type          TEXT NOT NULL,
+    from_key           TEXT NOT NULL,
+    into_type          TEXT NOT NULL,
+    into_key           TEXT NOT NULL,
+    from_id            TEXT NOT NULL,
+    from_provisional   INTEGER NOT NULL DEFAULT 0,
+    from_created_at    TEXT NOT NULL,
+    prior_aliases_json TEXT NOT NULL DEFAULT '[]',
+    recorded_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_log_observations (
+    merge_id               TEXT NOT NULL REFERENCES merge_log (id),
+    observation_id         TEXT NOT NULL,
+    prior_subject_id       TEXT,
+    prior_object_entity_id TEXT,
+    prior_object_json      TEXT,
+    PRIMARY KEY (merge_id, observation_id)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -174,11 +203,25 @@ CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recor
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
+CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key));
+CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 """
+
+# search_entities: a half-open range on the indexed expression (the LIKE
+# optimization does not apply to expression indexes). BINARY collation
+# compares UTF-8 bytes, which orders by code point, so prefix + U+10FFFF
+# bounds every key that starts with the prefix. Exact matches sort first.
+_SEARCH_SQL = (
+    "SELECT * FROM entities WHERE namespace = ?"
+    "   AND lower(key) >= ? AND lower(key) < ?"
+)
+_PREFIX_END = "\U0010ffff"
 
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
-SCHEMA_VERSION = 4  # v3: packed vectors (D-039); v4: resolution_declines (D-044)
+# v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
+# lease owners, lower(key) index, numeric norm_key rule (recompute)
+SCHEMA_VERSION = 5
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -218,7 +261,11 @@ _ON_EVENT_CONFLICT = (
 
 class SqliteStore(GraphStore):
     def __init__(self, path: str | Path):
-        self._lock = threading.Lock()
+        # Re-entrant: a public method that calls another public method
+        # (unmerge -> dossier drop, lifecycle helpers, ...) must not deadlock
+        # on its own lock; `_tx` commits only at the outermost level.
+        self._lock = threading.RLock()
+        self._depth = 0
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -226,9 +273,20 @@ class SqliteStore(GraphStore):
         # 15 s: several enrichment workers writing 512-vector batches can
         # hold the write lock past 5 s (D-039)
         self._conn.execute("PRAGMA busy_timeout=15000")
-        self._conn.executescript(_TABLES)
-        self._migrate()
-        self._conn.executescript(_INDEXES)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS loom_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        current = self._meta_version()
+        if current > SCHEMA_VERSION:
+            # An older image opening a newer file: serve what it understands,
+            # run no DDL, and never write the version down (H-B12) — the next
+            # up-to-date open must still see what was actually applied.
+            logging.getLogger("loom.store").warning(
+                "sqlite: schema version %d is newer than this build's %d;"
+                " running without migrations — upgrade the image", current, SCHEMA_VERSION)
+        else:
+            self._conn.executescript(_TABLES)
+            self._migrate()
+            self._conn.executescript(_INDEXES)
         self._vec_tables: dict[str, int] = {}   # ANN table name -> dimension
         self._vec = self._load_vec()
         # Referential integrity is per-connection in SQLite (H-B10). Old
@@ -252,11 +310,13 @@ class SqliteStore(GraphStore):
                           ("next_attempt_at", "TEXT"),
                           ("extract_claimed_by", "TEXT"),
                           ("extract_claimed_until", "TEXT"),
-                          ("chunk_claimed_until", "TEXT")],
+                          ("chunk_claimed_until", "TEXT"),
+                          ("chunk_claimed_by", "TEXT")],
             "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
             "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
             "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''"),
-                         ("dossier_claimed_until", "TEXT")],
+                         ("dossier_claimed_until", "TEXT"),
+                         ("dossier_claimed_by", "TEXT")],
         }
         for table, columns in wanted.items():
             have = {
@@ -276,7 +336,18 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(common.norm_key(r["key"]), r["id"]) for r in rows])
-        if current != SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
+        if current < 5:
+            # v5: numeric keys keep their punctuation in norm_key (10.0.4.7
+            # no longer collides with 100.4.7); recompute the rows that can
+            # differ — only keys carrying `. : / -` — in Python, the one
+            # place the rule is defined.
+            rows = self._conn.execute(
+                "SELECT id, key, norm_key FROM entities WHERE instr(key, '.') > 0"
+                " OR instr(key, ':') > 0 OR instr(key, '/') > 0 OR instr(key, '-') > 0").fetchall()
+            self._conn.executemany(
+                "UPDATE entities SET norm_key = ? WHERE id = ?",
+                [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
+        if current < SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
             self._conn.execute(
                 "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
                 " ('schema_version', ?)", (str(SCHEMA_VERSION),))
@@ -441,7 +512,10 @@ class SqliteStore(GraphStore):
                 ("vobs", "observations", "embeddings", "ref_id", "NULL"),
                 ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                # exactly this model's tables (one per dimension seen) — a
+                # bare `{kind}_` prefix matched every model, so a model whose
+                # index did not exist yet was skipped as "already indexed"
+                vec_tables = common.vec_tables_for(kind, model, self._vec_tables)
                 total = self._conn.execute(
                     f"SELECT COUNT(*) AS n FROM {table} WHERE model = ?", (model,)).fetchone()["n"]
                 indexed = sum(self._conn.execute(f"SELECT COUNT(*) AS n FROM {n}").fetchone()["n"]
@@ -479,18 +553,39 @@ class SqliteStore(GraphStore):
                 out.extend(common.row_to_observation(r) for r in rows)
         return out
 
+    _PREFIX_CAP = 20
+
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        if not prefix:
+            return []
+        lo, hi = common.prefix_bounds(prefix)
+        with self._tx():
+            rows = self._conn.execute(
+                _OBS_SELECT + " WHERE o.namespace = ? AND o.id >= ?"
+                + (" AND o.id < ?" if hi is not None else "") + _NOT_TOMBSTONED
+                + " ORDER BY o.id LIMIT ?",
+                (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP)).fetchall()
+        return [common.row_to_observation(r) for r in rows]
+
     @contextmanager
     def _tx(self):
         """One locked transaction: commit on success, rollback on error so a
-        failure never leaks partial writes into a later commit (H-B1)."""
+        failure never leaks partial writes into a later commit (H-B1).
+        Nested entries (a public method calling another) join the outer
+        transaction: only the outermost commits or rolls back."""
         with self._lock:
+            self._depth += 1
             try:
                 yield
             except BaseException:
-                self._conn.rollback()
+                if self._depth == 1:
+                    self._conn.rollback()
                 raise
             else:
-                self._conn.commit()
+                if self._depth == 1:
+                    self._conn.commit()
+            finally:
+                self._depth -= 1
 
     # ------------------------------------------------------------ public API
 
@@ -504,7 +599,7 @@ class SqliteStore(GraphStore):
 
     def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
         with self._tx():
-            target = self._get_entity(namespace, into)
+            target = self._resolve_entity(namespace, into)   # `into` may itself be an alias by now
             if target is None:
                 return
             self._put_alias(namespace, f"{alias.type}:{alias.key}", target.id)
@@ -517,21 +612,22 @@ class SqliteStore(GraphStore):
             dst = self._get_entity(namespace, into_ref)
             if src is None or dst is None or src.id == dst.id:
                 return False
+            self._log_merge(namespace, src, dst)
             self._conn.execute(
-                "UPDATE observations SET subject_id = ? WHERE subject_id = ?",
-                (dst.id, src.id),
+                "UPDATE observations SET subject_id = ? WHERE namespace = ? AND subject_id = ?",
+                (dst.id, namespace, src.id),
             )
             # object side: repoint the edge AND its rendered ref, so both ends
             # of a merged edge read as the canonical entity (H-B6)
             self._conn.execute(
                 "UPDATE observations SET object_entity_id = ?, object_json = ?"
-                " WHERE object_entity_id = ?",
-                (dst.id, json.dumps({"type": dst.type, "key": dst.key}), src.id),
+                " WHERE namespace = ? AND object_entity_id = ?",
+                (dst.id, json.dumps({"type": dst.type, "key": dst.key}), namespace, src.id),
             )
             # existing aliases pointing at the source follow it to the target
             self._conn.execute(
-                "UPDATE aliases SET entity_id = ? WHERE entity_id = ?",
-                (dst.id, src.id),
+                "UPDATE aliases SET entity_id = ? WHERE namespace = ? AND entity_id = ?",
+                (dst.id, namespace, src.id),
             )
             self._put_alias(namespace, f"{src.type}:{src.key}", dst.id)
             # the folded node's brief described a partial view; drop it and
@@ -542,6 +638,114 @@ class SqliteStore(GraphStore):
             )
             self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
             return True
+
+    def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
+        """Record what merge_entities is about to change — the folded
+        entity's row, the observations that name it (which side, and the
+        object ref as rendered), the aliases that point at it — so unmerge
+        can put every one of them back (D-019: reversible & lossless)."""
+        touched = self._conn.execute(
+            "SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = ? AND subject_id = ?"
+            " UNION SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = ? AND object_entity_id = ?",
+            (namespace, src.id, namespace, src.id)).fetchall()
+        aliases = [r["alias"] for r in self._conn.execute(
+            "SELECT alias FROM aliases WHERE namespace = ? AND entity_id = ?", (namespace, src.id))]
+        merge_id = uuid.uuid4().hex
+        self._conn.execute(
+            "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type, into_key,"
+            " from_id, from_provisional, from_created_at, prior_aliases_json, recorded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (merge_id, namespace, src.type, src.key, dst.type, dst.key, src.id,
+             int(src.provisional), common.iso(src.created_at), json.dumps(aliases),
+             common.iso(common.now())))
+        self._conn.executemany(
+            "INSERT INTO merge_log_observations (merge_id, observation_id, prior_subject_id,"
+            " prior_object_entity_id, prior_object_json) VALUES (?, ?, ?, ?, ?)",
+            [(merge_id, r["id"],
+              src.id if r["subject_id"] == src.id else None,
+              src.id if r["object_entity_id"] == src.id else None,
+              r["object_json"] if r["object_entity_id"] == src.id else None)
+             for r in touched])
+
+    def unmerge(self, namespace: str, alias: EntityRef) -> bool:
+        with self._tx():
+            m = self._conn.execute(
+                "SELECT * FROM merge_log WHERE namespace = ? AND from_type = ? AND from_key = ?"
+                " ORDER BY recorded_at DESC, id DESC LIMIT 1",
+                (namespace, alias.type, alias.key)).fetchone()
+            if m is None:
+                return False
+            from_ref = EntityRef(type=m["from_type"], key=m["from_key"])
+            # 1. the folded node again, with its original id and creation
+            #    record when nothing has taken them since
+            self._conn.execute(
+                "INSERT OR IGNORE INTO entities (id, namespace, type, key, provisional,"
+                " created_at, norm_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (m["from_id"], namespace, from_ref.type, from_ref.key,
+                 int(m["from_provisional"]), m["from_created_at"], common.norm_key(from_ref.key)))
+            src = self._get_entity(namespace, from_ref) or self._upsert_entity(namespace, from_ref)
+            # 2. exactly the observations that merge moved, each side it
+            #    moved — but only rows still on the merge target: in a chain
+            #    A->B->C an earlier unmerge of A already took A's rows back,
+            #    and B's log (which lists them, they were B's then) must not
+            #    steal them. `hold` is the target's current node (aliases
+            #    followed); None only if it vanished, then unconditional.
+            dst = self._resolve_entity(namespace, EntityRef(type=m["into_type"], key=m["into_key"]))
+            hold = dst.id if dst else None
+            moved = self._conn.execute(
+                "SELECT * FROM merge_log_observations WHERE merge_id = ?", (m["id"],)).fetchall()
+            self._conn.executemany(
+                "UPDATE observations SET subject_id = ? WHERE id = ? AND (? IS NULL OR subject_id = ?)",
+                [(src.id, r["observation_id"], hold, hold)
+                 for r in moved if r["prior_subject_id"] is not None])
+            self._conn.executemany(
+                "UPDATE observations SET object_entity_id = ?, object_json = ?"
+                " WHERE id = ? AND (? IS NULL OR object_entity_id = ?)",
+                [(src.id, r["prior_object_json"] or json.dumps({"type": src.type, "key": src.key}),
+                  r["observation_id"], hold, hold)
+                 for r in moved if r["prior_object_entity_id"] is not None])
+            # 3. aliases that had named it name it again; its own alias goes
+            self._conn.executemany(
+                "UPDATE aliases SET entity_id = ? WHERE namespace = ? AND alias = ?",
+                [(src.id, namespace, a) for a in json.loads(m["prior_aliases_json"] or "[]")])
+            self._conn.execute("DELETE FROM aliases WHERE namespace = ? AND alias = ?",
+                               (namespace, f"{from_ref.type}:{from_ref.key}"))
+            # 4. both briefs described the merged view
+            self._conn.execute(
+                "DELETE FROM dossiers WHERE namespace = ? AND entity_id IN (?, ?)",
+                (namespace, src.id, dst.id if dst else src.id))
+            # 5. the log rows: the merge no longer happened
+            self._conn.execute("DELETE FROM merge_log_observations WHERE merge_id = ?", (m["id"],))
+            self._conn.execute("DELETE FROM merge_log WHERE id = ?", (m["id"],))
+            return True
+
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            parents = self._conn.execute(
+                "SELECT * FROM merge_log" + (" WHERE namespace = ?" if namespace else "")
+                + " ORDER BY recorded_at, id", (namespace,) if namespace else ()).fetchall()
+            records = []
+            for m in parents:
+                kids = self._conn.execute(
+                    "SELECT * FROM merge_log_observations WHERE merge_id = ?"
+                    " ORDER BY observation_id", (m["id"],)).fetchall()
+                records.append(common.merge_record(m, kids))
+        yield from records
+
+    def restore_merge(self, record: dict) -> None:
+        parent, children = common.merge_rows(record)
+        with self._tx():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO merge_log (id, namespace, from_type, from_key, into_type,"
+                " into_key, from_id, from_provisional, from_created_at, prior_aliases_json,"
+                " recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (*parent[:7], int(parent[7]), *parent[8:]))
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO merge_log_observations (merge_id, observation_id,"
+                " prior_subject_id, prior_object_entity_id, prior_object_json)"
+                " VALUES (?, ?, ?, ?, ?)", children)
 
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -590,6 +794,15 @@ class SqliteStore(GraphStore):
             ).fetchone()
         return common.row_to_schema(row) if row else None
 
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT registration_json FROM schemas"
+                + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace",
+                (namespace,) if namespace else ()).fetchall()
+        for r in rows:
+            yield common.row_to_schema(r)
+
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
@@ -622,12 +835,8 @@ class SqliteStore(GraphStore):
             type_args = tuple(types)
         with self._tx():
             rows = self._conn.execute(
-                "SELECT * FROM entities WHERE namespace = ?"
-                "   AND (LOWER(key) = ? OR LOWER(key) LIKE ? ESCAPE '\\')"
-                + type_sql
-                + " ORDER BY (LOWER(key) != ?), type, key LIMIT ?",
-                (namespace, lowered, common.like_pattern(query), *type_args,
-                 lowered, limit),
+                _SEARCH_SQL + type_sql + " ORDER BY (lower(key) != ?), type, key LIMIT ?",
+                (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             ).fetchall()
         return [common.row_to_entity(r) for r in rows]
 
@@ -665,21 +874,25 @@ class SqliteStore(GraphStore):
             type_sql = f" AND s.type IN ({tm}) AND (ob.id IS NULL OR ob.type IN ({tm}))"
             type_args = tuple(allowed_types) * 2
         with self._tx():
+            # the per-artifact cut happens in SQL: a document cited by
+            # thousands of claims returns per_artifact rows, not all of them
             rows = self._conn.execute(
-                "SELECT DISTINCT json_extract(o.provenance_json, '$.artifact_id') AS aid,"
+                "WITH cited AS ("
+                " SELECT DISTINCT json_extract(o.provenance_json, '$.artifact_id') AS aid,"
                 " s.type AS stype, s.key AS skey"
                 " FROM observations o JOIN entities s ON s.id = o.subject_id"
                 " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
                 " WHERE o.namespace = ?"
                 f"   AND json_extract(o.provenance_json, '$.artifact_id') IN ({marks})"
-                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
-                (namespace, *artifact_ids, *type_args),
+                + _NOT_TOMBSTONED + type_sql + "),"
+                " ranked AS (SELECT *, row_number() OVER (PARTITION BY aid ORDER BY stype, skey) AS rn"
+                "            FROM cited)"
+                " SELECT aid, stype, skey FROM ranked WHERE rn <= ? ORDER BY aid, stype, skey",
+                (namespace, *artifact_ids, *type_args, per_artifact),
             ).fetchall()
         out: dict[str, list[EntityRef]] = {}
         for r in rows:
-            lst = out.setdefault(r["aid"], [])
-            if len(lst) < per_artifact:
-                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+            out.setdefault(r["aid"], []).append(EntityRef(type=r["stype"], key=r["skey"]))
         return out
 
     def artifact_cited_within(
@@ -925,25 +1138,42 @@ class SqliteStore(GraphStore):
                 ).fetchall()
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
+    # lease ownership (D-031): `worker_id=None` is unconditional (ops,
+    # tests, a single worker); given, the statement applies only while that
+    # worker holds the lease, so a holder whose lease expired and was
+    # re-claimed cannot clobber the new holder's state
+    _OWNS_EXTRACT = " AND (? IS NULL OR extract_claimed_by = ?)"
+
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._conn.execute(
+            return self._conn.execute(
                 "UPDATE artifacts SET extraction_attempts = ?, next_attempt_at = ?,"
-                " extract_claimed_until = NULL WHERE namespace = ? AND id = ?",
-                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
-            )
+                " extract_claimed_until = NULL WHERE namespace = ? AND id = ?" + self._OWNS_EXTRACT,
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id, worker_id, worker_id),
+            ).rowcount > 0
 
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None:
+        self, namespace: str, artifact_id: str, status: str, worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._conn.execute(
+            return self._conn.execute(
                 "UPDATE artifacts SET extraction_status = ?, extract_claimed_until = NULL"
-                " WHERE namespace = ? AND id = ?",
-                (status, namespace, artifact_id),
-            )
+                " WHERE namespace = ? AND id = ?" + self._OWNS_EXTRACT,
+                (status, namespace, artifact_id, worker_id, worker_id),
+            ).rowcount > 0
+
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        with self._tx():
+            return self._conn.execute(
+                "UPDATE artifacts SET extract_claimed_until = ? WHERE namespace = ? AND id = ?"
+                " AND extract_claimed_by = ? AND extraction_status = 'pending'",
+                (common.iso(common.now() + timedelta(seconds=seconds)), namespace, artifact_id, worker_id),
+            ).rowcount > 0
 
     _NEEDS_CHUNKS = (
         "a.text IS NOT NULL"
@@ -966,16 +1196,17 @@ class SqliteStore(GraphStore):
                 moment = common.now()
                 until = common.iso(moment + timedelta(seconds=lease[1]))
                 rows = self._conn.execute(
-                    "UPDATE artifacts SET chunk_claimed_until = ? WHERE id IN"
+                    "UPDATE artifacts SET chunk_claimed_until = ?, chunk_claimed_by = ? WHERE id IN"
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < ?)"
                     "   ORDER BY a.recorded_at LIMIT ?) RETURNING *",
-                    (until, model, common.iso(moment), limit)).fetchall()
+                    (until, lease[0], model, common.iso(moment), limit)).fetchall()
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         with self._tx():
             self._conn.executemany(
@@ -989,8 +1220,9 @@ class SqliteStore(GraphStore):
             self._vec_upsert("vchk", model, namespace,
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
-            self._conn.execute(  # release the chunking lease (D-031)
-                "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?", (artifact_id,))
+            self._conn.execute(  # release the chunking lease (D-031) — the holder's only
+                "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?"
+                " AND (? IS NULL OR chunk_claimed_by = ?)", (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -1045,11 +1277,15 @@ class SqliteStore(GraphStore):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
-                namespace, ref
-            )
+            entity = self._resolve_or_create(namespace, ref)
+            if worker_id is not None:
+                holder = self._conn.execute(
+                    "SELECT dossier_claimed_by FROM entities WHERE id = ?", (entity.id,)).fetchone()
+                if holder["dossier_claimed_by"] != worker_id:
+                    return False   # re-claimed by another worker: its brief is the one to land
             self._conn.execute(
                 "INSERT OR REPLACE INTO dossiers (namespace, entity_id, brief,"
                 " observation_count, observation_ids, updated_at)"
@@ -1059,6 +1295,7 @@ class SqliteStore(GraphStore):
             )
             self._conn.execute(  # release the dossier lease (D-031)
                 "UPDATE entities SET dossier_claimed_until = NULL WHERE id = ?", (entity.id,))
+            return True
 
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
@@ -1095,9 +1332,9 @@ class SqliteStore(GraphStore):
                 ref = EntityRef(type=r["type"], key=r["key"])
                 if lease is not None:
                     claimed = self._conn.execute(
-                        "UPDATE entities SET dossier_claimed_until = ? WHERE id = ?"
+                        "UPDATE entities SET dossier_claimed_until = ?, dossier_claimed_by = ? WHERE id = ?"
                         " AND (dossier_claimed_until IS NULL OR dossier_claimed_until < ?)",
-                        (common.iso(moment + timedelta(seconds=lease[1])), r["eid"],
+                        (common.iso(moment + timedelta(seconds=lease[1])), lease[0], r["eid"],
                          common.iso(moment))).rowcount
                     if not claimed:
                         continue  # another worker took it between SELECT and UPDATE
@@ -1155,7 +1392,23 @@ class SqliteStore(GraphStore):
                 " (SELECT subject_id FROM observations WHERE namespace = ?)",
                 (namespace, namespace),
             )
+            self._purge_vec_rows(namespace)
         return removed
+
+    def _purge_vec_rows(self, namespace: str) -> None:
+        """ANN rows whose source row is gone: they would otherwise keep
+        surfacing purged observation ids and chunk ids that no longer
+        join to anything."""
+        if not self._vec:
+            return
+        self._refresh_vec_tables()
+        for name in self._vec_tables:
+            source = "observations" if name.startswith("vobs_") else "doc_chunks"
+            stale = self._conn.execute(
+                f"SELECT ref_id FROM {name} WHERE namespace = ?"
+                f" AND ref_id NOT IN (SELECT id FROM {source})", (namespace,)).fetchall()
+            self._conn.executemany(f"DELETE FROM {name} WHERE ref_id = ?",
+                                   [(r["ref_id"],) for r in stale])
 
     # Exports stream in keyset pages (H-E4): the lock is held per page, not
     # for the whole table, and memory is bounded by the page size.
@@ -1219,12 +1472,24 @@ class SqliteStore(GraphStore):
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
 
-    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str,
+                         decided_at: datetime | None = None) -> None:
         a, b = sorted((a, b))
         with self._tx():
             self._conn.execute(
                 "INSERT OR REPLACE INTO resolution_declines (namespace, a, b, reason, decided_at)"
-                " VALUES (?, ?, ?, ?, ?)", (namespace, a, b, reason[:500], common.iso(common.now())))
+                " VALUES (?, ?, ?, ?, ?)",
+                (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT * FROM resolution_declines"
+                + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace, a, b",
+                (namespace,) if namespace else ()).fetchall()
+        for r in rows:
+            yield {"namespace": r["namespace"], "a": r["a"], "b": r["b"],
+                   "reason": r["reason"], "decided_at": r["decided_at"]}
 
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         with self._tx():
@@ -1247,11 +1512,12 @@ class SqliteStore(GraphStore):
 
     def restore_observation(self, obs: Observation) -> None:
         with self._tx():
-            subject = self._upsert_entity(obs.namespace, obs.subject)
+            subject = self._resolve_or_create(obs.namespace, obs.subject)
             object_entity_id = None
             if isinstance(obs.object, EntityRef):
-                object_entity_id = self._upsert_entity(obs.namespace, obs.object).id
-                object_json = json.dumps(obs.object.model_dump())
+                target = self._resolve_or_create(obs.namespace, obs.object)
+                object_entity_id = target.id
+                object_json = json.dumps({"type": target.type, "key": target.key})
             else:
                 object_json = json.dumps(obs.object)
             # OR IGNORE covers BOTH the id PK and the (namespace, event_id)
@@ -1289,8 +1555,9 @@ class SqliteStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities",
-                          "schemas", *self._vec_tables):
+                          "merge_log_observations", "merge_log", "observations",
+                          "aliases", "artifacts", "entities", "schemas",
+                          "resolution_declines", *self._vec_tables):
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
@@ -1346,6 +1613,11 @@ class SqliteStore(GraphStore):
             (namespace, event_id),
         ).fetchone()
         return common.row_to_artifact(row) if row else None
+
+    def _resolve_or_create(self, namespace: str, ref: EntityRef) -> Entity:
+        """The entity a write should attach to: the exact node, else the
+        canonical one an alias points at, else a new node."""
+        return self._resolve_entity(namespace, ref) or self._upsert_entity(namespace, ref)
 
     def _upsert_entity(self, namespace: str, ref: EntityRef) -> Entity:
         existing = self._get_entity(namespace, ref)
@@ -1407,11 +1679,17 @@ class SqliteStore(GraphStore):
                 metrics.INGEST_DEDUPED.inc()
                 return existing
 
-        subject = self._upsert_entity(claim.namespace, claim.subject)
+        # A ref that was merged away resolves to its canonical entity: a
+        # claim naming the old `ip_address:10.0.4.7` lands on `ip:10.0.4.7`
+        # instead of resurrecting the folded node beside its alias.
+        subject = self._resolve_or_create(claim.namespace, claim.subject)
         object_entity_id = None
+        obj = claim.object
         if isinstance(claim.object, EntityRef):
-            object_entity_id = self._upsert_entity(claim.namespace, claim.object).id
-            object_json = json.dumps(claim.object.model_dump())
+            target = self._resolve_or_create(claim.namespace, claim.object)
+            object_entity_id = target.id
+            obj = EntityRef(type=target.type, key=target.key)
+            object_json = json.dumps(obj.model_dump())
         else:
             object_json = json.dumps(claim.object)
 
@@ -1419,9 +1697,9 @@ class SqliteStore(GraphStore):
             id=uuid.uuid4().hex,
             namespace=claim.namespace,
             event_id=claim.event_id,
-            subject=claim.subject,
+            subject=EntityRef(type=subject.type, key=subject.key),
             predicate=claim.predicate,
-            object=claim.object,
+            object=obj,
             observed_at=claim.observed_at,
             valid_from=claim.valid_from,
             valid_to=claim.valid_to,
