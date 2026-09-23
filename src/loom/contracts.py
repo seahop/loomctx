@@ -349,6 +349,13 @@ class AnswerRequest(BaseModel):
     valid_at: datetime | None = None
     max_tokens: int = Field(default=1024, gt=0, le=8192)
 
+    @model_validator(mode="after")
+    def _subject_or_scope(self) -> "AnswerRequest":
+        # neither is fine (auto-resolution); both is ambiguous — and was a 500
+        if self.subject is not None and self.scope is not None:
+            raise ValueError("provide at most one of 'subject' or 'scope'")
+        return self
+
 
 class AnswerResponse(BaseModel):
     answer: str

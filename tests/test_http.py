@@ -108,6 +108,11 @@ def test_answer_503_when_no_llm_configured(tmp_path, monkeypatch):
         r = client.post("/v1/answer", json={"question": "anything?"})
         assert r.status_code == 503
         assert "LOOM_LLM_MODEL" in r.json()["detail"]
+        # both a subject and a scope is ambiguous: 422, not a 500 (D-046)
+        r = client.post("/v1/answer", json={
+            "question": "anything?", "subject": {"type": "host", "key": "web-01"},
+            "scope": {"subjects": [{"type": "host", "key": "db-01"}]}})
+        assert r.status_code == 422 and "at most one" in r.text
 
 
 REGISTRY = {

@@ -118,3 +118,14 @@ def test_prompt_carries_partial_coverage():
         ScopeTruncation(entity=EntityRef(type="product", key="linux:linux_kernel"), gathered=1000, total=2740)])
     text = render_user_prompt("exposed?", pack)
     assert "coverage: only the newest 1,000 of 2,740" in text and "do not conclude absence" in text
+
+
+def test_answer_request_rejects_subject_and_scope_together():
+    from pydantic import ValidationError
+    from loom.contracts import ScopeSpec
+    AnswerRequest(question="q")  # neither: auto-resolution
+    AnswerRequest(question="q", subject=EntityRef(type="host", key="a"))
+    AnswerRequest(question="q", scope=ScopeSpec(subjects=[EntityRef(type="host", key="b")]))
+    with pytest.raises(ValidationError):
+        AnswerRequest(question="q", subject=EntityRef(type="host", key="a"),
+                      scope=ScopeSpec(subjects=[EntityRef(type="host", key="b")]))
