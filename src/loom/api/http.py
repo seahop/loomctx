@@ -62,7 +62,11 @@ async def _lifespan(app: FastAPI):
     app.state.auth = AuthConfig.from_env()
     if not app.state.auth.enabled:
         logging.getLogger("loom.auth").warning(
-            "LOOM_API_KEYS unset — auth is DISABLED (open dev mode)"
+            "LOOM_API_KEYS and LOOM_AUTH_FILE unset — auth is DISABLED (open dev mode)"
+        )
+    if not os.environ.get("LOOM_HANDLE_SECRET", "").strip():
+        logging.getLogger("loom.auth").warning(
+            "expansion handles are unsigned; set LOOM_HANDLE_SECRET (D-021)"
         )
     yield
     app.state.store.close()

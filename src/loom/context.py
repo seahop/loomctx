@@ -336,19 +336,51 @@ def decode_handle(handle: str) -> dict:
         raise ValueError("malformed handle payload")
     if {"n", "s", "p"} <= payload.keys():  # compact form
         s = payload["s"]
-        if not (isinstance(s, list) and len(s) == 2 and all(isinstance(x, str) for x in s)) \
-                or not isinstance(payload["n"], str):
+        if not (isinstance(s, list) and len(s) == 2):
             raise ValueError("malformed handle payload")
         out = {"ns": payload["n"], "subject": {"type": s[0], "key": s[1]}, "predicate": payload["p"]}
         for short, long in (("a", "as_of"), ("v", "valid_at"), ("x", "excerpt")):
             if short in payload:
                 out[long] = payload[short]
-        return out
-    if not {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
+    elif {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
+        out = dict(payload)
+    else:
         raise ValueError("malformed handle payload")
-    if not isinstance(payload["subject"], dict) or not isinstance(payload["ns"], str):
-        raise ValueError("malformed handle payload")
-    return payload
+    return _validated_handle(out)
+
+
+def _validated_handle(meta: dict) -> dict:
+    """Every field an unsigned handle carries is caller-typed: check types
+    and values here so a forged `as_of: "yesterday"` or `seq: -1` is a
+    400 at the door rather than a 500 inside expand_pack (D-046)."""
+    subject = meta.get("subject")
+    if not (isinstance(subject, dict) and isinstance(subject.get("type"), str)
+            and isinstance(subject.get("key"), str) and subject["type"] and subject["key"]):
+        raise ValueError("malformed handle payload: subject")
+    meta["subject"] = {"type": subject["type"], "key": subject["key"]}
+    if not isinstance(meta.get("ns"), str) or not meta["ns"]:
+        raise ValueError("malformed handle payload: namespace")
+    if not isinstance(meta.get("predicate"), str):
+        raise ValueError("malformed handle payload: predicate")
+    for axis in ("as_of", "valid_at"):
+        value = meta.get(axis)
+        if value is None:
+            meta.pop(axis, None)
+            continue
+        try:
+            if not isinstance(value, str):
+                raise TypeError
+            datetime.fromisoformat(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"malformed handle payload: {axis}") from exc
+    if "excerpt" in meta:
+        ex = meta["excerpt"]
+        seq = ex.get("seq", 0) if isinstance(ex, dict) else None
+        if not (isinstance(ex, dict) and isinstance(ex.get("artifact_id"), str)
+                and isinstance(ex.get("model"), str)
+                and isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0):
+            raise ValueError("malformed handle payload: excerpt")
+    return meta
 
 
 def covers_valid_at(obs: Observation, valid_at: datetime) -> bool:

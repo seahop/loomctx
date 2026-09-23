@@ -309,13 +309,46 @@ def test_expand_handle_passes_entity_type_gate(tmp_path, monkeypatch):
         r = client.post("/v1/expand", json={"handle": edge, "budget": 500},
                         headers={"X-Loom-Key": reader})
         assert r.status_code == 200 and r.json()["items"] == []
-        # garbage handles are 400s, never 500s
+        # garbage handles are 400s, never 500s — including well-formed
+        # envelopes carrying bad field values (D-046)
         import base64
-        as_list = "h1_" + base64.urlsafe_b64encode(b"[1,2]").decode().rstrip("=")
-        for bad in ("nope", "h1_!!!", as_list):
+        import json as _json
+
+        def forged(payload) -> str:
+            raw = _json.dumps(payload).encode() if not isinstance(payload, bytes) else payload
+            return "h1_" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        good = {"n": "default", "s": ["host", "web-01"], "p": "logged_in_by"}
+        bad_payloads = [
+            b"[1,2]",
+            {**good, "a": "yesterday"},                    # as_of not ISO
+            {**good, "a": 12345},                          # as_of not a string
+            {**good, "v": "2026-13-45"},                   # valid_at not a date
+            {**good, "s": ["host", 7]},                    # key not a string
+            {**good, "s": ["", "web-01"]},                 # empty type
+            {**good, "s": "host:web-01"},                  # subject not a pair
+            {**good, "p": ["logged_in_by"]},               # predicate not a string
+            {**good, "n": 1},                              # namespace not a string
+            {**good, "x": "not-a-dict"},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": -1}},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": "0"}},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": True}},
+            {**good, "x": {"artifact_id": None, "model": "m", "seq": 0}},
+            {"ns": "default", "subject": {"type": "host"}, "predicate": "p"},   # legacy, no key
+            {"ns": "default", "subject": ["host", "web-01"], "predicate": "p"},
+            {"ns": "default", "subject": {"type": "host", "key": "web-01"}, "predicate": "p",
+             "as_of": "never"},
+        ]
+        for bad in ["nope", "h1_!!!"] + [forged(b) for b in bad_payloads]:
             r = client.post("/v1/expand", json={"handle": bad, "budget": 500},
                             headers={"X-Loom-Key": reader})
             assert r.status_code == 400, bad
+        # a legacy handle with explicit nulls still decodes
+        legacy = forged({"ns": "default", "subject": {"type": "host", "key": "web-01"},
+                         "predicate": "logged_in_by", "as_of": None, "valid_at": None})
+        r = client.post("/v1/expand", json={"handle": legacy, "budget": 500},
+                        headers={"X-Loom-Key": reader})
+        assert r.status_code == 200 and r.json()["items"]
 
 
 def test_expand_clamps_budget_to_ceiling(tmp_path, monkeypatch):
@@ -471,3 +504,25 @@ def test_raw_observations_route_applies_the_object_side_gate(tmp_path, monkeypat
         assert "runs_os" not in {o["predicate"] for o in r["observations"]}
         assert client.get("/v1/entities/host/web-01/observations",
                           params={"as_of": "not-a-date"}, headers=h).status_code == 422
+
+
+def test_startup_warns_about_open_auth_and_unsigned_handles(tmp_path, monkeypatch, caplog):
+    """H-H3/D-046: the open-dev-mode warning names both key sources, and an
+    unset LOOM_HANDLE_SECRET is called out next to it."""
+    import logging
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "warn.db"))
+    for var in ("LOOM_API_KEYS", "LOOM_AUTH_FILE", "LOOM_HANDLE_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    from loom.api.http import app
+    with caplog.at_level(logging.WARNING, logger="loom.auth"):
+        with TestClient(app):
+            pass
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "LOOM_API_KEYS" in text and "LOOM_AUTH_FILE" in text
+    assert "expansion handles are unsigned; set LOOM_HANDLE_SECRET" in text
+    caplog.clear()
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "s3cret")
+    with caplog.at_level(logging.WARNING, logger="loom.auth"):
+        with TestClient(app):
+            pass
+    assert "unsigned" not in "\n".join(r.getMessage() for r in caplog.records)
