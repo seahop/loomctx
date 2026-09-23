@@ -439,8 +439,18 @@ def _allowed_types(grant: Grant | None) -> tuple[str, ...] | None:
 def register_schema(reg: SchemaRegistration, request: Request) -> SchemaRegistration:
     """Register (additively) the entity types and predicates of a namespace —
     the domain knowledge that keeps the core domain-agnostic (D-024).
-    Requires write access to the namespace. Returns the effective registry."""
-    _authorize(request, reg.namespace, "w")
+    Requires an *ungated* write key: a shipper pinned to two entity types
+    and one source must not be able to flip the namespace's `strict` or
+    widen its predicates (D-046). Returns the effective registry."""
+    grant = _authorize(request, reg.namespace, "w")
+    if grant is not None and (grant.entity_types is not None or grant.sources is not None):
+        metrics.REJECTED.labels(reason="scope").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key {grant.id!r} is gated by entity_types/sources; registering "
+            "a namespace schema (including 'strict') needs a write key with no "
+            "entity-type or source restriction",
+        )
     merged = request.app.state.store.put_schema(reg)
     request.app.state.registry.invalidate(reg.namespace)
     return merged

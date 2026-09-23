@@ -564,3 +564,31 @@ def test_startup_warns_about_open_auth_and_unsigned_handles(tmp_path, monkeypatc
         with TestClient(app):
             pass
     assert "unsigned" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_schema_registration_needs_an_ungated_write_key(tmp_path, monkeypatch):
+    """D-046: any write key could rewrite a namespace's schema, `strict`
+    included. A gated shipper gets a 403 that says why; an ungated writer
+    registers; a read key is refused as before."""
+    import subprocess, sys
+    gated, path = _generate_key(tmp_path, id="shipper", perms="w",
+                                entity_types="host,user", sources="auth-log")
+    by_source, _ = _generate_key(tmp_path, id="by-source", perms="w", sources="auth-log")
+    admin = subprocess.run(
+        [sys.executable, "-m", "loom.keys", "--file", str(path), "generate",
+         "--id", "admin", "--namespace", "default", "--perms", "w"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "schema.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    reg = {"namespace": "default", "predicates": [{"name": "logged_in_by"}], "strict": True}
+    with TestClient(app) as client:
+        for key in (gated, by_source):
+            r = client.post("/v1/schemas", json=reg, headers={"X-Loom-Key": key})
+            assert r.status_code == 403 and "ungated" not in r.text and "restriction" in r.json()["detail"]
+        r = client.post("/v1/schemas", json=reg, headers={"X-Loom-Key": admin})
+        assert r.status_code == 200 and r.json()["strict"]
+        # the gated shipper can still write claims the (now strict) registry accepts
+        r = client.post("/v1/ingest", json=claim().model_dump(mode="json"), headers={"X-Loom-Key": gated})
+        assert r.status_code == 200
