@@ -194,6 +194,15 @@ _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
 )
 
+
+def _observed_before(mark: str, before) -> tuple[str, tuple]:
+    """SQL fragment + args bounding observed_at (the `as_of` axis, D-046);
+    empty when no bound. observed_at is stored as UTC ISO text (D-022), so a
+    normalized string compares correctly."""
+    if before is None:
+        return "", ()
+    return f" AND o.observed_at <= {mark}", (common.iso(before),)
+
 _OBS_SELECT = (
     "SELECT o.*, e.type AS subj_type, e.key AS subj_key"
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
@@ -666,18 +675,21 @@ class PostgresStore(GraphStore):
             )
         return [common.row_to_entity(r) for r in rows]
 
-    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+    def count_observations(
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+    ) -> int:
         with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
+            before_sql, before_args = _observed_before("%s", observed_before)
             rows = self._q(
                 "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
-                "          AND o.subject_id = %s" + _NOT_TOMBSTONED + ")"
+                "          AND o.subject_id = %s" + _NOT_TOMBSTONED + before_sql + ")"
                 "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
-                "          AND o.object_entity_id = %s AND o.subject_id <> %s" + _NOT_TOMBSTONED + ")"
+                "          AND o.object_entity_id = %s AND o.subject_id <> %s" + _NOT_TOMBSTONED + before_sql + ")"
                 " AS n",
-                (namespace, entity.id, namespace, entity.id, entity.id),
+                (namespace, entity.id, *before_args, namespace, entity.id, entity.id, *before_args),
             )
         return int(rows[0]["n"])
 
@@ -741,24 +753,28 @@ class PostgresStore(GraphStore):
         return retry_on_deadlock(once)
 
     def observations_for(
-        self, namespace: str, ref: EntityRef, limit: int = 100
+        self, namespace: str, ref: EntityRef, limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> list[Observation]:
         with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
+            before_sql, before_args = _observed_before("%s", observed_before)
             # same two-index UNION as the SQLite store (D-035): a per-side
-            # index range each, never a namespace scan
+            # index range each, never a namespace scan; the as_of bound
+            # rides the same index (D-046)
             rows = self._q(
                 "SELECT * FROM (" + _OBS_SELECT
-                + " WHERE o.namespace = %s AND o.subject_id = %s" + _NOT_TOMBSTONED
+                + " WHERE o.namespace = %s AND o.subject_id = %s" + _NOT_TOMBSTONED + before_sql
                 + " ORDER BY o.observed_at DESC LIMIT %s) s"
                 " UNION ALL SELECT * FROM (" + _OBS_SELECT
                 + " WHERE o.namespace = %s AND o.object_entity_id = %s"
-                "   AND o.subject_id <> %s" + _NOT_TOMBSTONED
+                "   AND o.subject_id <> %s" + _NOT_TOMBSTONED + before_sql
                 + " ORDER BY o.observed_at DESC LIMIT %s) t"
                 " ORDER BY observed_at DESC LIMIT %s",
-                (namespace, entity.id, limit, namespace, entity.id, entity.id, limit, limit),
+                (namespace, entity.id, *before_args, limit,
+                 namespace, entity.id, entity.id, *before_args, limit, limit),
             )
             return [common.row_to_observation(r) for r in rows]
 
@@ -789,11 +805,13 @@ class PostgresStore(GraphStore):
         return out
 
     def observations_for_many(
-        self, namespace: str, refs: list[EntityRef], limit: int = 100
+        self, namespace: str, refs: list[EntityRef], limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs:
             return result
+        before_sql, before_args = _observed_before("%s", observed_before)
         with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
@@ -802,14 +820,14 @@ class PostgresStore(GraphStore):
                 rows = self._q(
                     "WITH hits AS ("
                     + _OBS_SELECT_ENT.format(ent="o.subject_id") +
-                    " WHERE o.namespace = %s AND o.subject_id = ANY(%s)" + _NOT_TOMBSTONED +
+                    " WHERE o.namespace = %s AND o.subject_id = ANY(%s)" + _NOT_TOMBSTONED + before_sql +
                     " UNION ALL "
                     + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
                     " WHERE o.namespace = %s AND o.object_entity_id = ANY(%s)"
-                    "   AND o.subject_id <> o.object_entity_id" + _NOT_TOMBSTONED +
+                    "   AND o.subject_id <> o.object_entity_id" + _NOT_TOMBSTONED + before_sql +
                     "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
                     " SELECT * FROM ranked WHERE rn <= %s ORDER BY ent, observed_at DESC",
-                    (namespace, chunk, namespace, chunk, limit),
+                    (namespace, chunk, *before_args, namespace, chunk, *before_args, limit),
                 )
                 for row in rows:
                     obs = common.row_to_observation(row)

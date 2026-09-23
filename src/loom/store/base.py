@@ -90,19 +90,25 @@ class GraphStore(ABC):
 
     @abstractmethod
     def observations_for(
-        self, namespace: str, ref: EntityRef, limit: int = 100
+        self, namespace: str, ref: EntityRef, limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> list[Observation]:
-        """Observations where ref is subject OR object, newest observed first."""
+        """Observations where ref is subject OR object, newest observed first.
+        `observed_before` (the `as_of` axis, D-046) keeps only rows observed
+        at or before that instant — applied in the query, so the newest
+        `limit` rows are the newest *as of then*, not the newest overall."""
 
     def observations_for_many(
-        self, namespace: str, refs: list[EntityRef], limit: int = 100
+        self, namespace: str, refs: list[EntityRef], limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         """observations_for for many refs at once: (type, key) -> its newest
         `limit` observations. Backends override with one round trip per
         chunk; a 1,077-entity scope was 1,077 round trips, 5 s on Postgres
         over a network versus 0.5 s in-process (D-043). Refs that resolve
         to nothing are absent from the result."""
-        return {(r.type, r.key): self.observations_for(namespace, r, limit) for r in refs}
+        return {(r.type, r.key): self.observations_for(namespace, r, limit, observed_before=observed_before)
+                for r in refs}
 
     @abstractmethod
     def search_entities(
@@ -116,9 +122,13 @@ class GraphStore(ABC):
         entity names mentioned inside a free-form question."""
 
     @abstractmethod
-    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+    def count_observations(
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+    ) -> int:
         """Visible observations touching ref (subject or object) — the
-        connectivity signal entity resolution ranks by (H-E3)."""
+        connectivity signal entity resolution ranks by (H-E3), and the
+        denominator of a pack's `truncated` report (D-038), which must use
+        the same `observed_before` bound as the gather."""
 
     @abstractmethod
     def subjects_citing(

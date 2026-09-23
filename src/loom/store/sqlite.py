@@ -184,6 +184,15 @@ _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
 )
 
+
+def _observed_before(mark: str, before) -> tuple[str, tuple]:
+    """SQL fragment + args bounding observed_at (the `as_of` axis, D-046);
+    empty when no bound. observed_at is stored as UTC ISO text (D-022), so a
+    normalized string compares correctly."""
+    if before is None:
+        return "", ()
+    return f" AND o.observed_at <= {mark}", (common.iso(before),)
+
 _OBS_SELECT = (
     "SELECT o.*, e.type AS subj_type, e.key AS subj_key"
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
@@ -622,19 +631,22 @@ class SqliteStore(GraphStore):
             ).fetchall()
         return [common.row_to_entity(r) for r in rows]
 
-    def count_observations(self, namespace: str, ref: EntityRef) -> int:
+    def count_observations(
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+    ) -> int:
         with self._tx():
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
+            before_sql, before_args = _observed_before("?", observed_before)
             # two indexed halves, like observations_for (D-035/D-038)
             row = self._conn.execute(
                 "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
-                "          AND o.subject_id = ?" + _NOT_TOMBSTONED + ")"
+                "          AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql + ")"
                 "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
-                "          AND o.object_entity_id = ? AND o.subject_id != ?" + _NOT_TOMBSTONED + ")"
+                "          AND o.object_entity_id = ? AND o.subject_id != ?" + _NOT_TOMBSTONED + before_sql + ")"
                 " AS n",
-                (namespace, entity.id, namespace, entity.id, entity.id),
+                (namespace, entity.id, *before_args, namespace, entity.id, entity.id, *before_args),
             ).fetchone()
         return int(row["n"])
 
@@ -699,26 +711,31 @@ class SqliteStore(GraphStore):
             return [self._record_claim(c) for c in claims]
 
     def observations_for(
-        self, namespace: str, ref: EntityRef, limit: int = 100
+        self, namespace: str, ref: EntityRef, limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> list[Observation]:
         with self._tx():
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
+            before_sql, before_args = _observed_before("?", observed_before)
             # Two indexed halves (idx_obs_subject / idx_obs_object) merged,
             # not `subject_id = ? OR object_entity_id = ?`: SQLite planned the
             # OR as a scan of the whole namespace, ~230 ms per call on a
             # 465k-row namespace — found the day real data landed (D-035).
+            # observed_at trails both indexes, so the as_of bound is a range
+            # on the same index (D-046).
             rows = self._conn.execute(
                 "SELECT * FROM (" + _OBS_SELECT
-                + " WHERE o.namespace = ? AND o.subject_id = ?" + _NOT_TOMBSTONED
+                + " WHERE o.namespace = ? AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql
                 + " ORDER BY o.observed_at DESC LIMIT ?)"
                 " UNION ALL SELECT * FROM (" + _OBS_SELECT
                 + " WHERE o.namespace = ? AND o.object_entity_id = ?"
-                "   AND o.subject_id != ?" + _NOT_TOMBSTONED
+                "   AND o.subject_id != ?" + _NOT_TOMBSTONED + before_sql
                 + " ORDER BY o.observed_at DESC LIMIT ?)"
                 " ORDER BY observed_at DESC LIMIT ?",
-                (namespace, entity.id, limit, namespace, entity.id, entity.id, limit, limit),
+                (namespace, entity.id, *before_args, limit,
+                 namespace, entity.id, entity.id, *before_args, limit, limit),
             ).fetchall()
             return [common.row_to_observation(r) for r in rows]
 
@@ -752,11 +769,13 @@ class SqliteStore(GraphStore):
         return out
 
     def observations_for_many(
-        self, namespace: str, refs: list[EntityRef], limit: int = 100
+        self, namespace: str, refs: list[EntityRef], limit: int = 100,
+        observed_before: datetime | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs:
             return result
+        before_sql, before_args = _observed_before("?", observed_before)
         with self._tx():
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
@@ -766,14 +785,14 @@ class SqliteStore(GraphStore):
                 rows = self._conn.execute(
                     "WITH hits AS ("
                     + _OBS_SELECT_ENT.format(ent="o.subject_id") +
-                    f" WHERE o.namespace = ? AND o.subject_id IN ({marks})" + _NOT_TOMBSTONED +
+                    f" WHERE o.namespace = ? AND o.subject_id IN ({marks})" + _NOT_TOMBSTONED + before_sql +
                     " UNION ALL "
                     + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
                     f" WHERE o.namespace = ? AND o.object_entity_id IN ({marks})"
-                    "   AND o.subject_id != o.object_entity_id" + _NOT_TOMBSTONED +
+                    "   AND o.subject_id != o.object_entity_id" + _NOT_TOMBSTONED + before_sql +
                     "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
                     " SELECT * FROM ranked WHERE rn <= ? ORDER BY ent, observed_at DESC",
-                    (namespace, *chunk, namespace, *chunk, limit),
+                    (namespace, *chunk, *before_args, namespace, *chunk, *before_args, limit),
                 ).fetchall()
                 for row in rows:
                     obs = common.row_to_observation(row)
