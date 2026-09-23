@@ -693,9 +693,11 @@
         "description": "The set of entities a question is about \u2014 several computers, or an\nanchor plus everything related to it (\"domain X and its contents\").\n\n`expand` names the containment/relational predicates to follow outward\nfrom the subjects (e.g. [\"member_of\"]); `depth` bounds the traversal.",
         "properties": {
           "subjects": {
+            "description": "anchors of the scope; bounded so one request cannot name a whole namespace (expansion is how a scope grows, D-046)",
             "items": {
               "$ref": "#/$defs/EntityRef"
             },
+            "maxItems": 500,
             "minItems": 1,
             "title": "Subjects",
             "type": "array"
@@ -713,6 +715,12 @@
             "minimum": 0,
             "title": "Depth",
             "type": "integer"
+          },
+          "follow_extracted": {
+            "default": false,
+            "description": "also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)",
+            "title": "Follow Extracted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -722,7 +730,7 @@
         "type": "object"
       }
     },
-    "description": "Two time axes (docs/architecture.md, D-024): `as_of` = what did we\nKNOW at T (knowledge time \u2014 later-recorded observations are hidden);\n`valid_at` = what was TRUE at T (fact time \u2014 only observations whose\nvalidity window covers T survive, and facts with no window at all are\nkept).",
+    "description": "Two time axes (docs/architecture.md, D-024/D-046): `as_of` = what did\nwe KNOW at T, measured on observation time (`observed_at <= as_of`:\nwhen the source asserted it), the closest proxy to knowledge time for\nbackfilled corpora, where `recorded_at` is load day; `recorded_at`\nremains the audit column. `valid_at` = what was TRUE at T (fact time \u2014\nonly observations whose validity window covers T survive, and facts\nwith no window at all are kept). A fact scheduled for after T but\nasserted before it is part of the `as_of` view; hiding it is\n`valid_at`'s job.",
     "properties": {
       "namespace": {
         "default": "default",
@@ -1144,9 +1152,11 @@
         "description": "The set of entities a question is about \u2014 several computers, or an\nanchor plus everything related to it (\"domain X and its contents\").\n\n`expand` names the containment/relational predicates to follow outward\nfrom the subjects (e.g. [\"member_of\"]); `depth` bounds the traversal.",
         "properties": {
           "subjects": {
+            "description": "anchors of the scope; bounded so one request cannot name a whole namespace (expansion is how a scope grows, D-046)",
             "items": {
               "$ref": "#/$defs/EntityRef"
             },
+            "maxItems": 500,
             "minItems": 1,
             "title": "Subjects",
             "type": "array"
@@ -1164,6 +1174,12 @@
             "minimum": 0,
             "title": "Depth",
             "type": "integer"
+          },
+          "follow_extracted": {
+            "default": false,
+            "description": "also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)",
+            "title": "Follow Extracted",
+            "type": "boolean"
           }
         },
         "required": [

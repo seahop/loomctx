@@ -309,13 +309,46 @@ def test_expand_handle_passes_entity_type_gate(tmp_path, monkeypatch):
         r = client.post("/v1/expand", json={"handle": edge, "budget": 500},
                         headers={"X-Loom-Key": reader})
         assert r.status_code == 200 and r.json()["items"] == []
-        # garbage handles are 400s, never 500s
+        # garbage handles are 400s, never 500s — including well-formed
+        # envelopes carrying bad field values (D-046)
         import base64
-        as_list = "h1_" + base64.urlsafe_b64encode(b"[1,2]").decode().rstrip("=")
-        for bad in ("nope", "h1_!!!", as_list):
+        import json as _json
+
+        def forged(payload) -> str:
+            raw = _json.dumps(payload).encode() if not isinstance(payload, bytes) else payload
+            return "h1_" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        good = {"n": "default", "s": ["host", "web-01"], "p": "logged_in_by"}
+        bad_payloads = [
+            b"[1,2]",
+            {**good, "a": "yesterday"},                    # as_of not ISO
+            {**good, "a": 12345},                          # as_of not a string
+            {**good, "v": "2026-13-45"},                   # valid_at not a date
+            {**good, "s": ["host", 7]},                    # key not a string
+            {**good, "s": ["", "web-01"]},                 # empty type
+            {**good, "s": "host:web-01"},                  # subject not a pair
+            {**good, "p": ["logged_in_by"]},               # predicate not a string
+            {**good, "n": 1},                              # namespace not a string
+            {**good, "x": "not-a-dict"},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": -1}},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": "0"}},
+            {**good, "x": {"artifact_id": "a", "model": "m", "seq": True}},
+            {**good, "x": {"artifact_id": None, "model": "m", "seq": 0}},
+            {"ns": "default", "subject": {"type": "host"}, "predicate": "p"},   # legacy, no key
+            {"ns": "default", "subject": ["host", "web-01"], "predicate": "p"},
+            {"ns": "default", "subject": {"type": "host", "key": "web-01"}, "predicate": "p",
+             "as_of": "never"},
+        ]
+        for bad in ["nope", "h1_!!!"] + [forged(b) for b in bad_payloads]:
             r = client.post("/v1/expand", json={"handle": bad, "budget": 500},
                             headers={"X-Loom-Key": reader})
             assert r.status_code == 400, bad
+        # a legacy handle with explicit nulls still decodes
+        legacy = forged({"ns": "default", "subject": {"type": "host", "key": "web-01"},
+                         "predicate": "logged_in_by", "as_of": None, "valid_at": None})
+        r = client.post("/v1/expand", json={"handle": legacy, "budget": 500},
+                        headers={"X-Loom-Key": reader})
+        assert r.status_code == 200 and r.json()["items"]
 
 
 def test_expand_clamps_budget_to_ceiling(tmp_path, monkeypatch):
@@ -389,6 +422,44 @@ def test_oversized_body_is_rejected_before_parsing(tmp_path, monkeypatch):
         body["text"] = "small"
         assert client.post("/v1/ingest", json=body).status_code == 202
 
+        # a chunked upload carries no Content-Length: the body is counted
+        # as it streams and aborted at the cap (D-046)
+        def chunks():
+            yield b'{"kind": "document", "source": "s", "observed_at": "2026-09-01T00:00:00Z", "text": "'
+            for _ in range(8):
+                yield b"x" * 1024
+            yield b'"}'
+        r = client.post("/v1/ingest", content=chunks(),
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 413 and r.json()["detail"] == "body too large"
+        r = client.post("/v1/ingest/batch", content=chunks(),
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 413
+        small = (b for b in [b'{"kind": "document", "source": "s", "observed_at": "2026-09-01T00:00:00Z", "text": "ok"}'])
+        r = client.post("/v1/ingest", content=small,
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 202
+
+
+def test_api_responses_carry_hygiene_headers(tmp_path, monkeypatch):
+    """D-046: /v1/* responses are not to be sniffed or cached; probes keep
+    their defaults."""
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "hyg.db"))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    with TestClient(app) as client:
+        for r in (client.post("/v1/ingest", json=claim().model_dump(mode="json")),
+                  client.get("/v1/entities/host/web-01/observations"),
+                  client.post("/v1/expand", json={"handle": "nope"}),
+                  client.post("/v1/ingest", json={"kind": "claim"})):
+            assert r.headers["x-content-type-options"] == "nosniff", r.url
+            assert r.headers["cache-control"] == "no-store", r.url
+        monkeypatch.setenv("LOOM_MAX_BODY_BYTES", "64")
+        r = client.post("/v1/ingest", json={"kind": "document", "text": "x" * 200, "source": "s",
+                                            "observed_at": OBSERVED.isoformat()})
+        assert r.status_code == 413 and r.headers["cache-control"] == "no-store"
+        assert "cache-control" not in client.get("/healthz").headers
+
 
 def test_artifact_read_requires_a_citing_fact_in_scope(tmp_path, monkeypatch):
     """H-A6: a document is in a type-scoped reader's world only once it
@@ -439,3 +510,85 @@ def test_scoped_search_still_fills_the_limit(tmp_path, monkeypatch):
                        headers={"X-Loom-Key": reader})
         matches = r.json()["matches"]
         assert len(matches) == 3 and {m["type"] for m in matches} == {"host"}
+
+
+def test_raw_observations_route_applies_the_object_side_gate(tmp_path, monkeypatch):
+    """D-021 on GET .../observations (D-046): a host-only reader asking for
+    web-01's raw rows gets no edge to a user or a domain; the unrestricted
+    key gets them all. as_of / valid_at apply like in an ask."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch, entity_types="host")
+    with client:
+        _seed_scoped_world(client, writer)
+        h = {"X-Loom-Key": writer}
+        client.post("/v1/ingest", json={
+            "kind": "claim", "subject": {"type": "host", "key": "web-01"}, "predicate": "runs_os",
+            "object": "fedora", "source": "seed", "observed_at": (OBSERVED - timedelta(days=30)).isoformat(),
+            "valid_from": (OBSERVED - timedelta(days=30)).isoformat(),
+            "valid_to": (OBSERVED - timedelta(days=10)).isoformat()}, headers=h)
+        everything = client.get("/v1/entities/host/web-01/observations", headers=h).json()
+        assert {o["predicate"] for o in everything["observations"]} == {
+            "logged_in_by", "member_of", "supports", "runs_os"}
+        scoped = client.get("/v1/entities/host/web-01/observations",
+                            headers={"X-Loom-Key": reader}).json()
+        assert {o["predicate"] for o in scoped["observations"]} == {"runs_os"}
+        assert scoped["count"] == 1
+        # as_of: nothing observed after T
+        r = client.get("/v1/entities/host/web-01/observations",
+                       params={"as_of": (OBSERVED - timedelta(days=1)).isoformat()}, headers=h).json()
+        assert [o["predicate"] for o in r["observations"]] == ["runs_os"]
+        # valid_at: the expired window is history
+        r = client.get("/v1/entities/host/web-01/observations",
+                       params={"valid_at": OBSERVED.isoformat()}, headers=h).json()
+        assert "runs_os" not in {o["predicate"] for o in r["observations"]}
+        assert client.get("/v1/entities/host/web-01/observations",
+                          params={"as_of": "not-a-date"}, headers=h).status_code == 422
+
+
+def test_startup_warns_about_open_auth_and_unsigned_handles(tmp_path, monkeypatch, caplog):
+    """H-H3/D-046: the open-dev-mode warning names both key sources, and an
+    unset LOOM_HANDLE_SECRET is called out next to it."""
+    import logging
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "warn.db"))
+    for var in ("LOOM_API_KEYS", "LOOM_AUTH_FILE", "LOOM_HANDLE_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    from loom.api.http import app
+    with caplog.at_level(logging.WARNING, logger="loom.auth"):
+        with TestClient(app):
+            pass
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "LOOM_API_KEYS" in text and "LOOM_AUTH_FILE" in text
+    assert "expansion handles are unsigned; set LOOM_HANDLE_SECRET" in text
+    caplog.clear()
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "s3cret")
+    with caplog.at_level(logging.WARNING, logger="loom.auth"):
+        with TestClient(app):
+            pass
+    assert "unsigned" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_schema_registration_needs_an_ungated_write_key(tmp_path, monkeypatch):
+    """D-046: any write key could rewrite a namespace's schema, `strict`
+    included. A gated shipper gets a 403 that says why; an ungated writer
+    registers; a read key is refused as before."""
+    import subprocess, sys
+    gated, path = _generate_key(tmp_path, id="shipper", perms="w",
+                                entity_types="host,user", sources="auth-log")
+    by_source, _ = _generate_key(tmp_path, id="by-source", perms="w", sources="auth-log")
+    admin = subprocess.run(
+        [sys.executable, "-m", "loom.keys", "--file", str(path), "generate",
+         "--id", "admin", "--namespace", "default", "--perms", "w"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "schema.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    reg = {"namespace": "default", "predicates": [{"name": "logged_in_by"}], "strict": True}
+    with TestClient(app) as client:
+        for key in (gated, by_source):
+            r = client.post("/v1/schemas", json=reg, headers={"X-Loom-Key": key})
+            assert r.status_code == 403 and "ungated" not in r.text and "restriction" in r.json()["detail"]
+        r = client.post("/v1/schemas", json=reg, headers={"X-Loom-Key": admin})
+        assert r.status_code == 200 and r.json()["strict"]
+        # the gated shipper can still write claims the (now strict) registry accepts
+        r = client.post("/v1/ingest", json=claim().model_dump(mode="json"), headers={"X-Loom-Key": gated})
+        assert r.status_code == 200

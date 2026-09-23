@@ -57,31 +57,67 @@ def test_document_ingest_stores_artifact(tmp_path, monkeypatch):
         assert client.get("/v1/artifacts/nope").status_code == 404
 
 
-def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
-    with make_client(tmp_path, monkeypatch) as client:
-        client.post("/v1/ingest", json=CLAIM)
-        r = client.post(
-            "/v1/ask",
-            json={
-                "subject": {"type": "host", "key": "web-01"},
-                "question": "who logged in?",
-                "budget": 400,
-            },
-        )
+def _ask_then_expand(client):
+    """Ingest enough logins that a small budget leaves a handle, expand it,
+    and return (pack, handle, expanded)."""
+    for i in range(12):
+        r = client.post("/v1/ingest", json={
+            **CLAIM, "object": {"type": "user", "key": f"user-{i:02d}"},
+            "observed_at": f"2026-09-01T{i:02d}:00:00Z"})
         assert r.status_code == 200
-        pack = r.json()
-        assert pack["items"] and "jdoe" in pack["items"][0]["text"]
-        assert pack["items"][0]["citations"][0]["source"] == "auth-log"
+    r = client.post("/v1/ask", json={
+        "subject": {"type": "host", "key": "web-01"},
+        "question": "who logged in?", "budget": 120})
+    assert r.status_code == 200
+    pack = r.json()
+    assert pack["items"] and "logged_in_by" in pack["items"][0]["text"]
+    assert pack["items"][0]["citations"][0]["source"] == "auth-log"
+    assert pack["handles"], "a 120-token budget over 12 logins must leave a handle"
+    handle = pack["handles"][0]
+    r = client.post("/v1/expand", json={"handle": handle["id"], "budget": 4000})
+    assert r.status_code == 200, r.text
+    expanded = r.json()
+    assert expanded["items"] and all("logged_in_by" in i["text"] for i in expanded["items"])
+    shown = {i["text"] for i in pack["items"]}
+    assert {i["text"] for i in expanded["items"]} - shown, "the expansion brings new facts"
+    return pack, handle, expanded
 
-        assert client.post(
-            "/v1/expand", json={"handle": "h1_garbage"}
-        ).status_code == 400
+
+def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOOM_HANDLE_SECRET", raising=False)
+    with make_client(tmp_path, monkeypatch) as client:
+        _, handle, _ = _ask_then_expand(client)
+        assert handle["id"].startswith("h1_")
+        assert client.post("/v1/expand", json={"handle": "h1_garbage"}).status_code == 400
+
+
+def test_ask_and_expand_roundtrip_signed(tmp_path, monkeypatch):
+    """With LOOM_HANDLE_SECRET set, issued handles are signed and expand;
+    an unsigned handle for the same query is refused (D-021)."""
+    from loom.context import encode_handle
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+    with make_client(tmp_path, monkeypatch) as client:
+        _, handle, _ = _ask_then_expand(client)
+        assert handle["id"].startswith("h2_")
+        monkeypatch.delenv("LOOM_HANDLE_SECRET")
+        from loom.contracts import EntityRef
+        unsigned = encode_handle("default", EntityRef(type="host", key="web-01"), "logged_in_by", None)
+        monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+        assert unsigned.startswith("h1_")
+        assert client.post("/v1/expand", json={"handle": unsigned, "budget": 400}).status_code == 400
+        tampered = handle["id"][:-3] + ("AAA" if not handle["id"].endswith("AAA") else "BBB")
+        assert client.post("/v1/expand", json={"handle": tampered, "budget": 400}).status_code == 400
 
 
 def test_invalid_envelope_rejected(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/ingest", json={"kind": "claim", "predicate": "x"})
         assert r.status_code == 422
+        # a forward-dated observation is a typo or a ranking poison pill (D-046)
+        r = client.post("/v1/ingest", json={**CLAIM, "observed_at": "2099-01-01T00:00:00Z"})
+        assert r.status_code == 422 and "observed_at is in the future" in r.text
+        r = client.post("/v1/ingest/batch", json=[{**CLAIM, "observed_at": "2099-01-01T00:00:00Z"}])
+        assert r.json()["results"][0]["status"] == "rejected"
 
 
 def test_entity_search(tmp_path, monkeypatch):
@@ -103,6 +139,11 @@ def test_answer_503_when_no_llm_configured(tmp_path, monkeypatch):
         r = client.post("/v1/answer", json={"question": "anything?"})
         assert r.status_code == 503
         assert "LOOM_LLM_MODEL" in r.json()["detail"]
+        # both a subject and a scope is ambiguous: 422, not a 500 (D-046)
+        r = client.post("/v1/answer", json={
+            "question": "anything?", "subject": {"type": "host", "key": "web-01"},
+            "scope": {"subjects": [{"type": "host", "key": "db-01"}]}})
+        assert r.status_code == 422 and "at most one" in r.text
 
 
 REGISTRY = {
@@ -186,6 +227,21 @@ def test_semantic_entity_search(tmp_path, monkeypatch):
         assert body["matches"][0]["entity"] == {"type": "host", "key": "db-01"}
         assert body["matches"][0]["evidence"]["citations"]
         assert "vector_backend" in client.get("/readyz").json()
+        # a failing embedder is a 503 with the short public form, not a 500
+        # echoing the provider's body (D-046)
+        from loom.context import _query_cache
+        from loom.llm import LLMError
+
+        class Down(HashingEmbedder):
+            def embed_query(self, text):
+                raise LLMError("provider returned 500: https://secret.example/v1 said no",
+                               public="LLM provider returned HTTP 500")
+
+        _query_cache.clear()
+        client.app.state.embedder = Down()
+        r = client.get("/v1/entities/semantic", params={"q": "anything new"})
+        assert r.status_code == 503
+        assert r.json()["detail"] == "LLM provider returned HTTP 500" and "secret.example" not in r.text
 
 
 def test_batch_ingest_array_and_ndjson(tmp_path, monkeypatch):

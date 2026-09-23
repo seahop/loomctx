@@ -107,22 +107,24 @@ def test_q7_budgets_always_respected(store):
                f"spent {spent} of {budget}")
 
 
+def test_q4b_valid_at_fact_time(store):
+    """D-024: 'which host HELD this ip on Aug 20' — exactly one answer."""
+    pack = build_pack(store, AskRequest(
+        namespace="netsec", subject=EntityRef(type="ip", key="10.0.4.7"),
+        question="which host was assigned this ip?", budget=800,
+        valid_at=datetime(2026, 8, 20, tzinfo=timezone.utc)))
+    assert pack.valid_at is not None and pack.items
+    text = " | ".join(i.text for i in pack.items)
+    _score("valid-at", "laptop-17" in text and "web-01" not in text,
+           "fact-time filter leaked the expired lease")
+
+
 def test_zz_print_scorecard(store):
+    """Defined last on purpose: pytest runs a module's tests in definition
+    order, and the scorecard must include every question above."""
+    assert any(n == "valid-at" for n, _, _ in SCORECARD)
     width = max(len(n) for n, _, _ in SCORECARD)
     print("\n--- retrieval quality scorecard ---")
     for name, passed, _ in SCORECARD:
         print(f"  {name:<{width}}  {'PASS' if passed else 'FAIL'}")
     print(f"  {len([1 for _, p, _ in SCORECARD if p])}/{len(SCORECARD)} passing")
-
-
-def test_q4b_valid_at_fact_time(store):
-    """D-024: 'which host HELD this ip on Aug 20' — exactly one answer."""
-    pack = _ask(store, "which host was assigned this ip?",
-                subject=EntityRef(type="ip", key="10.0.4.7"), budget=800)
-    pack = build_pack(store, AskRequest(
-        namespace="netsec", subject=EntityRef(type="ip", key="10.0.4.7"),
-        question="which host was assigned this ip?", budget=800,
-        valid_at=datetime(2026, 8, 20, tzinfo=timezone.utc)))
-    text = " | ".join(i.text for i in pack.items)
-    _score("valid-at", "laptop-17" in text and "web-01" not in text,
-           "fact-time filter leaked the expired lease")

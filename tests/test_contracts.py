@@ -67,3 +67,20 @@ def test_provenance_needs_a_reference():
     assert Provenance(artifact_id="abc").artifact_event_id is None
     with pytest.raises(ValidationError):
         Provenance(span_start=1)
+
+
+def test_observed_at_may_not_be_in_the_future():
+    """D-046: a forward-dated observation poisons recency ranking; 24 h of
+    clock skew is tolerated, a validity window may be scheduled ahead."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError, match="observed_at is in the future"):
+        ENVELOPE.validate_python({**CLAIM, "observed_at": (now + timedelta(days=2)).isoformat()})
+    with pytest.raises(ValidationError, match="observed_at is in the future"):
+        ENVELOPE.validate_python({"kind": "document", "text": "x", "source": "s",
+                                  "observed_at": "2099-01-01T00:00:00Z"})
+    skewed = ENVELOPE.validate_python({**CLAIM, "observed_at": (now + timedelta(hours=1)).isoformat()})
+    assert isinstance(skewed, ClaimIn)
+    scheduled = ENVELOPE.validate_python({**CLAIM, "valid_from": "2099-01-01T00:00:00Z",
+                                          "valid_to": "2099-02-01T00:00:00Z"})
+    assert scheduled.valid_from.year == 2099

@@ -246,9 +246,11 @@ def test_scores_stay_comparable_when_some_vectors_are_missing(tmp_path):
                                         budget=3000), embedder=embedder)
     scores = [i.score for i in pack.items if i.kind == "fact"]
     assert max(scores) <= 1.0 and min(scores) >= 0.0
-    # nothing scores above the semantic formula's ceiling for a neutral cosine
+    # the fresh, un-embedded login is scored with the set's median cosine
+    # (D-046), so it sits among its embedded peers rather than below all
     fresh = next(i for i in pack.items if "fresh" in i.text)
-    assert fresh.score <= 0.75
+    jdoe = next(i for i in pack.items if "jdoe" in i.text)   # embedded login
+    assert abs(fresh.score - jdoe.score) < 0.25
 
 
 def test_numpy_and_python_cosines_agree():
@@ -454,3 +456,155 @@ def test_a_failing_query_embedder_degrades_to_keyword_ranking(tmp_path):
     pack = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=800), embedder=Down())
     assert pack.items and all(i.kind != "doc_excerpt" for i in pack.items)
     assert any("logged_in_by" in i.text for i in pack.items)
+
+
+def test_as_of_is_bounded_in_the_gather_not_after_it(tmp_path, monkeypatch):
+    """D-046: as_of filtered in Python after a newest-first LIMIT, so an
+    entity with more than the gather limit of rows newer than T yielded an
+    empty time-travel pack. The bound is the store's now; the rows as of T
+    come back, and a fact scheduled for later but asserted before T is in
+    the view (that is valid_at's job to hide)."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "asof.db")
+    host = EntityRef(type="host", key="web-01")
+    t = _at(8, 1)
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="old_fact", object=f"o{i}", source="s",
+                 observed_at=_at(7, 1 + i)) for i in range(3)]
+        + [ClaimIn(subject=host, predicate="scheduled", object="maintenance", source="cal",
+                   observed_at=_at(7, 20), valid_from=_at(9, 1))]
+        + [ClaimIn(subject=host, predicate="new_fact", object=f"n{i}", source="s",
+                   observed_at=_at(8, 2 + i)) for i in range(8)])
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000, as_of=t))
+    text = " | ".join(i.text for i in pack.items)
+    assert text.count("old_fact") == 3 and "new_fact" not in text
+    assert "scheduled" in text  # known at T, even though it applies later
+    assert pack.truncated == []  # four rows as of T: the limit was not hit
+    # ...and hidden by valid_at, which is the fact-time axis
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000,
+                                        as_of=t, valid_at=t))
+    assert "scheduled" not in " | ".join(i.text for i in pack.items)
+    store.close()
+
+
+def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
+    """D-046: the `truncated` denominator counts rows as of T, not overall."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "asof-trunc.db")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="old", object=i, source="s", observed_at=_at(7, 1 + i))
+         for i in range(7)]
+        + [ClaimIn(subject=host, predicate="new", object=i, source="s", observed_at=_at(8, 1 + i))
+           for i in range(6)])
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000, as_of=_at(7, 31)))
+    assert [(x.gathered, x.total) for x in pack.truncated] == [(5, 7)]
+    assert all("old" in i.text for i in pack.items)
+    # the expanded handle inherits the bound
+    tiny = build_pack(store, AskRequest(subject=host, question="", budget=1, as_of=_at(7, 31)))
+    more = expand_pack(store, tiny.handles[0].id, budget=4000)
+    assert more.truncated and more.truncated[0].total == 7
+    assert all("old" in i.text for i in more.items)
+    store.close()
+
+
+def test_a_forward_dated_row_does_not_age_every_real_fact(tmp_path, monkeypatch):
+    """D-046: recency decays relative to the newest gathered fact; a row
+    observed in 2099 (restored from an export, or a typo'd year) made every
+    real fact decades old and flattened ranking. The reference is clamped
+    at now, so the real facts keep their relative recency."""
+    import loom.context as ctx
+    from loom.contracts import Observation
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))  # the newest real fact's instant
+    store, web01 = make_store(tmp_path)
+    before = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=3000))
+    far = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    store.restore_observation(Observation(
+        id="poison", namespace="default", subject=web01, predicate="note", object="from the future",
+        observed_at=far, recorded_at=far, source="typo", confidence=1.0))
+    after = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=3000))
+    score = {i.text: i.score for i in after.items if i.kind == "fact"}
+    for item in before.items:
+        if item.kind == "fact":
+            assert score[item.text] == item.score, item.text
+    facts = [i for i in after.items if i.kind == "fact"]
+    assert "logged_in_by" in facts[0].text
+
+
+def test_expanding_a_conflict_handle_with_its_estimate_yields_the_conflict(tmp_path):
+    """D-046: a conflict handle says est_tokens; expanding it with exactly
+    that budget used to return nothing (the half-budget share cap applied
+    to the expansion too, and dropped the very item the handle stood for)."""
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=25))
+    handle = next(h for h in pack.handles if h.kind == "conflict")
+    expanded = expand_pack(store, handle.id, budget=handle.est_tokens)
+    conflicts = [i for i in expanded.items if i.kind == "conflict"]
+    assert len(conflicts) == 1 and "runs_os" in conflicts[0].text
+    assert est_tokens(conflicts[0].text) == handle.est_tokens   # the estimate is the real cost
+    assert sum(est_tokens(i.text) for i in expanded.items) <= expanded.budget
+
+
+def test_no_vectors_at_all_means_keyword_ranking(tmp_path):
+    """D-046: an embedder serving with vectors for none of the gathered
+    rows (worker backlog, a different model) used to score everything with
+    a neutral cosine, which cut keyword weight to 0.15 and let recency
+    decide: on 'what os?' the newest login outranked the July OS fact.
+    With no cosines the keyword formula ranks."""
+    from loom.llm import HashingEmbedder
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=3000),
+                      embedder=HashingEmbedder())  # nothing embedded yet
+    facts = [i for i in pack.items if i.kind == "fact"]
+    assert all("runs_os" in f.text for f in facts[:2]), [f.text for f in facts[:3]]
+
+
+def test_unembedded_facts_take_the_median_cosine(tmp_path, monkeypatch):
+    """D-046: inside a partially embedded set, a fact with no vector gets
+    the set's median cosine, not 0."""
+    import loom.context as ctx
+    from loom.contracts import Observation
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))
+    host = EntityRef(type="host", key="h")
+
+    def obs(i):
+        return Observation(id=f"o{i}", namespace="d", subject=host, predicate="p", object=f"v{i}",
+                           observed_at=_at(9, 1), recorded_at=_at(9, 1), source="s", confidence=1.0)
+    rows = [obs(1), obs(2), obs(3), obs(4)]
+    pack = ctx._pack(namespace="d", subjects=[host], question="anything", as_of=None, budget=5000,
+                     observations=rows, cos_map={"o1": 0.9, "o2": 0.1, "o3": 0.5}, semantic=True)
+    score = {i.text.split()[2]: i.score for i in pack.items if i.kind == "fact"}
+    assert score["v4"] == score["v3"]                       # median of {0.9, 0.1, 0.5} is 0.5
+    assert score["v2"] < score["v4"] < score["v1"]
+
+
+def test_query_cache_eviction_is_safe_across_threads():
+    """D-046: eviction popped the first key of a dict other threads were
+    inserting into (asks run in the threadpool); the cache is now locked
+    and stays bounded under concurrent misses."""
+    from concurrent.futures import ThreadPoolExecutor
+    from loom.context import _QUERY_CACHE_SIZE, _query_cache, embed_query
+    from loom.llm import HashingEmbedder
+    _query_cache.clear()
+    e = HashingEmbedder()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: embed_query(e, f"question number {i}"), range(_QUERY_CACHE_SIZE * 3)))
+    assert len(_query_cache) <= _QUERY_CACHE_SIZE
+
+
+def test_attrs_cannot_buy_keyword_rank(tmp_path):
+    """D-046: the keyword scorer read attrs, which the reader never sees;
+    a fact whose attrs were stuffed with the question's words outranked
+    the fact that actually answers it."""
+    store, web01 = make_store(tmp_path)
+    store.record_claim(ClaimIn(
+        subject=web01, predicate="communicated_with", object=EntityRef(type="host", key="db-99"),
+        observed_at=_at(9, 3), source="netflow",
+        attrs={"note": "who logged in logged in logged in host login who logged"}))
+    pack = build_pack(store, AskRequest(subject=web01, question="who logged in to this host?", budget=3000))
+    facts = [i for i in pack.items if i.kind == "fact"]
+    assert "logged_in_by" in facts[0].text and "jdoe" in facts[0].text
+    stuffed = next(i for i in facts if "db-99" in i.text)
+    assert stuffed.score < facts[0].score

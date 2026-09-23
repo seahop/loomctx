@@ -6,9 +6,15 @@ attaches citations + expansion handles. Ranking is LLM-free: cosine
 similarity when vectors exist (D-018), keyword overlap otherwise, plus
 time-decayed recency and source confidence (D-024).
 
-Two time axes (architecture.md): `as_of` hides what was recorded after T
+Two time axes (architecture.md): `as_of` hides what was observed after T
 ("what did we know"); `valid_at` keeps only facts whose validity window
-covers T ("what was true"), leaving un-windowed facts alone.
+covers T ("what was true"), leaving un-windowed facts alone. `as_of` is
+observation time (`observed_at <= as_of`: when the source asserted the
+fact), the closest proxy to knowledge time for backfilled corpora, where
+`recorded_at` is load day and useless; `recorded_at` remains the audit
+column. The bound is applied in the store query (D-046), so an entity with
+thousands of newer rows still yields its rows as of then, and the
+`truncated` report counts as of then too.
 
 Expansion handles are stateless: a base64url-encoded JSON descriptor of the
 query they stand for. No server-side handle table to expire or migrate.
@@ -31,6 +37,7 @@ import hmac
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 from .config import max_budget
@@ -77,13 +84,17 @@ def embed_query(embedder, question: str) -> list[float]:
     re-ask the same question with different subjects/budgets constantly,
     and each miss is a provider round-trip (H-E1)."""
     key = (embedder.model, question)
-    vec = _query_cache.get(key)
+    with _query_cache_lock:
+        vec = _query_cache.get(key)
     if vec is None:
         one = getattr(embedder, "embed_query", None)
         vec = one(question) if callable(one) else embedder.embed([question])[0]
-        if len(_query_cache) >= _QUERY_CACHE_SIZE:
-            _query_cache.pop(next(iter(_query_cache)))
-        _query_cache[key] = vec
+        # asks run in the threadpool: eviction (pop the oldest) raced with
+        # concurrent inserts and iterated a dict that changed size (D-046)
+        with _query_cache_lock:
+            while len(_query_cache) >= _QUERY_CACHE_SIZE:
+                _query_cache.pop(next(iter(_query_cache)))
+            _query_cache[key] = vec
     return vec
 
 
@@ -98,6 +109,7 @@ def try_embed_query(embedder, question: str) -> list[float] | None:
 
 
 _query_cache: dict[tuple[str, str], list[float]] = {}
+_query_cache_lock = threading.Lock()
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
 
@@ -123,6 +135,10 @@ def _question_tokens(question: str) -> set[str]:
 
 def _aware(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _object_text(obs: Observation) -> str:
@@ -170,6 +186,12 @@ def _recency(obs: Observation, newest: datetime) -> float:
     return 1.0 / (1.0 + age_days / _RECENCY_HALF_LIFE_DAYS)
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def _score(
     obs: Observation,
     question_tokens: set[str],
@@ -177,16 +199,20 @@ def _score(
     cos: float | None = None,
     semantic: bool = False,
 ) -> float:
-    """`semantic` means an embedder is serving this pack: observations that
-    have no vector yet (freshly ingested) are scored on the SAME formula
-    with cos=0 (neutral), so the two populations stay comparable (H-C7)."""
+    """`semantic` means an embedder is serving this pack AND vectors exist
+    for the gathered set: observations that have no vector yet (freshly
+    ingested) are scored on the SAME formula with the set's median cosine
+    filled in by the caller, so the two populations stay comparable
+    (H-C7). With no vectors at all the keyword formula ranks instead: a
+    neutral cos=0 for everything silently shrank keyword weight to 0.15
+    and let recency decide (D-046)."""
     if not question_tokens and not semantic:
         score = 0.6 * recency + 0.4 * obs.confidence
     else:
-        haystack = _tokens(
-            f"{obs.predicate} {_object_text(obs)} {obs.subject.key} "
-            f"{json.dumps(obs.attrs)}"
-        )
+        # Only what the pack renders is scored: attrs never reach the
+        # reader, so a sender stuffing them with question words could buy
+        # rank for a fact whose visible text says nothing relevant (D-046).
+        haystack = _tokens(f"{obs.predicate} {_object_text(obs)} {obs.subject.key}")
         sim = (
             len(question_tokens & haystack) / len(question_tokens)
             if question_tokens else 0.0
@@ -208,7 +234,7 @@ def _find_conflicts(
     """Scalar facts about the subject where sources disagree on the value.
     Returns (predicate, item) pairs so a conflict that doesn't fit the
     budget can still be handed back as an expansion handle (H-C4)."""
-    horizon = as_of or datetime.now(timezone.utc)
+    horizon = as_of or _now()
     by_predicate: dict[str, dict[str, Observation]] = {}
     for obs in observations:
         if obs.subject != subject or isinstance(obs.object, EntityRef):
@@ -326,19 +352,60 @@ def decode_handle(handle: str) -> dict:
         raise ValueError("malformed handle payload")
     if {"n", "s", "p"} <= payload.keys():  # compact form
         s = payload["s"]
-        if not (isinstance(s, list) and len(s) == 2 and all(isinstance(x, str) for x in s)) \
-                or not isinstance(payload["n"], str):
+        if not (isinstance(s, list) and len(s) == 2):
             raise ValueError("malformed handle payload")
         out = {"ns": payload["n"], "subject": {"type": s[0], "key": s[1]}, "predicate": payload["p"]}
         for short, long in (("a", "as_of"), ("v", "valid_at"), ("x", "excerpt")):
             if short in payload:
                 out[long] = payload[short]
-        return out
-    if not {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
+    elif {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
+        out = dict(payload)
+    else:
         raise ValueError("malformed handle payload")
-    if not isinstance(payload["subject"], dict) or not isinstance(payload["ns"], str):
-        raise ValueError("malformed handle payload")
-    return payload
+    return _validated_handle(out)
+
+
+def _validated_handle(meta: dict) -> dict:
+    """Every field an unsigned handle carries is caller-typed: check types
+    and values here so a forged `as_of: "yesterday"` or `seq: -1` is a
+    400 at the door rather than a 500 inside expand_pack (D-046)."""
+    subject = meta.get("subject")
+    if not (isinstance(subject, dict) and isinstance(subject.get("type"), str)
+            and isinstance(subject.get("key"), str) and subject["type"] and subject["key"]):
+        raise ValueError("malformed handle payload: subject")
+    meta["subject"] = {"type": subject["type"], "key": subject["key"]}
+    if not isinstance(meta.get("ns"), str) or not meta["ns"]:
+        raise ValueError("malformed handle payload: namespace")
+    if not isinstance(meta.get("predicate"), str):
+        raise ValueError("malformed handle payload: predicate")
+    for axis in ("as_of", "valid_at"):
+        value = meta.get(axis)
+        if value is None:
+            meta.pop(axis, None)
+            continue
+        try:
+            if not isinstance(value, str):
+                raise TypeError
+            datetime.fromisoformat(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"malformed handle payload: {axis}") from exc
+    if "excerpt" in meta:
+        ex = meta["excerpt"]
+        seq = ex.get("seq", 0) if isinstance(ex, dict) else None
+        if not (isinstance(ex, dict) and isinstance(ex.get("artifact_id"), str)
+                and isinstance(ex.get("model"), str)
+                and isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0):
+            raise ValueError("malformed handle payload: excerpt")
+    return meta
+
+
+def covers_valid_at(obs: Observation, valid_at: datetime) -> bool:
+    """Fact time: was this TRUE at T? Facts that carry no validity window
+    are timeless as far as we know and are kept (D-024). Shared by packs,
+    scope expansion and the raw observations route (D-046)."""
+    valid_at = _aware(valid_at)
+    return ((obs.valid_from is None or _aware(obs.valid_from) <= valid_at)
+            and (obs.valid_to is None or _aware(obs.valid_to) > valid_at))
 
 
 # ------------------------------------------------------------ data scoping #
@@ -363,48 +430,67 @@ Truncations = dict[tuple[str, str], ScopeTruncation]
 
 
 def _gather(store: GraphStore, namespace: str, ref: EntityRef,
-            truncated: Truncations) -> list[Observation]:
+            truncated: Truncations, as_of: datetime | None = None) -> list[Observation]:
     """observations_for under the gather limit, recording when the limit
     cut something off: a hub with 2,740 edges yields its newest 1,000 and
     the pack must say so (D-038). The count is only taken when the limit
     was actually hit, so ordinary entities pay nothing."""
-    return _gather_many(store, namespace, [ref], truncated).get((ref.type, ref.key), [])
+    return _gather_many(store, namespace, [ref], truncated, as_of).get((ref.type, ref.key), [])
 
 
 def _gather_many(store: GraphStore, namespace: str, refs: list[EntityRef],
-                 truncated: Truncations) -> dict[tuple[str, str], list[Observation]]:
+                 truncated: Truncations, as_of: datetime | None = None,
+                 ) -> dict[tuple[str, str], list[Observation]]:
     """One round trip per chunk for a whole frontier or subject list, with
     the same truncation accounting (D-043: a 1,077-entity scope was 1,077
-    round trips — 5 s on Postgres across a network)."""
-    got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT)
+    round trips — 5 s on Postgres across a network). `as_of` is pushed
+    into the query as the observed_before bound (D-046): filtering after a
+    newest-first LIMIT gave an entity with more than the limit of newer
+    rows an empty time-travel pack, and a truncation total blind to T."""
+    as_of = _aware(as_of) if as_of is not None else None
+    got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT, observed_before=as_of)
     for ref in refs:
         obs = got.get((ref.type, ref.key), [])
         if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
-            total = store.count_observations(namespace, ref)
+            total = store.count_observations(namespace, ref, observed_before=as_of)
             if total > len(obs):
                 truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
     return got
 
 
 def resolve_scope(
-    store: GraphStore, namespace: str, scope: ScopeSpec
+    store: GraphStore, namespace: str, scope: ScopeSpec,
+    as_of: datetime | None = None, valid_at: datetime | None = None,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> list[EntityRef]:
     """Expand a scope into a concrete entity list: BFS from the subjects over
     the named containment predicates, bounded by depth. Deterministic order.
     With no `expand` named, the namespace's registry supplies its
     containment predicates (D-012 promise, D-024)."""
-    return resolve_scope_paths(store, namespace, scope)[0]
+    return resolve_scope_paths(store, namespace, scope, as_of=as_of, valid_at=valid_at,
+                               allowed_types=allowed_types)[0]
 
 
 def resolve_scope_paths(
     store: GraphStore, namespace: str, scope: ScopeSpec,
     truncated: Truncations | None = None,
+    as_of: datetime | None = None, valid_at: datetime | None = None,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
     reached entity only makes sense to a reader alongside that chain
     (D-035): "CVE-X is exploited" is noise until "web-01 runs nginx, CVE-X
-    affects nginx" sits next to it."""
+    affects nginx" sits next to it.
+
+    The walk follows only edges the pack itself would show (D-046): none
+    observed after `as_of`, none whose validity window misses `valid_at`,
+    none touching an entity outside `allowed_types` (D-021: a scoped reader
+    must not hop *through* a node they cannot see), and — unless the scope
+    says `follow_extracted` — none mined from a document (D-023): a
+    hostile document could otherwise rewrite the topology a scope walks
+    and pull its own entities into the pack.
+    """
     expand = set(scope.expand)
     if not expand and scope.depth > 0:
         from .registry import containment_predicates
@@ -418,11 +504,17 @@ def resolve_scope_paths(
         if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
-        gathered = _gather_many(store, namespace, frontier, truncated)
+        gathered = _gather_many(store, namespace, frontier, truncated, as_of)
         for ref in frontier:
             via = paths.get((ref.type, ref.key), [])
             for obs in gathered.get((ref.type, ref.key), []):
                 if obs.predicate not in expand:
+                    continue
+                if not _in_scope(obs, allowed_types):
+                    continue
+                if valid_at is not None and not covers_valid_at(obs, valid_at):
+                    continue
+                if not scope.follow_extracted and _is_extracted(obs):
                     continue
                 ends = [obs.subject]
                 if isinstance(obs.object, EntityRef):
@@ -446,7 +538,9 @@ def build_pack(
     paths: Paths = {}
     truncated: Truncations = {}
     if req.scope is not None:
-        subjects, paths = resolve_scope_paths(store, req.namespace, req.scope, truncated)
+        subjects, paths = resolve_scope_paths(
+            store, req.namespace, req.scope, truncated,
+            as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types)
     else:
         subjects = [req.subject]
     if allowed_types is not None:
@@ -455,7 +549,7 @@ def build_pack(
         subjects = [s for s in subjects if s.type in allowed_types]
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
-    gathered = _gather_many(store, req.namespace, subjects, truncated)
+    gathered = _gather_many(store, req.namespace, subjects, truncated, req.as_of)
     for ref in subjects:
         for obs in gathered.get((ref.type, ref.key), []):
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
@@ -537,7 +631,10 @@ def build_pack(
         budget=min(req.budget, max_budget()),
         observations=observations,
         cos_map=cos_map,
-        semantic=semantic,
+        # the serving embedder may have vectors for none of these rows (a
+        # different model than the worker's, a backlog): rank by keyword
+        # then, rather than by a neutral cosine that mutes the keywords
+        semantic=semantic and bool(cos_map),
         briefs=briefs,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
@@ -618,7 +715,7 @@ def expand_pack(
     truncated: Truncations = {}
     observations = [
         o
-        for o in _gather(store, meta["ns"], subject, truncated)
+        for o in _gather(store, meta["ns"], subject, truncated, as_of)
         if o.predicate == meta["predicate"] and _in_scope(o, allowed_types)
     ]
     return _pack(
@@ -630,6 +727,10 @@ def expand_pack(
         budget=budget,
         observations=observations,
         with_handles=False,
+        # The caller asked for this thread — a conflict handle in particular
+        # — so the whole budget is theirs to spend on it; the share cap is
+        # for packs that must also carry facts (D-046).
+        conflict_share=1.0,
         truncated=list(truncated.values()),
     )
 
@@ -687,27 +788,20 @@ def _pack(
     paths: dict[tuple[str, str], list[str]] | None = None,
     roots: list[EntityRef] | None = None,
     truncated: list[ScopeTruncation] | None = None,
+    conflict_share: float = _CONFLICT_BUDGET_SHARE,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
-        # knowledge time: nothing we learned after T
+        # observation time: nothing a source asserted after T. The gather
+        # already applied this bound in the store; this keeps _pack honest
+        # for any caller that hands it an unbounded list. A fact scheduled
+        # for later (valid_from > T) but known at T belongs in the view —
+        # hiding it is valid_at's job (D-046).
         as_of = _aware(as_of)
-        observations = [
-            o
-            for o in observations
-            if _aware(o.observed_at) <= as_of
-            and (o.valid_from is None or _aware(o.valid_from) <= as_of)
-        ]
+        observations = [o for o in observations if _aware(o.observed_at) <= as_of]
     if valid_at is not None:
-        # fact time: only what was TRUE at T. Facts that carry no validity
-        # window are timeless as far as we know and are kept (D-024).
         valid_at = _aware(valid_at)
-        observations = [
-            o
-            for o in observations
-            if (o.valid_from is None or _aware(o.valid_from) <= valid_at)
-            and (o.valid_to is None or _aware(o.valid_to) > valid_at)
-        ]
+        observations = [o for o in observations if covers_valid_at(o, valid_at)]
 
     question_tokens = _question_tokens(question) if question else set()
     # "Is web-01 exposed to anything exploited?" names the subject; without
@@ -719,11 +813,20 @@ def _pack(
         for r in roots:
             named |= _tokens(f"{r.type} {r.key}")
         question_tokens = question_tokens - named or question_tokens
+    # The recency reference is the newest gathered fact, clamped at now: one
+    # forward-dated claim (a typo'd year, a hostile sender) otherwise ages
+    # every real fact by decades and flattens ranking to confidence.
     newest = max((_aware(o.observed_at) for o in observations), default=None)
+    if newest is not None:
+        newest = min(newest, _now())
+    # An un-embedded fact inside a partially embedded set takes the set's
+    # median cosine: neutral relative to its peers, rather than a 0 that
+    # ranks every fresh fact below every stale one (D-046).
+    fill = _median(list(cos_map.values())) if semantic and cos_map else None
     scored = sorted(
         (
             (_score(obs, question_tokens, _recency(obs, newest),
-                    cos_map.get(obs.id), semantic), obs)
+                    cos_map.get(obs.id, fill), semantic), obs)
             for obs in observations
         ),
         key=lambda pair: pair[0],
@@ -747,7 +850,7 @@ def _pack(
     by_subject: dict[tuple[str, str], list[Observation]] = {}
     for obs in observations:
         by_subject.setdefault((obs.subject.type, obs.subject.key), []).append(obs)
-    conflict_remaining = int(budget * _CONFLICT_BUDGET_SHARE)
+    conflict_remaining = int(budget * conflict_share)
     for subj in subjects:
         mine = by_subject.get((subj.type, subj.key), [])
         for predicate, item in _find_conflicts(subj, mine, valid_at or as_of):
@@ -757,6 +860,9 @@ def _pack(
                 remaining -= cost
                 conflict_remaining -= cost
             elif with_handles:
+                # est_tokens is the exact cost the expansion charges (text
+                # plus item framing), so a caller passing it as the
+                # expansion budget is guaranteed the conflict (D-046).
                 handles.append(ExpansionHandle(
                     id=encode_handle(namespace, subj, predicate, as_of, valid_at),
                     hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "
@@ -821,10 +927,10 @@ def _pack(
         # was reached through, as `relation` items just before it; if the
         # chain doesn't fit, neither does the fact (D-035). Without the
         # chain an answering model correctly refuses to connect the dots.
-        chain = [
-            by_id[pid] for pid in (paths or {}).get((obs.subject.type, obs.subject.key), [])
-            if pid in by_id and pid not in included and pid != obs.id
-        ]
+        path = (paths or {}).get((obs.subject.type, obs.subject.key), [])
+        if any(pid not in by_id and pid not in included for pid in path):
+            continue  # an edge of the chain is not visible in this view: neither is the fact
+        chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
         chain_cost = sum(est_tokens(_render_fact(p)) for p in chain)
         if cost + chain_cost <= remaining:
             for edge in chain:

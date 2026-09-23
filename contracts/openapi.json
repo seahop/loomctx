@@ -102,7 +102,7 @@
         "type": "object"
       },
       "AskRequest": {
-        "description": "Two time axes (docs/architecture.md, D-024): `as_of` = what did we\nKNOW at T (knowledge time \u2014 later-recorded observations are hidden);\n`valid_at` = what was TRUE at T (fact time \u2014 only observations whose\nvalidity window covers T survive, and facts with no window at all are\nkept).",
+        "description": "Two time axes (docs/architecture.md, D-024/D-046): `as_of` = what did\nwe KNOW at T, measured on observation time (`observed_at <= as_of`:\nwhen the source asserted it), the closest proxy to knowledge time for\nbackfilled corpora, where `recorded_at` is load day; `recorded_at`\nremains the audit column. `valid_at` = what was TRUE at T (fact time \u2014\nonly observations whose validity window covers T survive, and facts\nwith no window at all are kept). A fact scheduled for after T but\nasserted before it is part of the `as_of` view; hiding it is\n`valid_at`'s job.",
         "properties": {
           "as_of": {
             "anyOf": [
@@ -929,10 +929,18 @@
             "title": "Expand",
             "type": "array"
           },
+          "follow_extracted": {
+            "default": false,
+            "description": "also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)",
+            "title": "Follow Extracted",
+            "type": "boolean"
+          },
           "subjects": {
+            "description": "anchors of the scope; bounded so one request cannot name a whole namespace (expansion is how a scope grows, D-046)",
             "items": {
               "$ref": "#/components/schemas/EntityRef"
             },
+            "maxItems": 500,
             "minItems": 1,
             "title": "Subjects",
             "type": "array"
@@ -1425,6 +1433,7 @@
     },
     "/v1/entities/{etype}/{key}/observations": {
       "get": {
+        "description": "Raw observations touching an entity (audit/debug). The rows pass the\nsame gates as a pack's contents (D-021): a type-scoped reader never\nsees an edge to an entity outside their world here either. `as_of`\nand `valid_at` apply the same two time axes as /v1/ask (D-046).",
         "operationId": "entity_observations_v1_entities__etype___key__observations_get",
         "parameters": [
           {
@@ -1471,6 +1480,44 @@
                 }
               ],
               "title": "Namespace"
+            }
+          },
+          {
+            "description": "observation-time bound (observed_at <= as_of), as in an ask",
+            "in": "query",
+            "name": "as_of",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "observation-time bound (observed_at <= as_of), as in an ask",
+              "title": "As Of"
+            }
+          },
+          {
+            "description": "fact-time filter: only observations whose validity window covers T",
+            "in": "query",
+            "name": "valid_at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "fact-time filter: only observations whose validity window covers T",
+              "title": "Valid At"
             }
           },
           {
@@ -1675,7 +1722,7 @@
         "summary": "Get Schema"
       },
       "post": {
-        "description": "Register (additively) the entity types and predicates of a namespace \u2014\nthe domain knowledge that keeps the core domain-agnostic (D-024).\nRequires write access to the namespace. Returns the effective registry.",
+        "description": "Register (additively) the entity types and predicates of a namespace \u2014\nthe domain knowledge that keeps the core domain-agnostic (D-024).\nRequires an *ungated* write key: a shipper pinned to two entity types\nand one source must not be able to flip the namespace's `strict` or\nwiden its predicates (D-046). Returns the effective registry.",
         "operationId": "register_schema_v1_schemas_post",
         "requestBody": {
           "content": {

@@ -7,9 +7,11 @@ Prometheus (/metrics) with a store-probing readiness check (/readyz).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
@@ -20,7 +22,14 @@ from starlette.concurrency import run_in_threadpool
 from .. import metrics
 from ..answer import UnresolvedQuestionError, build_answer
 from ..auth import AuthConfig, Grant, extract_key
-from ..context import build_pack, decode_handle, expand_pack, semantic_search
+from ..context import (
+    _in_scope,
+    build_pack,
+    covers_valid_at,
+    decode_handle,
+    expand_pack,
+    semantic_search,
+)
 from ..contracts import (
     AnswerRequest,
     AnswerResponse,
@@ -54,7 +63,11 @@ async def _lifespan(app: FastAPI):
     app.state.auth = AuthConfig.from_env()
     if not app.state.auth.enabled:
         logging.getLogger("loom.auth").warning(
-            "LOOM_API_KEYS unset — auth is DISABLED (open dev mode)"
+            "LOOM_API_KEYS and LOOM_AUTH_FILE unset — auth is DISABLED (open dev mode)"
+        )
+    if not os.environ.get("LOOM_HANDLE_SECRET", "").strip():
+        logging.getLogger("loom.auth").warning(
+            "expansion handles are unsigned; set LOOM_HANDLE_SECRET (D-021)"
         )
     yield
     app.state.store.close()
@@ -71,15 +84,85 @@ def _max_body_bytes() -> int:
         return 2 * 1024 * 1024
 
 
-@app.middleware("http")
-async def _cap_request_size(request: Request, call_next):
-    """The default (no-gateway) shape had no body limit at all (H-A14):
-    reject oversized uploads before parsing, like the gateway does."""
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > _max_body_bytes():
-        metrics.REJECTED.labels(reason="too_large").inc()
-        return JSONResponse(status_code=413, content={"detail": "body too large"})
-    return await call_next(request)
+class _BodyTooLarge(HTTPException):
+    """Raised from the counted `receive` once a chunked body passes the cap.
+    An HTTPException on purpose: FastAPI's body reader converts any other
+    exception into a 400 "error parsing the body"; this one passes through
+    to the same 413 the fast path sends."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="body too large")
+
+
+async def _send_json(send, status: int, content: dict) -> None:
+    body = json.dumps(content).encode()
+    await send({"type": "http.response.start", "status": status, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _RequestSizeCap:
+    """Pure ASGI. The default (no-gateway) shape had no body limit at all
+    (H-A14): reject oversized uploads before parsing, like the gateway
+    does. Content-Length is the fast path; a chunked upload carries none,
+    so `receive` is counted and the request aborts with 413 the moment the
+    cap is passed (D-046) — no buffering of the whole body first."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = _max_body_bytes()
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > cap:
+            metrics.REJECTED.labels(reason="too_large").inc()
+            return await _send_json(send, 413, {"detail": "body too large"})
+        seen = 0
+
+        async def counted_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > cap:
+                    metrics.REJECTED.labels(reason="too_large").inc()
+                    raise _BodyTooLarge()
+            return message
+
+        await self.app(scope, counted_receive, send)
+
+
+class _ResponseHygiene:
+    """Pure ASGI. API responses are JSON meant for programs, never pages:
+    no MIME sniffing and no caching by any intermediary (a pack is keyed
+    to a bearer's world, D-046)."""
+
+    _HEADERS = ((b"x-content-type-options", b"nosniff"), (b"cache-control", b"no-store"))
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+            return await self.app(scope, receive, send)
+
+        async def hygienic_send(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                present = {k.lower() for k, _ in headers}
+                headers += [(k, v) for k, v in self._HEADERS if k not in present]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, hygienic_send)
+
+
+app.add_middleware(_RequestSizeCap)
+app.add_middleware(_ResponseHygiene)   # outermost: covers the cap's own 413 too
 
 
 def _authorize(request: Request, namespace: str, action: str) -> Grant | None:
@@ -294,13 +377,24 @@ def entity_observations(
     limit: Annotated[int, Query(gt=0, le=1000)] = 100,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
     namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
+    as_of: Annotated[datetime | None, Query(
+        description="observation-time bound (observed_at <= as_of), as in an ask")] = None,
+    valid_at: Annotated[datetime | None, Query(
+        description="fact-time filter: only observations whose validity window covers T")] = None,
 ) -> dict:
+    """Raw observations touching an entity (audit/debug). The rows pass the
+    same gates as a pack's contents (D-021): a type-scoped reader never
+    sees an edge to an entity outside their world here either. `as_of`
+    and `valid_at` apply the same two time axes as /v1/ask (D-046)."""
     namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     _gate_entity_type(grant, etype)
-    observations = request.app.state.store.observations_for(
-        namespace, EntityRef(type=etype, key=key), limit=limit
-    )
+    allowed = _allowed_types(grant)
+    observations = [
+        o for o in request.app.state.store.observations_for(
+            namespace, EntityRef(type=etype, key=key), limit=limit, observed_before=as_of)
+        if _in_scope(o, allowed) and (valid_at is None or covers_valid_at(o, valid_at))
+    ]
     return {
         "entity": {"type": etype, "key": key},
         "namespace": namespace,
@@ -345,8 +439,18 @@ def _allowed_types(grant: Grant | None) -> tuple[str, ...] | None:
 def register_schema(reg: SchemaRegistration, request: Request) -> SchemaRegistration:
     """Register (additively) the entity types and predicates of a namespace —
     the domain knowledge that keeps the core domain-agnostic (D-024).
-    Requires write access to the namespace. Returns the effective registry."""
-    _authorize(request, reg.namespace, "w")
+    Requires an *ungated* write key: a shipper pinned to two entity types
+    and one source must not be able to flip the namespace's `strict` or
+    widen its predicates (D-046). Returns the effective registry."""
+    grant = _authorize(request, reg.namespace, "w")
+    if grant is not None and (grant.entity_types is not None or grant.sources is not None):
+        metrics.REJECTED.labels(reason="scope").inc()
+        raise HTTPException(
+            status_code=403,
+            detail=f"key {grant.id!r} is gated by entity_types/sources; registering "
+            "a namespace schema (including 'strict') needs a write key with no "
+            "entity-type or source restriction",
+        )
     merged = request.app.state.store.put_schema(reg)
     request.app.state.registry.invalidate(reg.namespace)
     return merged
@@ -437,9 +541,15 @@ def semantic_entities(
         raise HTTPException(
             status_code=503,
             detail="no embedder configured: set LOOM_EMBED_* on the engine (D-018)")
-    with metrics.PACK_SECONDS.time():
-        return semantic_search(request.app.state.store, namespace, embedder, q,
-                               limit=limit, allowed_types=_allowed_types(grant))
+    try:
+        with metrics.PACK_SECONDS.time():
+            return semantic_search(request.app.state.store, namespace, embedder, q,
+                                   limit=limit, allowed_types=_allowed_types(grant))
+    except LLMError as exc:
+        # Unlike an ask, a search by meaning has no keyword fallback: the
+        # embedder is the feature. Provider detail stays in the log (D-021).
+        logging.getLogger("loom.context").warning("query embedding failed: %s", exc)
+        raise HTTPException(status_code=503, detail=exc.public)
 
 
 @app.post("/v1/answer", response_model=AnswerResponse)
