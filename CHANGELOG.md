@@ -3,7 +3,56 @@
 Loom is pre-1.0: contracts are stable within a minor version and every
 change to them is recorded in `docs/decisions.md` (D-numbers below).
 
-## Unreleased
+## Unreleased — the 2026-09-23 review batch (D-046…D-049)
+
+Six parallel review passes found ~60 verified issues; all landed except the
+design follow-ups listed in `docs/hardening.md` §R.
+
+### Read path (D-046)
+- `as_of` is the observation-time axis, applied in the store query (busy
+  entities no longer yield empty time-travel packs; `truncated` counts as of T)
+- Ingest rejects `observed_at` more than 24 h in the future; recency clamps to now
+- Data gates apply to scope hops; extracted edges do not steer expansion
+  unless `ScopeSpec.follow_extracted` (additive contract field); `subjects` ≤ 500
+- Raw observations route gated and time-filtered like a pack
+- Conflict handles expand at exactly `est_tokens`; forged handle fields are 400s
+- Chunked-upload body cap, `nosniff`/`no-store`, ungated key required for
+  `POST /v1/schemas`, answer prompt delimits items as data
+
+### Store (D-049)
+- Reversible merges: `merge_log` + `unmerge` (schema v5); claims for a
+  merged-away ref land on the canonical entity
+- Blob-offload wrapper delegates the batch paths; shards no longer inherit
+  `LOOM_DB_READ`; CLIs open the env-configured store
+- Export carries schema registrations and adjudication declines; vector index
+  per model; purge cleans ANN rows; pgvector minority-namespace fallback;
+  `norm_key` keeps IP/version separators
+
+### Enrichment, LLM, MCP (D-047)
+- Anthropic client works with thinking-enabled models; no redirects with the
+  key; Retry-After to 60 s with jitter; usage logged per job
+- Extraction per window with lease renewal; random document delimiter;
+  sanitized `doc:` labels; registry validation on every extracted claim
+- Resolution: registered-vs-registered key collisions adjudicated, numeric
+  keys never spelling-merged
+- MCP: scoped keys see only their namespaces; `ToolError` everywhere; compact
+  citations with `cite` tokens accepted by `expand`/`get_observations`
+- Eval: store-derived lease truth, non-KEV CVEs penalized; connector
+  validates downloads before caching
+
+### Supply chain, CI, deployment (D-048)
+- `requirements.lock` consumed by the Dockerfile; every base image pinned by
+  digest; Dependabot; SHA-pinned actions; `govulncheck`; Trivy gate; SBOM +
+  provenance; build once, promote the tested image
+- Registry validation on the NATS and Kafka paths; sanitized dead-letter
+  headers; bounded dead-letter stream; Kafka SASL/TLS
+- k8s: securityContext, NetworkPolicies, PDBs, bounded JetStream, no SA token
+- Compose binds to 127.0.0.1 by default; documented env vars now pass through
+
+### Docs and demo
+- Demo script made honest (night-before prep, pinned judge, frozen volume,
+  rendered fallback transcripts); numbers reconciled; README gains
+  "How it differs" and "Limitations"; talk date is mid-October
 
 ## v0.1.0 — 2026-09-09
 

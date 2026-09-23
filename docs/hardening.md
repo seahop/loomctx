@@ -1,4 +1,4 @@
-# Hardening roadmap (review of 2026-09-08)
+# Hardening roadmap (reviews of 2026-09-08 and 2026-09-23)
 
 Findings from a full-codebase review after phase 4 / D-020. Every item here
 was verified against the code at commit `a2aa1a5`; nothing speculative.
@@ -128,3 +128,94 @@ demo, **P2** should, **P3** after.
 | H-I5 | P2 | ✅ | Chunker: empty, whitespace, 5000-char unbroken line, multibyte, offset round-trip. Excerpts with a chunk/query model mismatch. *Done: model mismatch, blank artifacts. Open: chunker edge cases.* |
 | H-I6 | P2 | ✅ | Move D-014/D-016/D-018 store coverage into the backend-parametrized suite (D-011 rule). |
 | H-I7 | P3 | ✅ | Consumer batch where the store raises: no crash loop, no duplicate documents. Gateway: random unauthenticated keys don't create buckets. SDK smoke tests. *Done: gateway bucket test, keys-file tolerance on both sides, engine body cap. Open: consumer failure-path test, SDK tests.* |
+
+
+---
+
+# Review of 2026-09-23
+
+Second full review, six parallel passes (read path, store, enrichment/MCP,
+security/deploy, docs/demo, and the field). Every item was verified
+against the code at `293bd31` before it was listed; all landed on
+2026-09-23 (D-046…D-049) except the design follow-ups in section R,
+which change measured numbers and wait for the frozen-volume rehearsal.
+
+## J. Demo-day
+
+| ID | Status | Item |
+| --- | --- | --- |
+| J-1 | ✅ | `LOOM_MCP_NAMESPACE` (and `LOOM_ALIAS_TYPES`, the agent-eval and worker dials) documented but never passed through compose; `mcp` profile had no embedder. |
+| J-2 | ✅ | Home-directory paths and the pre-rename project name in `demo/act3-claude-code-after-aliases.json`, `deploy/README.md`, `vector.yaml`, `fluent-bit.conf`. |
+| J-3 | ✅ | The after-alias Act 3 rehearsal shows Claude Code grepping a spilled `ask_scope` result (7 of 26 calls); the demo prompt now asks for budget 1500 on scope asks — needs a rehearsal to confirm. |
+| J-4 | ✅ | "Before the talk: 5 minutes" was ~35 min plus a judge-model dependency; script now says night-before, pinned judge, frozen volume, `--offline` reload; Act 2 numbers marked re-verify. |
+| J-5 | ✅ | Native Anthropic client failed on every current model (thinking block first). |
+| J-6 | ✅ | Seed 580/590/591, handles 69/77 (both wrong: 67 at budget 400), models 14/18/20 and 168/216 runs, tests "~215": one value each. |
+| J-7 | ✅ | Act 3 narration still described the pre-D-042 seam as unplanted; fallback transcripts unreadable projected → `demo/act3-*.md`. |
+
+## K. Read path (D-046)
+
+| ID | Status | Item |
+| --- | --- | --- |
+| K-1 | ✅ | `as_of` filtered on `observed_at` after a newest-first LIMIT 1000 gather (empty time-travel packs on busy entities; `truncated` as_of-blind); docs said `recorded_at`. Axis settled as observation time, bound pushed into SQL. |
+| K-2 | ✅ | One forward-dated claim collapsed recency for the whole entity and never left the gather window. Reference clamped to now; ingest rejects `observed_at` > now + 24 h. |
+| K-3 | ✅ | `GET /v1/entities/{t}/{k}/observations` skipped the object-side gate MCP applies. |
+| K-4 | ✅ | Scope BFS ignored `as_of`/`valid_at`/`entity_types` on edges and followed extracted edges at full weight (a document could rewrite topology). `ScopeSpec.follow_extracted`, default off. |
+| K-5 | ✅ | Expanding a conflict handle at `budget == est_tokens` silently dropped the conflict. |
+| K-6 | ✅ | `/v1/answer` with both `subject` and `scope` → 500; forged handle field values → 500; `/v1/entities/semantic` → 500 on embedder failure. |
+| K-7 | ✅ | Embedder serving with no stored vectors demoted every fact to cos 0 (worse than keyword-only, silently). |
+| K-8 | ✅ | Keyword scorer read invisible `attrs` (rank stuffing); answer prompt had no delimiting (newline forged a cited line). |
+| K-9 | ✅ | Chunked upload bypassed the body cap; any write key could flip a namespace to `strict`; no `nosniff`/`no-store`; query-vector cache eviction raced. |
+| K-10 | ✅ | `ScopeSpec.subjects` unbounded (500 now); scorecard printout omitted `valid_at`; HTTP roundtrip test never expanded a real handle. |
+
+## L. Store (D-049)
+
+| ID | Status | Item |
+| --- | --- | --- |
+| L-1 | 🔨 | `BlobOffloadStore` delegated only abstract methods: with `LOOM_BLOB_THRESHOLD` set, `record_claims` fell back to one tx per claim and `observations_for_many` to the D-043 per-ref regression. |
+| L-2 | 🔨 | `LOOM_DB_READ` applied to every Postgres shard — a tenant's reads went to the default cluster's replica. |
+| L-3 | 🔨 | `lifecycle` (and the other CLIs) built the store from `--db`, bypassing sharding and blob offload; the D-032 tenant-move recipe did not work as written. |
+| L-4 | 🔨 | A claim naming a merged-away ref resurrected the node (exact-key upsert); the worker then re-merged and dropped both dossiers each cycle. |
+| L-5 | 🔨 | Merges were not reversible despite D-019: no `unmerge`, repointed rows unlogged, `object_json` overwritten. `merge_log` + `unmerge`, schema v5. |
+| L-6 | 🔨 | `ensure_vector_index` matched every model's tables; purge left stale ANN rows; Postgres HNSW namespace post-filter returned short/empty results. |
+| L-7 | 🔨 | Export omitted schema registrations and adjudication declines (a restore turned `strict` namespaces permissive). |
+| L-8 | 🔨 | Older image could write the schema version *down* and re-run DDL under a rolling update; `wipe()` missed declines; `add_alias` no-op'd on a merged target; `search_entities` defeated its index; `subjects_citing` unbounded; vanished blob served as the body; lease release ignored ownership; `norm_key` stripped the dots out of IP addresses. |
+
+## M. Enrichment, LLM, MCP, eval, connector (D-047)
+
+| ID | Status | Item |
+| --- | --- | --- |
+| M-1 | ✅ | Anthropic client `content[0]["text"]`; OpenAI `content: null` escaped the retry path; `finish_reason` never checked; redirects followed with the key; Retry-After clamped to 8 s. |
+| M-2 | ✅ | Tier-2 auto-merged distinct IPs/versions; tier-1 folded `user:admin` into `group:admin` without adjudication. |
+| M-3 | ✅ | Extracted claims skipped registered `object_types` in non-strict namespaces. |
+| M-4 | ✅ | `</document>` delimiter injection; sender-controlled filename as the `source` label. |
+| M-5 | ✅ | Extraction lease never renewed (double extraction); all-or-nothing windows; one garbled window dead-lettered the artifact with zero claims. |
+| M-6 | ✅ | `list_namespaces` and the unknown-namespace error leaked other tenants' namespaces to a scoped key; mixed `{"error"}` / `ToolError` conventions; 32-hex ids in every citation. |
+| M-7 | ✅ | agent_eval: lease truth hard-coded, first-sentence regex split on the IP, exposure metric never penalized non-KEV CVEs. |
+| M-8 | ✅ | Connector: truncated download cached forever via 304; no retry on 429/5xx. |
+| M-9 | ✅ | Chunks ~800 chars not ~400, no overlap; `object_entity_type: null` → type `"None"`; alias pass aborted mid-tick; tick summed a FAILED job with merges to zero; per-call `namespace_summary` scan. |
+
+## N. Security, CI, deployment (D-048)
+
+| ID | Status | Item |
+| --- | --- | --- |
+| N-1 | ✅ | Consumer and Kafka paths never ran registry validation. |
+| N-2 | ✅ | No lockfile (D-045's boto3 drift); base images unpinned; gateway on EOL Alpine 3.20; Go SDK on unsupported Go; `x/crypto` 0.18 indirect. |
+| N-3 | ✅ | Published image rebuilt in a separate job from the tested one; default `GITHUB_TOKEN` permissions; mutable action tags; no Dependabot / Trivy / govulncheck / SBOM. |
+| N-4 | ✅ | k8s: no NetworkPolicy, PDB, container securityContext or `automountServiceAccountToken: false`; JetStream unbounded on a 1 Gi PVC in `scale`; NATS monitor port on the client Service; readiness `failureThreshold` 1; vulns-refresh Secret optional. |
+| N-5 | ✅ | Gateway `http.Server` without read/write/idle timeouts; Kafka consumer without SASL/TLS; dead-letter headers carrying row values; keys file written non-atomically at 0644 in CWD; engine on 0.0.0.0 in open mode by default. |
+| N-6 | ✅ | Stale claims: compose said the MCP http transport had no auth; H-A1 fallback, H-F6 gateway mount, H-F8 lockfile marked ✅ but absent; SECURITY.md "until a tagged release"; deploy/README "while private". |
+
+## R. Design follow-ups (deferred: each moves measured numbers; do after the frozen-volume rehearsal, measure with the harness)
+
+| ID | Status | Item |
+| --- | --- | --- |
+| R-1 | ⬜ | Budget honesty: the budget charges item text only; citations (~25 tokens each) and up to 32 handles ride free, so an "800-token" pack is ~2,500 on the wire for an MCP agent. Charge the rendered form; one real-tokenizer test. |
+| R-2 | ⬜ | Lexical leg: FTS5 / `tsvector` BM25 fused with cosine by reciprocal rank (every serious peer has it); tokenize predicate names so "operating system" matches `runs_os`. |
+| R-3 | ⬜ | Packing: value-per-token with an MMR diversity term instead of greedy trim by score; cosine normalized within the gathered set (real embedders compress to ~0.27–0.40, so recency dominates). |
+| R-4 | ⬜ | Entity-valued conflicts never surface (`isinstance(object, EntityRef): continue`); `str()` value normalization false-conflicts `True`/`"true"`. |
+| R-5 | ⬜ | Pagination past the gather cap: a `before:` cursor in the handle payload so the 1,740 truncated kernel CVEs are reachable. |
+| R-6 | ⬜ | Scorecard: `test_quality.py` is eight booleans with no baseline. A small labeled set over the vulns corpus, MRR/nDCG, a recency-only and a full-context baseline, abstention and as-of cases, an NLI/LLM-judge citation *support* check, cost columns. |
+| R-7 | ⬜ | MCP 2026-07-28: `outputSchema` from the contracts, `readOnlyHint` annotations, handle TTL in the `expand` description, a `format: concise|detailed` knob, consider merging `ask`/`ask_scope`. |
+| R-8 | ⬜ | Explicit, cited supersession edge (recorded, never inferred); PROV-O JSON-LD export; STIX 2.1 / OCSF predicate mapping in the registry; CISA Vulnrichment as a third vuln source. |
+| R-9 | ⬜ | Worker tick scans (`observations_without_embeddings`, `dossier_candidates`) walk from the beginning each tick — high-water marks; `observations_for_many` has no per-entity pre-limit (a hub materializes every row). |
+| R-10 | ⬜ | Engine-side per-grant rate limiting (a valid reader can burn LLM spend on `/v1/answer` without bound in the default shape). |

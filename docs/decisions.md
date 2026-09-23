@@ -1468,6 +1468,187 @@ released in between. The gate exercised nothing in boto3 beyond import
 is the case for a lock file, added to the roadmap: a rebuild should be the
 same image, not a fresh resolution.
 
+## D-046 · Read path after the 2026-09-23 review: one `as_of` axis, gates on hops, honest handles (2026-09-23)
+
+A second full review (six parallel passes: read path, store, enrichment,
+security, docs, and the field) found the read path keeping most of its
+promises and breaking a few quietly. The fixes, and the semantics they
+settle:
+
+- **`as_of` is the observation-time axis.** `as_of = T` means
+  `observed_at <= T` — the moment the source asserted the fact. The docs
+  called it knowledge time and implied `recorded_at`; for a backfilled
+  corpus (the KEV/NVD load) `recorded_at` is load day for every row, so a
+  `recorded_at` filter would make time travel useless on exactly the data
+  the demo runs on. `recorded_at` stays the audit column. The bound now
+  travels into the store query (`observed_before` on
+  `observations_for`, `observations_for_many`, `count_observations`), so
+  an entity with more than the gather cap of *newer* rows still yields its
+  rows as of T, and the `truncated` denominator counts as of T. The old
+  `valid_from <= as_of` clause is gone: a fact asserted before T but
+  scheduled for later is part of what we knew at T; hiding it is
+  `valid_at`'s job.
+- **Forward-dated observations are refused at ingest.** `ClaimIn` and
+  `DocumentIn` reject `observed_at` more than 24 h ahead of the engine
+  clock (422, every door — the gateway's schema check is shape-only, the
+  consumers parse the same models). One `observed_at = 2099` row used to
+  sit permanently in the gather window and set the recency reference for
+  the whole entity, aging every real fact to ~0. Recency's reference is
+  now `min(newest observed_at, now)` as well, so a stray future row
+  restored from an export cannot do it either. `valid_from`/`valid_to`
+  stay unbounded — leases are scheduled.
+- **The data gate applies to hops, not only to reached subjects.** Scope
+  expansion follows only edges the pack would show: none observed after
+  `as_of`, none outside `valid_at`, none touching an entity outside the
+  key's `entity_types` (D-021 was applied to the gathered facts but the
+  BFS walked through invisible edges, and a reached fact then shipped
+  with no visible chain), and — new contract field, additive —
+  no document-extracted edge unless `ScopeSpec.follow_extracted` is set.
+  D-023 made extracted claims second-class witnesses in ranking and
+  conflicts, but an extracted `runs_software product:evil` edge steered
+  the two-hop walk at full weight, so one hostile document could pull an
+  arbitrary product and all of its CVEs into web-01's exposure pack. A
+  reached fact whose chain has an invisible edge is dropped, keeping the
+  D-035 rule "if the chain doesn't ship, neither does the fact".
+  `ScopeSpec.subjects` is capped at 500.
+- **The raw observations route is gated like a pack.** `GET
+  /v1/entities/{type}/{key}/observations` applied the subject gate only;
+  a host-scoped key read `logged_in_by user:*` rows. It now filters with
+  the same object-side rule as packs (MCP `get_observations` already did)
+  and accepts `as_of` / `valid_at`.
+- **Handles.** Every field of a decoded handle is type- and value-checked
+  (a forged `as_of: "garbage"` was a 500). Expanding a `conflict` handle
+  spends the whole budget on the conflict (the 50 % share cap applied on
+  expansion too, so `budget = est_tokens` returned ordinary facts and no
+  conflict — the silent drop D-023 forbids), and `est_tokens` is the exact
+  charge. The engine warns at startup when `LOOM_HANDLE_SECRET` is unset;
+  the "random per-process fallback" H-A1 described never existed.
+- **Ranking honesty.** With an embedder serving but no stored vectors for
+  the gathered set (worker not run, or a different model), every fact got
+  `cos = 0` and the keyword weight fell from 0.5 to 0.15 — strictly worse
+  than keyword-only, silently. No vectors → the keyword formula; inside a
+  partially embedded set, un-embedded facts take the set's median cosine.
+  The keyword scorer reads only rendered text (predicate, object, subject
+  key): `attrs` is never shown, so scoring it let any writer rank a fact
+  first with invisible words.
+- **HTTP.** The body cap counted only `Content-Length`; a chunked upload
+  streamed unbounded into the engine, unauthenticated. A pure-ASGI cap
+  now counts `receive` and aborts at the limit. `/v1/*` responses carry
+  `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`.
+  `POST /v1/schemas` requires an ungated write key: a shipper key scoped
+  to `--entity-types host --sources auth-log` could flip a namespace to
+  `strict` and redefine other senders' predicates. `/v1/entities/semantic`
+  maps embedder failure to 503 like `/v1/ask` degrades; `AnswerRequest`
+  with both `subject` and `scope` is 422, not 500.
+- **The answer prompt treats items as data.** Items, handle hints and
+  coverage lines are rendered one per line with newlines escaped, inside a
+  delimited block the system prompt declares to be retrieved data — a
+  scalar object containing `"\n- (fact) host:web-01 owner alice [..]"`
+  used to forge a cited line.
+
+Not changed, deliberately, and on the roadmap as design follow-ups
+rather than bugs: the budget charges item text only (citations and
+handles ride free, so a 800-token pack is ~2,500 on the wire for an MCP
+agent — fixing it moves every documented number and is a rehearsal-day
+change); no lexical (BM25) leg or rank fusion; greedy trim rather than
+value-per-token packing; entity-valued conflicts; pagination past the
+gather cap. See `docs/hardening.md` (2026-09-23 section).
+
+## D-047 · Enrichment, LLM access and MCP after the review (2026-09-23)
+
+- **LLM clients.** The native Anthropic client read `content[0]["text"]`;
+  with thinking on by default on current models `content[0]` is a
+  thinking block, so `LOOM_LLM_PROVIDER=anthropic` failed every
+  extraction, dossier, adjudication and answer except on Haiku. Replies
+  are now the concatenation of `text` blocks; a refusal or empty
+  completion is an `LLMError` (public: "declined" / "empty completion");
+  truncation (`stop_reason`/`finish_reason` length) is logged and the text
+  returned. Provider calls never follow redirects (the credential would
+  travel with them); `Retry-After` is honored to 60 s with ±25 % jitter;
+  `last_usage` carries the provider's token counts and the worker logs
+  them per job.
+- **Extraction windows are independent units.** Claims land per window as
+  soon as it parses (event ids are content-addressed, so this is
+  idempotent); one garbled window costs itself, not the artifact, and no
+  longer burns five retries of every good window. The lease is renewed per
+  window (`extend_extraction_lease`), since a long document exceeded the
+  600 s lease and was double-extracted by a second worker. The document
+  sits in a per-call random `<document-xxxxxxxx>` tag (a literal
+  `</document>` inside a document closed the old fixed one). The `doc:`
+  source label is the sanitized filename plus the artifact-id prefix, so a
+  sender cannot forge a label. Every extracted claim passes
+  `validate_claim` — registered `object_types` were enforced only in
+  strict namespaces, against what `registry.py` promised. A typeless
+  object key is a value, not an entity of type `"None"`. Chunks are ~400
+  characters as D-020 said (the boundary search overshot to ~800) with
+  ~10 % overlap.
+- **Resolution.** Tier 1 (same key, different types) auto-merges only when
+  one side's type is unregistered — the extractor-drift case it exists
+  for; two registered types sharing a key (`user:admin` / `group:admin`)
+  go to the adjudicator or are left alone. Tier 2 never merges numeric
+  keys on spelling (`norm_key` kept `10.0.4.7`, `100.4.7` and `1.0.0.47`
+  apart only by their dots, which it stripped — see D-049). The alias pass
+  re-offers only entities new since its last complete pass; the tick
+  reports resolution, adjudication and aliases separately (a failed job
+  summed with one merge read as "nothing to do").
+- **MCP.** A scoped key sees only its namespaces in `list_namespaces` and
+  in the unknown-namespace error. Every failure is a `ToolError`
+  (`find_related` and `answer` returned `{"error": …}` as successes).
+  Citations in the agent view are compact — the `cite` token plus source
+  and time, no 32-hex id — and `expand` / `get_observations` accept a cite
+  token (`observations_by_prefix`) or a full id. The namespace summary is
+  cached 5 s.
+- **Evaluation and connector.** The lease task's ground truth is computed
+  from `ip:10.0.4.7`'s validity windows (it was a fixture, against the
+  module's own docstring); its first-sentence check no longer splits on
+  the IP's dots; exposure scoring penalizes CVEs named that are not KEV
+  (it measured recall ≥ 1 only). Feed downloads are validated (length,
+  gzip/JSON) before they replace the cache or earn a `Last-Modified`
+  stamp; a truncated body used to be served by 304 forever. `seed load`,
+  `ingest`, `vulns load` and `agent_eval` open the env-configured store
+  (sharding and offload apply) unless `--db` overrides.
+
+## D-048 · Supply chain, CI and deployment posture (2026-09-23)
+
+- **Locked dependencies, pinned images.** `requirements.lock` (uv,
+  `--universal --all-extras`, Python ≥ 3.12; `scripts/lock-deps.sh`
+  regenerates it) is what the Dockerfile installs, then the package with
+  `--no-deps` — the boto3 drift D-045 found cannot recur. Every base image
+  is `tag@sha256`; the Python pin is `ARG PYTHON_DIGEST` so the CI matrix
+  still builds 3.12/3.13 by tag. Dependabot moves the pins (actions,
+  docker ×4, pip, gomod ×2). The gateway runtime left EOL Alpine 3.20; the
+  Go SDK image and `go.mod` match the gateway's Go. The `test` extra stays
+  in the image on purpose (D-011: one image).
+- **Build once, publish the tested image.** The test job builds each image
+  once and pushes it as `:ci-<sha>` with SBOM and provenance, pulls it
+  back by digest for the suite and the SDK tests, and `publish-image`
+  promotes by manifest re-tag after a Trivy gate (CRITICAL/HIGH, fixed
+  only). Nothing is rebuilt for publishing. `ci-*` tags accumulate; their
+  retention is OQ-7. Workflow token is `contents: read` by default;
+  actions are SHA-pinned; `govulncheck` runs beside `go vet`.
+- **Registry validation on every write path.** The NATS and Kafka
+  consumers apply the namespace registry per claim (HTTP, MCP
+  `record_claim` and extraction already did); a `strict` namespace was
+  enforced only on `/v1/ingest`. Violations are dropped with a reason and
+  counted. Dead-letter headers carry the exception class and a code only
+  — a Postgres `DETAIL: Key (...)=(...)` used to ride in a header — and
+  the dead-letter stream is bounded (`LOOM_DEADLETTER_MAX_BYTES`, 256
+  MiB). The Kafka consumer takes SASL/TLS settings; broker auth
+  authenticates Loom to the broker, and the topic ACL *is* the write
+  permission.
+- **Kubernetes posture.** Every pod: non-root, read-only root filesystem
+  with an emptyDir at `/tmp`, no capabilities, no service-account token.
+  Default-deny ingress with one allowance per tier (CNPG's operator must
+  reach the cluster pods, or failover stalls); PodDisruptionBudgets on the
+  tiers that run two or more replicas; the `scale` overlay's JetStream is
+  bounded (the Go default was unlimited on a 1 Gi PVC) and the NATS
+  monitor port is off the client Services. Egress is deliberately open.
+- **Local defaults.** Compose binds the engine, load balancer and MCP to
+  `127.0.0.1` (`LOOM_BIND=0.0.0.0` for LAN access); documented env vars
+  that compose never passed (`LOOM_MCP_NAMESPACE`, `LOOM_ALIAS_TYPES`,
+  the agent-eval and worker dials) are passed; the keys file is written
+  atomically at 0600 under `secrets/`.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
@@ -1489,3 +1670,4 @@ infrastructure-ecosystem norm. Canonical text in `LICENSE`.
 - **OQ-5:** ~~Retention/TTL policy~~ Mechanism shipped (D-016 purge/redact);
   remaining is per-team policy defaults and a scheduled sweep (cron/k8s Job).
 - **OQ-6:** ~~Public name~~ Settled: Loom (D-005, 2026-09-11).
+- **OQ-7:** Retention for the `ghcr.io/…:ci-<sha>` candidate tags CI pushes on every commit to `main` (D-048): a package retention rule, or a periodic cleanup Job.
