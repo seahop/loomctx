@@ -631,18 +631,122 @@ class PostgresStore(GraphStore):
             dst = self._get_entity(namespace, into_ref)
             if src is None or dst is None or src.id == dst.id:
                 return False
-            self._x("UPDATE observations SET subject_id = %s WHERE subject_id = %s",
-                    (dst.id, src.id))
+            self._log_merge(namespace, src, dst)
+            self._x("UPDATE observations SET subject_id = %s WHERE namespace = %s AND subject_id = %s",
+                    (dst.id, namespace, src.id))
             self._x("UPDATE observations SET object_entity_id = %s, object_json = %s"
-                    " WHERE object_entity_id = %s",
-                    (dst.id, json.dumps({"type": dst.type, "key": dst.key}), src.id))
-            self._x("UPDATE aliases SET entity_id = %s WHERE entity_id = %s",
-                    (dst.id, src.id))
+                    " WHERE namespace = %s AND object_entity_id = %s",
+                    (dst.id, json.dumps({"type": dst.type, "key": dst.key}), namespace, src.id))
+            self._x("UPDATE aliases SET entity_id = %s WHERE namespace = %s AND entity_id = %s",
+                    (dst.id, namespace, src.id))
             self._put_alias(namespace, f"{src.type}:{src.key}", dst.id)
             self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
                     (namespace, src.id, dst.id))
             self._x("DELETE FROM entities WHERE id = %s", (src.id,))
             return True
+
+    def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
+        """What merge_entities is about to change, so unmerge can put it
+        back (D-019: reversible & lossless); see sqlite.py."""
+        touched = self._q(
+            "SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = %s AND subject_id = %s"
+            " UNION SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = %s AND object_entity_id = %s",
+            (namespace, src.id, namespace, src.id))
+        aliases = [r["alias"] for r in self._q(
+            "SELECT alias FROM aliases WHERE namespace = %s AND entity_id = %s", (namespace, src.id))]
+        merge_id = uuid.uuid4().hex
+        self._x(
+            "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type, into_key,"
+            " from_id, from_provisional, from_created_at, prior_aliases_json, recorded_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (merge_id, namespace, src.type, src.key, dst.type, dst.key, src.id,
+             bool(src.provisional), common.iso(src.created_at), json.dumps(aliases),
+             common.iso(common.now())))
+        if touched:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO merge_log_observations (merge_id, observation_id, prior_subject_id,"
+                    " prior_object_entity_id, prior_object_json) VALUES (%s, %s, %s, %s, %s)",
+                    [(merge_id, r["id"],
+                      src.id if r["subject_id"] == src.id else None,
+                      src.id if r["object_entity_id"] == src.id else None,
+                      r["object_json"] if r["object_entity_id"] == src.id else None)
+                     for r in touched])
+
+    def unmerge(self, namespace: str, alias: EntityRef) -> bool:
+        with self._tx():
+            rows = self._q(
+                "SELECT * FROM merge_log WHERE namespace = %s AND from_type = %s AND from_key = %s"
+                " ORDER BY recorded_at DESC, id DESC LIMIT 1",
+                (namespace, alias.type, alias.key))
+            if not rows:
+                return False
+            m = rows[0]
+            from_ref = EntityRef(type=m["from_type"], key=m["from_key"])
+            self._x(
+                "INSERT INTO entities (id, namespace, type, key, provisional, created_at, norm_key)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (m["from_id"], namespace, from_ref.type, from_ref.key,
+                 bool(m["from_provisional"]), m["from_created_at"], common.norm_key(from_ref.key)))
+            src = self._get_entity(namespace, from_ref) or self._upsert_entity(namespace, from_ref)
+            # only rows still on the merge target move back (chained merges;
+            # see sqlite.py)
+            dst = self._resolve_entity(namespace, EntityRef(type=m["into_type"], key=m["into_key"]))
+            hold = dst.id if dst else None
+            moved = self._q("SELECT * FROM merge_log_observations WHERE merge_id = %s", (m["id"],))
+            with self._conn.cursor() as cur:
+                subj = [(src.id, r["observation_id"], hold, hold)
+                        for r in moved if r["prior_subject_id"] is not None]
+                if subj:
+                    cur.executemany("UPDATE observations SET subject_id = %s WHERE id = %s"
+                                    " AND (%s::text IS NULL OR subject_id = %s)", subj)
+                obj = [(src.id, r["prior_object_json"] or json.dumps({"type": src.type, "key": src.key}),
+                        r["observation_id"], hold, hold)
+                       for r in moved if r["prior_object_entity_id"] is not None]
+                if obj:
+                    cur.executemany(
+                        "UPDATE observations SET object_entity_id = %s, object_json = %s WHERE id = %s"
+                        " AND (%s::text IS NULL OR object_entity_id = %s)", obj)
+                back = [(src.id, namespace, a) for a in json.loads(m["prior_aliases_json"] or "[]")]
+                if back:
+                    cur.executemany(
+                        "UPDATE aliases SET entity_id = %s WHERE namespace = %s AND alias = %s", back)
+            self._x("DELETE FROM aliases WHERE namespace = %s AND alias = %s",
+                    (namespace, f"{from_ref.type}:{from_ref.key}"))
+            self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
+                    (namespace, src.id, dst.id if dst else src.id))
+            self._x("DELETE FROM merge_log_observations WHERE merge_id = %s", (m["id"],))
+            self._x("DELETE FROM merge_log WHERE id = %s", (m["id"],))
+            return True
+
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            parents = self._q(
+                "SELECT * FROM merge_log" + (" WHERE namespace = %s" if namespace else "")
+                + " ORDER BY recorded_at, id", (namespace,) if namespace else ())
+            records = []
+            for m in parents:
+                kids = self._q("SELECT * FROM merge_log_observations WHERE merge_id = %s"
+                               " ORDER BY observation_id", (m["id"],))
+                records.append(common.merge_record(m, kids))
+        yield from records
+
+    def restore_merge(self, record: dict) -> None:
+        parent, children = common.merge_rows(record)
+        with self._tx():
+            self._x(
+                "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type,"
+                " into_key, from_id, from_provisional, from_created_at, prior_aliases_json,"
+                " recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (id) DO NOTHING", parent)
+            if children:
+                with self._conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO merge_log_observations (merge_id, observation_id,"
+                        " prior_subject_id, prior_object_entity_id, prior_object_json)"
+                        " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", children)
 
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -692,6 +796,15 @@ class PostgresStore(GraphStore):
                 (namespace,),
             )
         return common.row_to_schema(rows[0]) if rows else None
+
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT registration_json FROM schemas"
+                + (" WHERE namespace = %s" if namespace else "") + " ORDER BY namespace",
+                (namespace,) if namespace else ())
+        for r in rows:
+            yield common.row_to_schema(r)
 
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -1310,14 +1423,25 @@ class PostgresStore(GraphStore):
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
 
-    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str,
+                         decided_at: datetime | None = None) -> None:
         a, b = sorted((a, b))
         with self._tx():
             self._x(
                 "INSERT INTO resolution_declines (namespace, a, b, reason, decided_at)"
                 " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (namespace, a, b) DO UPDATE SET"
                 " reason = EXCLUDED.reason, decided_at = EXCLUDED.decided_at",
-                (namespace, a, b, reason[:500], common.iso(common.now())))
+                (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT * FROM resolution_declines"
+                + (" WHERE namespace = %s" if namespace else "") + " ORDER BY namespace, a, b",
+                (namespace,) if namespace else ())
+        for r in rows:
+            yield {"namespace": r["namespace"], "a": r["a"], "b": r["b"],
+                   "reason": r["reason"], "decided_at": r["decided_at"]}
 
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         with self._tx(read=True):

@@ -250,6 +250,48 @@ def row_to_artifact(row: Mapping[str, Any]) -> Artifact:
     )
 
 
+def merge_record(parent: Mapping[str, Any], children) -> dict:
+    """The exported shape of one merge_log row and its per-observation rows
+    (GraphStore.iter_merges); both backends store identical columns."""
+    return {
+        "id": parent["id"],
+        "namespace": parent["namespace"],
+        "from": {"type": parent["from_type"], "key": parent["from_key"]},
+        "into": {"type": parent["into_type"], "key": parent["into_key"]},
+        "from_id": parent["from_id"],
+        "from_provisional": bool(parent["from_provisional"]),
+        "from_created_at": parent["from_created_at"],
+        "prior_aliases": json.loads(parent["prior_aliases_json"] or "[]"),
+        "recorded_at": parent["recorded_at"],
+        "observations": [
+            {"observation_id": c["observation_id"],
+             "prior_subject_id": c["prior_subject_id"],
+             "prior_object_entity_id": c["prior_object_entity_id"],
+             "prior_object_json": c["prior_object_json"]}
+            for c in children
+        ],
+    }
+
+
+def merge_rows(record: dict) -> tuple[tuple, list[tuple]]:
+    """The inverse of merge_record: (parent row values, child row values)
+    in the tables' column order, for restore_merge."""
+    parent = (
+        record["id"], record["namespace"],
+        record["from"]["type"], record["from"]["key"],
+        record["into"]["type"], record["into"]["key"],
+        record["from_id"], bool(record.get("from_provisional", False)),
+        record["from_created_at"], json.dumps(list(record.get("prior_aliases", []))),
+        record["recorded_at"],
+    )
+    children = [
+        (record["id"], c["observation_id"], c.get("prior_subject_id"),
+         c.get("prior_object_entity_id"), c.get("prior_object_json"))
+        for c in record.get("observations", [])
+    ]
+    return parent, children
+
+
 def row_to_schema(row: Mapping[str, Any]) -> SchemaRegistration:
     return SchemaRegistration.model_validate(json.loads(row["registration_json"]))
 

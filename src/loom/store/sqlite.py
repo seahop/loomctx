@@ -595,21 +595,22 @@ class SqliteStore(GraphStore):
             dst = self._get_entity(namespace, into_ref)
             if src is None or dst is None or src.id == dst.id:
                 return False
+            self._log_merge(namespace, src, dst)
             self._conn.execute(
-                "UPDATE observations SET subject_id = ? WHERE subject_id = ?",
-                (dst.id, src.id),
+                "UPDATE observations SET subject_id = ? WHERE namespace = ? AND subject_id = ?",
+                (dst.id, namespace, src.id),
             )
             # object side: repoint the edge AND its rendered ref, so both ends
             # of a merged edge read as the canonical entity (H-B6)
             self._conn.execute(
                 "UPDATE observations SET object_entity_id = ?, object_json = ?"
-                " WHERE object_entity_id = ?",
-                (dst.id, json.dumps({"type": dst.type, "key": dst.key}), src.id),
+                " WHERE namespace = ? AND object_entity_id = ?",
+                (dst.id, json.dumps({"type": dst.type, "key": dst.key}), namespace, src.id),
             )
             # existing aliases pointing at the source follow it to the target
             self._conn.execute(
-                "UPDATE aliases SET entity_id = ? WHERE entity_id = ?",
-                (dst.id, src.id),
+                "UPDATE aliases SET entity_id = ? WHERE namespace = ? AND entity_id = ?",
+                (dst.id, namespace, src.id),
             )
             self._put_alias(namespace, f"{src.type}:{src.key}", dst.id)
             # the folded node's brief described a partial view; drop it and
@@ -620,6 +621,114 @@ class SqliteStore(GraphStore):
             )
             self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
             return True
+
+    def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
+        """Record what merge_entities is about to change — the folded
+        entity's row, the observations that name it (which side, and the
+        object ref as rendered), the aliases that point at it — so unmerge
+        can put every one of them back (D-019: reversible & lossless)."""
+        touched = self._conn.execute(
+            "SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = ? AND subject_id = ?"
+            " UNION SELECT id, subject_id, object_entity_id, object_json FROM observations"
+            " WHERE namespace = ? AND object_entity_id = ?",
+            (namespace, src.id, namespace, src.id)).fetchall()
+        aliases = [r["alias"] for r in self._conn.execute(
+            "SELECT alias FROM aliases WHERE namespace = ? AND entity_id = ?", (namespace, src.id))]
+        merge_id = uuid.uuid4().hex
+        self._conn.execute(
+            "INSERT INTO merge_log (id, namespace, from_type, from_key, into_type, into_key,"
+            " from_id, from_provisional, from_created_at, prior_aliases_json, recorded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (merge_id, namespace, src.type, src.key, dst.type, dst.key, src.id,
+             int(src.provisional), common.iso(src.created_at), json.dumps(aliases),
+             common.iso(common.now())))
+        self._conn.executemany(
+            "INSERT INTO merge_log_observations (merge_id, observation_id, prior_subject_id,"
+            " prior_object_entity_id, prior_object_json) VALUES (?, ?, ?, ?, ?)",
+            [(merge_id, r["id"],
+              src.id if r["subject_id"] == src.id else None,
+              src.id if r["object_entity_id"] == src.id else None,
+              r["object_json"] if r["object_entity_id"] == src.id else None)
+             for r in touched])
+
+    def unmerge(self, namespace: str, alias: EntityRef) -> bool:
+        with self._tx():
+            m = self._conn.execute(
+                "SELECT * FROM merge_log WHERE namespace = ? AND from_type = ? AND from_key = ?"
+                " ORDER BY recorded_at DESC, id DESC LIMIT 1",
+                (namespace, alias.type, alias.key)).fetchone()
+            if m is None:
+                return False
+            from_ref = EntityRef(type=m["from_type"], key=m["from_key"])
+            # 1. the folded node again, with its original id and creation
+            #    record when nothing has taken them since
+            self._conn.execute(
+                "INSERT OR IGNORE INTO entities (id, namespace, type, key, provisional,"
+                " created_at, norm_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (m["from_id"], namespace, from_ref.type, from_ref.key,
+                 int(m["from_provisional"]), m["from_created_at"], common.norm_key(from_ref.key)))
+            src = self._get_entity(namespace, from_ref) or self._upsert_entity(namespace, from_ref)
+            # 2. exactly the observations that merge moved, each side it
+            #    moved — but only rows still on the merge target: in a chain
+            #    A->B->C an earlier unmerge of A already took A's rows back,
+            #    and B's log (which lists them, they were B's then) must not
+            #    steal them. `hold` is the target's current node (aliases
+            #    followed); None only if it vanished, then unconditional.
+            dst = self._resolve_entity(namespace, EntityRef(type=m["into_type"], key=m["into_key"]))
+            hold = dst.id if dst else None
+            moved = self._conn.execute(
+                "SELECT * FROM merge_log_observations WHERE merge_id = ?", (m["id"],)).fetchall()
+            self._conn.executemany(
+                "UPDATE observations SET subject_id = ? WHERE id = ? AND (? IS NULL OR subject_id = ?)",
+                [(src.id, r["observation_id"], hold, hold)
+                 for r in moved if r["prior_subject_id"] is not None])
+            self._conn.executemany(
+                "UPDATE observations SET object_entity_id = ?, object_json = ?"
+                " WHERE id = ? AND (? IS NULL OR object_entity_id = ?)",
+                [(src.id, r["prior_object_json"] or json.dumps({"type": src.type, "key": src.key}),
+                  r["observation_id"], hold, hold)
+                 for r in moved if r["prior_object_entity_id"] is not None])
+            # 3. aliases that had named it name it again; its own alias goes
+            self._conn.executemany(
+                "UPDATE aliases SET entity_id = ? WHERE namespace = ? AND alias = ?",
+                [(src.id, namespace, a) for a in json.loads(m["prior_aliases_json"] or "[]")])
+            self._conn.execute("DELETE FROM aliases WHERE namespace = ? AND alias = ?",
+                               (namespace, f"{from_ref.type}:{from_ref.key}"))
+            # 4. both briefs described the merged view
+            self._conn.execute(
+                "DELETE FROM dossiers WHERE namespace = ? AND entity_id IN (?, ?)",
+                (namespace, src.id, dst.id if dst else src.id))
+            # 5. the log rows: the merge no longer happened
+            self._conn.execute("DELETE FROM merge_log_observations WHERE merge_id = ?", (m["id"],))
+            self._conn.execute("DELETE FROM merge_log WHERE id = ?", (m["id"],))
+            return True
+
+    def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            parents = self._conn.execute(
+                "SELECT * FROM merge_log" + (" WHERE namespace = ?" if namespace else "")
+                + " ORDER BY recorded_at, id", (namespace,) if namespace else ()).fetchall()
+            records = []
+            for m in parents:
+                kids = self._conn.execute(
+                    "SELECT * FROM merge_log_observations WHERE merge_id = ?"
+                    " ORDER BY observation_id", (m["id"],)).fetchall()
+                records.append(common.merge_record(m, kids))
+        yield from records
+
+    def restore_merge(self, record: dict) -> None:
+        parent, children = common.merge_rows(record)
+        with self._tx():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO merge_log (id, namespace, from_type, from_key, into_type,"
+                " into_key, from_id, from_provisional, from_created_at, prior_aliases_json,"
+                " recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (*parent[:7], int(parent[7]), *parent[8:]))
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO merge_log_observations (merge_id, observation_id,"
+                " prior_subject_id, prior_object_entity_id, prior_object_json)"
+                " VALUES (?, ?, ?, ?, ?)", children)
 
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -667,6 +776,15 @@ class SqliteStore(GraphStore):
                 (namespace,),
             ).fetchone()
         return common.row_to_schema(row) if row else None
+
+    def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT registration_json FROM schemas"
+                + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace",
+                (namespace,) if namespace else ()).fetchall()
+        for r in rows:
+            yield common.row_to_schema(r)
 
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
@@ -1293,12 +1411,24 @@ class SqliteStore(GraphStore):
             yield {"namespace": r["namespace"], "alias": r["alias"],
                    "canonical": {"type": r["type"], "key": r["key"]}}
 
-    def remember_decline(self, namespace: str, a: str, b: str, reason: str) -> None:
+    def remember_decline(self, namespace: str, a: str, b: str, reason: str,
+                         decided_at: datetime | None = None) -> None:
         a, b = sorted((a, b))
         with self._tx():
             self._conn.execute(
                 "INSERT OR REPLACE INTO resolution_declines (namespace, a, b, reason, decided_at)"
-                " VALUES (?, ?, ?, ?, ?)", (namespace, a, b, reason[:500], common.iso(common.now())))
+                " VALUES (?, ?, ?, ?, ?)",
+                (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT * FROM resolution_declines"
+                + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace, a, b",
+                (namespace,) if namespace else ()).fetchall()
+        for r in rows:
+            yield {"namespace": r["namespace"], "a": r["a"], "b": r["b"],
+                   "reason": r["reason"], "decided_at": r["decided_at"]}
 
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         with self._tx():

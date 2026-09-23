@@ -1121,10 +1121,125 @@ def test_search_entities_uses_the_lower_key_index(store):
         assert any("idx_entity_lower_key" in r["QUERY PLAN"] for r in plan), plan
 
 
-def test_wipe_clears_declines(store):
+def test_wipe_clears_declines_and_the_merge_log(store):
     store.remember_decline("ns", "a:1", "b:2", "no")
+    a, b = EntityRef(type="ip", key="1.1.1.1"), EntityRef(type="ip_address", key="1.1.1.1")
+    for ref in (a, b):
+        store.record_claim(ClaimIn(subject=ref, predicate="p", object="x", observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", b, a) and list(store.iter_merges())
     store.wipe()
     assert store.declined_pairs("ns") == set()
+    assert list(store.iter_merges()) == [] and store.unmerge("default", b) is False
+
+
+# --------------------------------------------- reversible merges (D-019, v5) #
+
+def _snapshot(store, ns, ref):
+    return sorted((o.id, o.subject, o.predicate, o.object) for o in store.observations_for(ns, ref, limit=100))
+
+
+def test_unmerge_restores_both_entities_exactly(store):
+    """merge, claim, unmerge: the folded entity is back with exactly the
+    observations it had (both as subject and as object, object refs
+    rendered as before), the canonical keeps only what was its own plus
+    what arrived after the merge, the alias is gone, briefs are dropped."""
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims([
+        ClaimIn(subject=a, predicate="mentioned_in", object="IR-4432", observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=host, predicate="uses_ip", object=a, observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=a, predicate="peer_of", object=a, observed_at=OBSERVED, source="doc"),
+        ClaimIn(subject=b, predicate="assigned_to", object=host, observed_at=OBSERVED, source="dhcp"),
+    ])
+    before_a, before_b = _snapshot(store, "default", a), _snapshot(store, "default", b)
+    a_id = store.get_entity("default", a).id
+    store.add_alias("default", EntityRef(type="ipaddr", key="10.0.4.7"), into=a)   # an alias that names a
+    store.put_dossier("default", a, "brief a", 3, [])
+    assert store.merge_entities("default", a, b)
+    assert len(store.observations_for("default", b, limit=100)) == 4
+    later = store.record_claim(ClaimIn(subject=b, predicate="scanned", object="clean",
+                                       observed_at=OBSERVED, source="scanner"))
+    store.put_dossier("default", b, "merged brief", 5, [])
+    assert [m["from"] for m in store.iter_merges("default")] == [{"type": "ip_address", "key": "10.0.4.7"}]
+
+    assert store.unmerge("default", a) is True
+    assert _snapshot(store, "default", a) == before_a
+    assert _snapshot(store, "default", b) == sorted(before_b + [(later.id, b, "scanned", "clean")])
+    restored = store.get_entity("default", a)
+    assert restored.type == "ip_address" and restored.id == a_id         # its own node, its own id
+    assert store.get_entity("default", EntityRef(type="ipaddr", key="10.0.4.7")).id == a_id   # alias followed it back
+    assert [al["alias"] for al in store.iter_aliases("default")] == ["ipaddr:10.0.4.7"]         # the merge's alias is gone
+    assert store.get_dossier("default", a) is None and store.get_dossier("default", b) is None
+    assert list(store.iter_merges("default")) == []
+    assert store.unmerge("default", a) is False                          # nothing left to reverse
+    # and the pair can be merged again, reversibly
+    assert store.merge_entities("default", a, b) and store.unmerge("default", a)
+    assert _snapshot(store, "default", a) == before_a
+
+
+def test_unmerge_after_a_chained_merge(store):
+    """A folded into B, then B into C: unmerging A takes back exactly A's
+    observations from C; B stays an alias of C."""
+    a, b, c = (EntityRef(type="ip_address", key="1.1.1.1"), EntityRef(type="ip", key="1.1.1.1"),
+               EntityRef(type="ipv4", key="1.1.1.1"))
+    for ref in (a, b, c):
+        store.record_claim(ClaimIn(subject=ref, predicate=f"from_{ref.type}", object="x",
+                                   observed_at=OBSERVED, source="s"))
+    before_a = _snapshot(store, "default", a)
+    assert store.merge_entities("default", a, b) and store.merge_entities("default", b, c)
+    assert len(store.observations_for("default", c)) == 3
+    assert store.unmerge("default", a)
+    assert _snapshot(store, "default", a) == before_a
+    assert {o.predicate for o in store.observations_for("default", c)} == {"from_ip", "from_ipv4"}
+    assert store.get_entity("default", b).type == "ipv4"                # B is still folded into C
+    assert store.unmerge("default", b)
+    assert {o.predicate for o in store.observations_for("default", b)} == {"from_ip"}
+    assert {o.predicate for o in store.observations_for("default", c)} == {"from_ipv4"}
+
+
+def test_export_import_round_trips_schemas_declines_and_merges(store, tmp_path):
+    """A restore is only faithful if the registries, the adjudication
+    memory and the merge log come along — and a merge stays reversible
+    on the restored store."""
+    import io
+    from loom.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
+    from loom.lifecycle import export_jsonl, import_jsonl
+    store.put_schema(SchemaRegistration(namespace="netsec", strict=True,
+                                        entity_types=[EntityTypeDef(name="host")],
+                                        predicates=[PredicateDef(name="runs_os")]))
+    store.remember_decline("netsec", "product:b", "product:a", "different vendors",
+                           decided_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    store.record_claims([
+        ClaimIn(namespace="netsec", subject=a, predicate="noted", object="x", observed_at=OBSERVED, source="doc"),
+        ClaimIn(namespace="netsec", subject=EntityRef(type="host", key="h"), predicate="uses", object=a,
+                observed_at=OBSERVED, source="doc"),
+        ClaimIn(namespace="netsec", subject=b, predicate="assigned", object="y", observed_at=OBSERVED, source="dhcp"),
+    ])
+    before_a = _snapshot(store, "netsec", a)
+    assert store.merge_entities("netsec", a, b)
+    buf = io.StringIO()
+    counts = export_jsonl(store, buf, None)
+    assert counts["schemas"] == 1 and counts["declines"] == 1 and counts["merges"] == 1
+    kinds = [json.loads(l)["type"] for l in buf.getvalue().splitlines()]
+    assert kinds.index("merge") > kinds.index("alias") > kinds.index("observation")
+
+    dst = SqliteStore(tmp_path / "restored.db")
+    try:
+        buf.seek(0)
+        got = import_jsonl(dst, buf)
+        assert got["schemas"] == 1 and got["declines"] == 1 and got["merges"] == 1 and got["skipped"] == 0
+        assert dst.get_schema("netsec") == store.get_schema("netsec")
+        assert dst.declined_pairs("netsec") == {("product:a", "product:b")}
+        assert next(dst.iter_declines("netsec"))["decided_at"] == "2026-09-02T00:00:00+00:00"
+        assert [m["from"] for m in dst.iter_merges("netsec")] == [{"type": "ip_address", "key": "10.0.4.7"}]
+        buf.seek(0)
+        assert import_jsonl(dst, buf)["merges"] == 1 and len(list(dst.iter_merges())) == 1   # idempotent
+        assert dst.unmerge("netsec", a)                                  # reversible after the restore
+        assert _snapshot(dst, "netsec", a) == before_a
+        assert {o.predicate for o in dst.observations_for("netsec", b)} == {"assigned"}
+    finally:
+        dst.close()
 
 
 def test_sqlite_transactions_are_reentrant(store):
