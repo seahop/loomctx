@@ -210,6 +210,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_event
 CREATE UNIQUE INDEX IF NOT EXISTS idx_art_event
     ON artifacts (namespace, event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_obs_recorded ON observations (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_obs_id_pattern ON observations (id text_pattern_ops);
 CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
@@ -534,6 +535,23 @@ class PostgresStore(GraphStore):
             rows = self._q(
                 _OBS_SELECT + " WHERE o.namespace = %s AND o.id = ANY(%s)" + _NOT_TOMBSTONED,
                 (namespace, list(ids)))
+        return [common.row_to_observation(r) for r in rows]
+
+    _PREFIX_CAP = 20
+
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        if not prefix:
+            return []
+        lo, hi = common.prefix_bounds(prefix)
+        with self._tx(read=True):
+            # byte-wise operators + the text_pattern_ops index: the database's
+            # collation (en_US in the stock image) would otherwise order
+            # punctuation differently from SQLite's BINARY range
+            rows = self._q(
+                _OBS_SELECT + " WHERE o.namespace = %s AND o.id ~>=~ %s"
+                + (" AND o.id ~<~ %s" if hi is not None else "") + _NOT_TOMBSTONED
+                + " ORDER BY o.id COLLATE \"C\" LIMIT %s",
+                (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP))
         return [common.row_to_observation(r) for r in rows]
 
     def _migrate(self, cur) -> None:
@@ -873,21 +891,24 @@ class PostgresStore(GraphStore):
             type_sql = " AND s.type = ANY(%s) AND (ob.id IS NULL OR ob.type = ANY(%s))"
             type_args = (list(allowed_types), list(allowed_types))
         with self._tx(read=True):
+            # the per-artifact cut happens in SQL (see sqlite.py)
             rows = self._q(
-                "SELECT DISTINCT (o.provenance_json::jsonb ->> 'artifact_id') AS aid,"
+                "WITH cited AS ("
+                " SELECT DISTINCT (o.provenance_json::jsonb ->> 'artifact_id') AS aid,"
                 " s.type AS stype, s.key AS skey"
                 " FROM observations o JOIN entities s ON s.id = o.subject_id"
                 " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
                 " WHERE o.namespace = %s"
                 "   AND (o.provenance_json::jsonb ->> 'artifact_id') = ANY(%s)"
-                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
-                (namespace, list(artifact_ids), *type_args),
+                + _NOT_TOMBSTONED + type_sql + "),"
+                " ranked AS (SELECT *, row_number() OVER (PARTITION BY aid ORDER BY stype, skey) AS rn"
+                "            FROM cited)"
+                " SELECT aid, stype, skey FROM ranked WHERE rn <= %s ORDER BY aid, stype, skey",
+                (namespace, list(artifact_ids), *type_args, per_artifact),
             )
         out: dict[str, list[EntityRef]] = {}
         for r in rows:
-            lst = out.setdefault(r["aid"], [])
-            if len(lst) < per_artifact:
-                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+            out.setdefault(r["aid"], []).append(EntityRef(type=r["stype"], key=r["skey"]))
         return out
 
     def artifact_cited_within(

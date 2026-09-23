@@ -223,6 +223,14 @@ class GraphStore(ABC):
         """Visible observations for the given ids (tombstoned excluded),
         in no particular order."""
 
+    @abstractmethod
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        """Visible observations whose id starts with `prefix` — how a
+        12-hex cite token from a pack resolves back to its observation —
+        ordered by id and capped at 20 rows (an ambiguous token is a
+        caller problem, not an unbounded read). An empty prefix returns
+        nothing. Served by the primary-key index on both backends."""
+
     # ------------------------------------------------ vector index (D-025)
     # The JSON `embeddings` / `doc_chunks` tables remain the portable source
     # of truth; each backend keeps an ANN index beside them (sqlite-vec /

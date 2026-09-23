@@ -550,6 +550,20 @@ class SqliteStore(GraphStore):
                 out.extend(common.row_to_observation(r) for r in rows)
         return out
 
+    _PREFIX_CAP = 20
+
+    def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
+        if not prefix:
+            return []
+        lo, hi = common.prefix_bounds(prefix)
+        with self._tx():
+            rows = self._conn.execute(
+                _OBS_SELECT + " WHERE o.namespace = ? AND o.id >= ?"
+                + (" AND o.id < ?" if hi is not None else "") + _NOT_TOMBSTONED
+                + " ORDER BY o.id LIMIT ?",
+                (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP)).fetchall()
+        return [common.row_to_observation(r) for r in rows]
+
     @contextmanager
     def _tx(self):
         """One locked transaction: commit on success, rollback on error so a
@@ -857,21 +871,25 @@ class SqliteStore(GraphStore):
             type_sql = f" AND s.type IN ({tm}) AND (ob.id IS NULL OR ob.type IN ({tm}))"
             type_args = tuple(allowed_types) * 2
         with self._tx():
+            # the per-artifact cut happens in SQL: a document cited by
+            # thousands of claims returns per_artifact rows, not all of them
             rows = self._conn.execute(
-                "SELECT DISTINCT json_extract(o.provenance_json, '$.artifact_id') AS aid,"
+                "WITH cited AS ("
+                " SELECT DISTINCT json_extract(o.provenance_json, '$.artifact_id') AS aid,"
                 " s.type AS stype, s.key AS skey"
                 " FROM observations o JOIN entities s ON s.id = o.subject_id"
                 " LEFT JOIN entities ob ON ob.id = o.object_entity_id"
                 " WHERE o.namespace = ?"
                 f"   AND json_extract(o.provenance_json, '$.artifact_id') IN ({marks})"
-                + _NOT_TOMBSTONED + type_sql + " ORDER BY aid, stype, skey",
-                (namespace, *artifact_ids, *type_args),
+                + _NOT_TOMBSTONED + type_sql + "),"
+                " ranked AS (SELECT *, row_number() OVER (PARTITION BY aid ORDER BY stype, skey) AS rn"
+                "            FROM cited)"
+                " SELECT aid, stype, skey FROM ranked WHERE rn <= ? ORDER BY aid, stype, skey",
+                (namespace, *artifact_ids, *type_args, per_artifact),
             ).fetchall()
         out: dict[str, list[EntityRef]] = {}
         for r in rows:
-            lst = out.setdefault(r["aid"], [])
-            if len(lst) < per_artifact:
-                lst.append(EntityRef(type=r["stype"], key=r["skey"]))
+            out.setdefault(r["aid"], []).append(EntityRef(type=r["stype"], key=r["skey"]))
         return out
 
     def artifact_cited_within(

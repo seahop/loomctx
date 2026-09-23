@@ -153,6 +153,18 @@ def parse(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
+def prefix_bounds(prefix: str) -> tuple[str, str | None]:
+    """(lo, hi) such that `lo <= s < hi` holds exactly for the strings that
+    start with `prefix`: hi is the prefix with its last code point
+    incremented (a range the primary-key index serves on both backends,
+    where LIKE would not: SQLite's default LIKE is case-insensitive and
+    skips BINARY-collated indexes). hi is None when no bound exists."""
+    stem = prefix.rstrip("\U0010ffff")
+    if not stem:
+        return prefix, None
+    return prefix, stem[:-1] + chr(ord(stem[-1]) + 1)
+
+
 def like_pattern(query: str) -> str:
     """Prefix pattern for LIKE ... ESCAPE '\\' with the user's metacharacters
     neutralized, so `web_01` doesn't match `webX01` and `%` isn't a wildcard."""

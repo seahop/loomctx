@@ -985,6 +985,38 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
     assert store.subjects_citing("ns", [a.id], allowed_types=("cve",)) == {a.id: [cve]}   # host->cve edge hidden
     assert store.subjects_citing("ns", [a.id], allowed_types=()) == {}
     assert store.subjects_citing("ns", []) == {}
+    # the per-artifact cut is applied in the query, in (type, key) order
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=EntityRef(type="host", key=f"h{i}"), predicate="mentioned_in",
+                object=cve, source="kev", observed_at=t, provenance=Provenance(artifact_event_id="adv-a"))
+        for i in range(2, 9)])
+    assert store.subjects_citing("ns", [a.id], per_artifact=2) == {a.id: [cve, EntityRef(type="host", key="h1")]}
+    assert len(store.subjects_citing("ns", [a.id], per_artifact=100)[a.id]) == 9
+
+
+def test_observations_by_prefix_resolves_cite_tokens(store):
+    """A 12-hex token from a pack finds its observation; tombstoned rows
+    and other namespaces never surface; the read is capped."""
+    from loom.contracts import Observation
+    obs = [store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"u{i}")}))
+           for i in range(3)]
+    assert [o.id for o in store.observations_by_prefix("default", obs[0].id[:12])] == [obs[0].id]
+    assert store.observations_by_prefix("default", obs[0].id) == store.observations_by_prefix("default", obs[0].id[:12])
+    assert store.observations_by_prefix("other", obs[0].id[:12]) == []
+    assert store.observations_by_prefix("default", "") == []
+    store.redact("default", obs[1].id, "x")
+    assert store.observations_by_prefix("default", obs[1].id[:12]) == []
+    for i in range(25):   # crafted ids that share a prefix: the cap holds, LIKE metacharacters are literal
+        store.restore_observation(Observation(
+            id=f"tok_{i:03d}", namespace="default", subject=EntityRef(type="host", key="web-01"),
+            predicate="p", object="x", observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    store.restore_observation(Observation(
+        id="tokX010", namespace="default", subject=EntityRef(type="host", key="web-01"),
+        predicate="p", object="x", observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    got = store.observations_by_prefix("default", "tok_")
+    assert len(got) == 20 and [o.id for o in got] == sorted(o.id for o in got)
+    assert [o.id for o in store.observations_by_prefix("default", "tok_01")] == [f"tok_{i:03d}" for i in range(10, 20)]
+    assert [o.id for o in store.observations_by_prefix("default", "tokX")] == ["tokX010"]
 
 
 def test_postgres_retries_a_lost_deadlock_then_gives_up():
