@@ -73,6 +73,22 @@ def test_load_then_ask_the_demo_questions(tmp_path):
     store.close()
 
 
+def test_load_without_db_uses_the_environment_store(tmp_path, monkeypatch, capsys):
+    """`seed load` opens the store LOOM_DB / LOOM_SHARDS / LOOM_BLOB_*
+    configure, like the engine; --db is an explicit single-store override."""
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "env.db"))
+    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    cmd_load(None, seed=42)
+    assert "(env)" in capsys.readouterr().out
+    store = SqliteStore(tmp_path / "env.db")
+    assert sum(1 for _ in store.iter_artifacts()) >= 5
+    store.close()
+    monkeypatch.setattr("sys.argv", ["loom.seed", "load", "--db", str(tmp_path / "explicit.db")])
+    from loom.seed import main
+    main()
+    assert (tmp_path / "explicit.db").exists() and "explicit.db" in capsys.readouterr().out
+
+
 def test_seed_never_prints_a_password():
     from loom.seed import redact_dsn
     assert redact_dsn("postgresql://loom:s3cret@host:5432/loom") == "postgresql://loom:***@host:5432/loom"

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .contracts import ClaimIn, DocumentIn, EntityRef
-from .store.factory import store_from_url
+from .store.factory import store_from_env, store_from_url
 
 # Fixed epoch: the dataset describes July-September 2026 regardless of when
 # it is generated, so demos and tests are perfectly reproducible.
@@ -242,16 +242,20 @@ def redact_dsn(url: str) -> str:
     return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
 
 
-def cmd_load(db_path: str, seed: int) -> None:
+def cmd_load(db_path: str | None, seed: int) -> None:
+    """An explicit db_path opens that store alone; None opens whatever
+    LOOM_DB / LOOM_SHARDS / LOOM_BLOB_* configure, exactly as the engine
+    does — so the seed lands where the engine will look for it."""
     claims, docs = generate(seed)
-    store = store_from_url(db_path)
+    store = store_from_url(db_path) if db_path else store_from_env()
     try:
         store.record_claims(claims)
         for doc in docs:
             store.store_artifact(doc)
     finally:
         store.close()
-    print(f"loaded {len(claims)} claims and {len(docs)} documents into {redact_dsn(db_path)}")
+    where = redact_dsn(db_path) if db_path else f"{redact_dsn(os.environ.get('LOOM_DB', 'loom.db'))} (env)"
+    print(f"loaded {len(claims)} claims and {len(docs)} documents into {where}")
 
 
 def cmd_generate(out_dir: str, seed: int) -> None:
@@ -274,7 +278,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     sub = parser.add_subparsers(dest="command", required=True)
     load = sub.add_parser("load", help="ingest fake data into the store")
-    load.add_argument("--db", default=os.environ.get("LOOM_DB", "loom.db"))
+    load.add_argument("--db", help="explicit store URL/path; bypasses LOOM_SHARDS and LOOM_BLOB_* "
+                                   "(default: the store LOOM_DB and friends configure)")
     gen = sub.add_parser("generate", help="write fake data to files")
     gen.add_argument("--out", default="seed-data")
     args = parser.parse_args()

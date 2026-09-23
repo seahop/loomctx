@@ -25,6 +25,27 @@ def test_direct_load_is_batched_and_idempotent(tmp_path):
     assert store.count_observations("netsec", EntityRef(type="host", key="web-01")) == 7
 
 
+def test_direct_load_without_db_uses_the_environment_store(tmp_path, monkeypatch, capsys):
+    """No --db and no --url: the loader writes into the store LOOM_DB /
+    LOOM_SHARDS / LOOM_BLOB_* configure (sharding and offload apply);
+    --db is an explicit single-store override."""
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "env.db"))
+    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    assert load_direct(None, (json.dumps(r) + "\n" for r in ROWS), size=4)["recorded"] == 7
+    src = tmp_path / "rows.jsonl"
+    src.write_text("".join(json.dumps(r) + "\n" for r in ROWS))
+    monkeypatch.setattr("sys.argv", ["loom.ingest", str(src)])
+    from loom.ingest import main
+    main()
+    assert json.loads(capsys.readouterr().out)["recorded"] == 7          # replayed, deduped
+    store = SqliteStore(tmp_path / "env.db")
+    assert store.count_observations("netsec", EntityRef(type="host", key="web-01")) == 7
+    monkeypatch.setattr("sys.argv", ["loom.ingest", "--url", "http://x", "--db", "y", str(src)])
+    import pytest
+    with pytest.raises(SystemExit):
+        main()
+
+
 def test_http_load_posts_ndjson_batches(monkeypatch):
     seen = []
 

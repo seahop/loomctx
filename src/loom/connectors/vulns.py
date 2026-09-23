@@ -2,7 +2,8 @@
 
 Three public feeds, no API keys, one command:
 
-    python -m loom.connectors.vulns load --db /data/loom.db                # pull + load
+    python -m loom.connectors.vulns load                                   # pull + load into the LOOM_DB store
+    python -m loom.connectors.vulns load --db /data/loom.db                # ... into an explicit store
     python -m loom.connectors.vulns load --url http://loom:8000 --key ...  # via the batch API
     python -m loom.connectors.vulns emit > vulns.jsonl                     # NDJSON, load later
     python -m loom.connectors.vulns pull                                   # refresh the cache only
@@ -125,31 +126,95 @@ def _http_date(ts: float) -> str:
     return email.utils.formatdate(ts, usegmt=True)
 
 
-def fetch(url: str, dest: Path, timeout: float = 120.0) -> str:
+FETCH_ATTEMPTS = 3
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def validate_download(path: Path, expected_length: int | None = None,
+                      name: str | None = None) -> str | None:
+    """Why a downloaded feed body is unusable, or None. A truncated gzip
+    member or a cut-off JSON document that got cached with the server's
+    Last-Modified would be served as 'cached' (304) forever after. `name`
+    is the feed's final filename (the body is validated as a .part file)."""
+    size = path.stat().st_size
+    if expected_length is not None and size != expected_length:
+        return f"body is {size} bytes, Content-Length said {expected_length}"
+    if size == 0:
+        return "empty body"
+    name = name or path.name
+    if name.endswith(".gz"):
+        try:
+            with gzip.open(path, "rb") as fh:
+                # the first member header (bad magic raises at once), then
+                # the whole stream: a cut-off member raises EOFError, a
+                # damaged one a CRC error, at the end
+                if not fh.read(1):
+                    return "gzip member is empty"
+                while fh.read(1 << 20):
+                    pass
+        except (OSError, EOFError, gzip.BadGzipFile) as exc:
+            return f"gzip body unreadable: {exc}"
+    elif name.endswith(".json"):
+        try:
+            with open(path, "rb") as fh:
+                json.load(fh)
+        except ValueError as exc:
+            return f"JSON body unreadable: {exc}"
+    return None
+
+
+def fetch(url: str, dest: Path, timeout: float = 120.0, attempts: int = FETCH_ATTEMPTS) -> str:
     """Download `url` to `dest` unless the server says it is unchanged since
-    the cached copy's mtime (which we set to its Last-Modified). Returns
-    'fresh', 'cached' or 'downloaded'."""
+    the cached copy's mtime (which we set to its Last-Modified). The body is
+    validated (Content-Length, gzip/JSON integrity) before it replaces the
+    cache and before the Last-Modified stamp is applied; 429/5xx and
+    connection errors are retried with backoff. Returns 'cached' or
+    'downloaded'."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     headers = {"User-Agent": USER_AGENT}
     if dest.exists():
         headers["If-Modified-Since"] = _http_date(dest.stat().st_mtime)
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304 and dest.exists():
-            return "cached"
-        raise SystemExit(f"{url}: HTTP {exc.code}")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with resp, open(tmp, "wb") as out:
-        while chunk := resp.read(1 << 20):
-            out.write(chunk)
-    os.replace(tmp, dest)
-    last = resp.headers.get("Last-Modified")
-    if last:
-        stamp = email.utils.parsedate_to_datetime(last).timestamp()
-        os.utime(dest, (stamp, stamp))
-    return "downloaded"
+    problem = ""
+    for attempt in range(attempts):
+        if attempt:
+            delay = 2.0 ** attempt
+            print(f"{url}: {problem}; retry {attempt + 1}/{attempts} in {delay:.0f}s", file=sys.stderr)
+            time.sleep(delay)
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304 and dest.exists():
+                return "cached"
+            problem = f"HTTP {exc.code}"
+            if exc.code in _RETRY_STATUS:
+                continue
+            raise SystemExit(f"{url}: {problem}")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            problem = f"unreachable ({exc})"
+            continue
+        try:
+            with resp, open(tmp, "wb") as out:
+                while chunk := resp.read(1 << 20):
+                    out.write(chunk)
+        except (OSError, EOFError) as exc:   # the connection dropped mid-body
+            problem = f"download interrupted ({exc})"
+            tmp.unlink(missing_ok=True)
+            continue
+        length = resp.headers.get("Content-Length")
+        bad = validate_download(tmp, int(length) if length and length.isdigit() else None, name=dest.name)
+        if bad:
+            problem = bad
+            tmp.unlink(missing_ok=True)
+            continue
+        os.replace(tmp, dest)
+        last = resp.headers.get("Last-Modified")
+        if last:
+            stamp = email.utils.parsedate_to_datetime(last).timestamp()
+            os.utime(dest, (stamp, stamp))
+        return "downloaded"
+    raise SystemExit(f"{url}: {problem} (after {attempts} attempts)")
 
 
 def cache_paths(cache: Path, years: list[int]) -> dict[str, Path]:
@@ -437,9 +502,11 @@ def to_lines(envs: Iterable[ClaimIn | DocumentIn]) -> Iterator[str]:
 # --------------------------------------------------------------------- CLI #
 
 def register(reg: SchemaRegistration, url: str | None, db: str | None, key: str | None) -> None:
-    if db:
-        from ..store.factory import store_from_url
-        store = store_from_url(db)
+    if not url:
+        from ..store.factory import store_from_env, store_from_url
+        # an explicit --db bypasses LOOM_SHARDS / LOOM_BLOB_*; without it the
+        # connector writes into the same store the engine is configured for
+        store = store_from_url(db) if db else store_from_env()
         try:
             store.put_schema(reg)
         finally:
@@ -476,8 +543,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("emit", parents=[common], help="write NDJSON envelopes to stdout")
     sub.add_parser("schema", parents=[common], help="print the schema registration")
     load = sub.add_parser("load", parents=[common], help="pull, register the schema, and ingest")
-    load.add_argument("--url", help="engine or gateway base URL")
-    load.add_argument("--db", help="write straight into this store")
+    load.add_argument("--url", help="engine or gateway base URL (default: write straight into the "
+                                    "store LOOM_DB / LOOM_SHARDS / LOOM_BLOB_* configure)")
+    load.add_argument("--db", help="write straight into this explicit store URL/path; bypasses "
+                                   "LOOM_SHARDS and LOOM_BLOB_*")
     load.add_argument("--key", default=os.environ.get("LOOM_API_KEY"))
     load.add_argument("--batch", type=int, default=500)
     args = parser.parse_args(argv)
@@ -499,13 +568,14 @@ def main(argv: list[str] | None = None) -> None:
             sys.stdout.write(line)
         print(json.dumps({"envelopes": stats}), file=sys.stderr)
         return
-    if bool(args.url) == bool(args.db):
-        parser.error("load: give exactly one of --url or --db")
+    if args.url and args.db:
+        parser.error("load: give --url or --db, not both")
     from ..ingest import load_direct, post_batches
     register(schema(args.namespace), args.url, args.db, args.key)
     t0 = time.monotonic()
     lines = to_lines(envs)
-    totals = load_direct(args.db, lines, args.batch) if args.db else post_batches(args.url, lines, args.batch, args.key)
+    totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
+              else load_direct(args.db, lines, args.batch))
     elapsed = time.monotonic() - t0
     total = sum(stats.values())
     print(json.dumps({**totals, "envelopes": stats, "seconds": round(elapsed, 1),

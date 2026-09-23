@@ -10,9 +10,9 @@ truth is computed from the store, never hard-coded, and the score checks
 what matters: did it name the right entities, did it invent any, and do
 its citations point at observations it actually saw.
 
-    python -m loom.agent_eval --db /data/loom.db                # every task
-    python -m loom.agent_eval --db /data/loom.db --tasks lease  # one task
-    LOOM_AGENT_MODEL=anthropic/claude-haiku-4.5 python -m loom.agent_eval ...
+    python -m loom.agent_eval                                   # every task, the LOOM_DB store
+    python -m loom.agent_eval --db /data/loom.db --tasks lease  # one task, an explicit store
+    LOOM_LLM_PROVIDER=anthropic LOOM_AGENT_MODEL=claude-opus-5 python -m loom.agent_eval ...
     python -m loom.agent_eval --db ... --models a/x,b/y --markdown models.md   # a scorecard
 
 Provider/key come from LOOM_LLM_* (any OpenAI-compatible endpoint with tool
@@ -29,6 +29,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .contracts import EntityRef
@@ -37,8 +38,12 @@ from .llm import OPENAI_COMPAT_BASES, _env, _post_json
 MAX_STEPS = int(os.environ.get("LOOM_AGENT_MAX_STEPS", "20"))   # model turns per task (D-037: 14 cut off thorough models)
 MAX_TOOL_CHARS = 24_000       # a tool result larger than this is cut, with a marker
 NAMESPACE = "netsec"
+LEASE_IP = "10.0.4.7"
+LEASE_AT = datetime(2026, 8, 20, tzinfo=timezone.utc)    # the moment the lease task asks about
 _CVE = re.compile(r"CVE-\d{4}-\d{4,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,32}\b")
+# sentence boundary: a period not inside a dotted token (10.0.4.7, 22.04)
+_SENTENCE = re.compile(r"(?<!\d)\.(?!\d)|\n")
 
 SYSTEM = (
     "You are a security analyst agent. You have tools that query Loom, a "
@@ -91,26 +96,44 @@ def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
     hits = sorted(mentioned & set(truth["kev"]))
     invented = sorted(c for c in mentioned
                       if store.get_entity(NAMESPACE, EntityRef(type="cve", key=c)) is None)
+    # real CVEs that are NOT in the KEV set for web-01: naming them as the
+    # exposure is a precision failure, not just a recall shortfall
+    false_kev = sorted((mentioned - set(truth["kev"])) - set(invented))
     cites = _cited(answer, seen)
     return {
         "kev_total": len(truth["kev"]), "kev_named": len(hits), "hits": hits,
-        "cves_mentioned": len(mentioned), "invented_cves": invented, **cites,
-        "pass": bool(hits) and not invented and cites["citations_unseen"] == 0,
+        "cves_mentioned": len(mentioned), "invented_cves": invented,
+        "false_kev": len(false_kev), "false_kev_examples": false_kev[:3], **cites,
+        "pass": bool(hits) and not invented and not false_kev and cites["citations_unseen"] == 0,
     }
 
 
 def _truth_lease(store) -> dict:
-    return {"expect": "laptop-17", "reject": "web-01"}
+    """Which hosts held LEASE_IP at LEASE_AT, from the observations whose
+    validity window covers that moment; every other host the IP was ever
+    assigned to is a wrong answer (history, not the answer)."""
+    holders, others = set(), set()
+    for o in _obs(store, EntityRef(type="ip", key=LEASE_IP), limit=1000):
+        if o.predicate != "assigned_to" or not isinstance(o.object, EntityRef):
+            continue
+        covers = ((o.valid_from is None or o.valid_from <= LEASE_AT)
+                  and (o.valid_to is None or LEASE_AT < o.valid_to))
+        (holders if covers else others).add(o.object.key.lower())
+    return {"expect": sorted(holders), "reject": sorted(others - holders)}
 
 
 def _score_lease(answer: str, truth: dict, seen: set[str], store) -> dict:
     cites = _cited(answer, seen)
     low = answer.lower()
-    # the sentence that answers must name laptop-17; web-01 may appear only as
-    # history ("until Aug 10"), so the reject is: answering web-01 outright
-    first = re.split(r"[.\n]", low)[0]
-    ok = truth["expect"] in low and truth["reject"] not in first
-    return {"names_laptop_17": truth["expect"] in low, "first_sentence": first[:120], **cites,
+    # the sentence that answers must name the holder; a former holder may
+    # appear only as history ("until Aug 10"), so the reject is: answering
+    # it outright in the first sentence
+    first = _SENTENCE.split(low)[0]
+    named = [h for h in truth["expect"] if h in low]
+    rejected = [h for h in truth["reject"] if h in first]
+    ok = bool(truth["expect"]) and len(named) == len(truth["expect"]) and not rejected
+    return {"names_expected": named, "rejected_in_answer": rejected,
+            "first_sentence": first[:120], **cites,
             "pass": ok and cites["citations_unseen"] == 0}
 
 
@@ -150,7 +173,10 @@ def _cited(answer: str, seen: set[str]) -> dict:
     """Every hex id the answer cites must be (a prefix of) an observation id
     that appeared in a tool result during THIS run — the faithfulness check."""
     cited = set(_HEX.findall(answer))
-    unseen = sorted(c for c in cited if not any(s.startswith(c) for s in seen))
+    # a cite is seen when it prefixes a seen id, or a seen cite token (12
+    # hex) prefixes it — the agent may quote either form
+    unseen = sorted(c for c in cited
+                    if not any(s.startswith(c) or c.startswith(s) for s in seen))
     return {"citations": len(cited), "citations_unseen": len(unseen), "unseen_examples": unseen[:3]}
 
 
@@ -278,6 +304,8 @@ def _payload_text(result) -> str:
 def _collect_ids(text: str, seen: set[str]) -> None:
     for m in re.finditer(r'"(?:observation_id|artifact_id|id)":\s*"([0-9a-f]{32})"', text):
         seen.add(m.group(1))
+    for m in re.finditer(r'"cite":\s*"([0-9a-f]{12})"', text):   # compact citations carry the token only
+        seen.add(m.group(1))
     for m in re.finditer(r'\[doc:([0-9a-f]{8})', text):   # excerpt renderings cite a prefix
         seen.add(m.group(1))
 
@@ -352,10 +380,12 @@ async def run_task(session, provider: Provider, task: Task, store,
     return result
 
 
-async def _session(db: str, fn):
+async def _session(db: str | None, fn):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
-    env = {**os.environ, "LOOM_DB": db}
+    # an explicit --db pins the server to one store; otherwise it opens the
+    # same LOOM_DB / LOOM_SHARDS / LOOM_BLOB_* configuration this process has
+    env = {**os.environ, **({"LOOM_DB": db} if db else {})}
     for var in ("LOOM_API_KEYS", "LOOM_AUTH_FILE"):
         env.pop(var, None)
     params = StdioServerParameters(command=sys.executable, args=["-m", "loom.mcp_server"], env=env)
@@ -365,15 +395,15 @@ async def _session(db: str, fn):
             return await fn(session, getattr(init, "instructions", None) or "")
 
 
-def evaluate(db: str, task_names: list[str] | None, model: str | None = None,
+def evaluate(db: str | None, task_names: list[str] | None, model: str | None = None,
              caller: Callable = call_model) -> list[RunResult]:
-    from .store.factory import store_from_url
+    from .store.factory import store_from_env, store_from_url
     # a scripted caller (tests) needs no provider: CI has no LOOM_LLM_* and
     # must not need one to exercise the loop
     provider = (Provider.from_env(model) if caller is call_model
                 else Provider("openai", "scripted://", model or "scripted", None))
     tasks = [t for t in TASKS if not task_names or t.name in task_names]
-    store = store_from_url(db)
+    store = store_from_url(db) if db else store_from_env()
     try:
         async def run_all(session, instructions):
             return [await run_task(session, provider, t, store, caller, instructions) for t in tasks]
@@ -457,7 +487,8 @@ def scorecard_markdown(rows: list[dict]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="loom.agent_eval", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--db", default=os.environ.get("LOOM_DB", "loom.db"))
+    parser.add_argument("--db", help="explicit store URL/path; bypasses LOOM_SHARDS / LOOM_BLOB_* "
+                                     "(default: the store LOOM_DB and friends configure)")
     parser.add_argument("--tasks", help="comma-separated subset of: " + ",".join(t.name for t in TASKS))
     parser.add_argument("--model", help="override LOOM_AGENT_MODEL / LOOM_LLM_MODEL")
     parser.add_argument("--models", help="comma-separated models to compare (a scorecard run)")

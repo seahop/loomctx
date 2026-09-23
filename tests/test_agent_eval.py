@@ -52,8 +52,8 @@ def test_lease_task_scores_a_faithful_cited_answer(seeded_db):
     def final(messages):
         pack = json.loads(_last_tool_output(messages))
         item = next(i for i in pack["items"] if "laptop-17" in i["text"])
-        oid = item["citations"][0]["observation_id"]
-        return f"laptop-17 held 10.0.4.7 on that date [{oid[:12]}]."
+        cite = item["citations"][0]["cite"]
+        return f"laptop-17 held 10.0.4.7 on that date [{cite}]."
     model = Scripted([
         [("find_entity", {"query": "10.0.4.7", "namespace": "netsec"})],
         [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec",
@@ -100,6 +100,42 @@ def test_exposure_truth_is_computed_from_the_store(tmp_path):
     assert "openssl:openssl" in truth["products"] and truth["kev"] == {"CVE-2026-10001": "openssl:openssl"}
     score = ae._score_cves("CVE-2026-10001 via openssl [abc]; also CVE-2026-9999", truth, {"abcdef" * 5 + "ab"}, store)
     assert score["kev_named"] == 1 and score["invented_cves"] == ["CVE-2026-9999"] and not score["pass"]
+    # a real CVE that is not KEV-for-web-01 named as the exposure is a
+    # precision failure (the score used to measure recall only)
+    from loom.contracts import ClaimIn, EntityRef
+    from datetime import datetime, timezone
+    store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="cve", key="CVE-2026-10002"),
+                               predicate="status", object="Analyzed", source="nvd",
+                               observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)))
+    score = ae._score_cves("CVE-2026-10001 and CVE-2026-10002 [abcdef]", truth, {"abcdef" * 5 + "ab"}, store)
+    assert score["false_kev"] == 1 and score["false_kev_examples"] == ["CVE-2026-10002"] and not score["pass"]
+    assert score["invented_cves"] == []
+    score = ae._score_cves("CVE-2026-10001 [abcdef]", truth, {"abcdef" * 5 + "ab"}, store)
+    assert score["pass"] and score["false_kev"] == 0
+    store.close()
+
+
+def test_lease_truth_comes_from_validity_windows_and_dotted_ips_do_not_end_sentences(seeded_db, tmp_path):
+    import shutil
+    shutil.copy(seeded_db, tmp_path / "copy.db")          # this test adds a lease; keep the shared seed pristine
+    store = SqliteStore(tmp_path / "copy.db")
+    truth = ae._truth_lease(store)
+    assert truth == {"expect": ["laptop-17"], "reject": ["web-01"]}
+    seen = {"abcdef" * 5 + "ab"}
+    # the old splitter cut the first sentence at the IP's first dot, so
+    # "web-01" after "10.0.4.7" was never in the judged sentence
+    s = ae._score_lease("On 2026-08-20 the address 10.0.4.7 was held by web-01, not laptop-17 [abcdef].", truth, seen, store)
+    assert "web-01" in s["first_sentence"] and s["rejected_in_answer"] == ["web-01"] and not s["pass"]
+    s = ae._score_lease("10.0.4.7 was held by laptop-17 [abcdef]. Before Aug 10 it was web-01.", truth, seen, store)
+    assert s["pass"] and s["names_expected"] == ["laptop-17"] and s["rejected_in_answer"] == []
+    # the truth follows the store: move the lease and the answer moves with it
+    from loom.contracts import ClaimIn, EntityRef
+    from datetime import datetime, timezone
+    t = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="ip", key="10.0.4.7"), predicate="assigned_to",
+                               object=EntityRef(type="host", key="db-02"), observed_at=t, valid_from=t,
+                               valid_to=datetime(2026, 8, 25, tzinfo=timezone.utc), source="dhcp-log"))
+    assert ae._truth_lease(store)["expect"] == ["db-02", "laptop-17"]
     store.close()
 
 
@@ -148,12 +184,14 @@ def test_scorecard_ranks_passes_then_cost():
 
 def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retries(seeded_db):
     seen = set()
-    ae._collect_ids('{"citations":[{"artifact_id":"0123456789abcdef0123456789abcdef","span_start":1}]} "[doc:deadbeef @0-10]"', seen)
-    assert {"0123456789abcdef0123456789abcdef", "deadbeef"} <= seen
+    ae._collect_ids('{"citations":[{"artifact_id":"0123456789abcdef0123456789abcdef","span_start":1}]} "[doc:deadbeef @0-10]"'
+                    ' {"cite":"fedcba987654","source":"s"}', seen)
+    assert {"0123456789abcdef0123456789abcdef", "deadbeef", "fedcba987654"} <= seen
+    assert ae._cited("[fedcba98] and [fedcba987654] and [fedcba9876543210]", seen)["citations_unseen"] == 0
     model = Scripted([
         [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec"})],
         "",                                                     # transient empty completion
-        lambda messages: "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["observation_id"][:12] + "]",
+        lambda messages: "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["cite"] + "]",
     ])
     r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0]
     assert r.error is None and r.score["pass"] and r.steps == 3
