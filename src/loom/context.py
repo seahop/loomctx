@@ -131,6 +131,10 @@ def _aware(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _object_text(obs: Observation) -> str:
     if isinstance(obs.object, EntityRef):
         return f"{obs.object.type}:{obs.object.key}"
@@ -214,7 +218,7 @@ def _find_conflicts(
     """Scalar facts about the subject where sources disagree on the value.
     Returns (predicate, item) pairs so a conflict that doesn't fit the
     budget can still be handed back as an expansion handle (H-C4)."""
-    horizon = as_of or datetime.now(timezone.utc)
+    horizon = as_of or _now()
     by_predicate: dict[str, dict[str, Observation]] = {}
     for obs in observations:
         if obs.subject != subject or isinstance(obs.object, EntityRef):
@@ -729,7 +733,12 @@ def _pack(
         for r in roots:
             named |= _tokens(f"{r.type} {r.key}")
         question_tokens = question_tokens - named or question_tokens
+    # The recency reference is the newest gathered fact, clamped at now: one
+    # forward-dated claim (a typo'd year, a hostile sender) otherwise ages
+    # every real fact by decades and flattens ranking to confidence.
     newest = max((_aware(o.observed_at) for o in observations), default=None)
+    if newest is not None:
+        newest = min(newest, _now())
     scored = sorted(
         (
             (_score(obs, question_tokens, _recency(obs, newest),

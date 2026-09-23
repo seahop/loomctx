@@ -82,6 +82,11 @@ def test_invalid_envelope_rejected(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/ingest", json={"kind": "claim", "predicate": "x"})
         assert r.status_code == 422
+        # a forward-dated observation is a typo or a ranking poison pill (D-046)
+        r = client.post("/v1/ingest", json={**CLAIM, "observed_at": "2099-01-01T00:00:00Z"})
+        assert r.status_code == 422 and "observed_at is in the future" in r.text
+        r = client.post("/v1/ingest/batch", json=[{**CLAIM, "observed_at": "2099-01-01T00:00:00Z"}])
+        assert r.json()["results"][0]["status"] == "rejected"
 
 
 def test_entity_search(tmp_path, monkeypatch):

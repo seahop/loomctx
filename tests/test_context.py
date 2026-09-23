@@ -506,3 +506,26 @@ def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
     assert more.truncated and more.truncated[0].total == 7
     assert all("old" in i.text for i in more.items)
     store.close()
+
+
+def test_a_forward_dated_row_does_not_age_every_real_fact(tmp_path, monkeypatch):
+    """D-046: recency decays relative to the newest gathered fact; a row
+    observed in 2099 (restored from an export, or a typo'd year) made every
+    real fact decades old and flattened ranking. The reference is clamped
+    at now, so the real facts keep their relative recency."""
+    import loom.context as ctx
+    from loom.contracts import Observation
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))  # the newest real fact's instant
+    store, web01 = make_store(tmp_path)
+    before = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=3000))
+    far = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    store.restore_observation(Observation(
+        id="poison", namespace="default", subject=web01, predicate="note", object="from the future",
+        observed_at=far, recorded_at=far, source="typo", confidence=1.0))
+    after = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=3000))
+    score = {i.text: i.score for i in after.items if i.kind == "fact"}
+    for item in before.items:
+        if item.kind == "fact":
+            assert score[item.text] == item.score, item.text
+    facts = [i for i in after.items if i.kind == "fact"]
+    assert "logged_in_by" in facts[0].text

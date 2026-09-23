@@ -6,7 +6,7 @@ contract is a versioned event recorded in docs/decisions.md, not a refactor.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, model_validator
@@ -14,6 +14,16 @@ from pydantic import BaseModel, Field, model_validator
 DEFAULT_NAMESPACE = "default"
 MAX_DOCUMENT_CHARS = 1_000_000          # ~1 MB of text per document envelope
 MAX_DOCUMENT_B64 = 1_400_000            # base64 of ~1 MB of bytes
+# Clock skew a sender may have; beyond it observed_at is a typo or a poison
+# pill for recency ranking (D-046). valid_from/valid_to are never bounded:
+# a lease or a maintenance window is legitimately scheduled ahead.
+MAX_FUTURE_OBSERVED = timedelta(hours=24)
+
+
+def _not_in_the_future(observed_at: datetime) -> None:
+    when = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=timezone.utc)
+    if when > datetime.now(timezone.utc) + MAX_FUTURE_OBSERVED:
+        raise ValueError("observed_at is in the future")
 
 
 class EntityRef(BaseModel):
@@ -70,6 +80,11 @@ class ClaimIn(BaseModel):
     provenance: Provenance | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _observed_in_the_past(self) -> "ClaimIn":
+        _not_in_the_future(self.observed_at)
+        return self
+
 
 class DocumentIn(BaseModel):
     """Unstructured ingestion payload. Stored verbatim as an artifact, mined async."""
@@ -92,6 +107,7 @@ class DocumentIn(BaseModel):
     def _exactly_one_body(self) -> "DocumentIn":
         if (self.text is None) == (self.content_b64 is None):
             raise ValueError("provide exactly one of 'text' or 'content_b64'")
+        _not_in_the_future(self.observed_at)
         return self
 
 
