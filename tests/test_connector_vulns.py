@@ -199,6 +199,126 @@ def test_cli_emit_and_schema(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["namespace"] == "netsec"
 
 
+class _FeedResp:
+    """A stubbed urlopen response: body bytes plus headers."""
+
+    def __init__(self, body: bytes, headers: dict | None = None, fail_after: int | None = None):
+        self.body, self.pos, self.fail_after = body, 0, fail_after
+        import email.message
+        self.headers = email.message.Message()
+        for k, v in (headers or {}).items():
+            self.headers[k] = v
+
+    def read(self, n=-1):
+        if self.fail_after is not None and self.pos >= self.fail_after:
+            raise OSError("connection reset")
+        chunk = self.body[self.pos:self.pos + n] if n and n > 0 else self.body[self.pos:]
+        self.pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _http_error(code):
+    import email.message
+    import io
+    import urllib.error
+    return urllib.error.HTTPError("http://feed", code, "err", email.message.Message(), io.BytesIO(b""))
+
+
+def _stub_feed(monkeypatch, items):
+    """Each item is a response, an exception to raise, or a callable(req)."""
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req)
+        item = items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(vulns.time, "sleep", lambda s: None)
+    return seen
+
+
+def test_fetch_never_caches_a_truncated_or_corrupt_body(tmp_path, monkeypatch, capsys):
+    """A short gzip (connection cut, or Content-Length unmet) used to be
+    renamed into place and stamped with Last-Modified, so every later run
+    got a 304 and served the corrupt cache forever."""
+    dest = tmp_path / "feeds" / "nvdcve-2.0-2026.json.gz"
+    good = gzip.compress(json.dumps({"vulnerabilities": [NVD_ITEM]}).encode())
+    stamp = "Wed, 09 Sep 2026 10:00:00 GMT"
+    # 1: body shorter than Content-Length; 2: a cut-off gzip member; 3: fine
+    _stub_feed(monkeypatch, [
+        _FeedResp(good[:-40], {"Content-Length": str(len(good)), "Last-Modified": stamp}),
+        _FeedResp(good[:-40], {"Last-Modified": stamp}),
+        _FeedResp(good, {"Content-Length": str(len(good)), "Last-Modified": stamp}),
+    ])
+    assert vulns.fetch("http://feed", dest) == "downloaded"
+    assert dest.read_bytes() == good and not dest.with_suffix(".gz.part").exists()
+    assert "Content-Length said" in capsys.readouterr().err
+    import email.utils
+    assert abs(dest.stat().st_mtime - email.utils.parsedate_to_datetime(stamp).timestamp()) < 1   # stamped only for a valid body
+    assert sum(1 for _ in vulns.iter_nvd(dest)) == 1
+    # every attempt bad: no cache file appears, and the stale one is kept
+    before = dest.read_bytes()
+    _stub_feed(monkeypatch, [_FeedResp(b"\x1f\x8b\x08junk") for _ in range(3)])
+    with pytest.raises(SystemExit, match="gzip body unreadable"):
+        vulns.fetch("http://feed", dest)
+    assert dest.read_bytes() == before
+    # a truncated JSON feed is rejected the same way
+    kev = tmp_path / "feeds" / "kev.json"
+    _stub_feed(monkeypatch, [_FeedResp(b'{"vulnerabilities": [') for _ in range(3)])
+    with pytest.raises(SystemExit, match="JSON body unreadable"):
+        vulns.fetch("http://feed", kev)
+    assert not kev.exists()
+    # a connection dropped mid-body is retried
+    _stub_feed(monkeypatch, [_FeedResp(good, fail_after=0), _FeedResp(good)])
+    assert vulns.fetch("http://feed", dest) == "downloaded"
+
+
+def test_fetch_retries_transient_failures_and_honours_304(tmp_path, monkeypatch):
+    import urllib.error
+    dest = tmp_path / "feeds" / "kev.json"
+    body = json.dumps({"vulnerabilities": [KEV_ENTRY]}).encode()
+    seen = _stub_feed(monkeypatch, [_http_error(503), urllib.error.URLError("dns"), _FeedResp(body)])
+    assert vulns.fetch("http://feed", dest) == "downloaded" and len(seen) == 3
+    assert "If-Modified-Since" not in seen[0].headers
+    seen = _stub_feed(monkeypatch, [_http_error(304)])
+    assert vulns.fetch("http://feed", dest) == "cached" and seen[0].get_header("If-modified-since")
+    seen = _stub_feed(monkeypatch, [_http_error(429), _http_error(500), _http_error(502)])
+    with pytest.raises(SystemExit, match="HTTP 502 .after 3 attempts"):
+        vulns.fetch("http://feed", dest)
+    assert len(seen) == 3
+    seen = _stub_feed(monkeypatch, [_http_error(404)])
+    with pytest.raises(SystemExit, match="HTTP 404"):
+        vulns.fetch("http://feed", dest)
+    assert len(seen) == 1                                                # not retried
+    assert vulns.validate_download(dest) is None
+
+
+def test_load_without_url_or_db_uses_the_environment_store(tmp_path, monkeypatch, capsys):
+    """--db is an explicit override that bypasses LOOM_SHARDS / LOOM_BLOB_*;
+    without it (and without --url) the connector writes where the engine
+    reads: the store LOOM_DB and friends configure."""
+    cache = tmp_path / "feeds"
+    _write_cache(cache)
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "env.db"))
+    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    vulns.main(["load", "--cache", str(cache), "--offline", "--sources", "kev"])
+    out = capsys.readouterr().out
+    assert json.loads(out.splitlines()[-1])["recorded"] == 5
+    store = SqliteStore(tmp_path / "env.db")
+    assert store.get_schema("netsec") is not None
+    assert store.count_observations("netsec", EntityRef(type="cve", key="CVE-2026-1337")) >= 3
+    store.close()
+
+
 @pytest.mark.skipif(not os.environ.get("LOOM_LIVE_FEEDS"), reason="set LOOM_LIVE_FEEDS=1 to hit the real feeds")
 def test_live_pull_is_conditional(tmp_path):
     cache = tmp_path / "feeds"
