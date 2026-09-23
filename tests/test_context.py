@@ -578,3 +578,17 @@ def test_unembedded_facts_take_the_median_cosine(tmp_path, monkeypatch):
     score = {i.text.split()[2]: i.score for i in pack.items if i.kind == "fact"}
     assert score["v4"] == score["v3"]                       # median of {0.9, 0.1, 0.5} is 0.5
     assert score["v2"] < score["v4"] < score["v1"]
+
+
+def test_query_cache_eviction_is_safe_across_threads():
+    """D-046: eviction popped the first key of a dict other threads were
+    inserting into (asks run in the threadpool); the cache is now locked
+    and stays bounded under concurrent misses."""
+    from concurrent.futures import ThreadPoolExecutor
+    from loom.context import _QUERY_CACHE_SIZE, _query_cache, embed_query
+    from loom.llm import HashingEmbedder
+    _query_cache.clear()
+    e = HashingEmbedder()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: embed_query(e, f"question number {i}"), range(_QUERY_CACHE_SIZE * 3)))
+    assert len(_query_cache) <= _QUERY_CACHE_SIZE

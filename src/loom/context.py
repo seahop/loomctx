@@ -37,6 +37,7 @@ import hmac
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 from .config import max_budget
@@ -83,13 +84,17 @@ def embed_query(embedder, question: str) -> list[float]:
     re-ask the same question with different subjects/budgets constantly,
     and each miss is a provider round-trip (H-E1)."""
     key = (embedder.model, question)
-    vec = _query_cache.get(key)
+    with _query_cache_lock:
+        vec = _query_cache.get(key)
     if vec is None:
         one = getattr(embedder, "embed_query", None)
         vec = one(question) if callable(one) else embedder.embed([question])[0]
-        if len(_query_cache) >= _QUERY_CACHE_SIZE:
-            _query_cache.pop(next(iter(_query_cache)))
-        _query_cache[key] = vec
+        # asks run in the threadpool: eviction (pop the oldest) raced with
+        # concurrent inserts and iterated a dict that changed size (D-046)
+        with _query_cache_lock:
+            while len(_query_cache) >= _QUERY_CACHE_SIZE:
+                _query_cache.pop(next(iter(_query_cache)))
+            _query_cache[key] = vec
     return vec
 
 
@@ -104,6 +109,7 @@ def try_embed_query(embedder, question: str) -> list[float] | None:
 
 
 _query_cache: dict[tuple[str, str], list[float]] = {}
+_query_cache_lock = threading.Lock()
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
 
