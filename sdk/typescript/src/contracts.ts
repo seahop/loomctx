@@ -153,11 +153,15 @@ export interface Artifact {
   };
 }
 /**
- * Two time axes (docs/architecture.md, D-024): `as_of` = what did we
- * KNOW at T (knowledge time — later-recorded observations are hidden);
- * `valid_at` = what was TRUE at T (fact time — only observations whose
- * validity window covers T survive, and facts with no window at all are
- * kept).
+ * Two time axes (docs/architecture.md, D-024/D-046): `as_of` = what did
+ * we KNOW at T, measured on observation time (`observed_at <= as_of`:
+ * when the source asserted it), the closest proxy to knowledge time for
+ * backfilled corpora, where `recorded_at` is load day; `recorded_at`
+ * remains the audit column. `valid_at` = what was TRUE at T (fact time —
+ * only observations whose validity window covers T survive, and facts
+ * with no window at all are kept). A fact scheduled for after T but
+ * asserted before it is part of the `as_of` view; hiding it is
+ * `valid_at`'s job.
  */
 export interface AskRequest {
   namespace?: string;
@@ -183,11 +187,18 @@ export interface AskRequest {
  */
 export interface ScopeSpec {
   /**
+   * anchors of the scope; bounded so one request cannot name a whole namespace (expansion is how a scope grows, D-046)
+   *
    * @minItems 1
+   * @maxItems 500
    */
   subjects: [EntityRef, ...EntityRef[]];
   expand?: string[];
   depth?: number;
+  /**
+   * also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)
+   */
+  follow_extracted?: boolean;
 }
 export interface ExpandRequest {
   handle: string;
