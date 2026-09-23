@@ -7,6 +7,7 @@ Prometheus (/metrics) with a store-probing readiness check (/readyz).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -83,15 +84,85 @@ def _max_body_bytes() -> int:
         return 2 * 1024 * 1024
 
 
-@app.middleware("http")
-async def _cap_request_size(request: Request, call_next):
-    """The default (no-gateway) shape had no body limit at all (H-A14):
-    reject oversized uploads before parsing, like the gateway does."""
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > _max_body_bytes():
-        metrics.REJECTED.labels(reason="too_large").inc()
-        return JSONResponse(status_code=413, content={"detail": "body too large"})
-    return await call_next(request)
+class _BodyTooLarge(HTTPException):
+    """Raised from the counted `receive` once a chunked body passes the cap.
+    An HTTPException on purpose: FastAPI's body reader converts any other
+    exception into a 400 "error parsing the body"; this one passes through
+    to the same 413 the fast path sends."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="body too large")
+
+
+async def _send_json(send, status: int, content: dict) -> None:
+    body = json.dumps(content).encode()
+    await send({"type": "http.response.start", "status": status, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _RequestSizeCap:
+    """Pure ASGI. The default (no-gateway) shape had no body limit at all
+    (H-A14): reject oversized uploads before parsing, like the gateway
+    does. Content-Length is the fast path; a chunked upload carries none,
+    so `receive` is counted and the request aborts with 413 the moment the
+    cap is passed (D-046) — no buffering of the whole body first."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = _max_body_bytes()
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > cap:
+            metrics.REJECTED.labels(reason="too_large").inc()
+            return await _send_json(send, 413, {"detail": "body too large"})
+        seen = 0
+
+        async def counted_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > cap:
+                    metrics.REJECTED.labels(reason="too_large").inc()
+                    raise _BodyTooLarge()
+            return message
+
+        await self.app(scope, counted_receive, send)
+
+
+class _ResponseHygiene:
+    """Pure ASGI. API responses are JSON meant for programs, never pages:
+    no MIME sniffing and no caching by any intermediary (a pack is keyed
+    to a bearer's world, D-046)."""
+
+    _HEADERS = ((b"x-content-type-options", b"nosniff"), (b"cache-control", b"no-store"))
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+            return await self.app(scope, receive, send)
+
+        async def hygienic_send(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                present = {k.lower() for k, _ in headers}
+                headers += [(k, v) for k, v in self._HEADERS if k not in present]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, hygienic_send)
+
+
+app.add_middleware(_RequestSizeCap)
+app.add_middleware(_ResponseHygiene)   # outermost: covers the cap's own 413 too
 
 
 def _authorize(request: Request, namespace: str, action: str) -> Grant | None:

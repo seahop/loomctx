@@ -422,6 +422,44 @@ def test_oversized_body_is_rejected_before_parsing(tmp_path, monkeypatch):
         body["text"] = "small"
         assert client.post("/v1/ingest", json=body).status_code == 202
 
+        # a chunked upload carries no Content-Length: the body is counted
+        # as it streams and aborted at the cap (D-046)
+        def chunks():
+            yield b'{"kind": "document", "source": "s", "observed_at": "2026-09-01T00:00:00Z", "text": "'
+            for _ in range(8):
+                yield b"x" * 1024
+            yield b'"}'
+        r = client.post("/v1/ingest", content=chunks(),
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 413 and r.json()["detail"] == "body too large"
+        r = client.post("/v1/ingest/batch", content=chunks(),
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 413
+        small = (b for b in [b'{"kind": "document", "source": "s", "observed_at": "2026-09-01T00:00:00Z", "text": "ok"}'])
+        r = client.post("/v1/ingest", content=small,
+                        headers={"content-type": "application/json", "transfer-encoding": "chunked"})
+        assert r.status_code == 202
+
+
+def test_api_responses_carry_hygiene_headers(tmp_path, monkeypatch):
+    """D-046: /v1/* responses are not to be sniffed or cached; probes keep
+    their defaults."""
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "hyg.db"))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    with TestClient(app) as client:
+        for r in (client.post("/v1/ingest", json=claim().model_dump(mode="json")),
+                  client.get("/v1/entities/host/web-01/observations"),
+                  client.post("/v1/expand", json={"handle": "nope"}),
+                  client.post("/v1/ingest", json={"kind": "claim"})):
+            assert r.headers["x-content-type-options"] == "nosniff", r.url
+            assert r.headers["cache-control"] == "no-store", r.url
+        monkeypatch.setenv("LOOM_MAX_BODY_BYTES", "64")
+        r = client.post("/v1/ingest", json={"kind": "document", "text": "x" * 200, "source": "s",
+                                            "observed_at": OBSERVED.isoformat()})
+        assert r.status_code == 413 and r.headers["cache-control"] == "no-store"
+        assert "cache-control" not in client.get("/healthz").headers
+
 
 def test_artifact_read_requires_a_citing_fact_in_scope(tmp_path, monkeypatch):
     """H-A6: a document is in a type-scoped reader's world only once it
