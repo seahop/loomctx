@@ -6,13 +6,95 @@ on:
     tags: ["v*"]
   pull_request:
 
+# Least privilege by default; the jobs that push images say so themselves.
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs (Dependabot keeps them current); the
+# version comment is what a human reads.
+
 jobs:
   test:
+    # Builds the ONE engine image and the ONE gateway image everything else
+    # tests. On a push, each is built and pushed as a candidate
+    # (ghcr.io/<owner>/<image>:ci-<sha>, with SBOM + provenance attestations)
+    # and then pulled back BY DIGEST for the tests, so what publish-image
+    # later promotes is byte-for-byte what passed here. On a pull request
+    # there is nothing to push, so the build is loaded locally instead.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ENGINE: ghcr.io/${{ github.repository_owner }}/loom
+      GATEWAY: ghcr.io/${{ github.repository_owner }}/loom-gateway
     steps:
-      - uses: actions/checkout@v5
-      - name: Build engine image (shared by loom/test/consumer/mcp)
-        run: docker compose build loom
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- engine image ---------------------------------------------------
+      - name: Build + push the engine candidate (push events)
+        id: engine-push
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.ENGINE }}:ci-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=engine
+          cache-to: type=gha,mode=max,scope=engine
+      - name: Pull the engine candidate back by digest as loom-engine:local
+        if: github.event_name == 'push'
+        run: |
+          docker pull "$ENGINE@${{ steps.engine-push.outputs.digest }}"
+          docker tag "$ENGINE@${{ steps.engine-push.outputs.digest }}" loom-engine:local
+      - name: Build the engine image locally (pull requests)
+        if: github.event_name != 'push'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: loom-engine:local
+          cache-from: type=gha,scope=engine
+
+      # --- gateway image --------------------------------------------------
+      - name: Build + push the gateway candidate (push events; go vet/test/govulncheck run inside)
+        id: gateway-push
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: gateway/Dockerfile
+          push: true
+          tags: ${{ env.GATEWAY }}:ci-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
+      - name: Pull the gateway candidate back by digest as loom-gateway:local
+        if: github.event_name == 'push'
+        run: |
+          docker pull "$GATEWAY@${{ steps.gateway-push.outputs.digest }}"
+          docker tag "$GATEWAY@${{ steps.gateway-push.outputs.digest }}" loom-gateway:local
+      - name: Build the gateway image locally (pull requests)
+        if: github.event_name != 'push'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: gateway/Dockerfile
+          load: true
+          tags: loom-gateway:local
+          cache-from: type=gha,scope=gateway
+
+      # --- the suite, against those two images ----------------------------
       - name: Run Python test suite
         run: docker compose run --rm test
       - name: Contracts in sync (schemas.json + openapi.json regenerate identically)
@@ -33,8 +115,6 @@ jobs:
           docker compose run --rm \
             -e LOOM_TEST_POSTGRES_URL=postgresql://loom:loom@postgres:5432/loom \
             test pytest -q tests/test_store.py
-      - name: Build gateway (go vet + go test run in the build)
-        run: docker compose --profile scale build gateway
       - name: TypeScript + Go SDKs (generated types in sync, build, live tests)
         run: |
           docker compose up -d --wait loom
@@ -46,22 +126,23 @@ jobs:
     # The scale shape end to end (D-045): lb -> 2 gateways -> JetStream -> consumer -> store -> engine.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: One claim through the queue and back out of the engine
         run: scripts/smoke-scale.sh
 
   python-matrix:
-    # The image ships on the current stable Python (Dockerfile ARG); the
-    # older interpreters the package still supports are checked here.
+    # The image ships on the current stable Python (Dockerfile ARG, pinned by
+    # digest); the older interpreters the package still supports are checked
+    # here by tag (an empty PYTHON_DIGEST lets the tag resolve on its own).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Build on Python ${{ matrix.python }}
-        run: docker build --build-arg PYTHON_VERSION=${{ matrix.python }} -t loom-py${{ matrix.python }} .
+        run: docker build --build-arg PYTHON_VERSION=${{ matrix.python }} --build-arg PYTHON_DIGEST= -t loom-py${{ matrix.python }} .
       - name: Test on Python ${{ matrix.python }}
         run: |
           docker run --rm -e LOOM_DB=/tmp/t.db -e PYTHONPATH=/app/sdk/python \
@@ -69,59 +150,70 @@ jobs:
             loom-py${{ matrix.python }} pytest -q
 
   publish-image:
-    # main: build and push :latest + :<sha>. Tag push: re-tag the commit's already
-    # published :<sha> image as :<tag> so the release image is byte-for-byte the one
-    # that was gated (D-045); build only if that commit never went through main.
+    # Nothing is built here. main: the candidates the test job pushed and
+    # tested (:ci-<sha>) are scanned and promoted to :latest + :<sha> with
+    # `imagetools create` — a manifest re-tag, so the published image IS the
+    # tested one. Tag push: the commit's :<sha> (already gated on main) is
+    # promoted to :<tag>; if the commit never went through main, this run's
+    # own :ci-<sha> candidate is used instead (D-045).
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
-    needs: [test, scale-smoke]
+    needs: [test, scale-smoke, python-matrix]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      OWNER: ghcr.io/${{ github.repository_owner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Re-tag the published commit image as the release tag
-        id: retag
-        if: github.ref_type == 'tag'
+      - name: Pick the candidate to promote
+        id: pick
         run: |
           set -euo pipefail
-          o=ghcr.io/${{ github.repository_owner }}
-          build=false
           for img in loom loom-gateway; do
-            if docker buildx imagetools inspect "$o/$img:${{ github.sha }}" >/dev/null 2>&1; then
-              docker buildx imagetools create -t "$o/$img:${{ github.ref_name }}" "$o/$img:${{ github.sha }}"
-              echo "$img:${{ github.ref_name }} -> $(docker buildx imagetools inspect "$o/$img:${{ github.ref_name }}" --format '{{json .Manifest.Digest}}')"
-            else
-              echo "$o/$img:${{ github.sha }} was never published; building"; build=true
+            src="$OWNER/$img:ci-${{ github.sha }}"
+            if [ "${{ github.ref_type }}" = tag ] && docker buildx imagetools inspect "$OWNER/$img:${{ github.sha }}" >/dev/null 2>&1; then
+              src="$OWNER/$img:${{ github.sha }}"   # gated on main already
             fi
+            docker buildx imagetools inspect "$src" >/dev/null
+            echo "$img=$src" >> "$GITHUB_OUTPUT"
+            echo "$img <- $src"
           done
-          echo "build=$build" >> "$GITHUB_OUTPUT"
-      - name: Image tags
-        id: tags
+      - name: Trivy — engine candidate (CRITICAL/HIGH with a fix available fail the publish)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          image-ref: ${{ steps.pick.outputs.loom }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Trivy — gateway candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          image-ref: ${{ steps.pick.outputs.loom-gateway }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Promote (manifest re-tag; no rebuild)
         run: |
-          o=ghcr.io/${{ github.repository_owner }}
+          set -euo pipefail
           if [ "${{ github.ref_type }}" = tag ]; then
-            echo "engine=$o/loom:${{ github.sha }},$o/loom:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "gateway=$o/loom-gateway:${{ github.sha }},$o/loom-gateway:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            tags="${{ github.ref_name }}"
           else
-            echo "engine=$o/loom:latest,$o/loom:${{ github.sha }}" >> "$GITHUB_OUTPUT"
-            echo "gateway=$o/loom-gateway:latest,$o/loom-gateway:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            tags="latest ${{ github.sha }}"
           fi
-      - uses: docker/build-push-action@v6
-        if: github.ref_type != 'tag' || steps.retag.outputs.build == 'true'
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.tags.outputs.engine }}
-      - uses: docker/build-push-action@v6
-        if: github.ref_type != 'tag' || steps.retag.outputs.build == 'true'
-        with:
-          context: .
-          file: gateway/Dockerfile
-          push: true
-          tags: ${{ steps.tags.outputs.gateway }}
+          for img in loom loom-gateway; do
+            if [ "$img" = loom ]; then src="${{ steps.pick.outputs.loom }}"; else src="${{ steps.pick.outputs.loom-gateway }}"; fi
+            args=""
+            for t in $tags; do args="$args -t $OWNER/$img:$t"; done
+            docker buildx imagetools create $args "$src"
+            for t in $tags; do
+              echo "$img:$t -> $(docker buildx imagetools inspect "$OWNER/$img:$t" --format '{{json .Manifest.Digest}}')"
+            done
+          done

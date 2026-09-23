@@ -1,0 +1,29 @@
+# Keeps the pinned things current: action SHAs, base-image digests, the
+# Python lock, and the Go modules. One PR per ecosystem per week; CI gates
+# each one like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /gateway
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /sdk/go
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /sdk/typescript
+    schedule: {interval: weekly}
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /gateway
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /sdk/go
+    schedule: {interval: weekly}
