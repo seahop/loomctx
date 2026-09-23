@@ -676,6 +676,10 @@ def expand_pack(
         budget=budget,
         observations=observations,
         with_handles=False,
+        # The caller asked for this thread — a conflict handle in particular
+        # — so the whole budget is theirs to spend on it; the share cap is
+        # for packs that must also carry facts (D-046).
+        conflict_share=1.0,
         truncated=list(truncated.values()),
     )
 
@@ -733,6 +737,7 @@ def _pack(
     paths: dict[tuple[str, str], list[str]] | None = None,
     roots: list[EntityRef] | None = None,
     truncated: list[ScopeTruncation] | None = None,
+    conflict_share: float = _CONFLICT_BUDGET_SHARE,
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
@@ -790,7 +795,7 @@ def _pack(
     by_subject: dict[tuple[str, str], list[Observation]] = {}
     for obs in observations:
         by_subject.setdefault((obs.subject.type, obs.subject.key), []).append(obs)
-    conflict_remaining = int(budget * _CONFLICT_BUDGET_SHARE)
+    conflict_remaining = int(budget * conflict_share)
     for subj in subjects:
         mine = by_subject.get((subj.type, subj.key), [])
         for predicate, item in _find_conflicts(subj, mine, valid_at or as_of):
@@ -800,6 +805,9 @@ def _pack(
                 remaining -= cost
                 conflict_remaining -= cost
             elif with_handles:
+                # est_tokens is the exact cost the expansion charges (text
+                # plus item framing), so a caller passing it as the
+                # expansion budget is guaranteed the conflict (D-046).
                 handles.append(ExpansionHandle(
                     id=encode_handle(namespace, subj, predicate, as_of, valid_at),
                     hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "

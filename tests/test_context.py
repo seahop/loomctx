@@ -529,3 +529,17 @@ def test_a_forward_dated_row_does_not_age_every_real_fact(tmp_path, monkeypatch)
             assert score[item.text] == item.score, item.text
     facts = [i for i in after.items if i.kind == "fact"]
     assert "logged_in_by" in facts[0].text
+
+
+def test_expanding_a_conflict_handle_with_its_estimate_yields_the_conflict(tmp_path):
+    """D-046: a conflict handle says est_tokens; expanding it with exactly
+    that budget used to return nothing (the half-budget share cap applied
+    to the expansion too, and dropped the very item the handle stood for)."""
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=25))
+    handle = next(h for h in pack.handles if h.kind == "conflict")
+    expanded = expand_pack(store, handle.id, budget=handle.est_tokens)
+    conflicts = [i for i in expanded.items if i.kind == "conflict"]
+    assert len(conflicts) == 1 and "runs_os" in conflicts[0].text
+    assert est_tokens(conflicts[0].text) == handle.est_tokens   # the estimate is the real cost
+    assert sum(est_tokens(i.text) for i in expanded.items) <= expanded.budget
