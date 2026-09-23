@@ -12,3 +12,6 @@ dist/
 # operator-minted keys files (docs/administration.md) — never commit
 secrets/
 keys.json
+
+# Claude Code session worktrees (harness-managed)
+.claude/worktrees/
