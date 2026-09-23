@@ -18,12 +18,17 @@ Configuration (environment):
 
 from __future__ import annotations
 
+import email.utils
 import json
+import logging
 import os
+import random
 import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+
+log = logging.getLogger("loom.llm")
 
 OPENAI_COMPAT_BASES = {
     "openrouter": "https://openrouter.ai/api/v1",
@@ -50,6 +55,10 @@ class LLMError(RuntimeError):
 
 class LLMClient(ABC):
     model: str
+    # Token accounting for the most recent complete(): {"prompt_tokens",
+    # "completion_tokens"} as the provider reported them, None when it
+    # reported nothing. The enrichment worker logs it per job.
+    last_usage: dict[str, int] | None = None
 
     @abstractmethod
     def complete(self, system: str, user: str, max_tokens: int = 1024) -> str:
@@ -58,13 +67,52 @@ class LLMClient(ABC):
 
 _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
-_MAX_BACKOFF = 8.0
+_MAX_BACKOFF = 8.0          # exponential backoff ceiling (before jitter)
+_MAX_RETRY_AFTER = 60.0     # a server-stated Retry-After is honored up to this
+_JITTER = 0.25              # ±25 % on the computed backoff
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: a base URL that 30x-ed off-host would carry
+    the Authorization / x-api-key header wherever it pointed. The 3xx is
+    surfaced as an HTTPError and mapped to LLMError in _post_json."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect())
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    """The one place provider requests leave the process (tests stub it)."""
+    return _opener.open(req, timeout=timeout)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Retry-After as delay-seconds or an HTTP-date; None when absent or
+    unreadable."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    return max(0.0, when.timestamp() - time.time())
 
 
 def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
                attempts: int = _MAX_ATTEMPTS) -> dict:
     """One provider call with bounded retries on transient failures
-    (rate limits, 5xx, connection errors), honoring Retry-After (H-D9)."""
+    (rate limits, 5xx, connection errors), honoring Retry-After up to
+    _MAX_RETRY_AFTER (H-D9). Redirects are refused (the credentials would
+    follow them); the backoff carries ±25 % jitter so a fleet of workers
+    does not retry in lock-step."""
     payload = json.dumps(body).encode()
     last: LLMError | None = None
     for attempt in range(attempts):
@@ -73,9 +121,9 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
             headers={"content-type": "application/json", **headers},
             method="POST",
         )
-        delay = min(_MAX_BACKOFF, 2.0 ** attempt)
+        delay = min(_MAX_BACKOFF, 2.0 ** attempt) * random.uniform(1 - _JITTER, 1 + _JITTER)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
             try:
                 return json.loads(raw)
@@ -83,14 +131,25 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
                 raise LLMError(f"provider returned non-JSON body: {raw[:200]!r}",
                                public="LLM provider returned a malformed response") from exc
         except urllib.error.HTTPError as exc:
-            detail = exc.read()[:500].decode(errors="replace")
+            if 300 <= exc.code < 400:
+                target = exc.headers.get("Location") if exc.headers else None
+                raise LLMError(
+                    f"provider redirected ({exc.code}) {url} -> {target!r}; redirects are "
+                    "not followed because the request carries credentials",
+                    public="LLM provider endpoint redirected; check LOOM_LLM_BASE_URL",
+                ) from exc
+            try:
+                detail = exc.read()[:500].decode(errors="replace")
+            except Exception:  # noqa: BLE001 — a synthetic HTTPError may carry no body
+                detail = ""
             last = LLMError(f"provider returned {exc.code}: {detail}",
                             public=f"LLM provider returned HTTP {exc.code}")
             if exc.code not in _RETRYABLE:
                 raise last from exc
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
-            if retry_after and retry_after.isdigit():
-                delay = min(_MAX_BACKOFF, float(retry_after))
+            retry_after = _retry_after_seconds(
+                exc.headers.get("Retry-After") if exc.headers else None)
+            if retry_after is not None:
+                delay = min(_MAX_RETRY_AFTER, retry_after)
         except (urllib.error.URLError, TimeoutError) as exc:
             last = LLMError(f"provider unreachable: {exc}",
                             public="LLM provider unreachable")
@@ -98,6 +157,17 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
             time.sleep(delay)
     assert last is not None
     raise last
+
+
+def _usage(data: dict, prompt_key: str, completion_key: str) -> dict[str, int] | None:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    try:
+        return {"prompt_tokens": int(usage.get(prompt_key) or 0),
+                "completion_tokens": int(usage.get(completion_key) or 0)}
+    except (TypeError, ValueError):
+        return None
 
 
 class OpenAICompatClient(LLMClient):
@@ -123,9 +193,24 @@ class OpenAICompatClient(LLMClient):
             headers,
         )
         try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+            choice = data["choices"][0]
+            content = choice["message"].get("content")
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise LLMError(f"unexpected provider response shape: {exc}") from exc
+        self.last_usage = _usage(data, "prompt_tokens", "completion_tokens")
+        if isinstance(content, list):  # some gateways return content parts
+            content = "".join(p.get("text", "") for p in content
+                              if isinstance(p, dict) and p.get("type", "text") == "text")
+        if content is None or not str(content).strip():
+            # a null/blank message is a provider hiccup or a filtered reply,
+            # never a completion: callers would otherwise pass None onward
+            raise LLMError(
+                f"empty completion from {self.model} "
+                f"(finish_reason={choice.get('finish_reason')!r})",
+                public="LLM provider returned an empty completion")
+        if choice.get("finish_reason") == "length":
+            log.warning("completion from %s truncated at max_tokens=%d", self.model, max_tokens)
+        return str(content)
 
 
 class AnthropicClient(LLMClient):
@@ -149,10 +234,29 @@ class AnthropicClient(LLMClient):
                 "anthropic-version": "2023-06-01",
             },
         )
-        try:
-            return data["content"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"unexpected provider response shape: {exc}") from exc
+        blocks = data.get("content") if isinstance(data, dict) else None
+        if not isinstance(blocks, list):
+            raise LLMError(f"unexpected provider response shape: {str(data)[:200]!r}")
+        self.last_usage = _usage(data, "input_tokens", "output_tokens")
+        stop = data.get("stop_reason")
+        # current models think before they answer: content[0] is a `thinking`
+        # block, the text may span several blocks, and a refusal has none
+        text = "".join(b.get("text", "") for b in blocks
+                       if isinstance(b, dict) and b.get("type") == "text")
+        if stop == "refusal":
+            details = data.get("stop_details") or {}
+            raise LLMError(
+                f"{self.model} refused the request (category={details.get('category')!r}): "
+                f"{details.get('explanation') or ''}",
+                public="LLM provider declined to answer this request")
+        if not text.strip():
+            raise LLMError(
+                f"empty completion from {self.model} (stop_reason={stop!r}, blocks="
+                f"{[b.get('type') for b in blocks if isinstance(b, dict)]})",
+                public="LLM provider returned an empty completion")
+        if stop == "max_tokens":
+            log.warning("completion from %s truncated at max_tokens=%d", self.model, max_tokens)
+        return text
 
 
 # ------------------------------------------------------------- embeddings #
