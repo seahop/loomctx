@@ -6,7 +6,8 @@ an engine or gateway in batches, or writes them straight into a store:
 
     python -m loom.ingest --url http://loom:8000 --key loomk_... claims.jsonl
     cat export.jsonl | python -m loom.ingest --url http://lb:8081 -
-    python -m loom.ingest --db /data/loom.db claims.jsonl        # no HTTP at all
+    python -m loom.ingest claims.jsonl                           # no HTTP: the LOOM_DB store
+    python -m loom.ingest --db /data/loom.db claims.jsonl        # no HTTP: an explicit store
 
 Envelopes with an event_id are idempotent, so re-running a load is safe.
 Anything a tool can export as JSON lines — a scanner, a CMDB, a spreadsheet
@@ -68,13 +69,16 @@ def post_batches(url: str, lines: Iterable[str], size: int, key: str | None,
     return totals
 
 
-def load_direct(db: str, lines: Iterable[str], size: int) -> dict[str, int]:
+def load_direct(db: str | None, lines: Iterable[str], size: int) -> dict[str, int]:
     """Write straight into a store (no engine running) — the same code path
-    the queue consumer uses, so semantics are identical."""
+    the queue consumer uses, so semantics are identical. An explicit `db`
+    opens that store alone; None opens what LOOM_DB / LOOM_SHARDS /
+    LOOM_BLOB_* configure, so sharding and blob offload apply as they do
+    for the engine."""
     from .consumer import handle_batch
-    from .store.factory import store_from_url
+    from .store.factory import store_from_env, store_from_url
 
-    store = store_from_url(db)
+    store = store_from_url(db) if db else store_from_env()
     totals = {"recorded": 0, "accepted": 0, "skipped": 0}
     try:
         for batch in _batches(lines, size):
@@ -90,15 +94,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="loom.ingest", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="NDJSON files, or - for stdin")
-    parser.add_argument("--url", help="engine or gateway base URL (POST /v1/ingest/batch)")
-    parser.add_argument("--db", help="write directly to this store instead of over HTTP")
+    parser.add_argument("--url", help="engine or gateway base URL (POST /v1/ingest/batch); without it "
+                                      "envelopes are written straight into the store LOOM_DB / "
+                                      "LOOM_SHARDS / LOOM_BLOB_* configure")
+    parser.add_argument("--db", help="write directly to this explicit store URL/path; bypasses "
+                                     "LOOM_SHARDS and LOOM_BLOB_*")
     parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), help="API key (or $LOOM_API_KEY)")
     parser.add_argument("--batch", type=int, default=500)
     args = parser.parse_args()
-    if bool(args.url) == bool(args.db):
-        parser.error("give exactly one of --url or --db")
+    if args.url and args.db:
+        parser.error("give --url or --db, not both")
     lines = _lines(args.paths)
-    totals = load_direct(args.db, lines, args.batch) if args.db else post_batches(args.url, lines, args.batch, args.key)
+    totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
+              else load_direct(args.db, lines, args.batch))
     print(json.dumps(totals))
 
 
