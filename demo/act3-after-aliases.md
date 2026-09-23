@@ -1,0 +1,93 @@
+# Act 3 transcript — after the alias merges (D-042)
+
+Rehearsal of 2026-09-11 with Claude Code over MCP stdio against the loaded corpus (seed + CISA KEV / NVD / EPSS, aliases merged). This is the fallback to open if the live agent cannot run: the tool-call sequence first, then the answer exactly as the model wrote it. Note the `Bash`/`Read` calls over `<claude-code-tool-results>/…`: the first `ask_scope` result exceeded the inline tool-result limit and Claude Code spilled it to disk, so 7 of the 26 calls are the agent grepping its own tool output — the reason `docs/demo.md` now asks for a smaller budget on scope asks.
+
+Model `claude-fable-5-1`; 26 tool calls, 27 turns, 173 s, $4.84. Source: `act3-claude-code-after-aliases.json` (the JSON carries the full arguments).
+
+## Tool calls, in order
+
+1. `ToolSearch` — query=select:mcp__loom__describe_namespace,mcp__loom__find_entity,mcp__loom__ask_scope,mcp__loom__expand,mcp__loo...; max_results=7
+2. `describe_namespace` — namespace=netsec
+3. `find_entity` — query=web-01; namespace=netsec
+4. `ask_scope` — namespace=netsec; subjects=["host:web-01"]; question=Which software does web-01 run, and which of those products are affected by CVEs that CISA lists as exploit...; expand_predicates=["runs_software", "affects"]; depth=2; budget=4000
+5. `get_observations` — namespace=netsec; subject=host:web-01
+6. `Bash` — command=F=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; echo "== runs_software =="; grep -n -i -...; description=Grep saved ask_scope result for software and KEV facts
+7. `Read` — file_path=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; limit=120
+8. `Bash` — command=grep -n -i 'runs_software\\|exploited_in_wild\\|"conflicts"\\|"notes"\\|"truncated"\\|"handles"' <claude-code-to...; description=Locate software and KEV lines in saved ask_scope result
+9. `Read` — file_path=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; offset=985; limit=30
+10. `Read` — file_path=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; offset=1115; limit=75
+11. `Read` — file_path=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; offset=1390; limit=300
+12. `get_observations` — namespace=netsec; subject=host:web-01; limit=200
+13. `find_related` — namespace=netsec; question=CVEs listed in CISA KEV as exploited in the wild that affect the Linux kernel, nginx, OpenSSL, or OpenSSH; limit=20
+14. `ask_scope` — namespace=netsec; subjects=["product:linux:linux_kernel"]; question=Which CVEs affecting this product have exploited_in_wild true (CISA KEV listing)?; expand_predicates=["affects"]; depth=1; budget=2500
+15. `ask_scope` — namespace=netsec; subjects=["product:f5:nginx_open_source", "product:nginx:nginx"]; question=Which CVEs affecting this product have exploited_in_wild true (CISA KEV listing)?; expand_predicates=["affects"]; depth=1; budget=2500
+16. `ask_scope` — namespace=netsec; subjects=["product:openssl:openssl"]; question=Which CVEs affecting this product have exploited_in_wild true (CISA KEV listing)?; expand_predicates=["affects"]; depth=1; budget=2500
+17. `ask_scope` — namespace=netsec; subjects=["product:openbsd:openssh"]; question=Which CVEs affecting this product have exploited_in_wild true (CISA KEV listing)?; expand_predicates=["affects"]; depth=1; budget=2500
+18. `Bash` — command=grep -n -A6 '"predicate": "runs_software"' <claude-code-tool-results>/mcp-loom-get_observations-17891358233...; description=Extract runs_software observation ids for web-01
+19. `ask` — namespace=netsec; subject=cve:CVE-2014-0160; question=Is this CVE listed in CISA KEV (exploited_in_wild) and which products does it affect?; budget=600
+20. `ask` — namespace=netsec; subject=cve:CVE-2026-31431; question=Is this CVE listed in CISA KEV (exploited_in_wild) and which products does it affect?; budget=600
+21. `find_related` — namespace=netsec; question=CISA KEV catalog entry: Linux Kernel vulnerability. Vendor/project: Linux  Product: Kernel; limit=30
+22. `find_related` — namespace=netsec; question=CISA KEV catalog entry: OpenSSL vulnerability. Vendor/project: OpenSSL  Product: OpenSSL; limit=15
+23. `find_related` — namespace=netsec; question=CISA KEV catalog entry: NGINX vulnerability. Vendor/project: F5 or nginx  Product: NGINX; limit=15
+24. `find_related` — namespace=netsec; question=CISA KEV catalog entry: OpenSSH vulnerability. Vendor/project: OpenBSD  Product: OpenSSH; limit=15
+25. `Bash` — command=grep -n -B9 '"predicate": "runs_software"' <claude-code-tool-results>/mcp-loom-get_observations-17891358233...; description=Extract runs_software observation ids and product keys
+26. `find_related` — namespace=netsec; question=cve affects product:linux:linux_kernel per cisa-kev known exploited vulnerability catalog; limit=50
+
+## Final answer (verbatim)
+
+Yes. Loom's netsec data says web-01 runs three products that carry CISA Known Exploited Vulnerabilities (KEV) listings: the Linux kernel, OpenSSL, and nothing on the nginx or OpenSSH side. Two caveats up front: the asset inventory records no versions, so these are exposures by product, not confirmed-vulnerable versions, and the host's OS is itself disputed in the data.
+
+**What web-01 runs** (all from the asset-inventory source, observed 2026-07-03):
+
+| Product | runs_software observation |
+|---|---|
+| linux:linux_kernel | 44f97aad4d0242478a5d39433e85cc43 |
+| openssl:openssl | 6b4210db9e724b0298ece31b48bc3c3f |
+| f5:nginx_open_source | 78ac601a892145bbaf2d2a45c1e1f0c8 |
+| nginx:nginx | 24ca4df71dbc4398828a8094588bcb1c |
+| openbsd:openssh | 50984b9757ec4d49bd3f94c95c784326 |
+
+**Conflict to resolve before acting.** Loom flags a runs_os disagreement on web-01: nmap-scan says ubuntu-22.04 as of 2026-08-18 (obs 2ce373ffd50b4a67b7b80ed44f3eaa47), asset-inventory says fedora-44 as of 2026-07-03 (obs 9918808e0d254811a9d3fd639e2fc349). Which kernel CVEs actually apply depends on which is right.
+
+**OpenSSL: one KEV CVE**
+
+- CVE-2014-0160 (Heartbleed), exploited_in_wild True per cisa-kev (obs 5a7ac4de2fb8443ab1af62dc7c6fae66); affects openssl:openssl (obs ec0cbac923514040a1eff88702524969). EPSS 0.99999. Any OpenSSL from the last decade is patched, so this is almost certainly a stale catalog match rather than a live exposure, but the data cannot prove that without a version.
+
+**Linux kernel: 28 KEV CVEs.** The cisa-kev connector writes an affects observation for each catalog entry, so each id below is direct KEV evidence. The three most recent also have explicit exploited_in_wild facts.
+
+| CVE | KEV added | cisa-kev affects observation |
+|---|---|---|
+| CVE-2026-53362 (IPv6 privesc) | 2026-08-27 | c412f7f1a8b740f9bb3cfd849d07d663, exploited_in_wild obs 90a3927e32694e42a1beb8e512cc0fd4 |
+| CVE-2022-0995 | 2026-08-26 | f9709b0e37854705a3dfee19ee82ef2d, exploited_in_wild obs 2d94188cc4ff44bcbad5913f9df76d58 |
+| CVE-2022-0492 | 2026-06-02 | 098053940e4e4491b20fe375b28976ba |
+| CVE-2026-31431 ("copy fail", EPSS 0.999) | 2026-05-01 | fff60d346e9b4f8380897214a41a038d, exploited_in_wild obs 17578bc052554b8eb7b50ee132255fa9 |
+| CVE-2018-14634 | 2026-01-26 | a9546f9067b9490ea36cd7d4f7f7727e |
+| CVE-2021-22555 | 2025-10-06 | dd3d781aec2a492491c4f367de26a763 |
+| CVE-2025-38352 | 2025-09-04 | c94b8bfb33de4ecc8d1d78a8babd6158 |
+| CVE-2023-0386 | 2025-06-17 | 29ce44629e9a4170b086102b3c03cce4 |
+| CVE-2024-53197 | 2025-04-09 | 5e9285ec7e7d4500bc97a69628a8c141 |
+| CVE-2024-53150 | 2025-04-09 | 119e26c0e05444f59fb614e5e955992f |
+| CVE-2024-50302 | 2025-03-04 | e06fd7f3d0b9428e811feb0ba764bb8a |
+| CVE-2024-53104 | 2025-02-05 | 60e4fa07676540f88dfa0cd1b25f34c3 |
+| CVE-2017-1000253 | 2024-09-09 | fb97cfc5eef14aa58269e32bd97f7c3f |
+| CVE-2022-0185 | 2024-08-21 | 7215a848c82841a181c8ebf93c87ada5 |
+| CVE-2022-2586 | 2024-06-26 | e37c85c07eb6457596c6d203885366a8 |
+| CVE-2024-1086 | 2024-05-30 | 961839c37ff34ff59ddba6a78d84b900 |
+| CVE-2010-3904 | 2023-05-12 | 74babc73363c4f3a80595e2d5cf29d72 |
+| CVE-2014-0196 | 2023-05-12 | d444c68124ae4fd78237aa1f9b1e5508 |
+| CVE-2023-0266 | 2023-03-30 | 7569159d6a714f20b6a48c8fb02ec94a |
+| CVE-2021-3493 | 2022-10-20 | 3db39eeea1414c78be4925336ef92b52 |
+| CVE-2013-2094 | 2022-09-15 | 415db525686a4481838dab5e58a5021e |
+| CVE-2013-2596 | 2022-09-15 | 12ddd95ba8324aef962c10502eae43c7 |
+| CVE-2013-6282 | 2022-09-15 | f9bfb196801a44b492ad64a89491e3c5 |
+| CVE-2014-3153 | 2022-05-25 | 4d559127f95c46738f2d678bd1fe5388 |
+| CVE-2022-0847 (Dirty Pipe) | 2022-04-25 | 504cfd6faab0421e9c502b059276db34 |
+| CVE-2021-22600 | 2022-04-11 | c52c39240d37457591e391fc95476c31 |
+| CVE-2016-5195 (Dirty COW) | 2022-03-03 | 335e4c33880a44509c4c9cde6ffa067d |
+| CVE-2019-13272 | 2021-12-10 | 96bb58bb102d43a8b81e088a25f5c12b |
+
+For an Ubuntu 22.04 or Fedora 44 host the pre-2022 entries are patched by any current kernel. The ones that matter are the 2026 additions, especially CVE-2026-31431 and CVE-2026-53362, both local privilege escalations with recent catalog dates.
+
+**nginx and OpenSSH: no KEV listings found.** Loom reached 20 CVEs for the two nginx products and 21 for OpenSSH, and none carries an exploited_in_wild fact. The highest-risk non-KEV item is CVE-2026-42945 on nginx open source, a rewrite-module heap overflow with an EPSS of 0.68 and a CVSS dispute between F5 (9.2, critical) and NVD's secondary scorer (8.1, high).
+
+**Coverage note.** The kernel product has 2,776 observations and the scoped ask only examined the newest 1,000, so the kernel list above comes from a semantic sweep of cisa-kev observations rather than an exhaustive scan. It matched cleanly (every cisa-kev hit ranked above every NVD hit), but a few older catalog entries could still be missing.
