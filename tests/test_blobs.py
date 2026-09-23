@@ -115,6 +115,53 @@ def test_offload_from_env(tmp_path, monkeypatch):
     assert isinstance(store_from_env(), SqliteStore)
 
 
+def test_vanished_blob_is_reported_not_served_as_the_stub(tmp_path, caplog):
+    store, inner = _store(tmp_path)
+    art = store.store_artifact(DocumentIn(text="z" * 300, source="s", observed_at=OBSERVED))
+    key = inner.get_artifact("default", art.id).attrs["_blob"]["key"]
+    (tmp_path / "blobs" / key).unlink()
+    with caplog.at_level("WARNING", logger="loom.store"):
+        got = store.get_artifact("default", art.id)
+    assert got.text is None and got.content_b64 is None          # never the "[offloaded: ...]" stub
+    assert got.attrs["_blob_missing"] is True and got.attrs["_blob"]["key"] == key
+    assert "missing" in caplog.text and art.id in caplog.text
+    assert next(store.iter_artifacts("default")).text is None    # every read path agrees
+
+
+def test_b64_threshold_compares_decoded_bytes(tmp_path):
+    import base64
+    store, inner = _store(tmp_path, threshold=90)
+    inline = base64.b64encode(b"A" * 80).decode()      # 108 chars of base64, 80 bytes of file
+    art = store.store_artifact(DocumentIn(content_b64=inline, content_type="application/octet-stream",
+                                          source="s", observed_at=OBSERVED))
+    assert inner.get_artifact("default", art.id).content_b64 == inline and "_blob" not in art.attrs
+    big = base64.b64encode(b"A" * 100).decode()        # 100 bytes of file: offloaded
+    art = store.store_artifact(DocumentIn(content_b64=big, content_type="application/octet-stream",
+                                          source="s", observed_at=OBSERVED))
+    assert "_blob" in inner.get_artifact("default", art.id).attrs and art.content_b64 == big
+
+
+def test_blob_is_removed_when_the_row_never_lands(tmp_path, monkeypatch):
+    import pytest
+    from loom.contracts import Artifact
+    store, inner = _store(tmp_path)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(inner, "store_artifact", boom)
+    monkeypatch.setattr(inner, "restore_artifact", boom)
+    with pytest.raises(RuntimeError):
+        store.store_artifact(DocumentIn(text="q" * 300, source="s", observed_at=OBSERVED))
+    with pytest.raises(RuntimeError):
+        store.restore_artifact(Artifact(id="r1", namespace="default", content_type="text/plain",
+                                        text="q" * 300, source="s", observed_at=OBSERVED, recorded_at=OBSERVED))
+    assert [p for p in (tmp_path / "blobs").rglob("*") if p.is_file()] == []
+    monkeypatch.undo()
+    art = store.store_artifact(DocumentIn(text="q" * 300, source="s", observed_at=OBSERVED))
+    assert store.get_artifact("default", art.id).text == "q" * 300
+
+
 def test_wrappers_delegate_the_batched_defaults_too():
     """The base class ships per-item fallbacks for record_claims and
     observations_for_many; a wrapper that inherited them would silently
