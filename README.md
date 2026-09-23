@@ -187,7 +187,7 @@ envelopes loaded in 81 s to SQLite, single-entity ask 2–5 ms at 465k
 observations, two-hop scope over 1,077 entities in 0.5 s; on GKE with
 real nodes 421/s load, 202/s ingest, 186/s ask (`deploy/README.md`).
 Demo script: `docs/demo.md`. Milestones: `docs/roadmap.md` (conference:
-end of October 2026).
+mid-October 2026).
 
 Agents connect natively over MCP:
 

@@ -2,7 +2,7 @@
 
 Status legend: ✅ done · 🔨 partial · ⬜ not started
 
-**Fixed date: conference demo + presentation at the end of October 2026.**
+**Fixed date: conference demo + presentation mid-October 2026 (about 2026-10-13 — moved up from "end of October" on 2026-09-23).**
 The repo is public on GitHub; everything merged to `main` should be
 presentable.
 
@@ -20,9 +20,9 @@ presentable.
 | 2026-09-11 | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
 | 2026-09-11 | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
 | 2026-09-23 | Review-fix batch: dependency lock consumed by the Dockerfile (the boto3 drift D-045 found), base images by digest, SHA-pinned actions + Trivy + build-once CI, pod security posture + NetworkPolicies + PDBs, registry validation on the queue paths, Kafka SASL/TLS, compose env passthroughs, demo script made honest (night-before prep, frozen volume), docs numbers reconciled |
-| early Oct | Night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist) |
-| mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
-| end Oct | **Conference** |
+| late Sep | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23): lexical leg + rank fusion, budget accounting, scorecard with baselines |
+| early Oct | Freeze features; night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist); presentation materials |
+| ~2026-10-13 | **Conference** (moved up from end of October) |
 
 ## Phase 0 — Contracts ✅ (2026-09-03)
 

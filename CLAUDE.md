@@ -53,6 +53,6 @@ docker compose exec loom python -m loom.seed load
 
 ## Deadline
 
-Conference demo + presentation end of October 2026. Repo is public
+Conference demo + presentation mid-October 2026 (about 2026-10-13; moved up from "end of October" on 2026-09-23). Repo is public
 (github.com/seahop/Loom) — keep `main` green and presentable. k8s manifests in
 `deploy/k8s`; CI publishes the image to ghcr.io/seahop/loom on main.

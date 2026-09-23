@@ -127,7 +127,7 @@ requires auth first, OQ-3). Local Compose remains the primary dev/demo shape.
 Every push/PR runs the Docker test suite; pushes to `main` publish
 `ghcr.io/seahop/loom:latest` and a per-SHA tag, which the k8s manifests
 consume. The repo is public, so `main` must always be green and presentable
-(conference: end of October 2026).
+(conference: mid-October 2026).
 
 ## D-010 · Ingestion tier: Go gateway + standard load balancing, two deployment shapes (2026-09-03)
 
