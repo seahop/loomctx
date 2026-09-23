@@ -6,9 +6,15 @@ attaches citations + expansion handles. Ranking is LLM-free: cosine
 similarity when vectors exist (D-018), keyword overlap otherwise, plus
 time-decayed recency and source confidence (D-024).
 
-Two time axes (architecture.md): `as_of` hides what was recorded after T
+Two time axes (architecture.md): `as_of` hides what was observed after T
 ("what did we know"); `valid_at` keeps only facts whose validity window
-covers T ("what was true"), leaving un-windowed facts alone.
+covers T ("what was true"), leaving un-windowed facts alone. `as_of` is
+observation time (`observed_at <= as_of`: when the source asserted the
+fact), the closest proxy to knowledge time for backfilled corpora, where
+`recorded_at` is load day and useless; `recorded_at` remains the audit
+column. The bound is applied in the store query (D-046), so an entity with
+thousands of newer rows still yields its rows as of then, and the
+`truncated` report counts as of then too.
 
 Expansion handles are stateless: a base64url-encoded JSON descriptor of the
 query they stand for. No server-side handle table to expire or migrate.
@@ -363,24 +369,29 @@ Truncations = dict[tuple[str, str], ScopeTruncation]
 
 
 def _gather(store: GraphStore, namespace: str, ref: EntityRef,
-            truncated: Truncations) -> list[Observation]:
+            truncated: Truncations, as_of: datetime | None = None) -> list[Observation]:
     """observations_for under the gather limit, recording when the limit
     cut something off: a hub with 2,740 edges yields its newest 1,000 and
     the pack must say so (D-038). The count is only taken when the limit
     was actually hit, so ordinary entities pay nothing."""
-    return _gather_many(store, namespace, [ref], truncated).get((ref.type, ref.key), [])
+    return _gather_many(store, namespace, [ref], truncated, as_of).get((ref.type, ref.key), [])
 
 
 def _gather_many(store: GraphStore, namespace: str, refs: list[EntityRef],
-                 truncated: Truncations) -> dict[tuple[str, str], list[Observation]]:
+                 truncated: Truncations, as_of: datetime | None = None,
+                 ) -> dict[tuple[str, str], list[Observation]]:
     """One round trip per chunk for a whole frontier or subject list, with
     the same truncation accounting (D-043: a 1,077-entity scope was 1,077
-    round trips — 5 s on Postgres across a network)."""
-    got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT)
+    round trips — 5 s on Postgres across a network). `as_of` is pushed
+    into the query as the observed_before bound (D-046): filtering after a
+    newest-first LIMIT gave an entity with more than the limit of newer
+    rows an empty time-travel pack, and a truncation total blind to T."""
+    as_of = _aware(as_of) if as_of is not None else None
+    got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT, observed_before=as_of)
     for ref in refs:
         obs = got.get((ref.type, ref.key), [])
         if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
-            total = store.count_observations(namespace, ref)
+            total = store.count_observations(namespace, ref, observed_before=as_of)
             if total > len(obs):
                 truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
     return got
@@ -455,7 +466,7 @@ def build_pack(
         subjects = [s for s in subjects if s.type in allowed_types]
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
-    gathered = _gather_many(store, req.namespace, subjects, truncated)
+    gathered = _gather_many(store, req.namespace, subjects, truncated, req.as_of)
     for ref in subjects:
         for obs in gathered.get((ref.type, ref.key), []):
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
@@ -618,7 +629,7 @@ def expand_pack(
     truncated: Truncations = {}
     observations = [
         o
-        for o in _gather(store, meta["ns"], subject, truncated)
+        for o in _gather(store, meta["ns"], subject, truncated, as_of)
         if o.predicate == meta["predicate"] and _in_scope(o, allowed_types)
     ]
     return _pack(
@@ -690,14 +701,13 @@ def _pack(
 ) -> ContextPack:
     cos_map = cos_map or {}
     if as_of is not None:
-        # knowledge time: nothing we learned after T
+        # observation time: nothing a source asserted after T. The gather
+        # already applied this bound in the store; this keeps _pack honest
+        # for any caller that hands it an unbounded list. A fact scheduled
+        # for later (valid_from > T) but known at T belongs in the view —
+        # hiding it is valid_at's job (D-046).
         as_of = _aware(as_of)
-        observations = [
-            o
-            for o in observations
-            if _aware(o.observed_at) <= as_of
-            and (o.valid_from is None or _aware(o.valid_from) <= as_of)
-        ]
+        observations = [o for o in observations if _aware(o.observed_at) <= as_of]
     if valid_at is not None:
         # fact time: only what was TRUE at T. Facts that carry no validity
         # window are timeless as far as we know and are kept (D-024).

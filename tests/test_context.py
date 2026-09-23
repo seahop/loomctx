@@ -454,3 +454,55 @@ def test_a_failing_query_embedder_degrades_to_keyword_ranking(tmp_path):
     pack = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=800), embedder=Down())
     assert pack.items and all(i.kind != "doc_excerpt" for i in pack.items)
     assert any("logged_in_by" in i.text for i in pack.items)
+
+
+def test_as_of_is_bounded_in_the_gather_not_after_it(tmp_path, monkeypatch):
+    """D-046: as_of filtered in Python after a newest-first LIMIT, so an
+    entity with more than the gather limit of rows newer than T yielded an
+    empty time-travel pack. The bound is the store's now; the rows as of T
+    come back, and a fact scheduled for later but asserted before T is in
+    the view (that is valid_at's job to hide)."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "asof.db")
+    host = EntityRef(type="host", key="web-01")
+    t = _at(8, 1)
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="old_fact", object=f"o{i}", source="s",
+                 observed_at=_at(7, 1 + i)) for i in range(3)]
+        + [ClaimIn(subject=host, predicate="scheduled", object="maintenance", source="cal",
+                   observed_at=_at(7, 20), valid_from=_at(9, 1))]
+        + [ClaimIn(subject=host, predicate="new_fact", object=f"n{i}", source="s",
+                   observed_at=_at(8, 2 + i)) for i in range(8)])
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000, as_of=t))
+    text = " | ".join(i.text for i in pack.items)
+    assert text.count("old_fact") == 3 and "new_fact" not in text
+    assert "scheduled" in text  # known at T, even though it applies later
+    assert pack.truncated == []  # four rows as of T: the limit was not hit
+    # ...and hidden by valid_at, which is the fact-time axis
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000,
+                                        as_of=t, valid_at=t))
+    assert "scheduled" not in " | ".join(i.text for i in pack.items)
+    store.close()
+
+
+def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
+    """D-046: the `truncated` denominator counts rows as of T, not overall."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "asof-trunc.db")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="old", object=i, source="s", observed_at=_at(7, 1 + i))
+         for i in range(7)]
+        + [ClaimIn(subject=host, predicate="new", object=i, source="s", observed_at=_at(8, 1 + i))
+           for i in range(6)])
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=4000, as_of=_at(7, 31)))
+    assert [(x.gathered, x.total) for x in pack.truncated] == [(5, 7)]
+    assert all("old" in i.text for i in pack.items)
+    # the expanded handle inherits the bound
+    tiny = build_pack(store, AskRequest(subject=host, question="", budget=1, as_of=_at(7, 31)))
+    more = expand_pack(store, tiny.handles[0].id, budget=4000)
+    assert more.truncated and more.truncated[0].total == 7
+    assert all("old" in i.text for i in more.items)
+    store.close()

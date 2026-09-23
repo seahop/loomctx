@@ -230,11 +230,15 @@ class ScopeSpec(BaseModel):
 
 
 class AskRequest(BaseModel):
-    """Two time axes (docs/architecture.md, D-024): `as_of` = what did we
-    KNOW at T (knowledge time — later-recorded observations are hidden);
-    `valid_at` = what was TRUE at T (fact time — only observations whose
-    validity window covers T survive, and facts with no window at all are
-    kept)."""
+    """Two time axes (docs/architecture.md, D-024/D-046): `as_of` = what did
+    we KNOW at T, measured on observation time (`observed_at <= as_of`:
+    when the source asserted it), the closest proxy to knowledge time for
+    backfilled corpora, where `recorded_at` is load day; `recorded_at`
+    remains the audit column. `valid_at` = what was TRUE at T (fact time —
+    only observations whose validity window covers T survive, and facts
+    with no window at all are kept). A fact scheduled for after T but
+    asserted before it is part of the `as_of` view; hiding it is
+    `valid_at`'s job."""
 
     namespace: str = DEFAULT_NAMESPACE
     subject: EntityRef | None = None
