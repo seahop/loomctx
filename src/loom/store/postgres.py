@@ -368,16 +368,36 @@ class PostgresStore(GraphStore):
 
     # ------------------------------------------------- vector index (D-025)
 
+    _iterative_scan = False   # pgvector >= 0.8: hnsw.iterative_scan exists
+
     def _load_vec(self) -> bool:
         try:
             with self._tx():
                 self._x("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
                 self._x("CREATE EXTENSION IF NOT EXISTS vector")
-            return True
+                rows = self._q("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
         except self._psycopg.Error as exc:
             logging.getLogger("loom.store").info(
                 "pgvector unavailable (%s): vector search uses exact scans", exc)
             return False
+        try:
+            major, minor = (int(x) for x in rows[0]["extversion"].split(".")[:2])
+            self._iterative_scan = (major, minor) >= (0, 8)
+        except (IndexError, ValueError, KeyError):  # unparseable version: stay conservative
+            self._iterative_scan = False
+        return True
+
+    def _tune_hnsw(self, limit: int) -> None:
+        """HNSW post-filters WHERE namespace = ...: with the default
+        ef_search (40) every candidate can come from the majority tenant
+        and a small namespace gets a short or empty answer. Widen the
+        candidate set per query (SET LOCAL: this transaction only) and,
+        on pgvector >= 0.8, let the scan keep going until the filter is
+        satisfied. Callers still fall back to an exact scan when the index
+        returns fewer than `limit` rows."""
+        self._x(f"SET LOCAL hnsw.ef_search = {min(1000, max(limit * 4, 100))}")
+        if self._iterative_scan:
+            self._x("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
 
     def vector_backend(self) -> str:
         return "pgvector" if self._vec else "exact"
@@ -440,13 +460,17 @@ class PostgresStore(GraphStore):
         name = common.vec_table("vobs", model, len(query))
         with self._tx(read=True):
             if self._has_index(name):
+                self._tune_hnsw(limit)
                 rows = self._q(
                     f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name} v"
                     " WHERE namespace = %s AND NOT EXISTS"
                     "   (SELECT 1 FROM tombstones t WHERE t.observation_id = v.ref_id)"
                     " ORDER BY embedding <=> %s::vector LIMIT %s",
                     (self._vlit(query), namespace, self._vlit(query), limit))
-                return [(r["ref_id"], float(r["score"])) for r in rows]
+                hits = sorted(((r["ref_id"], float(r["score"])) for r in rows), key=lambda h: -h[1])
+                if len(hits) >= limit:
+                    return hits
+                # the post-filter starved the index: scan exactly, like the SQLite store
             rows = self._q(
                 "SELECT e.ref_id, e.vector FROM embeddings e"
                 " WHERE e.namespace = %s AND e.model = %s AND NOT EXISTS"
@@ -463,7 +487,9 @@ class PostgresStore(GraphStore):
             return []
         name = common.vec_table("vchk", model, len(query))
         with self._tx(read=True):
+            best: list[tuple[str, float]] = []
             if self._has_index(name):
+                self._tune_hnsw(limit)
                 sql = (f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name}"
                        " WHERE namespace = %s")
                 params: tuple = (self._vlit(query), namespace)
@@ -472,8 +498,9 @@ class PostgresStore(GraphStore):
                     params += (list(artifact_ids),)
                 sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
                 params += (self._vlit(query), limit)
-                best = [(r["ref_id"], float(r["score"])) for r in self._q(sql, params)]
-            else:
+                best = sorted(((r["ref_id"], float(r["score"])) for r in self._q(sql, params)),
+                              key=lambda h: -h[1])
+            if len(best) < limit:   # no index, or the post-filter starved it: exact scan
                 sql = "SELECT id, vector FROM doc_chunks WHERE namespace = %s AND model = %s"
                 params = (namespace, model)
                 if artifact_ids is not None:
@@ -504,7 +531,7 @@ class PostgresStore(GraphStore):
                 ("vobs", "observations", "embeddings", "ref_id", "NULL"),
                 ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                vec_tables = common.vec_tables_for(kind, model, self._vec_tables)   # this model only
                 total = self._q(f"SELECT COUNT(*) AS n FROM {table} WHERE model = %s", (model,))[0]["n"]
                 indexed = sum(self._q(f"SELECT COUNT(*) AS n FROM {n}")[0]["n"] for n in vec_tables)
                 if total <= indexed:
@@ -1382,6 +1409,12 @@ class PostgresStore(GraphStore):
                 " (SELECT subject_id FROM observations WHERE namespace = %s)",
                 (namespace, namespace),
             )
+            if self._vec:   # ANN rows whose source row is gone (see sqlite.py)
+                self._refresh_vec_tables()
+                for name in self._vec_tables:
+                    source = "observations" if name.startswith("vobs_") else "doc_chunks"
+                    self._x(f"DELETE FROM {name} v WHERE v.namespace = %s AND NOT EXISTS"
+                            f" (SELECT 1 FROM {source} s WHERE s.id = v.ref_id)", (namespace,))
         return removed
 
     _PAGE = 1000

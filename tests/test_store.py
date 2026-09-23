@@ -693,6 +693,72 @@ def test_vector_index_backfill_and_exact_fallback_agree(store):
     assert {o.id for o in store.observations_by_ids("default", ids[:2])} == set(ids[:2])
 
 
+def test_vector_index_backfill_is_per_model_and_purge_drops_stale_rows(store):
+    """ensure_vector_index counted every model's index rows as `model`'s
+    (a bare vobs_/vchk_ prefix), so a model whose index did not exist yet
+    was skipped as already indexed; and purge left the ANN rows of purged
+    observations and chunks behind, still answering searches."""
+    _raw(store)
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    ids = [store.record_claim(login_claim().model_copy(update={
+        "object": EntityRef(type="user", key=f"u{i}"), "event_id": f"pm{i}"})).id for i in range(3)]
+    store.put_embeddings("default", "m2", [(oid, _unit(1, 0, 0)) for oid in ids])   # m2: indexed
+    backend = store.vector_backend()
+    store._vec = False                                                              # m: JSON only
+    store.put_embeddings("default", "m", [(oid, _unit(0, 1, 0)) for oid in ids])
+    store._vec = backend != "exact"
+    counts = store.ensure_vector_index("m")
+    if backend != "exact":
+        assert counts["observations"] == 3            # m2's rows are not m's
+        assert store.ensure_vector_index("m")["observations"] == 0
+    assert {h[0] for h in store.nearest_observations("default", "m", _unit(0, 1, 0), 3)} == set(ids)
+
+    old = OBSERVED - timedelta(days=400)
+    gone = store.record_claim(_claim(observed=old, event_id="gone"))
+    store.put_embeddings("default", "m", [(gone.id, _unit(0, 1, 0))])
+    art_old = store.store_artifact(DocumentIn(text="old", source="s", observed_at=old))
+    art_new = store.store_artifact(DocumentIn(text="new", source="s", observed_at=OBSERVED))
+    store.put_doc_chunks("default", art_old.id, "m", [(0, 0, 3, "old", _unit(1, 0))])
+    store.put_doc_chunks("default", art_new.id, "m", [(0, 0, 3, "new", _unit(0, 1))])
+    assert store.purge_older_than("default", OBSERVED - timedelta(days=90)) == 2
+    assert gone.id not in {h[0] for h in store.nearest_observations("default", "m", _unit(0, 1, 0), 10)}
+    assert [c["text"] for c, _ in store.nearest_chunks("default", "m", _unit(1, 0), limit=1)] == ["new"]
+    if backend != "exact":
+        for name in store._vec_tables:
+            assert _exec(store, f"SELECT COUNT(*) AS n FROM {name} WHERE ref_id IN (?, ?)",
+                         (gone.id, f"{art_old.id}:m:0"))[0]["n"] == 0
+
+
+def test_nearest_search_in_a_minority_namespace_is_complete(store):
+    """The ANN index post-filters on namespace: with a few hundred vectors
+    in one tenant, a three-vector tenant came back short or empty on
+    Postgres (HNSW's default 40 candidates were all the big tenant's).
+    Both stores now widen the candidate set and fall back to an exact scan
+    when the index returns fewer than `limit` rows."""
+    import random
+    from loom.contracts import DocumentIn
+    rng = random.Random(3)
+
+    def vec():
+        return _unit(*[rng.uniform(-1, 1) for _ in range(4)])
+
+    big = store.record_claims([ClaimIn(namespace="big", subject=EntityRef(type="h", key=f"h{i}"), predicate="p",
+                                       object=str(i), observed_at=OBSERVED, source="s") for i in range(300)])
+    store.put_embeddings("big", "m", [(o.id, vec()) for o in big])
+    small = store.record_claims([ClaimIn(namespace="small", subject=EntityRef(type="h", key=f"s{i}"), predicate="p",
+                                         object=str(i), observed_at=OBSERVED, source="s") for i in range(3)])
+    store.put_embeddings("small", "m", [(o.id, vec()) for o in small])
+    assert {h[0] for h in store.nearest_observations("small", "m", _unit(1, 0, 0, 0), limit=3)} == {o.id for o in small}
+    assert len(store.nearest_observations("small", "m", _unit(1, 0, 0, 0), limit=10)) == 3
+    assert len(store.nearest_observations("big", "m", _unit(1, 0, 0, 0), limit=10)) == 10
+    for ns, n in (("big", 300), ("small", 3)):
+        art = store.store_artifact(DocumentIn(namespace=ns, text="t", source="s", observed_at=OBSERVED))
+        store.put_doc_chunks(ns, art.id, "m", [(i, 0, 1, f"c{i}", vec()) for i in range(n)])
+    assert len(store.nearest_chunks("small", "m", _unit(1, 0, 0, 0), limit=3)) == 3
+    assert len(store.nearest_chunks("small", "m", _unit(1, 0, 0, 0), limit=10)) == 3
+
+
 # ------------------------------------------------ concurrency (D-028) #
 
 def test_concurrent_writers_and_readers(store):

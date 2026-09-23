@@ -512,7 +512,10 @@ class SqliteStore(GraphStore):
                 ("vobs", "observations", "embeddings", "ref_id", "NULL"),
                 ("vchk", "chunks", "doc_chunks", "id", "artifact_id"),
             ):
-                vec_tables = [n for n in self._vec_tables if n.startswith(f"{kind}_")]
+                # exactly this model's tables (one per dimension seen) — a
+                # bare `{kind}_` prefix matched every model, so a model whose
+                # index did not exist yet was skipped as "already indexed"
+                vec_tables = common.vec_tables_for(kind, model, self._vec_tables)
                 total = self._conn.execute(
                     f"SELECT COUNT(*) AS n FROM {table} WHERE model = ?", (model,)).fetchone()["n"]
                 indexed = sum(self._conn.execute(f"SELECT COUNT(*) AS n FROM {n}").fetchone()["n"]
@@ -1365,7 +1368,23 @@ class SqliteStore(GraphStore):
                 " (SELECT subject_id FROM observations WHERE namespace = ?)",
                 (namespace, namespace),
             )
+            self._purge_vec_rows(namespace)
         return removed
+
+    def _purge_vec_rows(self, namespace: str) -> None:
+        """ANN rows whose source row is gone: they would otherwise keep
+        surfacing purged observation ids and chunk ids that no longer
+        join to anything."""
+        if not self._vec:
+            return
+        self._refresh_vec_tables()
+        for name in self._vec_tables:
+            source = "observations" if name.startswith("vobs_") else "doc_chunks"
+            stale = self._conn.execute(
+                f"SELECT ref_id FROM {name} WHERE namespace = ?"
+                f" AND ref_id NOT IN (SELECT id FROM {source})", (namespace,)).fetchall()
+            self._conn.executemany(f"DELETE FROM {name} WHERE ref_id = ?",
+                                   [(r["ref_id"],) for r in stale])
 
     # Exports stream in keyset pages (H-E4): the lock is held per page, not
     # for the whole table, and memory is bounded by the page size.
