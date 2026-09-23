@@ -183,6 +183,44 @@ def test_merge_folds_and_aliases_resolve(store):
         "default", EntityRef(type="ip_address", key="10.0.4.7")).type == "ip"
 
 
+def test_claim_for_a_merged_away_ref_lands_on_the_canonical(store):
+    """After ip_address:10.0.4.7 is folded into ip:10.0.4.7, a claim (or a
+    restored observation) naming the old ref must attach to the canonical
+    entity, not resurrect the folded node beside its own alias."""
+    from loom.contracts import Observation
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    store.record_claim(ClaimIn(subject=a, predicate="noted", object="x", observed_at=OBSERVED, source="s"))
+    store.record_claim(ClaimIn(subject=b, predicate="assigned_to", object=EntityRef(type="host", key="web-01"),
+                               observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", a, b)
+    obs = store.record_claim(ClaimIn(subject=a, predicate="seen", object="y", observed_at=OBSERVED, source="s"))
+    assert obs.subject == b                                  # the canonical ref, not the alias
+    edge = store.record_claim(ClaimIn(subject=EntityRef(type="host", key="db-01"), predicate="uses",
+                                      object=a, observed_at=OBSERVED, source="s"))
+    assert edge.object == b
+    store.restore_observation(Observation(
+        id="restored-1", namespace="default", subject=a, predicate="imported", object=a,
+        observed_at=OBSERVED, recorded_at=OBSERVED, source="s", confidence=1.0))
+    got = store.observations_for("default", b)
+    assert {o.predicate for o in got} == {"noted", "assigned_to", "seen", "uses", "imported"}
+    assert all(o.subject != a and o.object != a for o in got)
+    assert [e for e in store.iter_entities("default") if e.type == "ip_address"] == []   # not resurrected
+    assert store.get_entity("default", a).type == "ip"
+
+
+def test_add_alias_into_a_merged_away_ref_follows_the_alias(store):
+    a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
+    for ref in (a, b):
+        store.record_claim(ClaimIn(subject=ref, predicate="p", object="x", observed_at=OBSERVED, source="s"))
+    assert store.merge_entities("default", a, b)
+    stray = EntityRef(type="ipaddr", key="10.0.4.7")
+    store.add_alias("default", stray, into=a)                # `into` is itself an alias by now
+    assert store.get_entity("default", stray).type == "ip"
+    assert len(store.observations_for("default", stray)) == 2
+    store.add_alias("default", stray, into=EntityRef(type="ip", key="nope"))   # unknown: still a no-op
+    assert store.get_entity("default", stray).type == "ip"
+
+
 def test_merge_candidates_finds_cross_type_keys(store):
     store.record_claim(ClaimIn(
         subject=EntityRef(type="ip", key="10.0.4.7"), predicate="p",

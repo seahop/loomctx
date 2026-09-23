@@ -618,7 +618,7 @@ class PostgresStore(GraphStore):
 
     def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
         with self._tx():
-            target = self._get_entity(namespace, into)
+            target = self._resolve_entity(namespace, into)   # `into` may itself be an alias by now
             if target is None:
                 return
             self._put_alias(namespace, f"{alias.type}:{alias.key}", target.id)
@@ -1339,11 +1339,12 @@ class PostgresStore(GraphStore):
 
     def restore_observation(self, obs: Observation) -> None:
         with self._tx():
-            subject = self._upsert_entity(obs.namespace, obs.subject)
+            subject = self._resolve_or_create(obs.namespace, obs.subject)
             object_entity_id = None
             if isinstance(obs.object, EntityRef):
-                object_entity_id = self._upsert_entity(obs.namespace, obs.object).id
-                object_json = json.dumps(obs.object.model_dump())
+                target = self._resolve_or_create(obs.namespace, obs.object)
+                object_entity_id = target.id
+                object_json = json.dumps({"type": target.type, "key": target.key})
             else:
                 object_json = json.dumps(obs.object)
             # targetless ON CONFLICT covers the id PK and the event_id index
@@ -1441,6 +1442,11 @@ class PostgresStore(GraphStore):
         )
         return common.row_to_artifact(rows[0]) if rows else None
 
+    def _resolve_or_create(self, namespace: str, ref: EntityRef) -> Entity:
+        """The entity a write should attach to: the exact node, else the
+        canonical one an alias points at, else a new node."""
+        return self._resolve_entity(namespace, ref) or self._upsert_entity(namespace, ref)
+
     def _upsert_entity(self, namespace: str, ref: EntityRef) -> Entity:
         existing = self._get_entity(namespace, ref)
         if existing is not None:
@@ -1500,11 +1506,17 @@ class PostgresStore(GraphStore):
                 metrics.INGEST_DEDUPED.inc()
                 return existing
 
-        subject = self._upsert_entity(claim.namespace, claim.subject)
+        # A ref that was merged away resolves to its canonical entity: a
+        # claim naming the old `ip_address:10.0.4.7` lands on `ip:10.0.4.7`
+        # instead of resurrecting the folded node beside its alias.
+        subject = self._resolve_or_create(claim.namespace, claim.subject)
         object_entity_id = None
+        obj = claim.object
         if isinstance(claim.object, EntityRef):
-            object_entity_id = self._upsert_entity(claim.namespace, claim.object).id
-            object_json = json.dumps(claim.object.model_dump())
+            target = self._resolve_or_create(claim.namespace, claim.object)
+            object_entity_id = target.id
+            obj = EntityRef(type=target.type, key=target.key)
+            object_json = json.dumps(obj.model_dump())
         else:
             object_json = json.dumps(claim.object)
 
@@ -1512,9 +1524,9 @@ class PostgresStore(GraphStore):
             id=uuid.uuid4().hex,
             namespace=claim.namespace,
             event_id=claim.event_id,
-            subject=claim.subject,
+            subject=EntityRef(type=subject.type, key=subject.key),
             predicate=claim.predicate,
-            object=claim.object,
+            object=obj,
             observed_at=claim.observed_at,
             valid_from=claim.valid_from,
             valid_to=claim.valid_to,
