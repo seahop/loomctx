@@ -411,24 +411,38 @@ def _gather_many(store: GraphStore, namespace: str, refs: list[EntityRef],
 
 
 def resolve_scope(
-    store: GraphStore, namespace: str, scope: ScopeSpec
+    store: GraphStore, namespace: str, scope: ScopeSpec,
+    as_of: datetime | None = None, valid_at: datetime | None = None,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> list[EntityRef]:
     """Expand a scope into a concrete entity list: BFS from the subjects over
     the named containment predicates, bounded by depth. Deterministic order.
     With no `expand` named, the namespace's registry supplies its
     containment predicates (D-012 promise, D-024)."""
-    return resolve_scope_paths(store, namespace, scope)[0]
+    return resolve_scope_paths(store, namespace, scope, as_of=as_of, valid_at=valid_at,
+                               allowed_types=allowed_types)[0]
 
 
 def resolve_scope_paths(
     store: GraphStore, namespace: str, scope: ScopeSpec,
     truncated: Truncations | None = None,
+    as_of: datetime | None = None, valid_at: datetime | None = None,
+    allowed_types: tuple[str, ...] | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
     reached entity only makes sense to a reader alongside that chain
     (D-035): "CVE-X is exploited" is noise until "web-01 runs nginx, CVE-X
-    affects nginx" sits next to it."""
+    affects nginx" sits next to it.
+
+    The walk follows only edges the pack itself would show (D-046): none
+    observed after `as_of`, none whose validity window misses `valid_at`,
+    none touching an entity outside `allowed_types` (D-021: a scoped reader
+    must not hop *through* a node they cannot see), and — unless the scope
+    says `follow_extracted` — none mined from a document (D-023): a
+    hostile document could otherwise rewrite the topology a scope walks
+    and pull its own entities into the pack.
+    """
     expand = set(scope.expand)
     if not expand and scope.depth > 0:
         from .registry import containment_predicates
@@ -442,11 +456,17 @@ def resolve_scope_paths(
         if not expand or not frontier:
             break
         next_frontier: list[EntityRef] = []
-        gathered = _gather_many(store, namespace, frontier, truncated)
+        gathered = _gather_many(store, namespace, frontier, truncated, as_of)
         for ref in frontier:
             via = paths.get((ref.type, ref.key), [])
             for obs in gathered.get((ref.type, ref.key), []):
                 if obs.predicate not in expand:
+                    continue
+                if not _in_scope(obs, allowed_types):
+                    continue
+                if valid_at is not None and not covers_valid_at(obs, valid_at):
+                    continue
+                if not scope.follow_extracted and _is_extracted(obs):
                     continue
                 ends = [obs.subject]
                 if isinstance(obs.object, EntityRef):
@@ -470,7 +490,9 @@ def build_pack(
     paths: Paths = {}
     truncated: Truncations = {}
     if req.scope is not None:
-        subjects, paths = resolve_scope_paths(store, req.namespace, req.scope, truncated)
+        subjects, paths = resolve_scope_paths(
+            store, req.namespace, req.scope, truncated,
+            as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types)
     else:
         subjects = [req.subject]
     if allowed_types is not None:
@@ -842,10 +864,10 @@ def _pack(
         # was reached through, as `relation` items just before it; if the
         # chain doesn't fit, neither does the fact (D-035). Without the
         # chain an answering model correctly refuses to connect the dots.
-        chain = [
-            by_id[pid] for pid in (paths or {}).get((obs.subject.type, obs.subject.key), [])
-            if pid in by_id and pid not in included and pid != obs.id
-        ]
+        path = (paths or {}).get((obs.subject.type, obs.subject.key), [])
+        if any(pid not in by_id and pid not in included for pid in path):
+            continue  # an edge of the chain is not visible in this view: neither is the fact
+        chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
         chain_cost = sum(est_tokens(_render_fact(p)) for p in chain)
         if cost + chain_cost <= remaining:
             for edge in chain:

@@ -243,6 +243,12 @@ class ScopeSpec(BaseModel):
     subjects: list[EntityRef] = Field(min_length=1)
     expand: list[str] = Field(default_factory=list)
     depth: int = Field(default=1, ge=0, le=3)
+    follow_extracted: bool = Field(
+        default=False,
+        description="also traverse edges that were extracted from documents "
+        "(D-023 second-class witnesses); off by default so a hostile "
+        "document cannot rewrite the topology a scope walks (D-046)",
+    )
 
 
 class AskRequest(BaseModel):
