@@ -4,7 +4,7 @@ Four surfaces, one core. All of them speak the shapes in `src/loom/contracts.py`
 (exported as JSON Schema for non-Python consumers). Behavior can never diverge
 because each surface is a thin shell over the same internal service functions.
 
-## 1. MCP server — the surface for agents (live, phase 3)
+## 1. MCP server — the surface for agents
 
 The primary way AI systems tap in: `src/loom/mcp_server.py` wraps the same
 core functions the HTTP API uses (no drift possible). Entity handles are
@@ -241,10 +241,17 @@ What ships today are operator modules, each run inside the image
 (`docker compose run --rm loom python -m loom.<module> ...`):
 
 ```bash
-python -m loom.seed load                 # deterministic demo corpus
-python -m loom.keys generate ...         # mint/list/revoke/update API keys (D-013a)
+python -m loom.seed load                 # deterministic demo corpus (591 claims, 5 documents)
+python -m loom.keys generate ...         # mint/list/revoke/update API keys (D-013a); file defaults to secrets/keys.json
 python -m loom.lifecycle export|import|purge|redact   # backup, migration, retention (D-016)
+python -m loom.ingest file.jsonl --url … # bulk loader: NDJSON envelopes over HTTP batches or straight into a store (D-034)
+python -m loom.connectors.vulns load ... # real data: CISA KEV + NVD + EPSS, cached, idempotent (D-035); --offline reloads from the cache
 python -m loom.enrich run --once         # drain the enrichment backlog (D-018)
+python -m loom.enrich resolve [--dry-run] # entity resolution only: spelling tiers + LLM-adjudicated aliases (D-042)
+python -m loom.agent_eval --db ...       # run a real model as an agent over MCP against the store, scored (D-036); --models a,b for the scorecard
+python -m loom.schemas [openapi]         # export the JSON Schema / OpenAPI the SDKs and CI check against
+python -m loom.kafka_consumer            # writer consumer for your Kafka/Redpanda topics (D-034)
+python -m loom.consumer                  # writer consumer for the NATS scale shape (D-010)
 python -m loom.loadgen --url ...         # measure ingest throughput (D-011)
 ```
 

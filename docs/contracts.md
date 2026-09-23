@@ -82,12 +82,17 @@ observation was extracted from a document.
 
 The 202 response to a document ingest carries an `artifact_id`; fetch the
 verbatim content at `GET /v1/artifacts/{id}`. Artifacts carry an
-`extraction_status` (`pending | done | failed`) that the phase-4 workers will
-advance as they mine claims out of the text.
+`extraction_status` (`pending | done | failed | skipped`) that the enrichment
+worker advances as it mines claims out of the text (blank artifacts are
+`skipped`; a persistently failing one backs off and ends `failed`).
 
 ## Read side (live: /v1/ask and /v1/expand)
 
-**AskRequest:** `{subject, question, budget (tokens, mandatory), as_of?}`
+**AskRequest:** `{namespace, subject | scope, question, budget (tokens,
+mandatory), as_of?, valid_at?}` — exactly one of `subject` (one entity) or
+`scope` (`{subjects, expand?, depth?}`, several entities or an anchor plus
+what it reaches over the named predicates); `as_of` is knowledge time
+("what did we know at T"), `valid_at` is fact time ("what was true at T").
 
 **ContextPack:**
 
@@ -119,7 +124,7 @@ advance as they mine claims out of the text.
     }
   ],
   "handles": [
-    {"id": "h1_…", "hint": "69 more 'logged_in_by' observations for host:web-01",
+    {"id": "h1_…", "hint": "67 more 'logged_in_by' observations for host:web-01",
      "est_tokens": 1725, "kind": "more"},
     {"id": "h1_…", "hint": "CONFLICT on host:web-01 runs_os did not fit the budget",
      "est_tokens": 60, "kind": "conflict"}

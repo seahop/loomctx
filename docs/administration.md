@@ -40,11 +40,19 @@ The `--user` flag matters: the image runs as an unprivileged user (uid
 read-only to it. On Kubernetes the mounted Secret is readable by that uid
 because the manifests set `fsGroup: 10001`.
 
+`--file` defaults to `secrets/keys.json` (the directory is gitignored and
+dockerignored, and `keys.json` anywhere is gitignored too). The file is
+written atomically — a temp file in the same directory, then `os.replace`
+— with mode `0600`, so a hot-reloading engine never parses a half-written
+file and the grants are not readable by other users on the host. The
+recipes below omit `--file` and use that default; inside the compose
+recipe above it is `/secrets/keys.json`.
+
 **Onboard a sender** (a log shipper that may only write auth-log facts about
 hosts/users/ips into netsec, expiring in 6 months):
 
 ```bash
-python -m loom.keys --file keys.json generate --id netsec-authlog-shipper \
+python -m loom.keys generate --id netsec-authlog-shipper \
   --namespace netsec --perms w --entity-types host,user,ip \
   --sources auth-log --expires-days 180
 # -> prints loomk_... ONCE; put it in the shipper's config (X-Loom-Key)
@@ -54,7 +62,7 @@ python -m loom.keys --file keys.json generate --id netsec-authlog-shipper \
 host/ip/alert data — not, say, HR entities another team ingests):
 
 ```bash
-python -m loom.keys --file keys.json generate --id analyst-jdoe \
+python -m loom.keys generate --id analyst-jdoe \
   --namespace netsec --perms r --entity-types host,ip,alert,domain
 # hand the key to them for their agent config; their MCP/HTTP/SDK calls
 # carry it as X-Loom-Key or a Bearer token
@@ -68,17 +76,17 @@ request outside scope gets a 403 naming the gate.
 holder's key keeps working):
 
 ```bash
-python -m loom.keys --file keys.json update --id analyst-jdoe \
+python -m loom.keys update --id analyst-jdoe \
   --entity-types host,ip,alert,domain,user       # widen
-python -m loom.keys --file keys.json update --id analyst-jdoe --perms rw  # allow write-back
+python -m loom.keys update --id analyst-jdoe --perms rw  # allow write-back
 ```
 
 **Rotate a credential** (suspected leak, scheduled rotation):
 
 ```bash
-python -m loom.keys --file keys.json generate --id analyst-jdoe-2 --namespace netsec --perms r --entity-types host,ip,alert,domain
+python -m loom.keys generate --id analyst-jdoe-2 --namespace netsec --perms r --entity-types host,ip,alert,domain
 # hand over the new key, then:
-python -m loom.keys --file keys.json revoke --id analyst-jdoe
+python -m loom.keys revoke --id analyst-jdoe
 ```
 
 **Offboard:** `revoke --id ...` — takes effect on the next reload (seconds
@@ -86,7 +94,7 @@ locally, ≤ ~1 min on k8s). Their history remains attributed in the
 observations they wrote (`source`, and their writes are in the append-only
 record).
 
-**Review who has access:** `python -m loom.keys --file keys.json list` —
+**Review who has access:** `python -m loom.keys list` —
 one line per key: id, namespaces, perms, state, gates. The file itself
 diffs cleanly in your secret store's history, which is your change audit.
 

@@ -111,8 +111,13 @@ The engine answers with a **context pack**:
 - **surfaced conflicts** — contradictions between sources are shown explicitly
   ("source A says X as of March; source B says Y as of May"), never silently merged
 
-Ranking inside the budget combines: semantic similarity to the question, graph
-distance from the subject, recency/decay, and source confidence.
+Ranking inside the budget combines: similarity to the question (embedding
+cosine when `LOOM_EMBED_*` is set, keyword overlap otherwise), recency/decay,
+and source confidence, with extracted (`doc:*`) claims discounted. There is no
+graph-distance term: scope resolution decides *which* entities are in the pack
+(bounded BFS over the chosen predicates), and every gathered fact is then
+ranked on the same footing — a hop-2 fact that answers the question beats a
+hop-0 fact that does not.
 
 **Progressive disclosure is the point:** the agent starts with ~500 tokens and pulls
 more only when the question demands it. That is what keeps agent context clean.
@@ -181,7 +186,7 @@ ingestion tier in front of the core —
   durable buffer           (NATS JetStream, one small container:
         |                   backpressure, burst absorption, at-least-once)
         v
-  writer consumers  ->  server-backed GraphStore (Postgres/Neo4j, D-008)
+  writer consumers  ->  server-backed GraphStore (Postgres, D-008/D-011)
                               ^
   Python core (retrieval, ---+
   enrichment, MCP) scales as separate stateless replicas
@@ -204,10 +209,14 @@ contract from day one is what makes the last dial cheap.
 
 ## Deployment posture
 
-- Single engine container + volume-backed state (SQLite default). Optional Neo4j
-  container for teams that want Cypher/visual exploration.
-- Enrichment workers run **in-process** as background tasks until ingestion volume
-  forces a real queue. Do not add infrastructure speculatively.
+- Single engine container + volume-backed state (SQLite default); Postgres by
+  connection string when replicas are wanted (D-011). A graph database (Neo4j)
+  is a possible `GraphStore` backend, not a shipped one.
+- Enrichment workers are a **separate service** from the same image
+  (`python -m loom.enrich`; compose profile `enrich`, the `loom-enrich`
+  StatefulSet on k8s) — the engine never runs LLM or embedding calls in its
+  request path. The worker is optional: without it packs are facts-only and
+  keyword-ranked. Nothing else is added speculatively.
 - The same `docker-compose.yml` deploys unchanged to a laptop, a small VPS, Fly.io,
   or ECS. Design for portability, not for any specific cloud.
 
@@ -222,14 +231,14 @@ in [infrastructure.md](infrastructure.md); the two below are the summary.
 flowchart TB
     C["structured claims<br/>(telemetry, events)"] --> ING
     D["documents<br/>(reports, tickets, files)"] --> ING
-    ING["INGEST — one envelope, ack fast"] --> ER["entity resolution<br/>(natural keys now; fuzzy in phase 4)"]
+    ING["INGEST — one envelope, ack fast"] --> ER["entity resolution<br/>(natural keys; spelling + alias<br/>merges by the worker)"]
     ING --> ART["artifact store (verbatim)"]
-    ART -.->|"async: chunk, embed,<br/>extract claims (phase 4)"| OBS
+    ART -.->|"async worker: chunk, embed,<br/>extract claims"| OBS
     ER --> OBS
     subgraph STORE["GraphStore interface — SQLite or Postgres by connection string"]
         OBS["OBSERVATIONS — append-only, cited"]
         GRAPH["ENTITY GRAPH — bitemporal edges"]
-        DOS["DOSSIERS — rolling summaries (phase 4)"]
+        DOS["DOSSIERS — rolling summaries, cited"]
         OBS --- GRAPH --- DOS
     end
     STORE --> CPB["CONTEXT PACK BUILDER<br/>resolve scope → rank → trim to budget<br/>→ cite → surface conflicts → attach handles"]

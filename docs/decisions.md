@@ -8,11 +8,15 @@ is revisited, strike it here and add the replacement — don't rewrite history.
 1. **Docker-only builds and runs.** Nothing installs or executes on the host beyond
    `docker compose ...`. Tests, servers, and one-off scripts all run in containers.
    This keeps the host sanitary and is a standing project rule.
-2. **Small-resource posture.** Target: large *context*, not big data. One or two
-   containers, volume-backed state, runs on a laptop or a $10 VPS. No Kafka, no
-   Elasticsearch, no managed-cloud dependencies in the core. Two deployment
-   shapes only: local Docker Compose, and the k8s manifests in `deploy/k8s`
-   (D-008) — same image, same behavior.
+2. **Small-resource posture.** Target: large *context*, not big data. The core
+   needs nothing beyond one container and a volume: SQLite, no queue, no search
+   cluster, no managed-cloud dependency — it runs on a laptop or a $10 VPS.
+   Everything else is an opt-in shape of the *same image and contract*: Postgres
+   by connection string (D-011), the NATS-buffered ingest tier (D-010), Postgres
+   HA (D-030), and consuming from *your* Kafka (D-034) — each documented in
+   `deploy/` and switched on by env or overlay, never required. Local Compose
+   and the k8s manifests in `deploy/k8s` (D-008) are the two ways to deploy any
+   of those shapes.
 3. **Provenance is mandatory.** Every observation names its source; every context-pack
    item cites its observations. No uncited derived facts.
 4. **Observations are append-only.** Corrections supersede; nothing is edited in place.
@@ -1476,9 +1480,11 @@ infrastructure-ecosystem norm. Canonical text in `LICENSE`.
   question is *when* demo/adopter volume forces the scale shape.
 - **OQ-2:** One shared deployment with namespaces vs. per-team stacks as the primary
   story? (Both work; affects auth priority.)
-- **OQ-3:** ~~AuthN/Z on the HTTP surface~~ Resolved by D-013 (per-namespace
-  API keys). Remaining: key management API (rotation without redeploy) and
-  auth for the MCP http profile.
+- **OQ-3:** ~~AuthN/Z on the HTTP surface~~ Resolved: per-namespace API keys
+  (D-013), the hashed keys file with data-scoping grants and hot reload, so
+  rotation is a file update with no redeploy (D-013a), and the same key gate on
+  the MCP http transports (D-024). A key-management *API* (as opposed to the
+  `loom.keys` CLI + a mounted Secret) is not planned.
 - **OQ-4:** Embedding model choice + dimensionality (affects sqlite-vec schema).
 - **OQ-5:** ~~Retention/TTL policy~~ Mechanism shipped (D-016 purge/redact);
   remaining is per-team policy defaults and a scheduled sweep (cron/k8s Job).

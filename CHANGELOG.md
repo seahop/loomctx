@@ -3,6 +3,8 @@
 Loom is pre-1.0: contracts are stable within a minor version and every
 change to them is recorded in `docs/decisions.md` (D-numbers below).
 
+## Unreleased
+
 ## v0.1.0 — 2026-09-09
 
 First tagged release: the conference build.
@@ -39,7 +41,7 @@ First tagged release: the conference build.
 - Vulnerability-intelligence connector: CISA KEV + NVD + EPSS, streamed,
   idempotent, history-preserving, nightly CronJob (D-035)
 - Agent end-to-end harness over the real MCP transport with store-derived
-  ground truth and a citation-faithfulness check; twenty-model scorecard
+  ground truth and a citation-faithfulness check; eighteen-model scorecard
   with billed cost (D-036, D-037)
 
 ### Validation
@@ -50,8 +52,9 @@ First tagged release: the conference build.
   populated database; the published image re-validated on GKE before the
   tag moves (D-045)
 
-### Measured on this release
+### Measured on this release (laptop, generator co-located)
 - 511k envelopes loaded in 81 s to SQLite; single-entity ask 2–5 ms at
   465k observations; two-hop scope over 1,077 entities in 0.5 s
-- Seven models pass all four agent tasks three times out of three;
-  citation faithfulness 168/168 task-runs (`docs/models.md`)
+- Eighteen models, three runs each: nine pass all four agent tasks three
+  times out of three (12/12); citation faithfulness 216/216 task-runs
+  (`docs/models.md`)
