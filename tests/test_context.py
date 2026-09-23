@@ -592,3 +592,19 @@ def test_query_cache_eviction_is_safe_across_threads():
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda i: embed_query(e, f"question number {i}"), range(_QUERY_CACHE_SIZE * 3)))
     assert len(_query_cache) <= _QUERY_CACHE_SIZE
+
+
+def test_attrs_cannot_buy_keyword_rank(tmp_path):
+    """D-046: the keyword scorer read attrs, which the reader never sees;
+    a fact whose attrs were stuffed with the question's words outranked
+    the fact that actually answers it."""
+    store, web01 = make_store(tmp_path)
+    store.record_claim(ClaimIn(
+        subject=web01, predicate="communicated_with", object=EntityRef(type="host", key="db-99"),
+        observed_at=_at(9, 3), source="netflow",
+        attrs={"note": "who logged in logged in logged in host login who logged"}))
+    pack = build_pack(store, AskRequest(subject=web01, question="who logged in to this host?", budget=3000))
+    facts = [i for i in pack.items if i.kind == "fact"]
+    assert "logged_in_by" in facts[0].text and "jdoe" in facts[0].text
+    stuffed = next(i for i in facts if "db-99" in i.text)
+    assert stuffed.score < facts[0].score

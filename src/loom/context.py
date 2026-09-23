@@ -209,10 +209,10 @@ def _score(
     if not question_tokens and not semantic:
         score = 0.6 * recency + 0.4 * obs.confidence
     else:
-        haystack = _tokens(
-            f"{obs.predicate} {_object_text(obs)} {obs.subject.key} "
-            f"{json.dumps(obs.attrs)}"
-        )
+        # Only what the pack renders is scored: attrs never reach the
+        # reader, so a sender stuffing them with question words could buy
+        # rank for a fact whose visible text says nothing relevant (D-046).
+        haystack = _tokens(f"{obs.predicate} {_object_text(obs)} {obs.subject.key}")
         sim = (
             len(question_tokens & haystack) / len(question_tokens)
             if question_tokens else 0.0
