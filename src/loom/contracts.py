@@ -78,6 +78,13 @@ class ClaimIn(BaseModel):
     source: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     provenance: Provenance | None = None
+    supersedes: str | None = Field(
+        default=None, max_length=64,
+        description="id of an earlier observation this one corrects or replaces "
+        "(same namespace). Recorded, never inferred: the old row stays for audit and "
+        "for as_of reads before this one, but is no longer current — it drops out of "
+        "conflict detection and ranks as history (D-050)",
+    )
     attrs: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -152,6 +159,13 @@ class Observation(BaseModel):
     source: str
     confidence: float
     provenance: Provenance | None = None
+    supersedes: str | None = Field(
+        default=None, max_length=64,
+        description="id of an earlier observation this one corrects or replaces "
+        "(same namespace). Recorded, never inferred: the old row stays for audit and "
+        "for as_of reads before this one, but is no longer current — it drops out of "
+        "conflict detection and ranks as history (D-050)",
+    )
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 

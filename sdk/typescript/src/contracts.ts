@@ -45,6 +45,10 @@ export interface ClaimIn {
   source: string;
   confidence?: number;
   provenance?: Provenance | null;
+  /**
+   * id of an earlier observation this one corrects or replaces (same namespace). Recorded, never inferred: the old row stays for audit and for as_of reads before this one, but is no longer current — it drops out of conflict detection and ranks as history (D-050)
+   */
+  supersedes?: string | null;
   attrs?: {
     [k: string]: unknown;
   };
@@ -114,6 +118,10 @@ export interface Observation {
   source: string;
   confidence: number;
   provenance?: Provenance | null;
+  /**
+   * id of an earlier observation this one corrects or replaces (same namespace). Recorded, never inferred: the old row stays for audit and for as_of reads before this one, but is no longer current — it drops out of conflict detection and ranks as history (D-050)
+   */
+  supersedes?: string | null;
   attrs?: {
     [k: string]: unknown;
   };

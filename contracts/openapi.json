@@ -322,6 +322,19 @@
           "subject": {
             "$ref": "#/components/schemas/EntityRef"
           },
+          "supersedes": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "id of an earlier observation this one corrects or replaces (same namespace). Recorded, never inferred: the old row stays for audit and for as_of reads before this one, but is no longer current \u2014 it drops out of conflict detection and ranks as history (D-050)",
+            "title": "Supersedes"
+          },
           "valid_from": {
             "anyOf": [
               {
