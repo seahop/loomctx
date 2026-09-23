@@ -47,6 +47,28 @@ def test_write_with_retry_then_deadletter(tmp_path, monkeypatch):
     assert counts["deadlettered"] == 1 and counts["recorded"] == 0
     topic, value, headers = producer.sent[0]
     assert topic == "loom.deadletter" and value == CLAIM
-    assert headers["Loom-Error"].startswith(b"RuntimeError: database is locked")
+    assert headers == {"Loom-Error": b"RuntimeError", "Loom-Error-Code": b"store_rejected"}
     monkeypatch.undo()
     assert store.count_observations("default", EntityRef(type="host", key="web-01")) == 1
+
+
+def test_strict_registry_rejects_on_the_kafka_path(tmp_path):
+    from loom.contracts import SchemaRegistration
+    store = SqliteStore(tmp_path / "k2.db")
+    store.put_schema(SchemaRegistration(namespace="default", strict=True,
+                                        entity_types=[{"name": "host"}], predicates=[]))
+    counts = asyncio.run(write_with_retry(store, FakeProducer(), [CLAIM]))
+    assert counts["rejected"] == 1 and counts["recorded"] == 0
+    assert store.count_observations("default", EntityRef(type="host", key="web-01")) == 0
+
+
+def test_security_kwargs():
+    from loom.kafka_consumer import security_kwargs
+    assert security_kwargs({}) == {}
+    assert security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SSL"}).keys() == {"security_protocol", "ssl_context"}
+    sasl = security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SASL_SSL", "LOOM_KAFKA_SASL_MECHANISM": "scram-sha-256",
+                            "LOOM_KAFKA_SASL_USERNAME": "u", "LOOM_KAFKA_SASL_PASSWORD": "p"})
+    assert sasl["security_protocol"] == "SASL_SSL" and sasl["sasl_mechanism"] == "SCRAM-SHA-256"
+    assert sasl["sasl_plain_username"] == "u" and "ssl_context" in sasl
+    with pytest.raises(SystemExit):
+        security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SASL_PLAINTEXT"})
