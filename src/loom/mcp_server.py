@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -80,11 +82,10 @@ def _get_auth() -> AuthConfig:
 
 # ------------------------------------------------------------------- auth #
 
-def _grant(ctx, namespace: str, action: str) -> Grant | None:
-    """The caller's grant for this tool call, or None when no gate applies
-    (stdio transport, or auth disabled). Raises PermissionError — which the
-    MCP layer returns to the agent as a tool error — when the key is
-    missing, unknown, or not allowed the action on the namespace."""
+def _caller(ctx) -> Grant | None:
+    """The caller's grant, or None when no gate applies (stdio transport,
+    or auth disabled). Raises PermissionError — which the MCP layer returns
+    to the agent as a tool error — when the key is missing or unknown."""
     if _transport == "stdio":
         return None
     auth = _get_auth()
@@ -96,7 +97,13 @@ def _grant(ctx, namespace: str, action: str) -> Grant | None:
     if grant is None:
         raise PermissionError("missing or unknown API key: send X-Loom-Key "
                               "(or Authorization: Bearer) on every request")
-    if not grant.allows(namespace, action):
+    return grant
+
+
+def _grant(ctx, namespace: str, action: str) -> Grant | None:
+    """`_caller` plus the namespace/action check."""
+    grant = _caller(ctx)
+    if grant is not None and not grant.allows(namespace, action):
         raise PermissionError(
             f"key {grant.id!r} is not authorized for {action!r} on namespace {namespace!r}")
     return grant
@@ -172,13 +179,55 @@ def configure(store: GraphStore, auth: AuthConfig | None = None,
               transport: str = "stdio") -> None:
     """Inject a store (tests); optionally an auth config + transport so the
     tool-level gates can be exercised without a network."""
-    global _store, _auth, _transport
+    global _store, _auth, _transport, _summary_cache
     _store = store
     _auth = auth
     _transport = transport
+    _summary_cache = None
+
+
+# namespace_summary() is a GROUP BY over every entity; every tool call ran
+# it (twice for describe_namespace). Cached briefly — a namespace that
+# appeared five seconds ago is not what an orienting agent is waiting on.
+_SUMMARY_TTL = 5.0
+_summary_cache: tuple[float, dict[str, dict[str, int]]] | None = None
+
+
+def _summary() -> dict[str, dict[str, int]]:
+    global _summary_cache
+    now = time.monotonic()
+    if _summary_cache is None or _summary_cache[0] <= now:
+        _summary_cache = (now + _SUMMARY_TTL, _get_store().namespace_summary())
+    return _summary_cache[1]
 
 
 _SUBJECTS_SHOWN = 20
+_CITE = re.compile(r"^[0-9a-f]{12}$")
+_OBS_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _observation_by_cite(namespace: str, token: str):
+    """An observation from its `cite` token (12 hex, what packs show) or its
+    full 32-hex id. Prefix resolution needs the store's
+    `observations_by_prefix`; without it only full ids resolve."""
+    store = _get_store()
+    if _OBS_ID.match(token):
+        found = store.observations_by_ids(namespace, [token])
+    elif _CITE.match(token):
+        by_prefix = getattr(store, "observations_by_prefix", None)
+        if by_prefix is None:
+            raise ToolError(f"{token!r} is a cite token; this Loom's store resolves only full "
+                            "32-hex observation ids — cite by the full id or ask about the "
+                            "entity instead")
+        found = list(by_prefix(namespace, token))
+    else:
+        return None
+    if not found:
+        raise ToolError(f"no observation {token!r} in namespace {namespace!r}")
+    if len(found) > 1:
+        raise ToolError(f"cite {token!r} is ambiguous in namespace {namespace!r}; "
+                        "use the full observation id")
+    return found[0]
 
 
 def _agent_view(pack) -> dict:
@@ -190,12 +239,17 @@ def _agent_view(pack) -> dict:
     d = pack.model_dump(mode="json", exclude_none=True)
     # a 12-hex `cite` token per citation: two of 216 scorecard task-runs
     # mangled a hand-copied 32-hex id by one character (D-041); the
-    # answer route already cites by this prefix
+    # answer route already cites by this prefix. The 32-hex observation_id
+    # is dropped once the token stands for it (compact citations: agents
+    # carry every pack in context); artifact citations keep their id, which
+    # excerpt handles and get_artifact take.
     for item in d.get("items", []):
         for c in item.get("citations", []):
             ref = c.get("observation_id") or c.get("artifact_id") or ""
             if ref:
                 c["cite"] = ref[:12]
+            if c.get("observation_id"):
+                del c["observation_id"]
     subjects = d.get("subjects", [])
     view = {
         "namespace": d.get("namespace"), "question": d.get("question"),
@@ -233,12 +287,19 @@ def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _known_namespace(namespace: str) -> None:
+def _visible(grant: Grant | None, namespaces) -> list[str]:
+    """The namespaces a caller may read — a scoped key must not learn the
+    others' names from a listing or an error message."""
+    return sorted(ns for ns in namespaces if grant is None or grant.allows(ns, "r"))
+
+
+def _known_namespace(namespace: str, grant: Grant | None = None) -> None:
     """A query against a namespace that holds nothing is almost always a
-    dropped argument, not an empty answer — say so, and say what exists."""
-    summary = _get_store().namespace_summary()
+    dropped argument, not an empty answer — say so, and say what exists
+    (among the namespaces this caller may read)."""
+    summary = _summary()
     if namespace not in summary and _get_store().get_schema(namespace) is None:
-        known = ", ".join(sorted(summary)) or "none yet"
+        known = ", ".join(_visible(grant, summary)) or "none yet"
         raise ValueError(f"namespace {namespace!r} holds no data; namespaces with data: {known}"
                          " — pass namespace=... on every call")
 
@@ -248,8 +309,10 @@ def _known_namespace(namespace: str) -> None:
 def list_namespaces(ctx: Context = None) -> list[dict]:
     """The namespaces this Loom holds, with entity counts by type — call this
     first when you don't know where the data lives."""
-    return [{"namespace": ns, "entities": types, "total": sum(types.values())}
-            for ns, types in sorted(_get_store().namespace_summary().items())]
+    grant = _caller(ctx)
+    summary = _summary()
+    return [{"namespace": ns, "entities": summary[ns], "total": sum(summary[ns].values())}
+            for ns in _visible(grant, summary)]
 
 
 def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> dict:
@@ -257,11 +320,11 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> dic
     counts, and the registered predicates (description, allowed object types,
     whether scopes follow it by default). Read this before choosing
     expand_predicates for a multi-hop ask_scope."""
-    _grant(ctx, namespace, "r")
-    _known_namespace(namespace)
+    grant = _grant(ctx, namespace, "r")
+    _known_namespace(namespace, grant)
     store = _get_store()
     schema = store.get_schema(namespace)
-    counts = store.namespace_summary().get(namespace, {})
+    counts = _summary().get(namespace, {})
     return {
         "namespace": namespace,
         "entity_types": [
@@ -282,7 +345,7 @@ def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
     """Resolve a name or key fragment to entity handles. Returns matches as
     'type:key' handles usable with the other tools (exact match first)."""
     grant = _grant(ctx, namespace, "r")
-    _known_namespace(namespace)
+    _known_namespace(namespace, grant)
     return [
         {
             "handle": f"{e.type}:{e.key}",
@@ -306,8 +369,9 @@ def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
     grant = _grant(ctx, namespace, "r")
     embedder = _get_embedder()
     if embedder is None:
-        return {"error": "no embedder configured on this Loom (set LOOM_EMBED_*);"
-                         " use find_entity with a key fragment instead"}
+        raise ToolError("no embedder configured on this Loom (set LOOM_EMBED_*);"
+                        " use find_entity with a key fragment instead")
+    _known_namespace(namespace, grant)
     return semantic_search(_get_store(), namespace, embedder, question,
                            limit=limit, allowed_types=_allowed(grant)).model_dump(mode="json")
 
@@ -329,7 +393,7 @@ def ask(
     grant = _grant(ctx, namespace, "r")
     ref = _parse_ref(subject)
     _gate_type(grant, ref.type)
-    _known_namespace(namespace)
+    _known_namespace(namespace, grant)
     req = AskRequest(
         namespace=namespace,
         subject=ref,
@@ -362,7 +426,7 @@ def ask_scope(
     refs = [_parse_ref(s) for s in subjects]
     for ref in refs:
         _gate_type(grant, ref.type)
-    _known_namespace(namespace)
+    _known_namespace(namespace, grant)
     req = AskRequest(
         namespace=namespace,
         scope=ScopeSpec(subjects=refs, expand=expand_predicates or [], depth=depth),
@@ -375,16 +439,32 @@ def ask_scope(
         _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)))
 
 
-def expand(handle: str, budget: int = 800, ctx: Context = None) -> dict:
+def _observation_view(namespace: str, grant: Grant | None, obs) -> dict:
+    """One raw observation, gated like get_observations."""
+    if grant is not None and not (
+            grant.allows_entity_type(obs.subject.type)
+            and (not isinstance(obs.object, EntityRef) or grant.allows_entity_type(obs.object.type))):
+        raise PermissionError(f"key {grant.id!r} is not scoped to that observation's entity types")
+    return {"namespace": namespace, "count": 1, "observations": [obs.model_dump(mode="json")]}
+
+
+def expand(handle: str, budget: int = 800, namespace: str = _DEFAULT_NS,
+           ctx: Context = None) -> dict:
     """Pull one thread deeper: pass an expansion handle id from a previous
     ask/ask_scope result (the `id` of an entry in its `handles` list) to
-    fetch the observations it stands for."""
+    fetch the observations it stands for. A citation's `cite` token (or a
+    full observation id) returns that one observation instead, from
+    `namespace`."""
+    if _CITE.match(handle) or _OBS_ID.match(handle):
+        grant = _grant(ctx, namespace, "r")
+        return _observation_view(namespace, grant, _observation_by_cite(namespace, handle))
     try:
         meta = decode_handle(handle)
     except ValueError as exc:
         raise ValueError(f"{exc}: expand takes the `id` of an entry in a pack's `handles` list "
-                         "(it starts with h1_ or h2_), not an observation id or an entity handle; "
-                         "for more about an entity use ask, for a raw record use get_observations") from exc
+                         "(it starts with h1_ or h2_) or a citation's 12-hex `cite` token, "
+                         "not an entity handle; for more about an entity use ask, for its raw "
+                         "records use get_observations") from exc
     grant = _grant(ctx, meta["ns"], "r")
     _gate_type(grant, str(meta["subject"].get("type", "")))
     return _agent_view(expand_pack(_get_store(), handle, budget, allowed_types=_allowed(grant)))
@@ -439,8 +519,11 @@ def get_observations(
     subject: str, namespace: str = _DEFAULT_NS, limit: int = 50, ctx: Context = None
 ) -> dict:
     """Raw observations touching an entity (audit/debug — prefer ask for
-    focused context)."""
+    focused context). subject may also be a citation's `cite` token or a
+    full observation id, which returns that single record."""
     grant = _grant(ctx, namespace, "r")
+    if _CITE.match(subject) or _OBS_ID.match(subject):
+        return _observation_view(namespace, grant, _observation_by_cite(namespace, subject))
     ref = _parse_ref(subject)
     _gate_type(grant, ref.type)
     observations = [
@@ -473,10 +556,9 @@ def answer(
         _gate_type(grant, _parse_ref(subject).type)
     llm = _get_llm()
     if llm is None:
-        return {
-            "error": "no LLM configured on this Loom (set LOOM_LLM_MODEL plus "
-            "LOOM_LLM_PROVIDER or LOOM_LLM_BASE_URL); use the ask tool instead"
-        }
+        raise ToolError("no LLM configured on this Loom (set LOOM_LLM_MODEL plus "
+                        "LOOM_LLM_PROVIDER or LOOM_LLM_BASE_URL); use the ask tool instead")
+    _known_namespace(namespace, grant)
     req = AnswerRequest(
         namespace=namespace,
         question=question,
@@ -488,9 +570,9 @@ def answer(
         resp = build_answer(_get_store(), llm, req, embedder=_get_embedder(),
                             allowed_types=_allowed(grant))
     except UnresolvedQuestionError as exc:
-        return {"error": str(exc)}
+        raise ToolError(str(exc)) from exc
     except LLMError as exc:
-        return {"error": f"provider error: {exc.public}"}
+        raise ToolError(f"provider error: {exc.public}") from exc
     return {
         "answer": resp.answer,
         "model": resp.model,
@@ -514,7 +596,8 @@ def _surface_errors(fn):
     """The SDK reports unexpected exceptions as an opaque 'Error executing
     tool'; an agent needs the actual reason (bad handle, scope refusal,
     provider down) to recover. Wrap our expected failures as ToolError so
-    the message reaches the client verbatim."""
+    the message reaches the client verbatim. Every tool fails this one way
+    — none returns an {"error": …} payload an agent could mistake for data."""
     import functools
 
     @functools.wraps(fn)

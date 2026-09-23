@@ -90,12 +90,27 @@ def test_bad_handle_is_a_clear_error(store):
         mcp_server.ask("web-01", "q")
 
 
-def test_answer_without_llm_returns_guidance(store, monkeypatch):
+def test_answer_without_llm_is_a_tool_error(store, monkeypatch):
+    """Every tool fails one way — a ToolError — never an {"error": …}
+    payload an agent could read as data."""
+    from mcp.server.mcpserver.exceptions import ToolError
     for var in ("LOOM_LLM_MODEL", "LOOM_LLM_PROVIDER",
                 "LOOM_LLM_BASE_URL", "LOOM_LLM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    result = mcp_server.answer("what about web-01?")
-    assert "error" in result and "ask tool" in result["error"]
+    mcp_server._llm_loaded = False
+    try:
+        with pytest.raises(ToolError, match="ask tool"):
+            mcp_server.answer("what about web-01?")
+    finally:
+        mcp_server._llm_loaded = False
+    mcp_server._embedder_loaded = False
+    mcp_server._embedder = None
+    mcp_server._embedder_loaded = True
+    try:
+        with pytest.raises(ToolError, match="find_entity"):
+            mcp_server.find_related("what looks exploitable?")
+    finally:
+        mcp_server._embedder_loaded = False
 
 
 def test_call_tool_through_mcp_layer(store):
@@ -218,7 +233,11 @@ def test_unknown_namespace_is_an_error_not_an_empty_answer(store):
 
 
 def test_expand_explains_what_a_handle_is(store):
-    with pytest.raises(ValueError, match="handles.*list.*h1_"):
+    from mcp.server.mcpserver.exceptions import ToolError
+    with pytest.raises(ValueError, match="handles.*list.*h1_.*cite"):
+        mcp_server.expand("host:web-01")
+    # an observation id is accepted now; an unknown one says so
+    with pytest.raises(ToolError, match="no observation"):
         mcp_server.expand("fb5945447eaf409e85fd0f2422b422c8")
 
 
@@ -263,7 +282,82 @@ def test_agent_view_warns_about_partial_coverage(store, monkeypatch):
 
 
 def test_pack_view_offers_a_short_cite_token(store):
-    """D-041: models mangle hand-copied 32-hex ids; a 12-hex token is what to cite."""
+    """D-041: models mangle hand-copied 32-hex ids; a 12-hex token is what to
+    cite — and once it stands for the observation, the 32-hex id is dropped
+    from the view (compact citations; source and observed_at stay)."""
     view = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
     cites = [c for i in view["items"] for c in i["citations"]]
-    assert cites and all(len(c["cite"]) == 12 and c["observation_id"].startswith(c["cite"]) for c in cites)
+    assert cites and all(len(c["cite"]) == 12 and "observation_id" not in c for c in cites)
+    assert all(c["source"] and c["observed_at"] for c in cites)
+    ids = {o.id for o in store.observations_for("default", EntityRef(type="host", key="web-01"))}
+    assert all(any(i.startswith(c["cite"]) for i in ids) for c in cites)
+
+
+def test_cite_tokens_resolve_through_expand_and_get_observations(store):
+    """The tools that take an observation id take its 12-hex cite token too,
+    via the store's prefix lookup; without one, full ids still work and the
+    token is refused with a reason."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    obs = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
+    full = mcp_server.expand(obs.id)
+    assert full["count"] == 1 and full["observations"][0]["id"] == obs.id
+    assert mcp_server.get_observations(obs.id)["observations"][0]["predicate"] == obs.predicate
+    with pytest.raises(ToolError, match="full"):
+        mcp_server.expand(obs.id[:12])
+    store.observations_by_prefix = lambda ns, prefix: [o for o in store.iter_observations(ns) if o.id.startswith(prefix)]
+    assert mcp_server.expand(obs.id[:12])["observations"][0]["id"] == obs.id
+    assert mcp_server.get_observations(obs.id[:12])["observations"][0]["id"] == obs.id
+    with pytest.raises(ToolError, match="no observation"):
+        mcp_server.expand("0" * 12)
+    with pytest.raises(ToolError, match="no observation"):
+        mcp_server.expand("0" * 32)
+
+
+def test_scoped_key_never_learns_other_namespaces(store, monkeypatch, tmp_path):
+    """list_namespaces skipped the grant entirely, and the empty-namespace
+    error named every namespace in the store."""
+    store.record_claim(ClaimIn(
+        namespace="secret", subject=EntityRef(type="host", key="vault-01"), predicate="runs_os",
+        object="openbsd", observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc), source="inv"))
+    monkeypatch.setenv("LOOM_API_KEYS", "reader:default:r,admin:*:rw")
+    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
+    from loom.auth import AuthConfig
+    mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
+    assert [n["namespace"] for n in mcp_server.list_namespaces(ctx=_Ctx("reader"))] == ["default"]
+    assert [n["namespace"] for n in mcp_server.list_namespaces(ctx=_Ctx("admin"))] == ["default", "secret"]
+    with pytest.raises(PermissionError, match="API key"):
+        mcp_server.list_namespaces(ctx=_Ctx())
+    with pytest.raises(ValueError) as exc:
+        mcp_server.find_entity("x", namespace="nowhere", ctx=_Ctx("admin"))
+    assert "secret" in str(exc.value)
+    # a key granted two namespaces, one of them empty: the error for the
+    # empty one names only what that key may read
+    import hashlib
+    import json
+    keys = tmp_path / "keys.json"
+    keys.write_text(json.dumps({"keys": [{"id": "two", "sha256": hashlib.sha256(b"two").hexdigest(),
+                                          "namespaces": ["default", "empty"], "perms": "r"}]}))
+    monkeypatch.delenv("LOOM_API_KEYS")
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
+    mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
+    with pytest.raises(ValueError) as exc:
+        mcp_server.find_entity("x", namespace="empty", ctx=_Ctx("two"))
+    assert "default" in str(exc.value) and "secret" not in str(exc.value)
+    assert [n["namespace"] for n in mcp_server.list_namespaces(ctx=_Ctx("two"))] == ["default"]
+
+
+def test_namespace_summary_is_cached_briefly(store, monkeypatch):
+    calls = []
+    real = store.namespace_summary
+
+    def counted():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(store, "namespace_summary", counted)
+    mcp_server.configure(store)                       # resets the cache
+    mcp_server.list_namespaces(); mcp_server.describe_namespace("default"); mcp_server.find_entity("web-01")
+    assert len(calls) == 1
+    mcp_server._summary_cache = None
+    mcp_server.list_namespaces()
+    assert len(calls) == 2
