@@ -796,6 +796,44 @@ def test_sharded_store_from_env(tmp_path, monkeypatch):
     assert isinstance(store_from_env(), SqliteStore)
 
 
+def test_shards_never_inherit_the_default_read_replica(tmp_path, monkeypatch):
+    """LOOM_DB_READ names the replica of LOOM_DB. A Postgres shard on another
+    cluster must not be handed that replica; it gets one only from its own
+    {"dsn", "read"} entry."""
+    from loom.store import factory
+    from loom.store.sharded import ShardedStore
+    made = []
+
+    def fake_store_from_url(url, read_url=factory._FROM_ENV):
+        effective = os.environ.get("LOOM_DB_READ") if read_url is factory._FROM_ENV else read_url
+        made.append((url, effective))
+        return SqliteStore(tmp_path / f"{len(made)}.db")
+
+    monkeypatch.setattr(factory, "store_from_url", fake_store_from_url)
+    monkeypatch.setenv("LOOM_DB", "postgresql://primary/loom")
+    monkeypatch.setenv("LOOM_DB_READ", "postgresql://replica/loom")
+    monkeypatch.setenv("LOOM_SHARDS", json.dumps({
+        "acme": "postgresql://acme-db/loom",
+        "globex": {"dsn": "postgresql://globex-db/loom", "read": "postgresql://globex-replica/loom"},
+        "initech": {"dsn": "postgresql://globex-db/loom"},
+        "home": "postgresql://primary/loom",
+    }))
+    s = factory.store_from_env()
+    assert isinstance(s, ShardedStore)
+    assert made[0] == ("postgresql://primary/loom", "postgresql://replica/loom")   # LOOM_DB keeps its replica
+    assert ("postgresql://acme-db/loom", None) in made                              # a plain shard: no replica
+    assert ("postgresql://globex-db/loom", "postgresql://globex-replica/loom") in made
+    assert ("postgresql://globex-db/loom", None) in made                            # same dsn, no read: its own store
+    assert s.describe()["home"] == 0                                                 # LOOM_DB itself is shared, not reopened
+    assert len(made) == 4
+    s.close()
+    assert factory.shard_specs('{"a": "x"}') == {"a": ("x", None)}
+    with pytest.raises(ValueError):
+        factory.shard_specs('{"a": {"read": "only"}}')
+    with pytest.raises(ValueError):
+        factory.shard_specs('["not", "a", "map"]')
+
+
 def test_observations_for_merges_both_sides_newest_first_within_limit(store):
     """D-035: the lookup is two indexed halves (as subject, as object) merged,
     never a namespace scan. A self-edge appears once; the limit applies to
