@@ -16,6 +16,7 @@ spec:
       labels:
         app: loom
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -26,6 +27,11 @@ spec:
       containers:
         - name: loom
           image: ghcr.io/seahop/loom:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8000
               name: http
@@ -44,12 +50,18 @@ spec:
               value: "2"
             - name: LOOM_DB_POOL
               value: "4"
+            # --- auth (D-013a / D-021): see base/deployment.yaml for the
+            # LOOM_AUTH_FILE / LOOM_HANDLE_SECRET block and the keys mount.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           readinessProbe:
             httpGet:
               path: /readyz     # probes Postgres reachability
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -61,6 +73,9 @@ spec:
               memory: 128Mi
             limits:
               memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

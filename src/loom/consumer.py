@@ -17,6 +17,7 @@ import os
 from pydantic import TypeAdapter, ValidationError
 
 from .contracts import ClaimIn, IngestEnvelope
+from .registry import RegistryCache, validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
 
@@ -37,7 +38,23 @@ ACK_WAIT_SECONDS = float(os.environ.get("LOOM_ACK_WAIT", "") or 30)
 MAX_DELIVER = int(os.environ.get("LOOM_MAX_DELIVER", "") or 5)
 DEADLETTER_STREAM = "LOOM_DEADLETTER"
 DEADLETTER_SUBJECTS = "loom.deadletter.>"
+# The dead-letter stream is bounded too: a poison storm must not fill the
+# queue's disk. Oldest parked messages are shed first (default 256 MiB).
+DEADLETTER_MAX_BYTES = int(os.environ.get("LOOM_DEADLETTER_MAX_BYTES", "") or 256 * 1024 * 1024)
 STREAM_REPLICAS = int(os.environ.get("LOOM_STREAM_REPLICAS", "") or 1)
+
+# Dead-letter headers carry only the exception class and a short code — the
+# message text can quote row data (a constraint error names the values), and
+# headers are readable by anyone who can read the stream. The text goes to
+# the consumer's log, where it belongs.
+ERROR_HEADER = "Loom-Error"
+ERROR_CODE_HEADER = "Loom-Error-Code"
+ERROR_CODE_STORE = "store_rejected"
+
+
+def error_headers(exc: BaseException, code: str = ERROR_CODE_STORE) -> dict[str, str]:
+    """What a dead-lettered message says about why: class + code, no text."""
+    return {ERROR_HEADER: type(exc).__name__, ERROR_CODE_HEADER: code}
 
 
 def resolve_provenance(store: GraphStore, claim: ClaimIn) -> str | None:
@@ -55,14 +72,19 @@ def resolve_provenance(store: GraphStore, claim: ClaimIn) -> str | None:
     return None
 
 
-def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
+def handle_batch(store: GraphStore, payloads: list[bytes],
+                 registry: RegistryCache | None = None) -> dict[str, int]:
     """Write one fetched batch: claims land in a single transaction.
 
     Gateways validated against the same contract, so a parse failure here
     means a poison message (or contract drift) — log and drop rather than
-    poison-loop the stream.
+    poison-loop the stream. The namespace's schema registry (D-024) is
+    applied here too: the gateway knows the contract shape but not the
+    registry, so a claim that violates a registered predicate or a strict
+    namespace is dropped with its reason and counted under `rejected`.
     """
-    counts = {"recorded": 0, "accepted": 0, "skipped": 0}
+    registry = registry or RegistryCache(store)
+    counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
     claims: list[ClaimIn] = []
     for data in payloads:
         try:
@@ -75,6 +97,11 @@ def handle_batch(store: GraphStore, payloads: list[bytes]) -> dict[str, int]:
             counts["skipped"] += 1
             continue
         if isinstance(envelope, ClaimIn):
+            problem = validate_claim(registry.get(envelope.namespace), envelope)
+            if problem is not None:
+                log.warning("rejecting claim %s: %s", envelope.event_id, problem)
+                counts["rejected"] += 1
+                continue
             problem = resolve_provenance(store, envelope)
             if problem is not None:
                 log.warning("dropping claim %s: %s", envelope.event_id, problem)
@@ -104,17 +131,20 @@ async def settle_failed_batch(js, msgs, exc: Exception,
     dead-letter stream with the reason and acked, so one poison envelope
     can't hold the queue hostage (D-029). Returns how many were parked."""
     limit = max_deliver or MAX_DELIVER
-    reason = f"{type(exc).__name__}: {exc}"[:500]
+    headers = error_headers(exc)
     parked = 0
     for m in msgs:
         delivered = getattr(getattr(m, "metadata", None), "num_delivered", 1) or 1
         if delivered >= limit:
             await js.publish(m.subject.replace("loom.ingest.", "loom.deadletter.", 1),
-                             m.data, headers={**(m.headers or {}), "Loom-Error": reason})
+                             m.data, headers={**(m.headers or {}), **headers})
             await m.ack()
             parked += 1
         else:
             await m.nak(delay=2)
+    if parked:
+        log.error("%d message(s) dead-lettered after %d deliveries: %s: %s",
+                  parked, limit, type(exc).__name__, exc)
     return parked
 
 
@@ -123,6 +153,7 @@ async def run() -> None:
     from nats.errors import TimeoutError as NatsTimeoutError
 
     store = store_from_env()
+    registry = RegistryCache(store)
     url = os.environ.get("LOOM_NATS_URL", "nats://nats:4222")
     # The queue may still be booting when we start (compose/k8s ordering
     # is best-effort): keep trying instead of dying on the first refusal
@@ -140,20 +171,21 @@ async def run() -> None:
     js = nc.jetstream()
     from nats.js.api import ConsumerConfig, StreamConfig
 
-    for name, subjects in ((STREAM, [SUBJECTS]), (DEADLETTER_STREAM, [DEADLETTER_SUBJECTS])):
+    for cfg in (StreamConfig(name=STREAM, subjects=[SUBJECTS], num_replicas=STREAM_REPLICAS),
+                StreamConfig(name=DEADLETTER_STREAM, subjects=[DEADLETTER_SUBJECTS],
+                             num_replicas=STREAM_REPLICAS, max_bytes=DEADLETTER_MAX_BYTES)):
         try:
-            await js.add_stream(StreamConfig(name=name, subjects=subjects,
-                                             num_replicas=STREAM_REPLICAS))
+            await js.add_stream(cfg)
         except Exception:  # noqa: BLE001 — exists already (gateway creates the ingest one)
             pass
     sub = await js.pull_subscribe(
         SUBJECTS, durable=DURABLE,
         config=ConsumerConfig(durable_name=DURABLE, ack_wait=ACK_WAIT_SECONDS,
                               max_deliver=MAX_DELIVER))
-    log.info("consuming %s from %s (ack_wait=%ss max_deliver=%d)",
-             SUBJECTS, nc.connected_url.netloc, ACK_WAIT_SECONDS, MAX_DELIVER)
+    log.info("consuming %s from %s (ack_wait=%ss max_deliver=%d deadletter_max_bytes=%d)",
+             SUBJECTS, nc.connected_url.netloc, ACK_WAIT_SECONDS, MAX_DELIVER, DEADLETTER_MAX_BYTES)
 
-    totals = {"recorded": 0, "accepted": 0, "skipped": 0, "deadlettered": 0}
+    totals = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0, "deadlettered": 0}
     while True:
         try:
             msgs = await sub.fetch(BATCH, timeout=5)
@@ -166,7 +198,7 @@ async def run() -> None:
             who = (m.headers or {}).get("Loom-Principal", "-")
             principals[who] = principals.get(who, 0) + 1
         try:
-            batch_counts = handle_batch(store, [m.data for m in msgs])
+            batch_counts = handle_batch(store, [m.data for m in msgs], registry)
         except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
             parked = await settle_failed_batch(js, msgs, exc)
             totals["deadlettered"] += parked

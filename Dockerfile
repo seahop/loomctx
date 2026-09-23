@@ -1,15 +1,27 @@
 # The image runs the current stable Python; 3.12 and 3.13 are tested in CI (see ci.yml).
+# The base is pinned by digest (H-F8): PYTHON_DIGEST defaults to the 3.14 image the
+# release was gated on. The CI matrix overrides PYTHON_VERSION and passes an empty
+# PYTHON_DIGEST so the tag alone resolves (a digest belongs to exactly one tag).
 ARG PYTHON_VERSION=3.14
-FROM python:${PYTHON_VERSION}-slim
+ARG PYTHON_DIGEST=@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2
+FROM python:${PYTHON_VERSION}-slim${PYTHON_DIGEST}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Dependencies come from the lock (uv, universal, every extra) so a rebuild of
+# the same commit installs exactly what the gated build installed — D-045
+# found a boto3 patch drift between two builds of one commit before this.
+# Regenerate with scripts/lock-deps.sh after editing pyproject.toml. The
+# `test` extra stays in the image on purpose: one image serves
+# loom/test/consumer/mcp so they can never drift apart (D-011).
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[test,scale,postgres,mcp,vector,s3,kafka,connectors]"
+RUN pip install --no-cache-dir --no-deps .
 
 # Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
 # /data is created owned by that user, so a fresh named volume inherits it.

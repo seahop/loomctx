@@ -12,23 +12,6 @@ those things, it usually gets either nothing or everything. Loom's job is the mi
 *"what do we know about `web-01` relevant to Tuesday's alert, in under 800 tokens,
 with citations."*
 
-## Who it's for
-
-Security teams on **both sides of the line**. Loom is neutral about the data it
-holds — the value is in how each operator shapes information *out* of it:
-
-- **Blue teams** ask *what happened, is it patched, what's exposed* — served by
-  provenance, conflict-surfacing across sources, and bitemporal "what did we
-  know, and when."
-- **Red teams** ask *what's exploitable, what can I reach from here, what do we
-  know about this target* — served by scopes and relationship traversal that
-  assemble an entity and everything connected to it into one budgeted pack.
-
-Same store, same engine; the question determines the answer. The bundled demo
-is network telemetry; the [tutorial](docs/tutorial.md) builds a vulnerability-
-management domain — swap in cloud posture, identities, EDR events, or recon
-findings without touching Loom's code.
-
 ## Core ideas (details in `docs/`)
 
 - **Write path is greedy, read path is stingy.** Ingest everything with provenance;
@@ -45,17 +28,38 @@ findings without touching Loom's code.
   swap storage backends behind an interface, and plug in their own enrichers — without
   forking the core. See `docs/concepts.md`.
 
+Built for security teams on both sides of the line: blue teams ask *what
+happened, is it patched, what's exposed* (provenance, cross-source conflicts,
+bitemporal reads); red teams ask *what's exploitable and reachable from
+here* (scopes and relationship traversal into one budgeted pack). Same
+store, same engine — the bundled demo is network telemetry and the
+[tutorial](docs/tutorial.md) builds a vulnerability-management domain
+without touching Loom's code.
+
+## How it differs
+
+| Instead of | What you get there | With Loom |
+| --- | --- | --- |
+| A vector DB / RAG pipeline | the top-k chunks by similarity; no notion of *when* a fact held, *who* asserted it, or that two sources disagree | append-only, bitemporal observations; conflicts between sources are the first item in the pack; every item cites the observation ids behind it |
+| Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
+| A graph database | traversal power, but the agent talks to the graph and gets whatever the query returns | the graph is the index, not the payload: the agent gets a question-scoped pack, and a multi-hop question is one `ask_scope` call |
+| SIEM search | fast search over events; entities are a pivot, not a memory | entity-centric memory across sources with provenance, conflict detection and time travel built into every read |
+| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — measured 216 of 216 task-runs across eighteen models with no invented citation (`docs/models.md`) |
+
 ## Repository layout
 
 | Path | What it is |
 | --- | --- |
 | `docs/quickstart.md` | 5-minute run: seeded demo, a cited pack, an answer |
 | `docs/tutorial.md` | 30-minute build of your own security domain, end to end |
+| `docs/demo.md` | The conference demo script: night-before prep, three acts, fallbacks, rehearsal checklist |
 | `examples/` | Runnable sender + agent-query scripts (stdlib only) |
+| `demo/` | Saved agent transcripts (Claude Code over MCP, `agent_eval`) rendered as fallback pages, and an MCP config |
 | `docs/architecture.md` | Full system design: layers, write/read paths, retrieval contract |
 | `docs/contracts.md` | The data contracts (the real API of the framework) |
 | `docs/concepts.md` | Glossary — precise definitions of every term of art |
 | `docs/decisions.md` | Language/tech choices with rationale, and the constraints we hold |
+| `docs/hardening.md` | The verified issue list from the 2026-09-08 review, with status |
 | `docs/administration.md` | Running it for a team: users, scopes, rotation, retention |
 | `docs/roadmap.md` | Phased execution plan with current status |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
@@ -63,10 +67,12 @@ findings without touching Loom's code.
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
 | `docs/models.md` | Which LLMs drive Loom well as agents: measured scorecard with cost, and how to re-run it |
 | `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
+| `gateway/` | The Go ingest gateway for the scale shape: validates against `contracts/schemas.json`, forwards to NATS JetStream |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
 | `contracts/` | `schemas.json` (JSON Schema) and `openapi.json`, both regenerated and drift-checked in CI |
 | `deploy/` | Kubernetes shapes (default, scale, scale-pg, scale-pg-ha), `integrations/` (Fluent Bit, Vector, Kafka), deployment guide |
-| `tests/` | Contract, store, context-pack, seed, connector, and API tests |
+| `scripts/` | `smoke-scale.sh` (the scale shape end to end, run in CI), `lock-deps.sh` (regenerate the dependency lock), `verify.sh` |
+| `tests/` | Contract, store, context-pack, seed, connector, consumer, and API tests |
 
 ## Documentation
 
@@ -82,7 +88,7 @@ docker compose run --rm test
 
 # Start the engine (HTTP API on :8000) and load the demo dataset
 docker compose up -d loom
-docker compose exec loom python -m loom.seed load   # ~580 claims + 5 documents
+docker compose exec loom python -m loom.seed load   # 591 claims + 5 documents
 # Optional: real data next to it — CISA KEV + NVD + EPSS (docs/real-data.md)
 docker compose exec loom python -m loom.connectors.vulns load --db /data/loom.db --bridge-seed-hosts
 
@@ -97,9 +103,9 @@ curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 
 That last call answers with the IP's full lease timeline — it belonged to
 `web-01` until 2026-08-10, then `laptop-17` — each fact cited to `dhcp-log`.
-Ask about `host web-01`'s OS instead and the pack *leads with a conflict item*
-(two sources disagree), plus expansion handles like
-`"69 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
+Ask about `host web-01`'s OS instead (budget 400) and the pack *leads with a
+conflict item* (two sources disagree), plus expansion handles like
+`"67 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
 pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
 `document` envelope, or `POST /v1/ingest/batch` for many at once — which is
 what log shippers (Fluent Bit, Vector), the bulk loader, and the Kafka
@@ -112,6 +118,9 @@ Anthropic, or a self-hosted base URL), and restart — compose picks it up
 automatically. The gitignored `.env` never reaches the repo or the images.
 With it filled in, the real-provider e2e test activates:
 `docker compose run --rm test pytest -q tests/test_e2e_answer.py`.
+
+Ports bind to localhost by default; set `LOOM_BIND=0.0.0.0` in `.env`
+(and mount keys first) to reach the engine from the LAN.
 
 Deploying beyond a laptop: `kubectl apply -k deploy/k8s`, or the **scale
 shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
@@ -137,6 +146,33 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 - **Quality:** a retrieval scorecard runs in CI (`tests/test_quality.py`), so
   ranking changes ship with evidence.
 
+## Limitations
+
+Known and deliberate, as of `v0.1.0`; the open list is `docs/hardening.md`.
+
+- **Ranking without an embedder is keyword overlap.** Set `LOOM_EMBED_*` for
+  semantic ranking, document excerpts and `find_related`; without it the
+  engine still works, but "operating system" does not match `runs_os`.
+- **Gather cap.** A read collects at most 1,000 observations per entity;
+  when a subject has more, the pack says so in `truncated` (gathered/total)
+  and the handles reach the rest. A hub entity is never silently sampled.
+- **Alias resolution costs money.** Structural aliases (`linux:kernel` vs
+  `linux:linux_kernel`) are adjudicated by an LLM, one call per candidate
+  (~3 cents on the vulnerability corpus with a flash-class judge); the
+  merge set depends on the judge.
+- **Extracted claims are second-class.** Facts mined from documents rank
+  below sender-asserted ones and cannot corroborate or contradict a
+  structured source on their own — a hostile document cannot manufacture a
+  conflict.
+- **No per-entity ACLs, admin API, or SSO.** Access is a keys file with
+  namespace / entity-type / source gates, hot-reloaded; rotation is a CLI
+  and a Secret update, not a console.
+- **Handles are capped at 32 per pack** (`omitted_handles` says how many
+  more there were).
+- **A confident "no" is uncatchable by citations.** Every positive claim in
+  an answer can be checked against an observation id; an absence cannot.
+  `truncated` is the only signal, and the agent has to read it.
+
 ## Status
 
 `v0.1.0` (2026-09-09, `CHANGELOG.md`). Working end to end: contracts,
@@ -146,8 +182,12 @@ coverage reporting (`/v1/ask`, `/v1/expand`), provider-flexible answering
 (`/v1/answer`), an MCP server for agents, async enrichment, opt-in
 Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV, NVD,
 EPSS — `docs/real-data.md`) and with eighteen LLM agents over MCP
-(`docs/models.md`). Demo script: `docs/demo.md`. Milestones:
-`docs/roadmap.md` (conference: end of October 2026).
+(`docs/models.md`). Measured (laptop, generator co-located): 511k
+envelopes loaded in 81 s to SQLite, single-entity ask 2–5 ms at 465k
+observations, two-hop scope over 1,077 entities in 0.5 s; on GKE with
+real nodes 421/s load, 202/s ingest, 186/s ask (`deploy/README.md`).
+Demo script: `docs/demo.md`. Milestones: `docs/roadmap.md` (conference:
+end of October 2026).
 
 Agents connect natively over MCP:
 

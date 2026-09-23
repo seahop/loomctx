@@ -19,6 +19,8 @@ resources:
   - engine.yaml
   - consumer.yaml
   - enrich.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
 
 images:
   - name: ghcr.io/seahop/loom

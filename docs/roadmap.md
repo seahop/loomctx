@@ -10,17 +10,17 @@ presentable.
 
 | When | Milestone |
 | --- | --- |
-| early Sep (done 2026-09-03) | Phases 0–2 working: contracts, store, ingestion (claims + documents), context packs, seed data, k8s manifests, CI |
-| mid Sep (done 2026-09-04) | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
-| late Sep (done 2026-09-04) | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
-| early Sep (done 2026-09-08) | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
-| early Sep (done 2026-09-08) | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
-| early Sep (done 2026-09-08) | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
-| early Sep (done 2026-09-09) | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
-| early Sep (done 2026-09-11) | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
-| early Sep (done 2026-09-11) | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
-| early Oct | Lock dependencies (uv or pip-compile lock consumed by the Dockerfile) so a rebuild is byte-identical to the gated image — D-045 found a boto3 patch drift between two builds of the same commit |
-| early Oct | Final rehearsal the morning of the talk (`docs/demo.md`) |
+| 2026-09-03 | Phases 0–2 working: contracts, store, ingestion (claims + documents), context packs, seed data, k8s manifests, CI |
+| 2026-09-04 | Phase 3: MCP server — agents plug in natively (the demo's wow moment) |
+| 2026-09-04 | Phase 4 core: embeddings + claim extraction from documents + first dossiers |
+| 2026-09-08 | Hardening batch from the full review — `docs/hardening.md` (D-021…D-024) |
+| 2026-09-08 | Enterprise-scale dials (phase 6, D-027…D-033) and pipeline integrations (phase 7, D-034), validated on k8s |
+| 2026-09-08 | First real data: the vulnerability connector (D-035) — KEV + NVD + EPSS loaded next to the seed hosts, findings in `docs/real-data.md` |
+| 2026-09-09 | Demo script (`docs/demo.md`), `v0.1.0` tag + `CHANGELOG.md`, cold quickstart timed from a fresh clone |
+| 2026-09-11 | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
+| 2026-09-11 | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
+| 2026-09-23 | Review-fix batch: dependency lock consumed by the Dockerfile (the boto3 drift D-045 found), base images by digest, SHA-pinned actions + Trivy + build-once CI, pod security posture + NetworkPolicies + PDBs, registry validation on the queue paths, Kafka SASL/TLS, compose env passthroughs, demo script made honest (night-before prep, frozen volume), docs numbers reconciled |
+| early Oct | Night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist) |
 | mid Oct | Freeze features; rehearse demo; presentation materials; buffer |
 | end Oct | **Conference** |
 
@@ -37,7 +37,7 @@ presentable.
 - ✅ HTTP: `/healthz`, `POST /v1/ingest` (claims → 200 recorded; documents →
   202 accepted, artifact stored verbatim, extraction pending),
   `GET /v1/entities/{type}/{key}/observations`, `GET /v1/artifacts/{id}`
-- ✅ Seed corpus: `python -m loom.seed` — ~580 deterministic claims + 5
+- ✅ Seed corpus: `python -m loom.seed` — 591 deterministic claims + 5
   documents across `netsec` and `procurement`, with planted demo moments
   (IP lease reassignment, two cross-source conflicts, incident report doc)
 - ✅ Schema registry persistence + claim validation (2026-09-08, D-024):
@@ -127,7 +127,7 @@ presentable.
   retrieval uses it and `GET /v1/entities/semantic` / MCP `find_related`
   find entities by meaning.
 
-## Phase 5 — Hardening & spread 🔨
+## Phase 5 — Hardening & spread ✅ (2026-09-11; review-fix batch 2026-09-23)
 
 - ✅ **Review batch (2026-09-08, D-021…D-024):** the full verified issue
   list with status is `docs/hardening.md` — all items landed except two
@@ -141,7 +141,15 @@ presentable.
   Postgres, ~515/s scale-shape intake — all 0 errors, loadgen-bound.
 - ✅ TypeScript SDK generated from the JSON Schema (2026-09-08, D-026),
   built and live-tested in CI via the compose `sdk` profile.
-- Remaining: Neo4j backend if graph-native traversal demand appears.
+- Not planned unless demand appears: a Neo4j backend (a possible
+  `GraphStore` implementation, nothing shipped).
+- ✅ Review-fix batch (2026-09-23): `requirements.lock` consumed by the
+  Dockerfile, every base image pinned by digest, SHA-pinned actions with
+  Dependabot, Trivy on both images before publish, build-once CI (the
+  tested candidate is the published image), container security contexts +
+  default-deny NetworkPolicies + PodDisruptionBudgets in every shape,
+  registry validation on the NATS and Kafka write paths, Kafka SASL/TLS,
+  dead-letter headers without row data, atomic 0600 keys file.
 - ~~Scale-shape ingestion tier~~ **✅ built 2026-09-03 (pulled forward by the
   user), D-010:** Go ingest gateway validating against
   `contracts/schemas.json` (go tests run in the image build), nginx-balanced
@@ -150,9 +158,10 @@ presentable.
   SQLite WAL mode for cross-process sharing. Rehearsed live end-to-end:
   3 gateways → queue → consumer → `/v1/ask`. CI checks contract sync and
   publishes `ghcr.io/seahop/loom-gateway`.
-- 🔨 Load test before the conference (early-Oct milestone): laptop numbers
-  are in `deploy/README.md`; re-run the loadgen Job on real nodes for the
-  quoted figures (D-001a).
+- ✅ Load test on real nodes (2026-09-10/11, D-043 and D-045): GKE
+  `scale-pg-ha`, 421/s corpus load with live workers, 202/s single-envelope
+  ingest, 186/s ask, two primary failovers; the laptop table in
+  `deploy/README.md` is kept as the relative baseline (D-001a).
 
 ## Phase 6 — Enterprise scale ✅ (D-027…D-033, 2026-09-08)
 
@@ -215,14 +224,16 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   single-predicate firehoses excluded (D-044)
 - ✅ Extraction adopts a registered type when the key already exists under
   one; strict registries drop the rest (D-044)
-- ⬜ Embed the KEV documents (run the enrichment worker over the real
-  corpus with an embedding provider) and measure excerpt quality
+- ✅ Embed the KEV documents (D-039, 2026-09-09): the enrichment worker
+  run over the real corpus with an embedding provider; KEV advisories
+  surface as attributed `doc_excerpt` items and via `find_related`
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m
   loom.agent_eval` — real model, real MCP transport, real corpus, ground
   truth from the store; the first live run forced `list_namespaces` /
   `describe_namespace`, the empty-namespace error, `LOOM_MCP_NAMESPACE`
 - ✅ Model scorecard (D-037, 2026-09-09): `--models` mode with billed cost;
-  twenty OpenRouter models across price tiers measured — `docs/models.md`
+  eighteen OpenRouter models across price tiers, three runs each (216
+  task-runs, nine models clean at 12/12) — `docs/models.md`
 - ✅ Documents on real data (D-039, 2026-09-09): claims cite documents by
   event id, KEV advisories embedded and surfacing as attributed excerpts,
   packed vector storage, worker robustness, query-embedding fallback
@@ -252,6 +263,6 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
 `src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
-Verify from clean checkout: `docker compose run --rm test` (~215 tests; the store contract tests also run against live Postgres and a two-shard lane in CI, and the Go/TypeScript SDKs run live against the engine).
+Verify from clean checkout: `docker compose run --rm test` (about 230 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
 Demo rehearsal: `docker compose up -d loom && docker compose exec loom
 python -m loom.seed load`, then hit `/v1/ask`.

@@ -14,7 +14,8 @@ vibes:
    `host`, `user`, `ip`; a procurement team registers `vendor`, `contract`. The
    engine is domain-agnostic.
 2. **Store interface** — all persistence sits behind the `GraphStore` protocol.
-   SQLite is the default; Neo4j (or anything else) is a drop-in implementation.
+   SQLite is the default and Postgres ships (D-011); a graph database such as
+   Neo4j is a possible implementation, not a shipped one.
 3. **Pluggable enrichers** — summarization, embedding, and claim extraction are
    interfaces with an LLM-backed default; teams can substitute their own models,
    endpoints, or rule-based extractors.
@@ -130,9 +131,16 @@ the tombstone itself remain, so history is suppressed, never falsified.
 
 ### API key
 
-Per-namespace credential in `LOOM_API_KEYS` (`key:namespace:perms`),
-enforced identically by the engine and the ingest gateway; presented as
-`X-Loom-Key` or a Bearer token. Unset means open dev mode. See D-013.
+A bearer credential presented as `X-Loom-Key` or a Bearer token and enforced
+identically by the engine, the ingest gateway and the MCP http transports.
+The primary form is an entry in the **keys file** (`LOOM_AUTH_FILE`, minted by
+`python -m loom.keys`): only the key's SHA-256 is stored, next to its grants
+— namespaces, `r`/`w`/`rw`, an optional entity-type allowlist, an optional
+source pin for writers, an expiry — and the file is hot-reloaded, so rotation
+needs no restart. `LOOM_API_KEYS` (`key:namespace:perms`, plaintext) is the
+simple/legacy form for local use. Keys gate *data*, never capabilities: a valid
+reader always has the full query surface over what it may see. Unset means
+open dev mode (the engine warns). See D-013, D-013a.
 
 ### Namespace
 

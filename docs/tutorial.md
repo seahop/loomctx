@@ -11,8 +11,11 @@ agent would.
 
 > **No schema to declare.** Loom creates entity types and predicates the first
 > time you use them — "bring your own schema" is just "start sending claims."
-> (Optional registry *validation* is on the roadmap; today anything is
-> accepted, which is what makes a new domain a zero-ceremony affair.)
+> Registering a schema (`POST /v1/schemas`, D-024) is optional and additive:
+> a registered predicate's `object_types` are enforced on ingest, and a
+> `strict` namespace rejects anything unregistered — on the HTTP path, the
+> MCP `record_claim` tool, the extraction worker and the queue consumers
+> alike. Leave it off while you explore; turn it on when the domain settles.
 
 Everything runs in Docker. We'll use a fresh namespace, `vuln`, so it sits
 beside the demo data without colliding.
@@ -174,9 +177,10 @@ Neither framing is baked into Loom; both are just questions over the graph.
 
 ## 7. Connect an agent (MCP)
 
-Point any MCP-capable agent at Loom and it gets `find_entity`, `ask`,
-`ask_scope`, `expand`, `record_claim`, `get_observations`, `answer` — scoped
-to whatever the agent's API key allows:
+Point any MCP-capable agent at Loom and it gets `list_namespaces`,
+`describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
+`expand`, `record_claim`, `get_observations`, `answer` — scoped to whatever
+the agent's API key allows:
 
 ```bash
 claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server

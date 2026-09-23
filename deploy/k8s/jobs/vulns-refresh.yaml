@@ -35,25 +35,39 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
+            runAsGroup: 10001
             fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: vulns
               image: ghcr.io/seahop/loom:latest
               command: ["python", "-m", "loom.connectors.vulns"]
               args: ["load", "--url", "http://loom", "--cache", "/cache", "--namespace", "netsec"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
               env:
                 - name: LOOM_API_KEY
                   valueFrom:
                     secretKeyRef:
                       name: loom-vulns-key
                       key: key
-                      optional: true
+                      # REQUIRED on purpose: a job that loads a public feed
+                      # into the store must not silently run keyless. In
+                      # open dev mode create the Secret with any value.
+                      optional: false
               volumeMounts:
                 - name: cache
                   mountPath: /cache
+                - name: tmp
+                  mountPath: /tmp
               resources:
                 requests:
                   cpu: 200m
@@ -64,3 +78,5 @@ spec:
             - name: cache
               persistentVolumeClaim:
                 claimName: loom-feed-cache
+            - name: tmp
+              emptyDir: {}

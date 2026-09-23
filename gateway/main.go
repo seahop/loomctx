@@ -35,7 +35,7 @@ type config struct {
 // maxBytes caps what a storm can buffer, discard says which end gives.
 type streamConfig struct {
 	replicas int
-	maxBytes int64  // 0 = unlimited
+	maxBytes int64  // bytes; default 1 GiB (0 would be unlimited — on a small PVC that is a disk-full)
 	discard  string // "old" | "new"
 }
 
@@ -50,7 +50,7 @@ func loadConfig() config {
 		ratePerSec:   float64(envInt("LOOM_RATE_PER_SEC", 0)),
 		stream: streamConfig{
 			replicas: int(envInt("LOOM_STREAM_REPLICAS", 1)),
-			maxBytes: envInt("LOOM_STREAM_MAX_BYTES", 0),
+			maxBytes: envInt("LOOM_STREAM_MAX_BYTES", 1<<30),
 			discard:  envOr("LOOM_STREAM_DISCARD", "old"),
 		},
 	}
@@ -108,10 +108,15 @@ func main() {
 		log.Printf("forwarding to core engine at %s", cfg.forwardURL)
 	}
 
+	// Every timeout set: a slow client or a stalled forward must not pin a
+	// connection (and its goroutine) for as long as it likes.
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           newServer(cfg, validator, fwd, auth),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

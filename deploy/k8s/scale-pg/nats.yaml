@@ -3,6 +3,8 @@
 # the ingest stream is replicated (LOOM_STREAM_REPLICAS=3 on the gateway
 # and consumer) so a message is acknowledged only once a quorum holds it.
 # Clients use the headless Service; the client library discovers the rest.
+# The monitor port (8222) is deliberately NOT on the Service: probes reach
+# the pod directly and a scraper targets pods (see networkpolicy.yaml).
 apiVersion: v1
 kind: Service
 metadata:
@@ -20,9 +22,6 @@ spec:
     - name: cluster
       port: 6222
       targetPort: cluster
-    - name: monitor
-      port: 8222
-      targetPort: monitor
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -43,9 +42,22 @@ spec:
         app: nats
     spec:
       terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: nats
-          image: nats:2.10-alpine
+          image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true   # writes only under -sd /data
+            capabilities:
+              drop: [ALL]
           env:
             - name: POD_NAME
               valueFrom:

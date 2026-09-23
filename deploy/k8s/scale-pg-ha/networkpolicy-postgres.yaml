@@ -1,0 +1,43 @@
+# The CloudNativePG instances live in this namespace, so the default-deny
+# in scale-pg applies to them too. Postgres (5432) is for Loom's engines,
+# writer consumers and enrichment workers, and for the instances
+# themselves (streaming replication). The operator (in cnpg-system by
+# default) drives the instance manager on 8000; without that allowance no
+# failover ever completes. Backups/exports from another namespace need
+# their own rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: loom-pg
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: loom
+        - podSelector:
+            matchLabels:
+              app: loom-consumer
+        - podSelector:
+            matchLabels:
+              app: loom-enrich
+        - podSelector:
+            matchLabels:
+              app: loom-kafka-consumer
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: loom-pg
+      ports:
+        - port: 5432
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - port: 8000
+          protocol: TCP

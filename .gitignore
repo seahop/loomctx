@@ -11,3 +11,4 @@ dist/
 /schemas.json
 # operator-minted keys files (docs/administration.md) — never commit
 secrets/
+keys.json

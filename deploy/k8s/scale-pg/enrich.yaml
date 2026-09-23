@@ -34,6 +34,7 @@ spec:
       labels:
         app: loom-enrich
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -45,6 +46,11 @@ spec:
         - name: enrich
           image: ghcr.io/seahop/loom:latest
           command: ["python", "-m", "loom.enrich", "run", "--interval", "30"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: LOOM_DB
               valueFrom:
@@ -54,9 +60,15 @@ spec:
             - name: LOOM_WORKER_COUNT
               value: "2"
             # - name: LOOM_LLM_MODEL ... / LOOM_EMBED_* from a Secret
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 50m
               memory: 128Mi
             limits:
               memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

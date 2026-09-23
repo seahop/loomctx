@@ -1,3 +1,5 @@
+import json
+
 from loom.consumer import handle_message
 from loom.contracts import EntityRef
 from loom.store.sqlite import SqliteStore
@@ -38,7 +40,7 @@ def test_batch_mixes_kinds_and_survives_poison(tmp_path):
 
     store = SqliteStore(tmp_path / "c.db")
     counts = handle_batch(store, [CLAIM, CLAIM, DOCUMENT, b"{poison"])
-    assert counts == {"recorded": 2, "accepted": 1, "skipped": 1}
+    assert counts == {"recorded": 2, "accepted": 1, "skipped": 1, "rejected": 0}
     obs = store.observations_for("default", EntityRef(type="host", key="web-01"))
     assert len(obs) == 2
 
@@ -98,7 +100,40 @@ def test_failed_batch_naks_then_deadletters_on_last_delivery():
     assert last.acked and not last.naks
     assert published[0][0] == "loom.deadletter.claim"
     assert published[0][2]["Loom-Principal"] == "shipper"
-    assert published[0][2]["Loom-Error"].startswith("RuntimeError: database is locked")
+    # class + code only: the exception text can quote row data and headers
+    # are readable by anyone with the stream
+    assert published[0][2]["Loom-Error"] == "RuntimeError"
+    assert published[0][2]["Loom-Error-Code"] == "store_rejected"
+    assert "locked" not in json.dumps(published[0][2])
+
+
+def test_registry_validation_runs_on_the_queue_path(tmp_path):
+    """The gateway checks the contract shape, not the registry: a strict
+    namespace's rules (D-024) are applied here, per claim, and a violation
+    is dropped with a reason rather than written or crashing the batch."""
+    from loom.consumer import handle_batch
+    from loom.contracts import PredicateDef, SchemaRegistration
+    from loom.registry import RegistryCache
+    store = SqliteStore(tmp_path / "r.db")
+    store.put_schema(SchemaRegistration(
+        namespace="strict", strict=True,
+        entity_types=[{"name": "host"}, {"name": "user"}],
+        predicates=[PredicateDef(name="logged_in_by", object_types=["user"])]))
+    base = {"kind": "claim", "namespace": "strict", "observed_at": "2026-09-01T00:00:00Z", "source": "s"}
+    ok = {**base, "event_id": "ok", "subject": {"type": "host", "key": "h"},
+          "predicate": "logged_in_by", "object": {"type": "user", "key": "u"}}
+    wrong_type = {**base, "event_id": "wt", "subject": {"type": "host", "key": "h"},
+                  "predicate": "logged_in_by", "object": {"type": "printer", "key": "p"}}
+    unregistered = {**base, "event_id": "un", "subject": {"type": "host", "key": "h"},
+                    "predicate": "owned_by", "object": "x"}
+    counts = handle_batch(store, [json.dumps(x).encode() for x in (ok, wrong_type, unregistered)],
+                          RegistryCache(store))
+    assert counts == {"recorded": 1, "accepted": 0, "skipped": 0, "rejected": 2}
+    obs = store.observations_for("strict", EntityRef(type="host", key="h"))
+    assert [o.predicate for o in obs] == ["logged_in_by"]
+    # without an explicit cache the batch builds one itself
+    assert handle_batch(store, [json.dumps(unregistered).encode()])["rejected"] == 1
+    store.close()
 
 
 def test_queue_path_skips_a_claim_citing_an_unknown_document(tmp_path):
@@ -112,6 +147,6 @@ def test_queue_path_skips_a_claim_citing_an_unknown_document(tmp_path):
     good = {**base, "event_id": "g", "provenance": {"artifact_event_id": "d1"}}
     bad = {**base, "event_id": "b", "provenance": {"artifact_event_id": "zzz"}}
     counts = handle_batch(store, [json.dumps(x).encode() for x in (doc, good, bad)])
-    assert counts == {"recorded": 1, "accepted": 1, "skipped": 1}
+    assert counts == {"recorded": 1, "accepted": 1, "skipped": 1, "rejected": 0}
     assert store.observations_for("default", EntityRef(type="host", key="h"))[0].provenance.artifact_id
     store.close()

@@ -1,7 +1,7 @@
 # Strategic-merge patch: run the writer consumer as a sidecar of the engine
 # pod so both containers share the SQLite volume (single-node write locality).
-# When the store moves to Postgres/Neo4j (D-008) the consumer graduates to its
-# own scalable Deployment; nothing else changes.
+# When the store moves to Postgres (D-008) the consumer graduates to its own
+# scalable Deployment (scale-pg/consumer.yaml); nothing else changes.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +13,11 @@ spec:
         - name: consumer
           image: ghcr.io/seahop/loom:latest
           command: ["python", "-m", "loom.consumer"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: LOOM_DB
               value: /data/loom.db
@@ -21,6 +26,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 50m

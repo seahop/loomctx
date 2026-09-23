@@ -17,6 +17,7 @@ spec:
       labels:
         app: loom-gateway
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -27,6 +28,11 @@ spec:
       containers:
         - name: gateway
           image: ghcr.io/seahop/loom-gateway:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8080
               name: http
@@ -41,6 +47,15 @@ spec:
               value: "4294967296"
             - name: LOOM_STREAM_DISCARD
               value: "old"
+            # --- auth (D-013a): the same keys file the engine mounts;
+            # uncomment once the `loom-keys` Secret exists (deploy/README.md).
+            # Until then the gateway runs in open dev mode and logs it.
+            # - name: LOOM_AUTH_FILE
+            #   value: /etc/loom/keys.json
+          # volumeMounts:
+          #   - name: keys
+          #     mountPath: /etc/loom
+          #     readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -58,6 +73,10 @@ spec:
               memory: 32Mi
             limits:
               memory: 128Mi
+      # volumes:
+      #   - name: keys
+      #     secret:
+      #       secretName: loom-keys
 ---
 apiVersion: v1
 kind: Service

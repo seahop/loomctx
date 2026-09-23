@@ -33,4 +33,15 @@ D-023). In short:
 
 ## Supported versions
 
-Only `main` is supported until a tagged release exists.
+`main` and the latest tagged release (`v0.1.0`, 2026-09-09) are
+supported; a fix lands on `main` first and is re-tagged from the gated
+image when it warrants a release (D-045). Older tags get no backports.
+
+## What ships hardened
+
+Images run non-root with read-only roots and no capabilities; base images
+are pinned by digest and Python dependencies by a universal lock; CI pins
+its actions by commit, scans both images with Trivy before publishing,
+and publishes the exact image it tested. The Kubernetes manifests carry
+default-deny ingress NetworkPolicies and no ServiceAccount tokens. See
+`deploy/README.md` ("Pod posture") and `docs/hardening.md`.

@@ -5,11 +5,15 @@ at. The plaintext key is printed EXACTLY ONCE at generation; only its
 SHA-256 hash is stored, so neither the file, the repo, nor a backup can leak
 credentials.
 
-    python -m loom.keys generate --file keys.json --id netsec-shipper \
+    python -m loom.keys generate --id netsec-shipper \
         --namespace netsec --perms w --entity-types host,ip --sources auth-log \
         --expires-days 180
-    python -m loom.keys list   --file keys.json
-    python -m loom.keys revoke --file keys.json --id netsec-shipper
+    python -m loom.keys list
+    python -m loom.keys revoke --id netsec-shipper
+
+The file defaults to secrets/keys.json (gitignored and dockerignored) and is
+written atomically with mode 0600: a reader never sees a half-written file,
+and the grants are not world-readable on a shared host.
 
 Distribute the file to the engine/gateway as a mounted Secret; both hot-reload
 it on change, so rotation is: generate new key -> hand it to the sender ->
@@ -21,11 +25,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 
 KEY_PREFIX = "loomk_"  # recognizable in configs and (hashed) never in logs
+DEFAULT_FILE = "secrets/keys.json"
 
 
 def _load(path: str) -> dict:
@@ -37,9 +43,28 @@ def _load(path: str) -> dict:
 
 
 def _save(path: str, data: dict) -> None:
-    with open(path, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+    """Atomic replace (tmp file in the same directory + os.replace) so the
+    engine's hot reload never parses a partial file, created 0600 so the
+    grants are private to the operator. The parent directory is created
+    if missing (the default lives under secrets/)."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def cmd_generate(args) -> None:
@@ -139,7 +164,8 @@ def cmd_revoke(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="loom.keys", description=__doc__)
-    parser.add_argument("--file", default="keys.json")
+    parser.add_argument("--file", default=DEFAULT_FILE,
+                        help=f"keys file (default {DEFAULT_FILE}; written atomically, mode 0600)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate")

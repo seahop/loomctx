@@ -51,28 +51,28 @@
     {
       "tool": "Bash",
       "args": {
-        "command": "F=/home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt; echo \"== runs_software ==\"; grep -n -i -B2 -A12 'runs_software' \"$F\" | head -150; echo \"== exploited ==\"; grep -n -i -B12 -A6 'exploited_in_wild' \"$F\" | head -250; echo \"== conflicts/notes ==\"; grep -n -i -E '\"conflicts\"|\"notes\"|\"truncated\"|\"handles\"' \"$F\" | head",
+        "command": "F=<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt; echo \"== runs_software ==\"; grep -n -i -B2 -A12 'runs_software' \"$F\" | head -150; echo \"== exploited ==\"; grep -n -i -B12 -A6 'exploited_in_wild' \"$F\" | head -250; echo \"== conflicts/notes ==\"; grep -n -i -E '\"conflicts\"|\"notes\"|\"truncated\"|\"handles\"' \"$F\" | head",
         "description": "Grep saved ask_scope result for software and KEV facts"
       }
     },
     {
       "tool": "Read",
       "args": {
-        "file_path": "/home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt",
+        "file_path": "<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt",
         "limit": 120
       }
     },
     {
       "tool": "Bash",
       "args": {
-        "command": "grep -n -i 'runs_software\\|exploited_in_wild\\|\"conflicts\"\\|\"notes\"\\|\"truncated\"\\|\"handles\"' /home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt",
+        "command": "grep -n -i 'runs_software\\|exploited_in_wild\\|\"conflicts\"\\|\"notes\"\\|\"truncated\"\\|\"handles\"' <claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt",
         "description": "Locate software and KEV lines in saved ask_scope result"
       }
     },
     {
       "tool": "Read",
       "args": {
-        "file_path": "/home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt",
+        "file_path": "<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt",
         "offset": 985,
         "limit": 30
       }
@@ -80,7 +80,7 @@
     {
       "tool": "Read",
       "args": {
-        "file_path": "/home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt",
+        "file_path": "<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt",
         "offset": 1115,
         "limit": 75
       }
@@ -88,7 +88,7 @@
     {
       "tool": "Read",
       "args": {
-        "file_path": "/home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-ask_scope-1789135789647.txt",
+        "file_path": "<claude-code-tool-results>/mcp-loom-ask_scope-1789135789647.txt",
         "offset": 1390,
         "limit": 300
       }
@@ -173,7 +173,7 @@
     {
       "tool": "Bash",
       "args": {
-        "command": "grep -n -A6 '\"predicate\": \"runs_software\"' /home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-get_observations-1789135823378.txt | grep -E '\"id\"|\"key\"|\"source\"|\"observed_at\"'",
+        "command": "grep -n -A6 '\"predicate\": \"runs_software\"' <claude-code-tool-results>/mcp-loom-get_observations-1789135823378.txt | grep -E '\"id\"|\"key\"|\"source\"|\"observed_at\"'",
         "description": "Extract runs_software observation ids for web-01"
       }
     },
@@ -230,7 +230,7 @@
     {
       "tool": "Bash",
       "args": {
-        "command": "grep -n -B9 '\"predicate\": \"runs_software\"' /home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-get_observations-1789135823378.txt | grep -E '\"id\"'; grep -n -A5 '\"predicate\": \"runs_software\"' /home/user-adm/.claude/projects/-home-user-adm-Projects-project2026/3f79698c-bab7-45fc-9130-767fb627b545/tool-results/mcp-loom-get_observations-1789135823378.txt | grep -E '\"key\"'",
+        "command": "grep -n -B9 '\"predicate\": \"runs_software\"' <claude-code-tool-results>/mcp-loom-get_observations-1789135823378.txt | grep -E '\"id\"'; grep -n -A5 '\"predicate\": \"runs_software\"' <claude-code-tool-results>/mcp-loom-get_observations-1789135823378.txt | grep -E '\"key\"'",
         "description": "Extract runs_software observation ids and product keys"
       }
     },

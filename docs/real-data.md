@@ -1,7 +1,7 @@
 # Real data: the vulnerability-intelligence connector (D-035)
 
 Everything before this page was tested against a corpus we wrote knowing
-the answers (~590 seed claims, 5 documents). This is the first data Loom
+the answers (591 seed claims, 5 documents). This is the first data Loom
 did not author: three public, keyless feeds, one command, loaded next to
 the seed hosts so the demo can ask a real question about them.
 

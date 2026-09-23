@@ -11,6 +11,8 @@ resources:
   - ../base
   - nats.yaml
   - gateway.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
 
 patches:
   - path: loom-consumer-sidecar.yaml
