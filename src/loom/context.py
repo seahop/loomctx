@@ -351,6 +351,15 @@ def decode_handle(handle: str) -> dict:
     return payload
 
 
+def covers_valid_at(obs: Observation, valid_at: datetime) -> bool:
+    """Fact time: was this TRUE at T? Facts that carry no validity window
+    are timeless as far as we know and are kept (D-024). Shared by packs,
+    scope expansion and the raw observations route (D-046)."""
+    valid_at = _aware(valid_at)
+    return ((obs.valid_from is None or _aware(obs.valid_from) <= valid_at)
+            and (obs.valid_to is None or _aware(obs.valid_to) > valid_at))
+
+
 # ------------------------------------------------------------ data scoping #
 
 def _in_scope(obs: Observation, allowed_types: tuple[str, ...] | None) -> bool:
@@ -713,15 +722,8 @@ def _pack(
         as_of = _aware(as_of)
         observations = [o for o in observations if _aware(o.observed_at) <= as_of]
     if valid_at is not None:
-        # fact time: only what was TRUE at T. Facts that carry no validity
-        # window are timeless as far as we know and are kept (D-024).
         valid_at = _aware(valid_at)
-        observations = [
-            o
-            for o in observations
-            if (o.valid_from is None or _aware(o.valid_from) <= valid_at)
-            and (o.valid_to is None or _aware(o.valid_to) > valid_at)
-        ]
+        observations = [o for o in observations if covers_valid_at(o, valid_at)]
 
     question_tokens = _question_tokens(question) if question else set()
     # "Is web-01 exposed to anything exploited?" names the subject; without

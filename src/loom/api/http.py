@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
@@ -20,7 +21,14 @@ from starlette.concurrency import run_in_threadpool
 from .. import metrics
 from ..answer import UnresolvedQuestionError, build_answer
 from ..auth import AuthConfig, Grant, extract_key
-from ..context import build_pack, decode_handle, expand_pack, semantic_search
+from ..context import (
+    _in_scope,
+    build_pack,
+    covers_valid_at,
+    decode_handle,
+    expand_pack,
+    semantic_search,
+)
 from ..contracts import (
     AnswerRequest,
     AnswerResponse,
@@ -294,13 +302,24 @@ def entity_observations(
     limit: Annotated[int, Query(gt=0, le=1000)] = 100,
     namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
     namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
+    as_of: Annotated[datetime | None, Query(
+        description="observation-time bound (observed_at <= as_of), as in an ask")] = None,
+    valid_at: Annotated[datetime | None, Query(
+        description="fact-time filter: only observations whose validity window covers T")] = None,
 ) -> dict:
+    """Raw observations touching an entity (audit/debug). The rows pass the
+    same gates as a pack's contents (D-021): a type-scoped reader never
+    sees an edge to an entity outside their world here either. `as_of`
+    and `valid_at` apply the same two time axes as /v1/ask (D-046)."""
     namespace = namespace_q or namespace  # query param wins over the header (D-039)
     grant = _authorize(request, namespace, "r")
     _gate_entity_type(grant, etype)
-    observations = request.app.state.store.observations_for(
-        namespace, EntityRef(type=etype, key=key), limit=limit
-    )
+    allowed = _allowed_types(grant)
+    observations = [
+        o for o in request.app.state.store.observations_for(
+            namespace, EntityRef(type=etype, key=key), limit=limit, observed_before=as_of)
+        if _in_scope(o, allowed) and (valid_at is None or covers_valid_at(o, valid_at))
+    ]
     return {
         "entity": {"type": etype, "key": key},
         "namespace": namespace,

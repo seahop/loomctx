@@ -439,3 +439,35 @@ def test_scoped_search_still_fills_the_limit(tmp_path, monkeypatch):
                        headers={"X-Loom-Key": reader})
         matches = r.json()["matches"]
         assert len(matches) == 3 and {m["type"] for m in matches} == {"host"}
+
+
+def test_raw_observations_route_applies_the_object_side_gate(tmp_path, monkeypatch):
+    """D-021 on GET .../observations (D-046): a host-only reader asking for
+    web-01's raw rows gets no edge to a user or a domain; the unrestricted
+    key gets them all. as_of / valid_at apply like in an ask."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch, entity_types="host")
+    with client:
+        _seed_scoped_world(client, writer)
+        h = {"X-Loom-Key": writer}
+        client.post("/v1/ingest", json={
+            "kind": "claim", "subject": {"type": "host", "key": "web-01"}, "predicate": "runs_os",
+            "object": "fedora", "source": "seed", "observed_at": (OBSERVED - timedelta(days=30)).isoformat(),
+            "valid_from": (OBSERVED - timedelta(days=30)).isoformat(),
+            "valid_to": (OBSERVED - timedelta(days=10)).isoformat()}, headers=h)
+        everything = client.get("/v1/entities/host/web-01/observations", headers=h).json()
+        assert {o["predicate"] for o in everything["observations"]} == {
+            "logged_in_by", "member_of", "supports", "runs_os"}
+        scoped = client.get("/v1/entities/host/web-01/observations",
+                            headers={"X-Loom-Key": reader}).json()
+        assert {o["predicate"] for o in scoped["observations"]} == {"runs_os"}
+        assert scoped["count"] == 1
+        # as_of: nothing observed after T
+        r = client.get("/v1/entities/host/web-01/observations",
+                       params={"as_of": (OBSERVED - timedelta(days=1)).isoformat()}, headers=h).json()
+        assert [o["predicate"] for o in r["observations"]] == ["runs_os"]
+        # valid_at: the expired window is history
+        r = client.get("/v1/entities/host/web-01/observations",
+                       params={"valid_at": OBSERVED.isoformat()}, headers=h).json()
+        assert "runs_os" not in {o["predicate"] for o in r["observations"]}
+        assert client.get("/v1/entities/host/web-01/observations",
+                          params={"as_of": "not-a-date"}, headers=h).status_code == 422
