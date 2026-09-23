@@ -113,3 +113,32 @@ def test_offload_from_env(tmp_path, monkeypatch):
     s.close()
     monkeypatch.delenv("LOOM_BLOB_THRESHOLD")
     assert isinstance(store_from_env(), SqliteStore)
+
+
+def test_wrappers_delegate_the_batched_defaults_too():
+    """The base class ships per-item fallbacks for record_claims and
+    observations_for_many; a wrapper that inherited them would silently
+    reintroduce one transaction per claim and one round trip per ref
+    (D-043) whenever offload or sharding is configured."""
+    from loom.store.base import GraphStore
+    from loom.store.sharded import ShardedStore
+    for wrapper in (BlobOffloadStore, ShardedStore):
+        for name in ("record_claims", "observations_for_many"):
+            assert getattr(wrapper, name) is not getattr(GraphStore, name), f"{wrapper.__name__}.{name}"
+    # and nothing public on the interface is left to the base class
+    for name, fn in vars(GraphStore).items():
+        if name.startswith("_") or not callable(fn):
+            continue
+        assert getattr(BlobOffloadStore, name) is not fn, f"BlobOffloadStore inherits {name}"
+
+
+def test_offloaded_store_batches_claims_in_one_transaction(tmp_path):
+    store, inner = _store(tmp_path)
+    calls = []
+    real = inner.record_claims
+    inner.record_claims = lambda claims: (calls.append(len(claims)), real(claims))[1]
+    out = store.record_claims([ClaimIn(subject=EntityRef(type="h", key=f"k{i}"), predicate="p",
+                                       object="v", observed_at=OBSERVED, source="s") for i in range(5)])
+    assert len(out) == 5 and calls == [5]
+    many = store.observations_for_many("default", [EntityRef(type="h", key="k0"), EntityRef(type="h", key="k1")])
+    assert set(many) == {("h", "k0"), ("h", "k1")}

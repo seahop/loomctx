@@ -945,3 +945,27 @@ def test_declines_are_stored_symmetrically(store):
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
     assert store.schema_version() == 4
+
+
+def test_sqlite_transactions_are_reentrant(store):
+    """A public method that calls another public method must not deadlock
+    on the store's own lock, and the inner call must not commit the outer
+    transaction half-way: the outermost `_tx` is the only one that commits
+    or rolls back."""
+    if not isinstance(store, SqliteStore):
+        pytest.skip("SQLite-internal")
+    with store._tx():
+        store.record_claim(login_claim())            # nested public call: no deadlock
+        with pytest.raises(RuntimeError):
+            with store._tx():
+                store.record_claim(login_claim(namespace="inner"))
+                raise RuntimeError("inner failure")
+    # the outer block exited cleanly (the exception was caught inside it),
+    # so everything it wrote — including the inner block's row — committed
+    assert len(store.observations_for("default", EntityRef(type="host", key="web-01"))) == 1
+    assert len(store.observations_for("inner", EntityRef(type="host", key="web-01"))) == 1
+    with pytest.raises(RuntimeError):
+        with store._tx():
+            store.record_claim(login_claim(namespace="lost"))
+            raise RuntimeError("outer failure")
+    assert store.observations_for("lost", EntityRef(type="host", key="web-01")) == []

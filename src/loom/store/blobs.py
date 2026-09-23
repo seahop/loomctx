@@ -218,8 +218,13 @@ def _delegate_iter(name: str):
     return method
 
 
+# Every public GraphStore method the wrapper does not define itself is
+# delegated — the concrete defaults too. Delegating only the abstract ones
+# left `record_claims` on the base class's one-transaction-per-claim
+# fallback and `observations_for_many` on one round trip per ref whenever
+# offload was configured (the D-043 regression, reintroduced by the wrapper).
 for _name, _fn in list(vars(GraphStore).items()):
-    if not getattr(_fn, "__isabstractmethod__", False) or _name in vars(BlobOffloadStore):
+    if _name.startswith("_") or not callable(_fn) or _name in vars(BlobOffloadStore):
         continue
     setattr(BlobOffloadStore, _name,
             _delegate_iter(_name) if inspect.isgeneratorfunction(_fn) or _name.startswith("iter_")

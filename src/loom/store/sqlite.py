@@ -218,7 +218,11 @@ _ON_EVENT_CONFLICT = (
 
 class SqliteStore(GraphStore):
     def __init__(self, path: str | Path):
-        self._lock = threading.Lock()
+        # Re-entrant: a public method that calls another public method
+        # (unmerge -> dossier drop, lifecycle helpers, ...) must not deadlock
+        # on its own lock; `_tx` commits only at the outermost level.
+        self._lock = threading.RLock()
+        self._depth = 0
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -482,15 +486,22 @@ class SqliteStore(GraphStore):
     @contextmanager
     def _tx(self):
         """One locked transaction: commit on success, rollback on error so a
-        failure never leaks partial writes into a later commit (H-B1)."""
+        failure never leaks partial writes into a later commit (H-B1).
+        Nested entries (a public method calling another) join the outer
+        transaction: only the outermost commits or rolls back."""
         with self._lock:
+            self._depth += 1
             try:
                 yield
             except BaseException:
-                self._conn.rollback()
+                if self._depth == 1:
+                    self._conn.rollback()
                 raise
             else:
-                self._conn.commit()
+                if self._depth == 1:
+                    self._conn.commit()
+            finally:
+                self._depth -= 1
 
     # ------------------------------------------------------------ public API
 
