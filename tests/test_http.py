@@ -196,6 +196,21 @@ def test_semantic_entity_search(tmp_path, monkeypatch):
         assert body["matches"][0]["entity"] == {"type": "host", "key": "db-01"}
         assert body["matches"][0]["evidence"]["citations"]
         assert "vector_backend" in client.get("/readyz").json()
+        # a failing embedder is a 503 with the short public form, not a 500
+        # echoing the provider's body (D-046)
+        from loom.context import _query_cache
+        from loom.llm import LLMError
+
+        class Down(HashingEmbedder):
+            def embed_query(self, text):
+                raise LLMError("provider returned 500: https://secret.example/v1 said no",
+                               public="LLM provider returned HTTP 500")
+
+        _query_cache.clear()
+        client.app.state.embedder = Down()
+        r = client.get("/v1/entities/semantic", params={"q": "anything new"})
+        assert r.status_code == 503
+        assert r.json()["detail"] == "LLM provider returned HTTP 500" and "secret.example" not in r.text
 
 
 def test_batch_ingest_array_and_ndjson(tmp_path, monkeypatch):

@@ -460,9 +460,15 @@ def semantic_entities(
         raise HTTPException(
             status_code=503,
             detail="no embedder configured: set LOOM_EMBED_* on the engine (D-018)")
-    with metrics.PACK_SECONDS.time():
-        return semantic_search(request.app.state.store, namespace, embedder, q,
-                               limit=limit, allowed_types=_allowed_types(grant))
+    try:
+        with metrics.PACK_SECONDS.time():
+            return semantic_search(request.app.state.store, namespace, embedder, q,
+                                   limit=limit, allowed_types=_allowed_types(grant))
+    except LLMError as exc:
+        # Unlike an ask, a search by meaning has no keyword fallback: the
+        # embedder is the feature. Provider detail stays in the log (D-021).
+        logging.getLogger("loom.context").warning("query embedding failed: %s", exc)
+        raise HTTPException(status_code=503, detail=exc.public)
 
 
 @app.post("/v1/answer", response_model=AnswerResponse)
