@@ -276,10 +276,23 @@ class GraphStore(ABC):
 
     @abstractmethod
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         """Record a failed extraction attempt and when to try again (H-D4);
-        survives worker restarts, unlike in-memory backoff."""
+        survives worker restarts, unlike in-memory backoff. Releases the
+        extraction lease. With `worker_id`, only if that worker still holds
+        the lease (a worker whose lease expired and was re-claimed must not
+        clobber the new holder's state); returns whether it applied."""
+
+    @abstractmethod
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        """Push the extraction lease `seconds` further out for the worker
+        that holds it (a long extraction renews per window instead of
+        guessing the whole job's length up front). False if the lease is
+        held by someone else or the artifact is no longer pending."""
 
     @abstractmethod
     def doc_chunks_by_seq(
@@ -306,9 +319,12 @@ class GraphStore(ABC):
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         """Store (seq, span_start, span_end, text, vector) passages embedded
-        with `model`."""
+        with `model`; the rows are idempotent by (artifact, model, seq) so
+        they always land. Releases the chunking lease — with `worker_id`,
+        only if that worker holds it."""
 
     @abstractmethod
     def doc_chunks_for_artifacts(
@@ -321,8 +337,12 @@ class GraphStore(ABC):
 
     @abstractmethod
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None: ...
+        self, namespace: str, artifact_id: str, status: str,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Set the extraction status and release the lease. With
+        `worker_id`, only while that worker holds the lease; returns
+        whether it applied (None = unconditional, for ops and tests)."""
 
     @abstractmethod
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
@@ -334,7 +354,11 @@ class GraphStore(ABC):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None: ...
+        worker_id: str | None = None,
+    ) -> bool:
+        """Store the brief and release the dossier lease. With `worker_id`,
+        only while that worker holds the lease (the re-claimer's brief is
+        the one that should land); returns whether it was written."""
 
     @abstractmethod
     def dossier_candidates(

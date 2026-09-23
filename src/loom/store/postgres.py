@@ -1185,25 +1185,39 @@ class PostgresStore(GraphStore):
                 )
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
+    # lease ownership (D-031): see sqlite.py
+    _OWNS_EXTRACT = " AND (%s::text IS NULL OR extract_claimed_by = %s)"
+
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._x(
+            return self._x(
                 "UPDATE artifacts SET extraction_attempts = %s, next_attempt_at = %s,"
-                " extract_claimed_until = NULL WHERE namespace = %s AND id = %s",
-                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
-            )
+                " extract_claimed_until = NULL WHERE namespace = %s AND id = %s" + self._OWNS_EXTRACT,
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id, worker_id, worker_id),
+            ) > 0
 
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None:
+        self, namespace: str, artifact_id: str, status: str, worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._x(
+            return self._x(
                 "UPDATE artifacts SET extraction_status = %s, extract_claimed_until = NULL"
-                " WHERE namespace = %s AND id = %s",
-                (status, namespace, artifact_id),
-            )
+                " WHERE namespace = %s AND id = %s" + self._OWNS_EXTRACT,
+                (status, namespace, artifact_id, worker_id, worker_id),
+            ) > 0
+
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        with self._tx():
+            return self._x(
+                "UPDATE artifacts SET extract_claimed_until = %s WHERE namespace = %s AND id = %s"
+                " AND extract_claimed_by = %s AND extraction_status = 'pending'",
+                (common.iso(common.now() + timedelta(seconds=seconds)), namespace, artifact_id, worker_id),
+            ) > 0
 
     _NEEDS_CHUNKS = (
         "a.text IS NOT NULL"
@@ -1230,14 +1244,15 @@ class PostgresStore(GraphStore):
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < %s)"
                     "   ORDER BY a.recorded_at LIMIT %s FOR UPDATE SKIP LOCKED)"
-                    " UPDATE artifacts a SET chunk_claimed_until = %s"
+                    " UPDATE artifacts a SET chunk_claimed_until = %s, chunk_claimed_by = %s"
                     " FROM picked WHERE a.id = picked.id RETURNING a.*",
-                    (model, common.iso(moment), limit, until))
+                    (model, common.iso(moment), limit, until, lease[0]))
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         with self._tx():
             with self._conn.cursor() as cur:
@@ -1256,8 +1271,9 @@ class PostgresStore(GraphStore):
             self._vec_upsert("vchk", model, namespace,
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
-            self._x("UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = %s",
-                    (artifact_id,))
+            self._x("UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = %s"
+                    " AND (%s::text IS NULL OR chunk_claimed_by = %s)",
+                    (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -1308,11 +1324,14 @@ class PostgresStore(GraphStore):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
-                namespace, ref
-            )
+            entity = self._resolve_or_create(namespace, ref)
+            if worker_id is not None:
+                holder = self._q("SELECT dossier_claimed_by FROM entities WHERE id = %s", (entity.id,))
+                if not holder or holder[0]["dossier_claimed_by"] != worker_id:
+                    return False   # re-claimed by another worker: its brief is the one to land
             self._x(
                 "INSERT INTO dossiers (namespace, entity_id, brief,"
                 " observation_count, observation_ids, updated_at)"
@@ -1327,6 +1346,7 @@ class PostgresStore(GraphStore):
             )
             self._x("UPDATE entities SET dossier_claimed_until = NULL WHERE id = %s",
                     (entity.id,))
+            return True
 
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
@@ -1357,9 +1377,9 @@ class PostgresStore(GraphStore):
             for r in rows:
                 if lease is not None:
                     claimed = self._x(
-                        "UPDATE entities SET dossier_claimed_until = %s WHERE id = %s"
+                        "UPDATE entities SET dossier_claimed_until = %s, dossier_claimed_by = %s WHERE id = %s"
                         " AND (dossier_claimed_until IS NULL OR dossier_claimed_until < %s)",
-                        (common.iso(moment + timedelta(seconds=lease[1])), r["eid"],
+                        (common.iso(moment + timedelta(seconds=lease[1])), lease[0], r["eid"],
                          common.iso(moment)))
                     if not claimed:
                         continue

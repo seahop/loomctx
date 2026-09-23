@@ -1138,25 +1138,42 @@ class SqliteStore(GraphStore):
                 ).fetchall()
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
+    # lease ownership (D-031): `worker_id=None` is unconditional (ops,
+    # tests, a single worker); given, the statement applies only while that
+    # worker holds the lease, so a holder whose lease expired and was
+    # re-claimed cannot clobber the new holder's state
+    _OWNS_EXTRACT = " AND (? IS NULL OR extract_claimed_by = ?)"
+
     def defer_extraction(
-        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime
-    ) -> None:
+        self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._conn.execute(
+            return self._conn.execute(
                 "UPDATE artifacts SET extraction_attempts = ?, next_attempt_at = ?,"
-                " extract_claimed_until = NULL WHERE namespace = ? AND id = ?",
-                (attempts, common.iso(next_attempt_at), namespace, artifact_id),
-            )
+                " extract_claimed_until = NULL WHERE namespace = ? AND id = ?" + self._OWNS_EXTRACT,
+                (attempts, common.iso(next_attempt_at), namespace, artifact_id, worker_id, worker_id),
+            ).rowcount > 0
 
     def set_extraction_status(
-        self, namespace: str, artifact_id: str, status: str
-    ) -> None:
+        self, namespace: str, artifact_id: str, status: str, worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            self._conn.execute(
+            return self._conn.execute(
                 "UPDATE artifacts SET extraction_status = ?, extract_claimed_until = NULL"
-                " WHERE namespace = ? AND id = ?",
-                (status, namespace, artifact_id),
-            )
+                " WHERE namespace = ? AND id = ?" + self._OWNS_EXTRACT,
+                (status, namespace, artifact_id, worker_id, worker_id),
+            ).rowcount > 0
+
+    def extend_extraction_lease(
+        self, namespace: str, artifact_id: str, worker_id: str, seconds: float
+    ) -> bool:
+        with self._tx():
+            return self._conn.execute(
+                "UPDATE artifacts SET extract_claimed_until = ? WHERE namespace = ? AND id = ?"
+                " AND extract_claimed_by = ? AND extraction_status = 'pending'",
+                (common.iso(common.now() + timedelta(seconds=seconds)), namespace, artifact_id, worker_id),
+            ).rowcount > 0
 
     _NEEDS_CHUNKS = (
         "a.text IS NOT NULL"
@@ -1179,16 +1196,17 @@ class SqliteStore(GraphStore):
                 moment = common.now()
                 until = common.iso(moment + timedelta(seconds=lease[1]))
                 rows = self._conn.execute(
-                    "UPDATE artifacts SET chunk_claimed_until = ? WHERE id IN"
+                    "UPDATE artifacts SET chunk_claimed_until = ?, chunk_claimed_by = ? WHERE id IN"
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < ?)"
                     "   ORDER BY a.recorded_at LIMIT ?) RETURNING *",
-                    (until, model, common.iso(moment), limit)).fetchall()
+                    (until, lease[0], model, common.iso(moment), limit)).fetchall()
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
         self, namespace: str, artifact_id: str, model: str,
         chunks: list[tuple[int, int, int, str, list[float]]],
+        worker_id: str | None = None,
     ) -> None:
         with self._tx():
             self._conn.executemany(
@@ -1202,8 +1220,9 @@ class SqliteStore(GraphStore):
             self._vec_upsert("vchk", model, namespace,
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
-            self._conn.execute(  # release the chunking lease (D-031)
-                "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?", (artifact_id,))
+            self._conn.execute(  # release the chunking lease (D-031) — the holder's only
+                "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?"
+                " AND (? IS NULL OR chunk_claimed_by = ?)", (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -1258,11 +1277,15 @@ class SqliteStore(GraphStore):
     def put_dossier(
         self, namespace: str, ref: EntityRef, brief: str,
         observation_count: int, observation_ids: list[str],
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         with self._tx():
-            entity = self._resolve_entity(namespace, ref) or self._upsert_entity(
-                namespace, ref
-            )
+            entity = self._resolve_or_create(namespace, ref)
+            if worker_id is not None:
+                holder = self._conn.execute(
+                    "SELECT dossier_claimed_by FROM entities WHERE id = ?", (entity.id,)).fetchone()
+                if holder["dossier_claimed_by"] != worker_id:
+                    return False   # re-claimed by another worker: its brief is the one to land
             self._conn.execute(
                 "INSERT OR REPLACE INTO dossiers (namespace, entity_id, brief,"
                 " observation_count, observation_ids, updated_at)"
@@ -1272,6 +1295,7 @@ class SqliteStore(GraphStore):
             )
             self._conn.execute(  # release the dossier lease (D-031)
                 "UPDATE entities SET dossier_claimed_until = NULL WHERE id = ?", (entity.id,))
+            return True
 
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
@@ -1308,9 +1332,9 @@ class SqliteStore(GraphStore):
                 ref = EntityRef(type=r["type"], key=r["key"])
                 if lease is not None:
                     claimed = self._conn.execute(
-                        "UPDATE entities SET dossier_claimed_until = ? WHERE id = ?"
+                        "UPDATE entities SET dossier_claimed_until = ?, dossier_claimed_by = ? WHERE id = ?"
                         " AND (dossier_claimed_until IS NULL OR dossier_claimed_until < ?)",
-                        (common.iso(moment + timedelta(seconds=lease[1])), r["eid"],
+                        (common.iso(moment + timedelta(seconds=lease[1])), lease[0], r["eid"],
                          common.iso(moment))).rowcount
                     if not claimed:
                         continue  # another worker took it between SELECT and UPDATE

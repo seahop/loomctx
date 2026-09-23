@@ -867,6 +867,53 @@ def test_chunk_and_dossier_leases(store):
     assert store.dossier_candidates(min_new=20, min_total=5) == []  # h1 built, h2 leased
 
 
+def test_lease_release_honours_ownership(store):
+    """A worker whose lease expired and was re-claimed must not clobber the
+    new holder's state; a holder can renew per extraction window."""
+    from datetime import timedelta
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="doc", source="s", observed_at=OBSERVED))
+    now = OBSERVED
+    assert [a.id for a in store.pending_artifacts(1, now=now, lease=("a", 300))] == [art.id]
+    assert store.extend_extraction_lease("default", art.id, "a", 600) is True   # renews from the real clock
+    assert store.extend_extraction_lease("default", art.id, "b", 600) is False   # not b's
+    later = datetime.now(timezone.utc) + timedelta(seconds=901)                  # a's renewal ran out
+    assert [a.id for a in store.pending_artifacts(1, now=later, lease=("b", 300))] == [art.id]
+    assert store.set_extraction_status("default", art.id, "done", worker_id="a") is False
+    assert store.get_artifact("default", art.id).extraction_status == "pending"
+    assert store.defer_extraction("default", art.id, 3, later, worker_id="a") is False
+    assert store.get_artifact("default", art.id).extraction_attempts == 0
+    assert store.set_extraction_status("default", art.id, "done", worker_id="b") is True
+    assert store.get_artifact("default", art.id).extraction_status == "done"
+    assert store.extend_extraction_lease("default", art.id, "b", 600) is False   # nothing left to hold
+    assert store.set_extraction_status("default", art.id, "pending") is True      # unconditional: ops/tests
+    assert store.defer_extraction("default", art.id, 1, later) is True
+    assert store.set_extraction_status("default", "nope", "done") is False
+
+
+def test_chunk_and_dossier_release_honour_ownership(store):
+    from loom.contracts import DocumentIn
+    art = store.store_artifact(DocumentIn(text="hello world", source="s", observed_at=OBSERVED))
+    assert [x.id for x in store.artifacts_needing_chunks("m", 4, lease=("a", 300))] == [art.id]
+    # a stranger's chunks land (idempotent rows) but the lease stays a's
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 11, "hello world", [1.0])], worker_id="c")
+    assert len(store.doc_chunks_for_artifacts("default", [art.id], "m")) == 1
+    assert store.artifacts_needing_chunks("m2", 4, lease=("b", 300)) == []       # still leased
+    store.put_doc_chunks("default", art.id, "m", [(0, 0, 11, "hello world", [1.0])], worker_id="a")
+    assert [x.id for x in store.artifacts_needing_chunks("m2", 4, lease=("b", 300))] == [art.id]
+
+    h1 = EntityRef(type="host", key="h1")
+    for i in range(4):
+        store.record_claim(login_claim().model_copy(update={"subject": h1, "object": EntityRef(type="user", key=f"u{i}")}))
+    store.record_claim(login_claim().model_copy(update={"subject": h1, "predicate": "runs_os", "object": "x"}))
+    assert [c[1] for c in store.dossier_candidates(min_new=20, min_total=5, lease=("a", 300))] == [h1]
+    assert store.put_dossier("default", h1, "b's brief", 5, [], worker_id="b") is False
+    assert store.get_dossier("default", h1) is None
+    assert store.put_dossier("default", h1, "a's brief", 5, [], worker_id="a") is True
+    assert store.get_dossier("default", h1)["brief"] == "a's brief"
+    assert store.put_dossier("default", h1, "ops brief", 5, []) is True            # unconditional
+
+
 def test_embedding_backlog_shards_partition_the_work(store):
     host = EntityRef(type="host", key="web-01")
     ids = {store.record_claim(login_claim().model_copy(update={
