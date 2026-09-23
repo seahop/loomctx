@@ -180,6 +180,12 @@ def _recency(obs: Observation, newest: datetime) -> float:
     return 1.0 / (1.0 + age_days / _RECENCY_HALF_LIFE_DAYS)
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def _score(
     obs: Observation,
     question_tokens: set[str],
@@ -187,9 +193,13 @@ def _score(
     cos: float | None = None,
     semantic: bool = False,
 ) -> float:
-    """`semantic` means an embedder is serving this pack: observations that
-    have no vector yet (freshly ingested) are scored on the SAME formula
-    with cos=0 (neutral), so the two populations stay comparable (H-C7)."""
+    """`semantic` means an embedder is serving this pack AND vectors exist
+    for the gathered set: observations that have no vector yet (freshly
+    ingested) are scored on the SAME formula with the set's median cosine
+    filled in by the caller, so the two populations stay comparable
+    (H-C7). With no vectors at all the keyword formula ranks instead: a
+    neutral cos=0 for everything silently shrank keyword weight to 0.15
+    and let recency decide (D-046)."""
     if not question_tokens and not semantic:
         score = 0.6 * recency + 0.4 * obs.confidence
     else:
@@ -615,7 +625,10 @@ def build_pack(
         budget=min(req.budget, max_budget()),
         observations=observations,
         cos_map=cos_map,
-        semantic=semantic,
+        # the serving embedder may have vectors for none of these rows (a
+        # different model than the worker's, a backlog): rank by keyword
+        # then, rather than by a neutral cosine that mutes the keywords
+        semantic=semantic and bool(cos_map),
         briefs=briefs,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
@@ -800,10 +813,14 @@ def _pack(
     newest = max((_aware(o.observed_at) for o in observations), default=None)
     if newest is not None:
         newest = min(newest, _now())
+    # An un-embedded fact inside a partially embedded set takes the set's
+    # median cosine: neutral relative to its peers, rather than a 0 that
+    # ranks every fresh fact below every stale one (D-046).
+    fill = _median(list(cos_map.values())) if semantic and cos_map else None
     scored = sorted(
         (
             (_score(obs, question_tokens, _recency(obs, newest),
-                    cos_map.get(obs.id), semantic), obs)
+                    cos_map.get(obs.id, fill), semantic), obs)
             for obs in observations
         ),
         key=lambda pair: pair[0],
