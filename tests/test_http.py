@@ -57,25 +57,56 @@ def test_document_ingest_stores_artifact(tmp_path, monkeypatch):
         assert client.get("/v1/artifacts/nope").status_code == 404
 
 
-def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
-    with make_client(tmp_path, monkeypatch) as client:
-        client.post("/v1/ingest", json=CLAIM)
-        r = client.post(
-            "/v1/ask",
-            json={
-                "subject": {"type": "host", "key": "web-01"},
-                "question": "who logged in?",
-                "budget": 400,
-            },
-        )
+def _ask_then_expand(client):
+    """Ingest enough logins that a small budget leaves a handle, expand it,
+    and return (pack, handle, expanded)."""
+    for i in range(12):
+        r = client.post("/v1/ingest", json={
+            **CLAIM, "object": {"type": "user", "key": f"user-{i:02d}"},
+            "observed_at": f"2026-09-01T{i:02d}:00:00Z"})
         assert r.status_code == 200
-        pack = r.json()
-        assert pack["items"] and "jdoe" in pack["items"][0]["text"]
-        assert pack["items"][0]["citations"][0]["source"] == "auth-log"
+    r = client.post("/v1/ask", json={
+        "subject": {"type": "host", "key": "web-01"},
+        "question": "who logged in?", "budget": 120})
+    assert r.status_code == 200
+    pack = r.json()
+    assert pack["items"] and "logged_in_by" in pack["items"][0]["text"]
+    assert pack["items"][0]["citations"][0]["source"] == "auth-log"
+    assert pack["handles"], "a 120-token budget over 12 logins must leave a handle"
+    handle = pack["handles"][0]
+    r = client.post("/v1/expand", json={"handle": handle["id"], "budget": 4000})
+    assert r.status_code == 200, r.text
+    expanded = r.json()
+    assert expanded["items"] and all("logged_in_by" in i["text"] for i in expanded["items"])
+    shown = {i["text"] for i in pack["items"]}
+    assert {i["text"] for i in expanded["items"]} - shown, "the expansion brings new facts"
+    return pack, handle, expanded
 
-        assert client.post(
-            "/v1/expand", json={"handle": "h1_garbage"}
-        ).status_code == 400
+
+def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOOM_HANDLE_SECRET", raising=False)
+    with make_client(tmp_path, monkeypatch) as client:
+        _, handle, _ = _ask_then_expand(client)
+        assert handle["id"].startswith("h1_")
+        assert client.post("/v1/expand", json={"handle": "h1_garbage"}).status_code == 400
+
+
+def test_ask_and_expand_roundtrip_signed(tmp_path, monkeypatch):
+    """With LOOM_HANDLE_SECRET set, issued handles are signed and expand;
+    an unsigned handle for the same query is refused (D-021)."""
+    from loom.context import encode_handle
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+    with make_client(tmp_path, monkeypatch) as client:
+        _, handle, _ = _ask_then_expand(client)
+        assert handle["id"].startswith("h2_")
+        monkeypatch.delenv("LOOM_HANDLE_SECRET")
+        from loom.contracts import EntityRef
+        unsigned = encode_handle("default", EntityRef(type="host", key="web-01"), "logged_in_by", None)
+        monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+        assert unsigned.startswith("h1_")
+        assert client.post("/v1/expand", json={"handle": unsigned, "budget": 400}).status_code == 400
+        tampered = handle["id"][:-3] + ("AAA" if not handle["id"].endswith("AAA") else "BBB")
+        assert client.post("/v1/expand", json={"handle": tampered, "budget": 400}).status_code == 400
 
 
 def test_invalid_envelope_rejected(tmp_path, monkeypatch):
