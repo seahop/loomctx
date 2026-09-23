@@ -17,6 +17,7 @@ spec:
       labels:
         app: loom-consumer
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -28,6 +29,11 @@ spec:
         - name: consumer
           image: ghcr.io/seahop/loom:latest
           command: ["python", "-m", "loom.consumer"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: LOOM_DB
               valueFrom:
@@ -38,9 +44,15 @@ spec:
               value: nats://nats:4222
             - name: LOOM_STREAM_REPLICAS
               value: "3"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
               memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

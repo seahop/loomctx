@@ -8,6 +8,7 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - networkpolicy.yaml
 
 images:
   - name: ghcr.io/seahop/loom

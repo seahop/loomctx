@@ -6,7 +6,7 @@
 # JSON to POST /v1/ingest/batch on the engine or the gateway.
 #
 #   docker run --rm -v "<repo>/deploy/integrations/vector.yaml:/etc/vector/vector.yaml" \
-#     --network project2026_default timberio/vector:0.42.0-alpine
+#     --network loom_default timberio/vector:0.42.0-alpine
 # (Vector interpolates environment variables written with a dollar sign
 # anywhere in this file, comments included. Double the sign for a literal.)
 #

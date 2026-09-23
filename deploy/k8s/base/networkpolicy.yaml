@@ -1,0 +1,32 @@
+# Network posture for the namespace: nothing accepts traffic unless a policy
+# says so. Only ingress is restricted — the engine and workers make outbound
+# calls (LLM / embedding providers, the vulnerability feeds), so egress is
+# left to the cluster's own policy. Requires a CNI that enforces
+# NetworkPolicy (Calico, Cilium, GKE Dataplane V2, kube-router; kind's
+# default does not).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# The engine's HTTP port is the product: reachable from anywhere the
+# cluster routes to it (an Ingress controller in another namespace, a
+# port-forward, the gateways, the jobs). /metrics rides on the same port,
+# so a Prometheus scraper needs nothing extra. Everything else on the pod
+# stays closed by the default-deny above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-engine-http
+spec:
+  podSelector:
+    matchLabels:
+      app: loom
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8000
+          protocol: TCP

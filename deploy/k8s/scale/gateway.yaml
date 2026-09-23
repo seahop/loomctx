@@ -17,6 +17,7 @@ spec:
       labels:
         app: loom-gateway
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -27,12 +28,36 @@ spec:
       containers:
         - name: gateway
           image: ghcr.io/seahop/loom-gateway:latest
+          # a static binary that reads its schema and (optionally) a keys
+          # file: nothing is written anywhere
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8080
               name: http
           env:
             - name: LOOM_NATS_URL
               value: nats://nats:4222
+            # single-node JetStream here: one replica, and a 1 GiB cap that
+            # matches the 1Gi NATS PVC in nats.yaml — raise both together
+            - name: LOOM_STREAM_REPLICAS
+              value: "1"
+            - name: LOOM_STREAM_MAX_BYTES
+              value: "1073741824"
+            - name: LOOM_STREAM_DISCARD
+              value: "old"
+            # --- auth (D-013a): the same keys file the engine mounts;
+            # uncomment once the `loom-keys` Secret exists (deploy/README.md).
+            # Until then the gateway runs in open dev mode and logs it.
+            # - name: LOOM_AUTH_FILE
+            #   value: /etc/loom/keys.json
+          # volumeMounts:
+          #   - name: keys
+          #     mountPath: /etc/loom
+          #     readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -50,6 +75,10 @@ spec:
               memory: 32Mi
             limits:
               memory: 128Mi
+      # volumes:
+      #   - name: keys
+      #     secret:
+      #       secretName: loom-keys
 ---
 apiVersion: v1
 kind: Service

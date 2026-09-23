@@ -1,0 +1,12 @@
+# A node drain may take at most one gateway at a time (2 replicas minimum in
+# the HPA). The engine and NATS run one replica in this shape by design, so
+# a budget on them would only block drains.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loom-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: loom-gateway

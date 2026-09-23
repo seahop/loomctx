@@ -2,6 +2,11 @@
 # the loom namespace next to any shape when your pipelines already publish
 # to Kafka. Scale replicas up to the topic's partition count.
 #   kubectl -n loom apply -f deploy/k8s/integrations/kafka-consumer.yaml
+#
+# SECURITY: the broker credentials below authenticate Loom TO the broker and
+# encrypt the hop. There is no per-message principal on this path — anyone
+# who can produce to the topic writes into ANY namespace. The topic's ACL is
+# the write permission; grant it as narrowly as you would a write key.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +23,7 @@ spec:
       labels:
         app: loom-kafka-consumer
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -28,6 +34,11 @@ spec:
         - name: consumer
           image: ghcr.io/seahop/loom:latest
           command: ["python", "-m", "loom.kafka_consumer"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: LOOM_DB
               valueFrom:
@@ -42,9 +53,36 @@ spec:
               value: "loom-writer"
             - name: LOOM_KAFKA_DEADLETTER
               value: "loom.deadletter"
+            # --- broker auth / TLS: uncomment for a secured cluster.
+            #     PLAINTEXT (default) | SSL | SASL_PLAINTEXT | SASL_SSL
+            # - name: LOOM_KAFKA_SECURITY_PROTOCOL
+            #   value: "SASL_SSL"
+            # - name: LOOM_KAFKA_SASL_MECHANISM
+            #   value: "SCRAM-SHA-256"      # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+            # - name: LOOM_KAFKA_SASL_USERNAME
+            #   valueFrom:
+            #     secretKeyRef: {name: loom-kafka, key: username}
+            # - name: LOOM_KAFKA_SASL_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef: {name: loom-kafka, key: password}
+            # - name: LOOM_KAFKA_SSL_CAFILE   # private CA; system roots when unset
+            #   value: /etc/loom/kafka-ca.pem
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # - name: kafka-ca
+            #   mountPath: /etc/loom
+            #   readOnly: true
           resources:
             requests:
               cpu: 50m
               memory: 96Mi
             limits:
               memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # - name: kafka-ca
+        #   secret:
+        #     secretName: loom-kafka
+        #     items: [{key: ca.pem, path: kafka-ca.pem}]

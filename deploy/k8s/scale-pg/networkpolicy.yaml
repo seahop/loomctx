@@ -1,0 +1,82 @@
+# Network posture for the fully horizontal shape: default-deny ingress, then
+# one allowance per tier. Only ingress is restricted — engines and workers
+# call out (LLM / embedding providers, the vulnerability feeds, and your
+# Postgres, which may live outside the cluster), so egress is left to the
+# cluster's own policy. Requires a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# the read path: reachable from anywhere the cluster routes to it (Ingress
+# controller, port-forward, jobs); /metrics is on the same port
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-engine-http
+spec:
+  podSelector:
+    matchLabels:
+      app: loom
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8000
+          protocol: TCP
+---
+# the ingest front door
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-http
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+---
+# NATS: clients on 4222 are the gateways (publish) and the writer consumers
+# (pull); the cluster route port is peers only; the monitor port only for
+# pods that declare they scrape (label loom.dev/scrape=true, any namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats-clients
+spec:
+  podSelector:
+    matchLabels:
+      app: nats
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: loom-gateway
+        - podSelector:
+            matchLabels:
+              app: loom-consumer
+      ports:
+        - port: 4222
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - port: 6222
+          protocol: TCP
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              loom.dev/scrape: "true"
+      ports:
+        - port: 8222
+          protocol: TCP

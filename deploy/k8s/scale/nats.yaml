@@ -10,7 +10,10 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 1Gi
+      # the gateway caps the ingest stream at LOOM_STREAM_MAX_BYTES (1 GiB
+      # here) and the consumer caps the dead-letter stream at 256 MiB; the
+      # claim must hold both plus headroom
+      storage: 2Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -30,9 +33,22 @@ spec:
       labels:
         app: nats
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: nats
-          image: nats:2.10-alpine
+          image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true   # writes only under -sd /data
+            capabilities:
+              drop: [ALL]
           args: ["-js", "-sd", "/data", "-m", "8222"]
           ports:
             - containerPort: 4222
@@ -65,6 +81,8 @@ spec:
           persistentVolumeClaim:
             claimName: nats-data
 ---
+# Client Service only: the monitor port (8222) is for the probes, which the
+# kubelet reaches on the pod directly, and for a scraper that targets pods.
 apiVersion: v1
 kind: Service
 metadata:

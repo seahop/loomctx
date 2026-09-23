@@ -1,0 +1,43 @@
+# Every tier here runs >= 2 replicas, so a node drain may take at most one
+# pod of each at a time: ingest keeps a gateway, the queue keeps its quorum
+# (2 of 3), reads keep an engine, writes keep a consumer.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loom-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: loom-gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loom
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: loom
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loom-consumer
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: loom-consumer
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nats
+spec:
+  # a 3-node JetStream cluster needs 2 for quorum; one at a time, please
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: nats

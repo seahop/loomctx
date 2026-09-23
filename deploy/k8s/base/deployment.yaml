@@ -19,6 +19,8 @@ spec:
       labels:
         app: loom
     spec:
+      # nothing here talks to the Kubernetes API
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -29,6 +31,13 @@ spec:
       containers:
         - name: loom
           image: ghcr.io/seahop/loom:latest
+          # read-only root: the engine writes only to /data (the store) and
+          # /tmp (an emptyDir); no capability is needed to serve HTTP on 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8000
               name: http
@@ -46,6 +55,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
             # - name: keys
             #   mountPath: /etc/loom
             #   readOnly: true
@@ -55,6 +66,7 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -71,6 +83,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: loom-data
+        - name: tmp
+          emptyDir: {}
         # - name: keys
         #   secret:
         #     secretName: loom-keys

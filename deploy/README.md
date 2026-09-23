@@ -38,8 +38,9 @@ SQLite trade documented in D-008.
 - **Auth:** the shipped manifests run in **open dev mode** (no keys) so a
   first `kubectl apply` just works inside the cluster. Before exposing
   anything, mint keys (`docs/administration.md`), create a Secret from the
-  keys file, and mount it on the engine and gateways — the commented block
-  in `base/deployment.yaml` shows exactly where:
+  keys file, and mount it on the engine and gateways — the commented
+  `LOOM_AUTH_FILE` blocks in `base/deployment.yaml`, `scale/gateway.yaml`
+  and `scale-pg/gateway.yaml` show exactly where:
 
   ```bash
   kubectl -n loom create secret generic loom-keys --from-file=keys.json=secrets/keys.json
@@ -50,6 +51,22 @@ SQLite trade documented in D-008.
   with no restarts. Set `LOOM_HANDLE_SECRET` (any long random string, the
   same on every engine replica) alongside it so expansion handles are signed
   (D-021).
+
+- **Pod posture:** every pod runs as uid 10001 with a read-only root
+  filesystem, no capabilities, no privilege escalation, and no
+  ServiceAccount token mounted (nothing here talks to the Kubernetes API);
+  writable paths are the data volume and an `emptyDir` at `/tmp`. Each
+  shape ships a **default-deny ingress** NetworkPolicy plus one allowance
+  per tier (engine and gateway HTTP from anywhere the cluster routes,
+  NATS only from gateways and consumers, Postgres only from Loom's pods
+  and the CNPG operator). Egress is deliberately left open — engines and
+  workers call LLM/embedding providers, the feeds, and possibly an external
+  Postgres. Enforcement needs a CNI that implements NetworkPolicy (Calico,
+  Cilium, GKE Dataplane V2); kind's default CNI silently ignores it. A
+  scraper that wants NATS's monitor port labels itself
+  `loom.dev/scrape: "true"`. Tiers with ≥ 2 replicas carry a
+  PodDisruptionBudget (`minAvailable: 1`, NATS `maxUnavailable: 1`) so a
+  node drain never takes a whole tier.
 
 - **Upgrading:** the engine migrates its store in place on first open
   (schema version in `schema_meta`; a current schema takes a no-DDL fast
@@ -106,9 +123,13 @@ Deployment behind the `loom-db` Secret.
 CI publishes the image to `ghcr.io/seahop/loom` (`latest` + per-commit SHA tags)
 on every push to `main`; a `vX.Y.Z` tag push re-tags that commit's
 already-published image as `:vX.Y.Z` rather than rebuilding it (D-045).
-While the repository is private the packages are too, so the nodes need
-a pull secret — a GitHub token with `read:packages`, attached to the
-namespace's default ServiceAccount so no manifest changes:
+The repository is public, and the packages are public too — but GHCR
+package visibility is a **separate** setting from the repository's: after
+the first publish an owner must open the package on GitHub (Packages →
+loom → Package settings → Change visibility) once, or the first pull
+fails with `denied`. A private fork's nodes need a pull secret — a GitHub
+token with `read:packages`, attached to the namespace's default
+ServiceAccount so no manifest changes:
 
 ```bash
 kubectl -n loom create secret docker-registry ghcr --docker-server=ghcr.io \
@@ -167,6 +188,52 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 The consumers lost two deadlocks to each other on entity upserts during
 the run and retried them; no row was lost.
 
+**What the operator owns on the CNPG cluster.** `scale-pg-ha` ships the
+`Cluster` with instances, storage, the vector extension and the failover
+timeout — and nothing about *your* durability or sizing, because those
+are yours to decide: there is **no backup** and `max_connections` is the
+Postgres default (100) until you say otherwise. A worked example that
+goes in `postgres-cluster.yaml` (or a kustomize patch):
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: loom-pg
+spec:
+  # ... instances, storage, bootstrap as shipped ...
+  postgresql:
+    parameters:
+      # engines × LOOM_WORKERS × LOOM_DB_POOL + consumers + workers + the
+      # operator's own; 8 engine pods × 2 × 4 = 64 already
+      max_connections: "200"
+      shared_buffers: "256MB"
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://YOUR-BUCKET/loom-pg
+      s3Credentials:
+        accessKeyId: {name: loom-pg-backup, key: ACCESS_KEY_ID}
+        secretAccessKey: {name: loom-pg-backup, key: SECRET_ACCESS_KEY}
+      wal: {compression: gzip}
+    retentionPolicy: "30d"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: loom-pg-nightly
+spec:
+  schedule: "0 0 3 * * *"     # six fields: seconds first
+  backupOwnerReference: self
+  cluster: {name: loom-pg}
+```
+
+Continuous WAL archiving to the object store is what makes point-in-time
+recovery possible; the ScheduledBackup is the base backup it replays from.
+Restore by bootstrapping a new `Cluster` with `recovery` from the same
+store (CNPG docs). `python -m loom.lifecycle export` remains the
+backend-independent backup (JSONL) and is what you use to move between
+SQLite and Postgres.
+
 **Overnight soak (18 h, full enrichment pipeline on the real corpus):**
 every tier at zero restarts except the enrichment workers, which the
 vector-index backfill OOM-killed every few minutes at 200k vectors —
@@ -187,7 +254,7 @@ and the failover finding are in `docs/decisions.md`.
 ```bash
 docker compose build loom && docker compose --profile scale build gateway
 docker tag loom-engine:local ghcr.io/seahop/loom:dev
-docker tag project2026-gateway ghcr.io/seahop/loom-gateway:dev
+docker tag loom-gateway:local ghcr.io/seahop/loom-gateway:dev
 kind load docker-image ghcr.io/seahop/loom:dev   # minikube image load ...; Rancher Desktop
                                                   # on the docker runtime sees local images directly
 ```
@@ -288,10 +355,11 @@ store, not a limitation of the manifests — it comfortably handles the target
 workload (large context, small resources).
 
 The scaling path (docs/decisions.md D-008) is swapping the `GraphStore` for a
-server-backed implementation (Postgres/Neo4j); at that point replicas scale
-horizontally and only the `LOOM_DB`-style config changes. The API surface,
-image, and manifests stay the same.
+server-backed implementation — Postgres ships (`scale-pg`); a graph
+database such as Neo4j is a possible backend, not a shipped one. At that
+point replicas scale horizontally and only the `LOOM_DB`-style config
+changes. The API surface, image, and manifests stay the same.
 
 No ingress is shipped: it is environment-specific. Add your cluster's usual
-Ingress/HTTPRoute pointing at service `loom:80`, plus auth (phase 5, OQ-3)
-before exposing beyond the cluster.
+Ingress/HTTPRoute pointing at service `loom:80`, with keys mounted
+(`docs/administration.md`) before exposing beyond the cluster.

@@ -3,6 +3,8 @@
 # the engine reading from the replicas (-ro Service) and writing to the
 # primary (-rw Service). Requires the operator:
 #   kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.26/releases/cnpg-1.26.0.yaml
+# Backups (ScheduledBackup) and Postgres sizing (max_connections) are yours
+# to set on the Cluster — a worked example is in deploy/README.md.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -11,6 +13,7 @@ namespace: loom
 resources:
   - ../scale-pg
   - postgres-cluster.yaml
+  - networkpolicy-postgres.yaml
 
 patches:
   # the placeholder external-Postgres Secret is replaced by the operator's

@@ -1,0 +1,48 @@
+# Scale shape on top of the base default-deny: the gateway tier is the
+# ingest front door, NATS accepts only its clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-http
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-gateway
+  policyTypes: [Ingress]
+  ingress:
+    # from a load balancer / Ingress controller anywhere, and from scrapers
+    - ports:
+        - port: 8080
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats-clients
+spec:
+  podSelector:
+    matchLabels:
+      app: nats
+  policyTypes: [Ingress]
+  ingress:
+    # gateways publish; the engine pod (its consumer sidecar) pulls
+    - from:
+        - podSelector:
+            matchLabels:
+              app: loom-gateway
+        - podSelector:
+            matchLabels:
+              app: loom
+      ports:
+        - port: 4222
+          protocol: TCP
+    # monitoring endpoint (/healthz, /varz, /jsz) only for pods that say
+    # they scrape, e.g. a Prometheus labelled loom.dev/scrape=true
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              loom.dev/scrape: "true"
+      ports:
+        - port: 8222
+          protocol: TCP
