@@ -1186,7 +1186,8 @@ class PostgresStore(GraphStore):
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     # lease ownership (D-031): see sqlite.py
-    _OWNS_EXTRACT = " AND (%s::text IS NULL OR extract_claimed_by = %s)"
+    # a worker releases only its own lease; an unleased artifact has no owner (D-049)
+    _OWNS_EXTRACT = " AND (%s::text IS NULL OR extract_claimed_by IS NULL OR extract_claimed_by = %s)"
 
     def defer_extraction(
         self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
@@ -1272,7 +1273,7 @@ class PostgresStore(GraphStore):
                              [(f"{artifact_id}:{model}:{seq}", artifact_id, vec)
                               for seq, _, _, _, vec in chunks])
             self._x("UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = %s"
-                    " AND (%s::text IS NULL OR chunk_claimed_by = %s)",
+                    " AND (%s::text IS NULL OR chunk_claimed_by IS NULL OR chunk_claimed_by = %s)",
                     (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
@@ -1330,7 +1331,7 @@ class PostgresStore(GraphStore):
             entity = self._resolve_or_create(namespace, ref)
             if worker_id is not None:
                 holder = self._q("SELECT dossier_claimed_by FROM entities WHERE id = %s", (entity.id,))
-                if not holder or holder[0]["dossier_claimed_by"] != worker_id:
+                if not holder or holder[0]["dossier_claimed_by"] not in (None, worker_id):
                     return False   # re-claimed by another worker: its brief is the one to land
             self._x(
                 "INSERT INTO dossiers (namespace, entity_id, brief,"

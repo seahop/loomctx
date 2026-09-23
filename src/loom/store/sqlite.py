@@ -1142,7 +1142,9 @@ class SqliteStore(GraphStore):
     # tests, a single worker); given, the statement applies only while that
     # worker holds the lease, so a holder whose lease expired and was
     # re-claimed cannot clobber the new holder's state
-    _OWNS_EXTRACT = " AND (? IS NULL OR extract_claimed_by = ?)"
+    # a worker releases only its own lease; an artifact nobody leased (direct
+    # calls, `--once` on a fresh row) has no owner to protect (D-049)
+    _OWNS_EXTRACT = " AND (? IS NULL OR extract_claimed_by IS NULL OR extract_claimed_by = ?)"
 
     def defer_extraction(
         self, namespace: str, artifact_id: str, attempts: int, next_attempt_at: datetime,
@@ -1222,7 +1224,8 @@ class SqliteStore(GraphStore):
                               for seq, _, _, _, vec in chunks])
             self._conn.execute(  # release the chunking lease (D-031) — the holder's only
                 "UPDATE artifacts SET chunk_claimed_until = NULL WHERE id = ?"
-                " AND (? IS NULL OR chunk_claimed_by = ?)", (artifact_id, worker_id, worker_id))
+                " AND (? IS NULL OR chunk_claimed_by IS NULL OR chunk_claimed_by = ?)",
+                (artifact_id, worker_id, worker_id))
 
     def doc_chunks_for_artifacts(
         self, namespace: str, artifact_ids: list[str], model: str
@@ -1284,7 +1287,7 @@ class SqliteStore(GraphStore):
             if worker_id is not None:
                 holder = self._conn.execute(
                     "SELECT dossier_claimed_by FROM entities WHERE id = ?", (entity.id,)).fetchone()
-                if holder["dossier_claimed_by"] != worker_id:
+                if holder["dossier_claimed_by"] not in (None, worker_id):
                     return False   # re-claimed by another worker: its brief is the one to land
             self._conn.execute(
                 "INSERT OR REPLACE INTO dossiers (namespace, entity_id, brief,"

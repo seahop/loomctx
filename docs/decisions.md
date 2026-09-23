@@ -1649,6 +1649,67 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   the agent-eval and worker dials) are passed; the keys file is written
   atomically at 0600 under `secrets/`.
 
+## D-049 · Store after the review: reversible merges, faithful export, owned leases (2026-09-23, schema v5)
+
+- **D-019 made real.** `merge_entities` logged nothing it moved, overwrote
+  `object_json`, deleted the source, and no unmerge existed — "reversible"
+  meant only that the old key still resolved. Now a merge writes
+  `merge_log` (who folded into whom, the folded node's identity and prior
+  aliases) and `merge_log_observations` (per repointed row: prior subject,
+  object entity, object_json), and `GraphStore.unmerge(namespace, alias)`
+  reverses exactly that merge — recreating the node, repointing only the
+  logged rows still on the target (so chained A→B→C merges reverse in any
+  order), restoring `object_json`, returning the aliases, dropping both
+  dossiers. `lifecycle unmerge --namespace N --alias type:key`. Writes that
+  name a merged-away ref (claims, restored observations, `add_alias`)
+  attach to the canonical entity: an exact-key upsert used to resurrect
+  the node, and the worker then re-merged it and dropped both dossiers on
+  every extracted mention of `ip_address:10.0.4.7` — the demo's own
+  resolution moment undoing itself.
+- **`norm_key` keeps structure in numeric keys (D-024 tier 2).** It
+  stripped every non-alphanumeric, so `10.0.4.7`, `100.4.7` and
+  `1.0.0.47` collided and were auto-merged as spelling drift. Keys made
+  only of digits and `. : / -` keep those characters after case and
+  whitespace folding; `web-01` / `WEB_01` / `web01` still collide. The v5
+  migration recomputes the column for existing rows. Hex-containing keys
+  (IPv6) are not special-cased yet.
+- **Export is faithful, extended (D-022).** JSONL carries `schema`,
+  `decline` and `merge` records; a restore used to turn a `strict`
+  namespace permissive and forget every adjudication. The lifecycle CLI —
+  and `seed`, `ingest`, `vulns`, `agent_eval` — open the engine's store
+  (`store_from_env`: `LOOM_SHARDS` and `LOOM_BLOB_*` apply), so an export
+  covers every shard with real bodies; `--db` is an explicit
+  single-database escape hatch. The D-032 tenant-move recipe works as
+  written now.
+- **Wrappers.** `BlobOffloadStore` delegated only abstract methods, so
+  with offload on, `record_claims` ran one transaction per claim and
+  `observations_for_many` one round trip per ref — the D-043 regression
+  back through a wrapper the contract suite never wrapped. Every public
+  store method is delegated, with a guard test on both wrappers. A shard
+  no longer inherits `LOOM_DB_READ` (a tenant's reads went to the
+  default cluster's replica); a shard's own `{"dsn", "read"}` entry names
+  its replica. A vanished blob is reported (`_blob_missing`, body `None`)
+  rather than served as the stub text; the blob is written before the
+  row and removed if the insert fails.
+- **Leases have owners (D-031).** `set_extraction_status`,
+  `defer_extraction`, `put_doc_chunks`, `put_dossier` take `worker_id`
+  and apply only while that worker holds the lease — or while nobody
+  does, so direct calls and a `--once` run on fresh rows still land.
+  `extend_extraction_lease` renews per extraction window; chunk and
+  dossier leases record their holder.
+- **Vectors (D-025).** `ensure_vector_index` matched every model's
+  tables (a model switch never backfilled); purge left stale ANN rows.
+  Both are per model and per row now. Postgres HNSW with a namespace
+  post-filter returned short or empty results for a minority tenant;
+  queries widen `ef_search`, use iterative scan on pgvector ≥ 0.8, and
+  fall back to the exact scan when the index starves, matching SQLite.
+- **Smaller.** An older image never lowers the stored schema version or
+  re-runs DDL (it warns and skips). `search_entities` uses an expression
+  index on `lower(key)` with a half-open range on both backends;
+  `observations_by_prefix` (cite tokens) is an index range too.
+  `subjects_citing` is bounded in SQL. `wipe()` sweeps declines and the
+  merge log. The SQLite lock is re-entrant with outermost-only commit.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

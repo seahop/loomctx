@@ -295,16 +295,18 @@ def test_pack_view_offers_a_short_cite_token(store):
 
 def test_cite_tokens_resolve_through_expand_and_get_observations(store):
     """The tools that take an observation id take its 12-hex cite token too,
-    via the store's prefix lookup; without one, full ids still work and the
-    token is refused with a reason."""
+    via the store's prefix lookup (`observations_by_prefix`, D-049); a store
+    without one still resolves full ids and refuses the token with a reason."""
     from mcp.server.mcpserver.exceptions import ToolError
     obs = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
     full = mcp_server.expand(obs.id)
     assert full["count"] == 1 and full["observations"][0]["id"] == obs.id
     assert mcp_server.get_observations(obs.id)["observations"][0]["predicate"] == obs.predicate
+    real = store.observations_by_prefix
+    store.observations_by_prefix = None   # a store generation without the lookup
     with pytest.raises(ToolError, match="full"):
         mcp_server.expand(obs.id[:12])
-    store.observations_by_prefix = lambda ns, prefix: [o for o in store.iter_observations(ns) if o.id.startswith(prefix)]
+    store.observations_by_prefix = real
     assert mcp_server.expand(obs.id[:12])["observations"][0]["id"] == obs.id
     assert mcp_server.get_observations(obs.id[:12])["observations"][0]["id"] == obs.id
     with pytest.raises(ToolError, match="no observation"):

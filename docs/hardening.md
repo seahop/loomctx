@@ -171,14 +171,14 @@ which change measured numbers and wait for the frozen-volume rehearsal.
 
 | ID | Status | Item |
 | --- | --- | --- |
-| L-1 | 🔨 | `BlobOffloadStore` delegated only abstract methods: with `LOOM_BLOB_THRESHOLD` set, `record_claims` fell back to one tx per claim and `observations_for_many` to the D-043 per-ref regression. |
-| L-2 | 🔨 | `LOOM_DB_READ` applied to every Postgres shard — a tenant's reads went to the default cluster's replica. |
-| L-3 | 🔨 | `lifecycle` (and the other CLIs) built the store from `--db`, bypassing sharding and blob offload; the D-032 tenant-move recipe did not work as written. |
-| L-4 | 🔨 | A claim naming a merged-away ref resurrected the node (exact-key upsert); the worker then re-merged and dropped both dossiers each cycle. |
-| L-5 | 🔨 | Merges were not reversible despite D-019: no `unmerge`, repointed rows unlogged, `object_json` overwritten. `merge_log` + `unmerge`, schema v5. |
-| L-6 | 🔨 | `ensure_vector_index` matched every model's tables; purge left stale ANN rows; Postgres HNSW namespace post-filter returned short/empty results. |
-| L-7 | 🔨 | Export omitted schema registrations and adjudication declines (a restore turned `strict` namespaces permissive). |
-| L-8 | 🔨 | Older image could write the schema version *down* and re-run DDL under a rolling update; `wipe()` missed declines; `add_alias` no-op'd on a merged target; `search_entities` defeated its index; `subjects_citing` unbounded; vanished blob served as the body; lease release ignored ownership; `norm_key` stripped the dots out of IP addresses. |
+| L-1 | ✅ | `BlobOffloadStore` delegated only abstract methods: with `LOOM_BLOB_THRESHOLD` set, `record_claims` fell back to one tx per claim and `observations_for_many` to the D-043 per-ref regression. |
+| L-2 | ✅ | `LOOM_DB_READ` applied to every Postgres shard — a tenant's reads went to the default cluster's replica. |
+| L-3 | ✅ | `lifecycle` (and the other CLIs) built the store from `--db`, bypassing sharding and blob offload; the D-032 tenant-move recipe did not work as written. |
+| L-4 | ✅ | A claim naming a merged-away ref resurrected the node (exact-key upsert); the worker then re-merged and dropped both dossiers each cycle. |
+| L-5 | ✅ | Merges were not reversible despite D-019: no `unmerge`, repointed rows unlogged, `object_json` overwritten. `merge_log` + `unmerge`, schema v5. |
+| L-6 | ✅ | `ensure_vector_index` matched every model's tables; purge left stale ANN rows; Postgres HNSW namespace post-filter returned short/empty results. |
+| L-7 | ✅ | Export omitted schema registrations and adjudication declines (a restore turned `strict` namespaces permissive). |
+| L-8 | ✅ | Older image could write the schema version *down* and re-run DDL under a rolling update; `wipe()` missed declines; `add_alias` no-op'd on a merged target; `search_entities` defeated its index; `subjects_citing` unbounded; vanished blob served as the body; lease release ignored ownership; `norm_key` stripped the dots out of IP addresses. |
 
 ## M. Enrichment, LLM, MCP, eval, connector (D-047)
 
