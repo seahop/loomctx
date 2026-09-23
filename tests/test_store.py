@@ -46,6 +46,23 @@ def _raw(store):
     return store
 
 
+def _exec(store, sql, params=()):
+    """Raw SQL against a backend for setup/inspection; `?` placeholders are
+    translated for Postgres. Returns rows as dicts (empty for statements)."""
+    with store._tx():
+        if isinstance(store, SqliteStore):
+            return [dict(r) for r in store._conn.execute(sql, params).fetchall()]
+        return store._q(sql.replace("?", "%s"), params)
+
+
+def _reopen(store, tmp_path):
+    """A second store instance on the same database (migration tests)."""
+    if isinstance(store, SqliteStore):
+        return SqliteStore(tmp_path / "test.db")
+    from loom.store.postgres import PostgresStore
+    return PostgresStore(os.environ["LOOM_TEST_POSTGRES_URL"])
+
+
 def login_claim(namespace="default"):
     return ClaimIn(
         namespace=namespace,
@@ -909,7 +926,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -982,7 +999,94 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
+
+
+# ------------------------------------------------------- schema v5 #
+
+def test_norm_key_keeps_the_structure_of_numeric_keys():
+    """web-01 / WEB_01 / web01 still collide; IPs, CIDRs and versions do not
+    (10.0.4.7, 100.4.7 and 1.0.0.47 all normalized to 10047)."""
+    from loom.store.common import norm_key
+    assert norm_key("web-01") == norm_key("WEB_01") == norm_key("web01") == "web01"
+    assert len({norm_key(k) for k in ("10.0.4.7", "100.4.7", "1.0.0.47")}) == 3
+    assert norm_key("10.0.4.7") == norm_key(" 10.0.4.7 ") == "10.0.4.7"
+    assert norm_key("10.0.0.0/8") == "10.0.0.0/8" and norm_key("1.2.3") == "1.2.3"
+    assert norm_key("10.0.4.7:443") == "10.0.4.7:443" and norm_key("2026-09-01") == "2026-09-01"
+    assert norm_key("v1.2.3") == "v123"          # letters: spelling, not structure
+    assert norm_key("10_0_4_7") == "10047"       # underscores are spelling
+
+
+def test_fuzzy_candidates_do_not_group_distinct_ips(store):
+    for key in ("10.0.4.7", "100.4.7", "1.0.0.47"):
+        store.upsert_entity("default", EntityRef(type="ip", key=key))
+    store.upsert_entity("default", EntityRef(type="host", key="web-01"))
+    store.upsert_entity("default", EntityRef(type="host", key="web01"))
+    groups = store.fuzzy_merge_candidates("default")
+    assert [{e.key for e in g} for g in groups] == [{"web-01", "web01"}]
+
+
+def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    store.upsert_entity("default", EntityRef(type="ip", key="10.0.4.7"))
+    store.upsert_entity("default", EntityRef(type="host", key="web-01"))
+    _exec(store, "UPDATE entities SET norm_key = '10047' WHERE key = '10.0.4.7'")   # as v4 wrote it
+    _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
+    again = _reopen(store, tmp_path)
+    try:
+        assert again.schema_version() == SCHEMA_VERSION == 5
+        rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
+        assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
+    finally:
+        again.close()
+
+
+def test_schema_version_is_never_written_down(store, tmp_path, caplog):
+    """An older image opening a newer database serves what it understands,
+    runs no DDL, warns — and leaves the version alone (H-B12)."""
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),))
+    try:
+        with caplog.at_level("WARNING", logger="loom.store"):
+            newer = _reopen(store, tmp_path)
+        try:
+            assert newer.schema_version() == SCHEMA_VERSION + 1
+            assert "newer than this build" in caplog.text
+            newer.record_claim(login_claim())
+            assert len(newer.observations_for("default", EntityRef(type="host", key="web-01"))) == 1
+        finally:
+            newer.close()
+    finally:
+        _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
+    assert store.schema_version() == SCHEMA_VERSION
+
+
+def test_search_entities_uses_the_lower_key_index(store):
+    _raw(store)
+    for key in ("web-01", "Web-02", "db-01"):
+        store.upsert_entity("default", EntityRef(type="host", key=key))
+    assert {e.key for e in store.search_entities("default", "WEB")} == {"web-01", "Web-02"}
+    assert [e.key for e in store.search_entities("default", "web-02")] == ["Web-02"]
+    assert store.search_entities("default", "") != []           # empty prefix: everything
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._SEARCH_SQL, ("default", "web", "web" + sq._PREFIX_END))
+        assert any("idx_entity_lower_key" in r["detail"] for r in plan), plan
+    else:
+        from loom.store import postgres as pg
+        assert _exec(store, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_entity_lower_key'")
+        with store._tx():   # one transaction: the planner hint and the EXPLAIN share a connection
+            store._x("SET LOCAL enable_seqscan = off")
+            plan = store._q("EXPLAIN " + pg._SEARCH_SQL, ("default", "web", "web" + pg._PREFIX_END))
+        assert any("idx_entity_lower_key" in r["QUERY PLAN"] for r in plan), plan
+
+
+def test_wipe_clears_declines(store):
+    store.remember_decline("ns", "a:1", "b:2", "no")
+    store.wipe()
+    assert store.declined_pairs("ns") == set()
 
 
 def test_sqlite_transactions_are_reentrant(store):

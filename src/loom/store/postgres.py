@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at  TEXT NOT NULL,
     norm_key    TEXT NOT NULL DEFAULT '',
     dossier_claimed_until TEXT,
+    dossier_claimed_by    TEXT,
     UNIQUE (namespace, type, key)
 );
 
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extract_claimed_by    TEXT,
     extract_claimed_until TEXT,
     chunk_claimed_until   TEXT,
+    chunk_claimed_by      TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -124,6 +126,30 @@ CREATE TABLE IF NOT EXISTS resolution_declines (
     reason     TEXT NOT NULL,
     decided_at TEXT NOT NULL,
     PRIMARY KEY (namespace, a, b)
+);
+
+-- merge reversal log (schema v5): see sqlite.py for the column semantics
+CREATE TABLE IF NOT EXISTS merge_log (
+    id                 TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL,
+    from_type          TEXT NOT NULL,
+    from_key           TEXT NOT NULL,
+    into_type          TEXT NOT NULL,
+    into_key           TEXT NOT NULL,
+    from_id            TEXT NOT NULL,
+    from_provisional   BOOLEAN NOT NULL DEFAULT FALSE,
+    from_created_at    TEXT NOT NULL,
+    prior_aliases_json TEXT NOT NULL DEFAULT '[]',
+    recorded_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_log_observations (
+    merge_id               TEXT NOT NULL REFERENCES merge_log (id),
+    observation_id         TEXT NOT NULL,
+    prior_subject_id       TEXT,
+    prior_object_entity_id TEXT,
+    prior_object_json      TEXT,
+    PRIMARY KEY (merge_id, observation_id)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -172,6 +198,8 @@ ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS extract_claimed_by TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS extract_claimed_until TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_until TEXT;
+ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_by TEXT;
+ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_by TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -186,9 +214,20 @@ CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recor
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
+CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key) text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 """
 
-SCHEMA_VERSION = 4  # keep in step with sqlite.py (v3: packed vectors; v4: resolution_declines, D-044)
+# search_entities: a half-open range with the text_pattern_ops operators —
+# byte-wise, collation-free comparisons, so the expression index is used
+# and the semantics match the SQLite store's BINARY range exactly.
+_SEARCH_SQL = (
+    "SELECT * FROM entities WHERE namespace = %s"
+    "   AND lower(key) ~>=~ %s AND lower(key) ~<~ %s"
+)
+_PREFIX_END = "\U0010ffff"
+
+SCHEMA_VERSION = 5  # keep in step with sqlite.py (v5: merge_log, lease owners, lower(key) index, norm_key recompute)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -301,12 +340,22 @@ class PostgresStore(GraphStore):
                 self._refresh_vec_tables()
 
     def _schema_current(self) -> bool:
+        """True when no DDL is needed: the database is at this build's
+        version — or a newer one (an older image opening a newer database
+        serves what it understands, runs no DDL and never writes the
+        version down, H-B12)."""
         try:
             with self._tx(read=False):
                 rows = self._q("SELECT value FROM loom_meta WHERE key = 'schema_version'")
-            return bool(rows) and int(rows[0]["value"]) == SCHEMA_VERSION
         except Exception:  # noqa: BLE001 — no loom_meta yet: a fresh database
             return False
+        if not rows:
+            return False
+        current = int(rows[0]["value"])
+        if current > SCHEMA_VERSION:
+            log.warning("postgres: schema version %d is newer than this build's %d;"
+                        " running without migrations — upgrade the image", current, SCHEMA_VERSION)
+        return current >= SCHEMA_VERSION
 
     @property
     def _conn(self):
@@ -509,10 +558,19 @@ class PostgresStore(GraphStore):
                 if row and row["data_type"] == "text":
                     cur.execute(f"ALTER TABLE {table} ALTER COLUMN vector TYPE BYTEA"
                                 " USING convert_to(vector, 'UTF8')")
-        cur.execute(
-            "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
-            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (str(SCHEMA_VERSION),))
+        if current < 5:
+            # v5: numeric keys keep their punctuation in norm_key; recompute
+            # the rows that can differ, in Python, where the rule lives.
+            cur.execute("SELECT id, key, norm_key FROM entities WHERE key ~ '[.:/-]'")
+            changed = [(nk, r["id"]) for r in cur.fetchall()
+                       if (nk := common.norm_key(r["key"])) != r["norm_key"]]
+            if changed:
+                cur.executemany("UPDATE entities SET norm_key = %s WHERE id = %s", changed)
+        if current < SCHEMA_VERSION:   # never written down (H-B12)
+            cur.execute(
+                "INSERT INTO loom_meta (key, value) VALUES ('schema_version', %s)"
+                " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (str(SCHEMA_VERSION),))
 
     def schema_version(self) -> int:
         with self._tx(read=True):
@@ -666,12 +724,8 @@ class PostgresStore(GraphStore):
             type_sql, type_args = " AND type = ANY(%s)", (list(types),)
         with self._tx(read=True):
             rows = self._q(
-                "SELECT * FROM entities WHERE namespace = %s"
-                "   AND (LOWER(key) = %s OR LOWER(key) LIKE %s ESCAPE '\\')"
-                + type_sql
-                + " ORDER BY (LOWER(key) != %s), type, key LIMIT %s",
-                (namespace, lowered, common.like_pattern(query), *type_args,
-                 lowered, limit),
+                _SEARCH_SQL + type_sql + " ORDER BY (lower(key) <> %s), type, key LIMIT %s",
+                (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             )
         return [common.row_to_entity(r) for r in rows]
 
@@ -1327,8 +1381,9 @@ class PostgresStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities",
-                          "schemas", *self._vec_tables):
+                          "merge_log_observations", "merge_log", "observations",
+                          "aliases", "artifacts", "entities", "schemas",
+                          "resolution_declines", *self._vec_tables):
                 self._x(f"DELETE FROM {table}")
 
     def close(self) -> None:

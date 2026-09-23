@@ -18,22 +18,51 @@ from ..contracts import (
 )
 
 _NORM = re.compile(r"[^a-z0-9]+")
+_WS = re.compile(r"\s+")
+# digit-dominated keys — IPs, CIDRs, ports, versions — where the punctuation
+# IS the structure: stripping it made 10.0.4.7, 100.4.7 and 1.0.0.47 collide
+_NUMERIC = re.compile(r"^[\d.:/\-]+$")
 
 
 def norm_key(key: str) -> str:
-    """The fuzzy-match key: lowercase, punctuation/whitespace stripped, so
-    web-01 / WEB_01 / web01 collide (D-024 entity resolution tier 2)."""
-    return _NORM.sub("", key.lower())
+    """The fuzzy-match key (D-024 entity resolution tier 2): lowercase with
+    punctuation/whitespace stripped, so web-01 / WEB_01 / web01 collide.
+    A key made only of digits and `. : / -` keeps those characters (only
+    case and whitespace fold): 10.0.4.7 and 100.4.7 are different things."""
+    lowered = _WS.sub("", key.lower())
+    if _NUMERIC.match(lowered):
+        return lowered
+    return _NORM.sub("", lowered)
+
+
+def norm_key_may_change(key: str) -> bool:
+    """Cheap pre-filter for the v5 norm_key recompute: only keys carrying
+    one of the characters the numeric rule preserves can differ."""
+    return any(c in key for c in ".:/-")
 
 
 _SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def vec_slug(model: str) -> str:
+    """The embedding model's table-name slug."""
+    return _SLUG.sub("_", model.lower()).strip("_")
 
 
 def vec_table(kind: str, model: str, dim: int) -> str:
     """Name of the ANN index table (D-025): vobs_/vchk_ + a slug of the
     embedding model + the dimension, so vectors from different models — or
     a model that changed size — never share an index."""
-    return f"{kind}_{_SLUG.sub('_', model.lower()).strip('_')}_{int(dim)}"
+    return f"{kind}_{vec_slug(model)}_{int(dim)}"
+
+
+def vec_tables_for(kind: str, model: str, names) -> list[str]:
+    """The index tables that belong to exactly this (kind, model) — one per
+    dimension it has been seen with. A prefix test matched every model
+    (`vobs_m_` is a prefix of `vobs_m2_...` only by luck of naming, but
+    `vobs_text_embedding_3_` is a prefix of `vobs_text_embedding_3_large_`)."""
+    pattern = re.compile(rf"^{re.escape(kind)}_{re.escape(vec_slug(model))}_\d+$")
+    return [n for n in names if pattern.match(n)]
 
 
 try:  # optional accelerator (extra "vector"); pure Python otherwise

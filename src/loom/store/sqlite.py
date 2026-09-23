@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at  TEXT NOT NULL,
     norm_key    TEXT NOT NULL DEFAULT '',
     dossier_claimed_until TEXT,
+    dossier_claimed_by    TEXT,
     UNIQUE (namespace, type, key)
 );
 
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     extract_claimed_by    TEXT,
     extract_claimed_until TEXT,
     chunk_claimed_until   TEXT,
+    chunk_claimed_by      TEXT,
     attrs_json        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -123,6 +125,33 @@ CREATE TABLE IF NOT EXISTS resolution_declines (
     reason     TEXT NOT NULL,
     decided_at TEXT NOT NULL,
     PRIMARY KEY (namespace, a, b)
+);
+
+-- What a merge changed, so unmerge can put it back exactly (D-019's
+-- "reversible & lossless", made real in schema v5). One parent row per
+-- merge; one child row per observation it repointed, recording which
+-- side(s) named the folded entity and the object ref as rendered before.
+CREATE TABLE IF NOT EXISTS merge_log (
+    id                 TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL,
+    from_type          TEXT NOT NULL,
+    from_key           TEXT NOT NULL,
+    into_type          TEXT NOT NULL,
+    into_key           TEXT NOT NULL,
+    from_id            TEXT NOT NULL,
+    from_provisional   INTEGER NOT NULL DEFAULT 0,
+    from_created_at    TEXT NOT NULL,
+    prior_aliases_json TEXT NOT NULL DEFAULT '[]',
+    recorded_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_log_observations (
+    merge_id               TEXT NOT NULL REFERENCES merge_log (id),
+    observation_id         TEXT NOT NULL,
+    prior_subject_id       TEXT,
+    prior_object_entity_id TEXT,
+    prior_object_json      TEXT,
+    PRIMARY KEY (merge_id, observation_id)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -174,11 +203,25 @@ CREATE INDEX IF NOT EXISTS idx_art_status ON artifacts (extraction_status, recor
 CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
+CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key));
+CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 """
+
+# search_entities: a half-open range on the indexed expression (the LIKE
+# optimization does not apply to expression indexes). BINARY collation
+# compares UTF-8 bytes, which orders by code point, so prefix + U+10FFFF
+# bounds every key that starts with the prefix. Exact matches sort first.
+_SEARCH_SQL = (
+    "SELECT * FROM entities WHERE namespace = ?"
+    "   AND lower(key) >= ? AND lower(key) < ?"
+)
+_PREFIX_END = "\U0010ffff"
 
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
-SCHEMA_VERSION = 4  # v3: packed vectors (D-039); v4: resolution_declines (D-044)
+# v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
+# lease owners, lower(key) index, numeric norm_key rule (recompute)
+SCHEMA_VERSION = 5
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -230,9 +273,20 @@ class SqliteStore(GraphStore):
         # 15 s: several enrichment workers writing 512-vector batches can
         # hold the write lock past 5 s (D-039)
         self._conn.execute("PRAGMA busy_timeout=15000")
-        self._conn.executescript(_TABLES)
-        self._migrate()
-        self._conn.executescript(_INDEXES)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS loom_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        current = self._meta_version()
+        if current > SCHEMA_VERSION:
+            # An older image opening a newer file: serve what it understands,
+            # run no DDL, and never write the version down (H-B12) — the next
+            # up-to-date open must still see what was actually applied.
+            logging.getLogger("loom.store").warning(
+                "sqlite: schema version %d is newer than this build's %d;"
+                " running without migrations — upgrade the image", current, SCHEMA_VERSION)
+        else:
+            self._conn.executescript(_TABLES)
+            self._migrate()
+            self._conn.executescript(_INDEXES)
         self._vec_tables: dict[str, int] = {}   # ANN table name -> dimension
         self._vec = self._load_vec()
         # Referential integrity is per-connection in SQLite (H-B10). Old
@@ -256,11 +310,13 @@ class SqliteStore(GraphStore):
                           ("next_attempt_at", "TEXT"),
                           ("extract_claimed_by", "TEXT"),
                           ("extract_claimed_until", "TEXT"),
-                          ("chunk_claimed_until", "TEXT")],
+                          ("chunk_claimed_until", "TEXT"),
+                          ("chunk_claimed_by", "TEXT")],
             "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
             "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
             "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''"),
-                         ("dossier_claimed_until", "TEXT")],
+                         ("dossier_claimed_until", "TEXT"),
+                         ("dossier_claimed_by", "TEXT")],
         }
         for table, columns in wanted.items():
             have = {
@@ -280,7 +336,18 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(common.norm_key(r["key"]), r["id"]) for r in rows])
-        if current != SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
+        if current < 5:
+            # v5: numeric keys keep their punctuation in norm_key (10.0.4.7
+            # no longer collides with 100.4.7); recompute the rows that can
+            # differ — only keys carrying `. : / -` — in Python, the one
+            # place the rule is defined.
+            rows = self._conn.execute(
+                "SELECT id, key, norm_key FROM entities WHERE instr(key, '.') > 0"
+                " OR instr(key, ':') > 0 OR instr(key, '/') > 0 OR instr(key, '-') > 0").fetchall()
+            self._conn.executemany(
+                "UPDATE entities SET norm_key = ? WHERE id = ?",
+                [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
+        if current < SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
             self._conn.execute(
                 "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
                 " ('schema_version', ?)", (str(SCHEMA_VERSION),))
@@ -633,12 +700,8 @@ class SqliteStore(GraphStore):
             type_args = tuple(types)
         with self._tx():
             rows = self._conn.execute(
-                "SELECT * FROM entities WHERE namespace = ?"
-                "   AND (LOWER(key) = ? OR LOWER(key) LIKE ? ESCAPE '\\')"
-                + type_sql
-                + " ORDER BY (LOWER(key) != ?), type, key LIMIT ?",
-                (namespace, lowered, common.like_pattern(query), *type_args,
-                 lowered, limit),
+                _SEARCH_SQL + type_sql + " ORDER BY (lower(key) != ?), type, key LIMIT ?",
+                (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             ).fetchall()
         return [common.row_to_entity(r) for r in rows]
 
@@ -1300,8 +1363,9 @@ class SqliteStore(GraphStore):
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
-                          "observations", "aliases", "artifacts", "entities",
-                          "schemas", *self._vec_tables):
+                          "merge_log_observations", "merge_log", "observations",
+                          "aliases", "artifacts", "entities", "schemas",
+                          "resolution_declines", *self._vec_tables):
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
