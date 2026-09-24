@@ -402,7 +402,13 @@ class GraphStore(ABC):
         the matching tombstones are exported alongside via iter_tombstones)."""
 
     @abstractmethod
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]: ...
+    def iter_entities(
+        self, namespace: str | None = None, since: datetime | None = None
+    ) -> Iterator[Entity]:
+        """Every entity, oldest created first. `since` keeps those created
+        at or after that instant, so a periodic scan (the enrichment alias
+        pass) can be incremental instead of re-reading the namespace every
+        tick (R-9); served by the (namespace, created_at) index."""
 
     @abstractmethod
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]: ...

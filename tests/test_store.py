@@ -1260,6 +1260,13 @@ def test_search_entities_uses_the_lower_key_index(store):
     else:
         from loom.store import postgres as pg
         assert _exec(store, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_entity_lower_key'")
+        # enough rows and fresh statistics that the planner has a real
+        # choice: on a 3-row table with no stats every (namespace, ...)
+        # index costs the same and any of them may be picked
+        _exec(store, "INSERT INTO entities (id, namespace, type, key, created_at, norm_key)"
+                     " SELECT md5(i::text), 'default', 'host', 'k' || i, '2026-01-01T00:00:00+00:00', 'k' || i"
+                     " FROM generate_series(1, 500) i")
+        _exec(store, "ANALYZE entities")
         with store._tx():   # one transaction: the planner hint and the EXPLAIN share a connection
             store._x("SET LOCAL enable_seqscan = off")
             plan = store._q("EXPLAIN " + pg._SEARCH_SQL, ("default", "web", "web" + pg._PREFIX_END))
@@ -1658,3 +1665,25 @@ def test_observations_for_many_prelimits_each_entity(store):
         plan = _exec(b, "EXPLAIN QUERY PLAN WITH hits AS (" + hits + ") SELECT COUNT(*) AS n FROM hits", params)
         details = " | ".join(r["detail"] for r in plan)
         assert "idx_obs_subject" in details and "idx_obs_object" in details and "SCAN o" not in details, details
+
+
+# ---------------------------------------------- iter_entities(since=) (R-9) #
+
+def test_iter_entities_since_is_incremental(store):
+    """The alias scan can ask for the entities created since its last pass
+    instead of the whole namespace; the bound is inclusive and rides the
+    (namespace, created_at) index."""
+    from datetime import timedelta
+    a = store.upsert_entity("default", EntityRef(type="host", key="a"))
+    b = store.upsert_entity("default", EntityRef(type="host", key="b"))
+    store.upsert_entity("team-b", EntityRef(type="host", key="elsewhere"))
+    assert [e.key for e in store.iter_entities("default", since=b.created_at)] == ["b"]
+    assert [e.key for e in store.iter_entities("default", since=a.created_at)] == ["a", "b"]
+    assert list(store.iter_entities("default", since=b.created_at + timedelta(seconds=1))) == []
+    assert {e.key for e in store.iter_entities(None, since=a.created_at)} == {"a", "b", "elsewhere"}
+    assert [e.key for e in store.iter_entities("default")] == ["a", "b"]          # unchanged default
+    b_ = _backend(store, "default")
+    if isinstance(b_, SqliteStore):
+        plan = _exec(b_, "EXPLAIN QUERY PLAN SELECT * FROM entities WHERE 1=1 AND namespace = ? AND created_at >= ?"
+                         " AND (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT ?", ("default", "2026", "", "", 10))
+        assert any("idx_entity_created" in r["detail"] for r in plan), plan

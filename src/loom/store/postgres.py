@@ -226,6 +226,7 @@ CREATE INDEX IF NOT EXISTS idx_obs_subject_recorded ON observations (subject_id,
 CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
     ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_created ON entities (namespace, created_at);
 """
 
 # search_entities: a half-open range with the text_pattern_ops operators —
@@ -1560,10 +1561,13 @@ class PostgresStore(GraphStore):
             out.setdefault(r["namespace"], {})[r["type"]] = int(r["n"])
         return out
 
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = %s" if namespace else "")
-        for row in self._pages(sql, (namespace,) if namespace else (),
-                               ("created_at", "id")):
+    def iter_entities(
+        self, namespace: str | None = None, since: datetime | None = None
+    ) -> Iterator[Entity]:
+        sql = ("SELECT * FROM entities WHERE 1=1" + (" AND namespace = %s" if namespace else "")
+               + (" AND created_at >= %s" if since else ""))
+        params = (*((namespace,) if namespace else ()), *((common.iso(since),) if since else ()))
+        for row in self._pages(sql, params, ("created_at", "id")):
             yield common.row_to_entity(row)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
