@@ -34,7 +34,9 @@ git. It contains only hashes, but grants are still access metadata.
 
 ## Recipes
 
-All commands run in the container (`docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom python -m loom.keys --file /secrets/keys.json ...`).
+Create the directory first (`mkdir -p secrets`): if it is missing, docker
+creates it owned by root and the key file cannot be written. All commands
+run in the container (`docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom python -m loom.keys --file /secrets/keys.json ...`).
 The `--user` flag matters: the image runs as an unprivileged user (uid
 10001), so a bind-mounted `secrets/` owned by you would otherwise be
 read-only to it. On Kubernetes the mounted Secret is readable by that uid
