@@ -1797,7 +1797,7 @@ first gated publish failed on Trivy — pip's vendored `msgpack` and the
 base image's `setuptools`, both HIGH with fixes — and the answer was to
 remove the package manager from the runtime image rather than pin it
 (nothing imports either at run time); both images scan clean now. Table
-in `deploy/README.md`.
+in `deploy/README.md`. The fully-merged batch image (schema v6) was then rolled onto the same cluster: the **v5→v6 migration ran in place on the populated 3-instance HA Postgres** (readyz reported schema 6, pgvector, no downtime), and the read-side supersession and the PROV-O route were confirmed live (the hooli `contract_owner` correction ranks current with its predecessor `[superseded by …]`; `GET /v1/observations/{id}/prov` returns valid JSON-LD).
 
 ## D-053 · Retrieval scorecard: packs against the obvious baselines, rule-scored, no judge (2026-09-24)
 
