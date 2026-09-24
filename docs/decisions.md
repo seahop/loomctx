@@ -2090,6 +2090,18 @@ condition to the same bar, and a row nobody answered is never a score.
   that step — the next tick may merge or ask again. In a scope pack a fact
   pointing into a reached entity from outside the pack carries that
   entity's path, like one whose subject is the reached entity.
+- **KEV value changes are recorded; exports speak versions.** KEV event
+  ids are keyed on `dateAdded`, so a changed ransomware flag, due date or
+  required action was dropped as a replay. `load` now reads each KEV CVE's
+  stored rows and records a changed value as `<id>:<catalog stamp>`,
+  observed at the catalog's `dateReleased`, superseding the previous
+  version and citing a re-recorded advisory; unchanged values keep their
+  ids, so an existing store gains only the changes (the refresh job's key
+  now needs `r` as well as `w`; `emit` has no store and keeps the old ids).
+  STIX export gives every version of an object one `id` and `created` with
+  increasing `modified`; OCSF versions share `finding_info.uid`; both
+  export the newest version unless `--history`. Exports carry the original
+  event ids and sources, so importing an export is a replay.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

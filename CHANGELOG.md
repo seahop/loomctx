@@ -59,6 +59,10 @@ Full list with statuses: `docs/hardening.md` §S.
   document; `loom.ingest` retries 429 / 5xx with `Retry-After`
 - Fuzzy (tier-2) candidates skip settled groups; `python -m loom.enrich
   undistinct` / `GraphStore.forget_decline` take a decline back
+- KEV ransomware / due-date / required-action changes are recorded as
+  superseding versions (the refresh key needs `rw`); STIX and OCSF export
+  express version chains (`--history` for every version); export → import
+  is a replay
 
 #### Release
 - Every engine-image compose service builds (a fresh clone's
