@@ -229,10 +229,7 @@ def _render_fact(obs: Observation, superseded_by: Observation | None = None) -> 
         f"{_object_text(obs)} ({obs.observed_at.date().isoformat()}, "
         f"per {obs.source})"
     )
-    if obs.valid_from or obs.valid_to:
-        frm = obs.valid_from.date().isoformat() if obs.valid_from else "?"
-        to = obs.valid_to.date().isoformat() if obs.valid_to else "present"
-        text += f" [valid {frm} to {to}]"
+    text += _window_text(obs)
     if superseded_by is not None:
         text += f" [superseded by {superseded_by.id[:12]}]"
     return text
@@ -778,6 +775,73 @@ def canonical_refs(store: GraphStore, namespace: str, refs: list[EntityRef]) -> 
 
 _SCOPE_CHUNK = 400                     # entities per gather round trip (the stores' own chunk)
 _SCOPE_CAP_KEY = ("", "scope_cap")     # the walk's own entry in a Truncations map
+# Hub completion (D-061): how many of a hub's expand edges the store's join
+# reads for the question's topic, and the rows per far entity a probe reads
+# when a crowded frontier (no hub) must be ordered by it.
+_HUB_EDGE_LIMIT = 10 * _GATHER_LIMIT
+_TOPIC_PROBE_ROWS = 2
+
+
+def _predicate_words(predicate: str) -> frozenset[str]:
+    """A predicate name's content words, stemmed: `exploited_in_wild` ->
+    {exploited, wild}; `logged_in_by` -> {logged}."""
+    words = set(_WORD.findall(_SEPARATORS.sub(" ", predicate.lower()))) - _STOPWORDS
+    return frozenset(_stem(w) for w in words)
+
+
+def _asked_words(question: str, roots: list[EntityRef] | tuple = ()) -> set[str]:
+    """The question's content words, stemmed, without the names of the
+    entities it is asked about (they are the frame, not the topic)."""
+    words = _question_tokens(question)
+    named: set[str] = set()
+    for r in roots:
+        named |= _tokens(f"{r.type} {r.key}")
+    return {_stem(w) for w in (words - named or words)}
+
+
+def named_predicates(question: str | None, vocabulary, roots: list[EntityRef] | tuple = ()) -> frozenset[str]:
+    """The predicates a question names (D-061): every content word of the
+    predicate's name is a word of the question — "exploited in the wild"
+    names `exploited_in_wild`, "the software web-01 runs" names
+    `runs_software` but not `runs_os`. The same word matching the lexical
+    leg uses (D-051), over names only: registry descriptions are prose and
+    would name half the registry."""
+    if not question:
+        return frozenset()
+    asked = _asked_words(question, roots)
+    return frozenset(p for p in vocabulary if (w := _predicate_words(p)) and w <= asked)
+
+
+def _registry_predicates(store: GraphStore, namespace: str) -> set[str]:
+    getter = getattr(store, "get_schema", None)
+    schema = getter(namespace) if callable(getter) else None
+    return {p.name for p in schema.predicates} if schema is not None else set()
+
+
+def scope_expand(store: GraphStore, namespace: str, scope: ScopeSpec) -> set[str]:
+    """The predicates a scope walk follows: the named ones, or the
+    registry's containment predicates when none are named (D-024)."""
+    expand = set(scope.expand)
+    if not expand and scope.depth > 0:
+        from .registry import containment_predicates
+        expand = set(containment_predicates(store.get_schema(namespace)))
+    return expand
+
+
+def scope_topic(store: GraphStore, namespace: str, scope: ScopeSpec | None, question: str | None,
+                seen_predicates=(), expand: set[str] | None = None) -> frozenset[str]:
+    """A scope question's topic (D-061): the predicates it names that are
+    not the walk's own edges — the attribute the answer turns on, which
+    lives on the entities the walk reaches, not on the edges it follows
+    ("which CVEs CISA lists as exploited in the wild affect software
+    web-01 runs": topic `exploited_in_wild`; `runs_software` and `affects`
+    are the path). The vocabulary is the namespace's registry (domain
+    knowledge is data) plus every predicate already gathered."""
+    if scope is None or not question:
+        return frozenset()
+    expand = scope_expand(store, namespace, scope) if expand is None else expand
+    vocabulary = _registry_predicates(store, namespace) | set(seen_predicates)
+    return named_predicates(question, vocabulary - expand, list(scope.subjects))
 
 
 def _record_scope_cap(truncated: Truncations, at: EntityRef, kept: int, reached: int) -> None:
@@ -793,6 +857,7 @@ def resolve_scope_paths(
     as_of: datetime | None = None, valid_at: datetime | None = None,
     allowed_types: tuple[str, ...] | None = None,
     gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
+    question: str | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
@@ -817,12 +882,19 @@ def resolve_scope_paths(
     1,000 rows for every entity in reach. A cut is recorded in `truncated`
     (reason scope_cap), never silent. `gathered_out` receives the frontier
     gathers so the pack need not fetch those entities a second time.
+
+    With a `question` whose topic names an attribute (`scope_topic`, D-061),
+    a hub the gather limit cut is completed for that question: the store
+    joins the hub's expand edges to the rows of their far ends on the topic
+    predicates, and the far ends that carry one are admitted, whatever the
+    age of their edge — the KEV entries of a 2,785-edge kernel product are
+    older than its newest 1,000 edges, so recency alone never reached them.
+    Entities without the attribute stay beyond the window (its page handle
+    still offers them). When the entity cap would cut a frontier, the
+    topic's carriers are admitted before the rest.
     """
     from .config import max_scope_entities, max_scope_observations
-    expand = set(scope.expand)
-    if not expand and scope.depth > 0:
-        from .registry import containment_predicates
-        expand = set(containment_predicates(store.get_schema(namespace)))
+    expand = scope_expand(store, namespace, scope)
     roots = canonical_refs(store, namespace, list(scope.subjects))
     seen = {(r.type, r.key) for r in roots}
     resolved = list(roots)
@@ -833,6 +905,29 @@ def resolve_scope_paths(
     held = 0                                # rows gathered for the walk
     beyond: set[tuple[str, str]] = set()   # reached, but past the entity cap
     cut_at: EntityRef | None = None
+    topic: frozenset[str] | None = None     # computed once the first rows are in
+    seen_predicates: set[str] = set()
+
+    def walkable(obs: Observation, retired) -> bool:
+        return (obs.predicate in expand and obs.id not in retired
+                and _in_scope(obs, allowed_types)
+                and (valid_at is None or covers_valid_at(obs, valid_at))
+                and (scope.follow_extracted or not _is_extracted(obs)))
+
+    def admit(ref: EntityRef, end: EntityRef, obs: Observation, into: list[EntityRef]) -> None:
+        nonlocal cut_at
+        key = (end.type, end.key)
+        if key in seen:
+            return
+        if len(resolved) >= cap:
+            beyond.add(key)   # counted, so the report can say how much was cut
+            cut_at = cut_at or ref
+            return
+        seen.add(key)
+        resolved.append(end)
+        into.append(end)
+        paths[key] = paths.get((ref.type, ref.key), []) + [obs]
+
     for _ in range(scope.depth):
         if not expand or not frontier or cut_at is not None:
             break
@@ -852,36 +947,124 @@ def resolve_scope_paths(
             # applies (D-058)
             retired = _supersession([o for rows in gathered.values() for o in rows
                                      if _in_scope(o, allowed_types)])
+            # the far ends this chunk's windows reach, in walk order
+            window: dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]] = {}
             for ref in chunk:
-                via = paths.get((ref.type, ref.key), [])
                 for obs in gathered.get((ref.type, ref.key), []):
-                    if obs.predicate not in expand or obs.id in retired:
+                    if not walkable(obs, retired):
                         continue
-                    if not _in_scope(obs, allowed_types):
-                        continue
-                    if valid_at is not None and not covers_valid_at(obs, valid_at):
-                        continue
-                    if not scope.follow_extracted and _is_extracted(obs):
-                        continue
-                    ends = [obs.subject]
-                    if isinstance(obs.object, EntityRef):
-                        ends.append(obs.object)
-                    for end in ends:
-                        key = (end.type, end.key)
-                        if key in seen:
-                            continue
-                        if len(resolved) >= cap:
-                            beyond.add(key)   # counted, so the report can say how much was cut
-                            cut_at = cut_at or ref
-                            continue
-                        seen.add(key)
-                        resolved.append(end)
-                        next_frontier.append(end)
-                        paths[key] = via + [obs]
+                    for end in (obs.subject, obs.object):
+                        if isinstance(end, EntityRef) and (end.type, end.key) not in seen:
+                            window.setdefault((end.type, end.key), (ref, end, obs))
+            hubs = [ref for ref in chunk
+                    if (t := truncated.get((ref.type, ref.key))) is not None and t.reason == "gather_limit"]
+            crowded = len(resolved) + len(window) > cap
+            if question and (hubs or crowded) and topic is None:
+                seen_predicates.update(o.predicate for rows in gathered.values() for o in rows)
+                topic = scope_topic(store, namespace, scope, question, seen_predicates, expand)
+            carriers: Reach = {}
+            if topic and (hubs or crowded):
+                carriers, read = _hub_carriers(store, namespace, hubs, expand, topic, seen, as_of,
+                                               valid_at, allowed_types, walkable, window, truncated)
+                held += read
+                if crowded:   # the rest of the window, by probe
+                    hub_keys = {(h.type, h.key) for h in hubs}
+                    rest = {k: r for k, r in window.items()
+                            if k not in carriers and (r[0].type, r[0].key) not in hub_keys}
+                    more, read = _topic_carriers(store, namespace, rest, topic, as_of, valid_at, allowed_types)
+                    held += read
+                    carriers.update(more)
+                # in walk order: the window's carriers, then those past it
+                carriers = {k: carriers[k] for k in [*window, *carriers] if k in carriers}
+            # What the question is about goes in first: when the entity cap
+            # binds, it cuts the entities that do not carry the topic, not
+            # the ones that do (D-061). Past the window only carriers enter.
+            for ref, end, obs in carriers.values():
+                admit(ref, end, obs, next_frontier)
+            for ref, end, obs in window.values():
+                admit(ref, end, obs, next_frontier)
         frontier = next_frontier
     if cut_at is not None:
         _record_scope_cap(truncated, cut_at, len(resolved), len(resolved) + len(beyond))
     return resolved, paths
+
+
+Reach = dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]]  # far end -> (from, end, edge)
+
+
+def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expand: set[str],
+                  topic: frozenset[str], seen: set[tuple[str, str]], as_of: datetime | None,
+                  valid_at: datetime | None, allowed_types: tuple[str, ...] | None,
+                  walkable, window: Reach, truncated: Truncations) -> tuple[Reach, int]:
+    """The far ends of hubs the gather limit cut that carry the question's
+    topic, whatever their age (D-061): the walk saw each hub's newest
+    `_GATHER_LIMIT` rows, and the KEV entries behind a 2,785-edge product
+    are older than its newest 1,000 edges. One indexed join per hub side
+    in the store (`edges_to_carriers`, over at most `_HUB_EDGE_LIMIT` of
+    the hub's expand edges) returns only the matching (edge, attribute)
+    pairs; the edges then pass the walk's own rules (visible, as of, valid
+    at, not extracted, not superseded) and the attributes the reader's.
+
+    Completion is for an attribute that singles out a few of a hub's far
+    ends. When most of them carry it (a CVSS score on every CVE), the
+    recency window already holds carriers aplenty and reaching the rest
+    would only fill the scope to its cap: such a hub keeps its window.
+    Returns the far ends not yet reached, newest edge first, and the rows
+    read."""
+    if not hubs:
+        return {}, 0
+    before = _aware(as_of) if as_of is not None else None
+    pairs = store.edges_to_carriers(namespace, hubs, sorted(expand), sorted(topic),
+                                    limit=_HUB_EDGE_LIMIT, observed_before=before)
+    if not pairs:
+        return {}, 0
+    rows = {o.id: o for o in store.observations_by_ids(
+        namespace, list({i for _, edge, attr in pairs for i in (edge, attr)}))}
+    edge_ids = list({edge for _, edge, _ in pairs})
+    retired = _supersession([o for o in store.corrections_of(namespace, edge_ids, observed_before=before)
+                             if _in_scope(o, allowed_types)] + [rows[i] for i in edge_ids if i in rows])
+    by_key = {(h.type, h.key): h for h in hubs}
+    far: Reach = {}
+    for hub_key, edge_id, attr_id in pairs:
+        edge, attr = rows.get(edge_id), rows.get(attr_id)
+        hub = by_key.get(hub_key)
+        if edge is None or attr is None or hub is None or not walkable(edge, retired):
+            continue
+        if not _in_scope(attr, allowed_types) or (valid_at is not None and not covers_valid_at(attr, valid_at)):
+            continue
+        end = attr.subject
+        if (end.type, end.key) not in seen:
+            far.setdefault((end.type, end.key), (hub, end, edge))
+    for key, hub in by_key.items():
+        mine = [k for k, (h, _, _) in far.items() if h is hub]
+        t = truncated.get(key)
+        if t is not None and 2 * len(mine) > t.total:   # not selective: the window stands
+            for k in mine:
+                if k not in window:
+                    del far[k]
+    return far, len(rows)
+
+
+def _topic_carriers(store: GraphStore, namespace: str, candidates: Reach, topic: frozenset[str],
+                    as_of: datetime | None, valid_at: datetime | None,
+                    allowed_types: tuple[str, ...] | None) -> tuple[Reach, int]:
+    """The candidates that carry a topic predicate this reader may see at
+    this time (D-061): one predicate-filtered read of at most
+    `_TOPIC_PROBE_ROWS` rows per candidate — an unrelated far end costs an
+    index probe, not a gather. Returns them in candidate order, and the
+    rows read."""
+    if not candidates:
+        return {}, 0
+    probe = store.observations_for_many(namespace, [end for _, end, _ in candidates.values()],
+                                        limit=_TOPIC_PROBE_ROWS,
+                                        observed_before=_aware(as_of) if as_of is not None else None,
+                                        predicates=sorted(topic))
+    # the entity's own attribute (it is the row's subject), as the hub join reads it
+    carriers = {key: reach for key, reach in candidates.items()
+                if any(o.subject == reach[1] and _in_scope(o, allowed_types)
+                       and (valid_at is None or covers_valid_at(o, valid_at))
+                       for o in probe.get(key, []))}
+    return carriers, sum(len(rows) for rows in probe.values())
 
 
 def _focus(scope: ScopeSpec | None, question: str | None) -> frozenset[str]:
@@ -911,7 +1094,7 @@ def build_pack(
         subjects, paths = resolve_scope_paths(
             store, req.namespace, req.scope, truncated,
             as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
-            gathered_out=gathered)
+            gathered_out=gathered, question=req.question)
     else:
         # the entity the name resolves to — a merged-away alias included (D-058)
         subjects = canonical_refs(store, req.namespace, [req.subject])
@@ -944,7 +1127,20 @@ def build_pack(
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
                 seen_ids.add(obs.id)
                 observations.append(obs)
+    # The edges the walk reached an entity through are evidence the pack
+    # must be able to show with it, even when neither end's window holds
+    # them (an edge a hub's completion found past both windows, D-061).
+    for key, chain in paths.items():
+        if key not in examined:
+            continue
+        for obs in chain:
+            if obs.id not in seen_ids and _in_scope(obs, allowed_types):
+                seen_ids.add(obs.id)
+                observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
+    topic = (scope_topic(store, req.namespace, req.scope, req.question,
+                         {o.predicate for o in observations})
+             if req.scope is not None else frozenset())
 
     # Semantic ranking (D-018) + document excerpts (D-020): embed the question
     # once, reuse it to score observation vectors AND rank passages from the
@@ -1037,7 +1233,10 @@ def build_pack(
         semantic=semantic and bool(cos_map),
         briefs=briefs,
         withheld_briefs=withheld,
-        focus=_focus(req.scope, req.question),
+        # the attribute a scope question names is its topic; with none, the
+        # walk's own edges it names are (D-058)
+        focus=topic or _focus(req.scope, req.question),
+        topic=topic,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
         # both spellings are the frame, not the topic: the name asked and
@@ -1234,6 +1433,7 @@ def _pack(
     page_predicate: str = "",
     withheld_briefs: int = 0,
     focus: frozenset[str] = frozenset(),
+    topic: frozenset[str] = frozenset(),
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -1324,11 +1524,30 @@ def _pack(
     for obs in observations:
         by_subject.setdefault((obs.subject.type, obs.subject.key), []).append(obs)
     conflict_remaining = int(budget * conflict_share)
+    # A contested fact about an entity the scope walk merely reached is the
+    # question's business only when the question is about that predicate
+    # (D-061): a two-hop walk over a product hub reaches a thousand CVEs
+    # whose CVSS scorers disagree, and shipping those first spent half of
+    # every budget on scores nobody asked about. The rest are handed back
+    # as conflict handles, after the pages — never dropped.
+    reached = set(paths or {}) if question else set()
+    aside_handles: list[ExpansionHandle] = []
+    aside_unminted = 0
     for subj in subjects:
         mine = by_subject.get((subj.type, subj.key), [])
+        aside = (subj.type, subj.key) in reached
         for predicate, item in _find_conflicts(subj, mine, valid_at or as_of,
                                                exclude=superseded_by.keys()):
             cost = item_tokens(item)
+            if aside and predicate not in focus:
+                if len(aside_handles) < _MAX_HANDLES:
+                    aside_handles.append(ExpansionHandle(
+                        id=encode_handle(namespace, subj, predicate, as_of, valid_at, before=page_before),
+                        hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} (not what the question asks)",
+                        est_tokens=cost, kind="conflict"))
+                else:
+                    aside_unminted += 1
+                continue
             if cost <= remaining and cost <= conflict_remaining:
                 items.append(item)
                 remaining -= cost
@@ -1345,6 +1564,55 @@ def _pack(
                     f"did not fit the budget",
                     est_tokens=cost, kind="conflict",
                 ))
+
+    # A scope question's topic comes next (D-061): the facts on the
+    # attribute it names, with the edges that reached them, before the
+    # orientation layers — at 3,200 tokens the KEV question's pack held
+    # sixteen CVSS conflicts and four document excerpts and not one
+    # `exploited_in_wild`. Siblings reached through one edge that share the
+    # attribute's value render as one item per four (`_group_key`); the
+    # handles' share is held back so the menu still fits.
+    subject_keys = {(s.type, s.key) for s in subjects}
+    by_id = {o.id: o for o in observations} if paths else {}
+    pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys)
+    edge_costs: dict[str, int] = {}
+    page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
+                                 page_before, page_predicate, question)
+    share = int(budget * _HANDLE_BUDGET_SHARE)
+    included: set[str] = set()
+    topic_skipped: dict[tuple[str, str, str], int] = {}
+    topic_inbound: set[tuple[str, str, str]] = set()
+    held_back = 0
+    if topic:
+        topic_pool = [e for e in pool if e[3].predicate in topic]
+        if topic_pool:
+            pool = [e for e in pool if e[3].predicate not in topic]
+            groups = {e[3].id: g for e in topic_pool
+                      if (g := _group_key(e[3], e[5], by_id, superseded_by, subject_keys)) is not None}
+            topic_pool = _grouped_density(topic_pool, groups)
+            known = conflict_handles + page_handles + aside_handles if with_handles else []
+            reserve = _handle_room(known, budget, share)
+            for _ in range(2):
+                # the handles' room is held back from the topic: what the
+                # handles already known need, then — if the topic itself
+                # left threads behind — what those add (the loop below
+                # would otherwise have to trim facts it cannot trim)
+                done = set(included)
+                room = max(0, remaining - reserve)
+                got, topic_skipped, topic_inbound, left = _select_facts(
+                    topic_pool, room, by_id, subject_keys, focus, edge_costs,
+                    included=done, groups=groups)
+                threads = (_thread_handles(namespace, topic_skipped, topic_inbound, as_of, valid_at,
+                                           page_before, limit=_MAX_HANDLES)[0] if with_handles else [])
+                wanted = _handle_room(known + threads, budget, share)
+                if wanted <= reserve:
+                    break
+                reserve = wanted
+            included = done
+            items.extend(got)
+            remaining -= room - left
+            held_back = min(reserve, remaining)
+            remaining -= held_back
 
     # Then dossier briefs — the orientation layer (phase 4) — within their
     # share (D-058): a brief cites up to a hundred observations, and at
@@ -1411,27 +1679,24 @@ def _pack(
     # fixed items left. Handles are a bounded share of the budget; when the
     # threads they stand for need that share, the facts are re-selected
     # against the rest so the pack — items AND handles — fits the request.
+    remaining += held_back
     fixed_remaining = remaining
-    subject_keys = {(s.type, s.key) for s in subjects}
-    by_id = {o.id: o for o in observations} if paths else {}
-    page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
-                                 page_before, page_predicate, question)
-
-    pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys)
-    edge_costs: dict[str, int] = {}
     unminted = 0   # threads past the handle cap: counted, never encoded
 
     def select(item_budget: int) -> tuple[list[ContextItem], list[ExpansionHandle], int]:
         nonlocal unminted
         facts, skipped, inbound, left = _select_facts(
-            pool, item_budget, by_id, subject_keys, focus, edge_costs)
-        fixed = conflict_handles + page_handles + excerpt_handles
+            pool, item_budget, by_id, subject_keys, focus, edge_costs, included=set(included))
+        for key, n in topic_skipped.items():
+            skipped[key] = skipped.get(key, 0) + n
+        inbound |= topic_inbound
+        fixed = conflict_handles + page_handles + aside_handles + excerpt_handles
         threads, unminted = _thread_handles(
             namespace, skipped, inbound, as_of, valid_at, page_before,
             limit=max(0, _MAX_HANDLES - len(fixed))) if with_handles else ([], 0)
+        unminted += aside_unminted
         return facts, fixed + threads, left
 
-    share = int(budget * _HANDLE_BUDGET_SHARE)
     item_budget = fixed_remaining
     facts: list[ContextItem] = []
     handles: list[ExpansionHandle] = []
@@ -1488,6 +1753,22 @@ def _pack(
 Pool = list[tuple[float, float, int, Observation, str, list[str]]]
 
 
+def _handle_room(handles: list[ExpansionHandle], budget: int, share: int) -> int:
+    """The room the handles `_pack` would ship need: those that fit, in
+    order, within the share (or the first one's cost if that is larger) —
+    none when the budget is under two of the first, which then rides
+    outside it."""
+    costs = [handle_tokens(h) for h in handles[:_MAX_HANDLES]]
+    if not costs or budget < 2 * costs[0]:
+        return 0
+    cap, room = max(share, costs[0]), 0
+    for cost in costs:
+        if room + cost > cap:
+            break
+        room += cost
+    return room
+
+
 def _fact_pool(
     scored: list[tuple[float, Observation]],
     paths: dict[tuple[str, str], list[str]],
@@ -1519,6 +1800,140 @@ def _fact_pool(
     return pool
 
 
+class _Group:
+    """What siblings must share to render as one item (D-061): the fact's
+    predicate, value and source, the edge that reached them (predicate,
+    direction, the entity at its other end) and the chain before it, and
+    the form of the facts' and the edges' validity windows (`_window_form`):
+    `own` is stated once for the item, `explicit` per member."""
+
+    __slots__ = ("key", "prefix", "edge_predicate", "anchor", "outbound", "fact_form",
+                 "edge_form", "predicate", "object_text", "source")
+
+    def __init__(self, key, prefix, edge_predicate, anchor, outbound, fact_form, edge_form,
+                 predicate, object_text, source):
+        self.key, self.prefix = key, prefix
+        self.edge_predicate, self.anchor, self.outbound = edge_predicate, anchor, outbound
+        self.fact_form, self.edge_form, self.predicate = fact_form, edge_form, predicate
+        self.object_text, self.source = object_text, source
+
+
+_GROUP_MAX = 4   # members per rendered item: two citations each, the eight answer.py renders
+
+
+def _window_form(obs: Observation) -> str:
+    """`own`: valid from its own observation instant, open-ended; `none`:
+    no window (timeless); `explicit`: any other window."""
+    if obs.valid_from is None and obs.valid_to is None:
+        return "none"
+    if obs.valid_to is None and _aware(obs.valid_from) == _aware(obs.observed_at):
+        return "own"
+    return "explicit"
+
+
+def _window_text(obs: Observation) -> str:
+    """The ` [valid X to Y]` suffix `_render_fact` writes, or nothing."""
+    if not (obs.valid_from or obs.valid_to):
+        return ""
+    frm = obs.valid_from.date().isoformat() if obs.valid_from else "?"
+    to = obs.valid_to.date().isoformat() if obs.valid_to else "present"
+    return f" [valid {frm} to {to}]"
+
+
+def _group_key(obs: Observation, path: list[str], by_id: dict[str, Observation],
+               superseded_by: dict[str, Observation],
+               subject_keys: set[tuple[str, str]]) -> tuple[_Group, Observation] | None:
+    """The sibling group of a topic fact about an entity the walk reached,
+    with the edge that reached it; None when the fact must render alone
+    (about a root, superseded, or the edge itself)."""
+    if not path or obs.id in superseded_by or obs.id in path:
+        return None
+    edge = by_id.get(path[-1])
+    member = obs.subject
+    if edge is None or (member.type, member.key) not in subject_keys:
+        return None
+    if edge.subject == member and isinstance(edge.object, EntityRef):
+        anchor, outbound = edge.object, True
+    elif edge.object == member:
+        anchor, outbound = edge.subject, False
+    else:
+        return None
+    fact_form, edge_form = _window_form(obs), _window_form(edge)
+    prefix = tuple(path[:-1])
+    key = (obs.predicate, _norm_value(obs.object), obs.source, edge.predicate,
+           anchor.type, anchor.key, outbound, fact_form, edge_form, prefix)
+    return _Group(key, prefix, edge.predicate, anchor, outbound, fact_form, edge_form,
+                  obs.predicate, _object_text(obs), obs.source), edge
+
+
+_OWN_WINDOWS = {("own", "own"): ", valid from each date",
+                ("own", "none"): ", facts valid from each date",
+                ("own", "explicit"): ", facts valid from each date",
+                ("none", "own"): ", edges valid from each date",
+                ("explicit", "own"): ", edges valid from each date"}
+
+
+def _render_group(group: _Group, members: list[tuple[Observation, Observation]]) -> str:
+    """`cve:A (2023-05-12), cve:B (2022-09-15) exploited_in_wild True (per
+    cisa-kev, valid from each date); each affects product:linux:linux_kernel`
+    — each member's own date (and its edge's, when that differs), the
+    shared value and source once, the shared edge once. A window of the
+    `own` form is stated once in the parentheses; an explicit one is
+    written per member as `_render_fact` writes it: `cve:C (2026-09-18;
+    edge 2026-09-21 [valid 2026-06-25 to present])`."""
+    parts = []
+    for obs, edge in members:
+        date = obs.observed_at.date().isoformat()
+        edate = edge.observed_at.date().isoformat()
+        fwin = _window_text(obs) if group.fact_form == "explicit" else ""
+        ewin = _window_text(edge) if group.edge_form == "explicit" else ""
+        tail = f"; edge {edate}{ewin}" if (edate != date or ewin) else ""
+        parts.append(f"{obs.subject.type}:{obs.subject.key} ({date}{fwin}{tail})")
+    window = _OWN_WINDOWS.get((group.fact_form, group.edge_form), "")
+    anchor = f"{group.anchor.type}:{group.anchor.key}"
+    link = (f"each {group.edge_predicate} {anchor}" if group.outbound
+            else f"{anchor} {group.edge_predicate} each")
+    return (f"{', '.join(parts)} {group.predicate} {group.object_text} "
+            f"(per {group.source}{window}); {link}")
+
+
+def _group_charge(group: _Group, members: list[tuple[Observation, Observation]]) -> int:
+    cites = [c for obs, edge in members for c in (_citation(obs), _citation(edge))]
+    return _charge(_render_group(group, members), cites)
+
+
+def _grouped_density(pool: Pool, groups: dict[str, tuple[_Group, Observation]]) -> Pool:
+    """A groupable fact's density is its score per the tokens it adds to a
+    group (its name, date and two citations), not per a standalone line
+    plus its edge; re-sorted so `_select_facts` ranks by it."""
+    out: Pool = []
+    for density, score, cost, obs, text, path in pool:
+        g = groups.get(obs.id)
+        if g is not None:
+            group, edge = g
+            one = _group_charge(group, [(obs, edge)])
+            two = _group_charge(group, [(obs, edge), (obs, edge)])
+            density = score / max(1, two - one)
+        out.append((density, score, cost, obs, text, path))
+    out.sort(key=lambda e: e[0], reverse=True)
+    return out
+
+
+class _Chunk:
+    """One rendered group item, filled member by member."""
+
+    __slots__ = ("group", "members", "score")
+
+    def __init__(self, group: _Group):
+        self.group, self.members, self.score = group, [], 0.0
+
+    def item(self) -> ContextItem:
+        return ContextItem(
+            kind="fact", text=_render_group(self.group, self.members),
+            score=round(min(self.score, 1.0), 4),
+            citations=[c for obs, edge in self.members for c in (_citation(obs), _citation(edge))])
+
+
 def _select_facts(
     pool: Pool,
     budget: int,
@@ -1526,6 +1941,8 @@ def _select_facts(
     subject_keys: set[tuple[str, str]],
     focus: frozenset[str] = frozenset(),
     edge_costs: dict[str, int] | None = None,
+    included: set[str] | None = None,
+    groups: dict[str, tuple[_Group, Observation]] | None = None,
 ) -> tuple[list[ContextItem], dict[tuple[str, str, str], int], set[tuple[str, str, str]], int]:
     """Value-per-token selection with an MMR-style diversity term (D-051).
     Candidates are ordered by score per charged token; each round takes
@@ -1543,15 +1960,24 @@ def _select_facts(
     that cannot be afforded is skipped for good (the budget only shrinks)
     and counted toward its thread's handle.
 
+    `groups` (D-061) maps a topic fact to its sibling group and the edge
+    that reached it: such a fact joins its group's open item (four members
+    each) and pays only what it adds — the item's charge with it minus the
+    charge without — and its edge ships inside the item, cited, instead of
+    as a relation line. `included` carries ids an earlier pass shipped and
+    is updated in place.
+
     Returns (items, skipped thread counts, inbound thread keys, budget left).
     """
     edge_costs = edge_costs if edge_costs is not None else {}
+    groups = groups or {}
     remaining = budget
-    items: list[ContextItem] = []
-    included: set[str] = set()
+    items: list[ContextItem | _Chunk] = []
+    included = included if included is not None else set()
     skipped: dict[tuple[str, str, str], int] = {}  # (owner type, key, predicate)
     inbound: set[tuple[str, str, str]] = set()
     per_predicate: Counter[str] = Counter()
+    open_chunks: dict[tuple, _Chunk] = {}
 
     def skip(obs: Observation) -> None:
         # An edge pointing INTO a pack subject from outside the pack
@@ -1577,6 +2003,21 @@ def _select_facts(
             cost = edge_costs[edge.id] = _charge(_render_fact(edge), [_citation(edge)])
         return cost
 
+    def grouped(obs: Observation) -> tuple[_Group, Observation, _Chunk | None, int] | None:
+        """(group, edge, the open chunk it would join, what it adds), when
+        the fact renders as a group member here."""
+        g = groups.get(obs.id)
+        if g is None or g[1].id in included:
+            return None   # its edge already shipped: a plain fact now
+        group, edge = g
+        chunk = open_chunks.get(group.key)
+        if chunk is not None:
+            add = (_group_charge(group, chunk.members + [(obs, edge)])
+                   - _group_charge(group, chunk.members))
+        else:
+            add = _group_charge(group, [(obs, edge)])
+        return group, edge, chunk, add
+
     dead: set[str] = set()  # chosen, shipped as an edge, or unaffordable for good
     while True:
         best = None
@@ -1589,9 +2030,15 @@ def _select_facts(
             if obs.id in included:
                 dead.add(obs.id)
                 continue  # already shipped as part of another fact's path
-            chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
+            member = grouped(obs)
+            if member is not None:
+                chain = [by_id[pid] for pid in member[0].prefix if pid not in included]
+                cost_here = member[3]
+            else:
+                chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
+                cost_here = cost
             chain_cost = sum(edge_cost(p) for p in chain)
-            if cost + chain_cost > remaining:
+            if cost_here + chain_cost > remaining:
                 dead.add(obs.id)
                 skip(obs)
                 continue
@@ -1599,10 +2046,10 @@ def _select_facts(
                                if per_predicate[obs.predicate] >= _DIVERSITY_AFTER
                                and obs.predicate not in focus else 1.0)
             if value > best_val:
-                best, best_val = (score, cost, obs, text, chain, chain_cost), value
+                best, best_val = (score, cost_here, obs, text, chain, chain_cost, member), value
         if best is None:
             break
-        score, cost, obs, text, chain, chain_cost = best
+        score, cost, obs, text, chain, chain_cost, member = best
         for edge in chain:
             items.append(ContextItem(
                 kind="relation", text=_render_fact(edge),
@@ -1611,8 +2058,19 @@ def _select_facts(
             included.add(edge.id)
             per_predicate[edge.predicate] += 1
         remaining -= chain_cost
-        items.append(ContextItem(kind="fact", text=text, score=round(min(score, 1.0), 4),
-                                 citations=[_citation(obs)]))
+        if member is not None:
+            group, edge, chunk, _ = member
+            if chunk is None:
+                chunk = open_chunks[group.key] = _Chunk(group)
+                items.append(chunk)
+            chunk.members.append((obs, edge))
+            chunk.score = max(chunk.score, score)
+            if len(chunk.members) >= _GROUP_MAX:
+                del open_chunks[group.key]
+            included.add(edge.id)
+        else:
+            items.append(ContextItem(kind="fact", text=text, score=round(min(score, 1.0), 4),
+                                     citations=[_citation(obs)]))
         remaining -= cost
         included.add(obs.id)
         dead.add(obs.id)
@@ -1620,7 +2078,7 @@ def _select_facts(
     for _, _, _, obs, _, _ in pool:  # affordable but never picked (a zero score): still a thread
         if obs.id not in dead and obs.id not in included:
             skip(obs)
-    return items, skipped, inbound, remaining
+    return [i.item() if isinstance(i, _Chunk) else i for i in items], skipped, inbound, remaining
 
 
 def _thread_handles(

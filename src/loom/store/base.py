@@ -131,14 +131,59 @@ class GraphStore(ABC):
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
+        predicates: list[str] | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         """observations_for for many refs at once: (type, key) -> its newest
         `limit` observations. Backends override with one round trip per
         chunk; a 1,077-entity scope was 1,077 round trips, 5 s on Postgres
         over a network versus 0.5 s in-process (D-043). Refs that resolve
-        to nothing are absent from the result."""
-        return {(r.type, r.key): self.observations_for(namespace, r, limit, observed_before=observed_before)
-                for r in refs}
+        to nothing are absent from the result. `predicates` keeps only rows
+        on those predicates — the newest `limit` of *them* per entity, the
+        filter applied in the query (D-061: a scope walk fetches a hub's
+        edges past its gather window, and the attributes a question names
+        on the entities at their far end)."""
+        if predicates is None:
+            return {(r.type, r.key): self.observations_for(namespace, r, limit, observed_before=observed_before)
+                    for r in refs}
+        wanted = set(predicates)
+        out: dict[tuple[str, str], list[Observation]] = {}
+        for r in refs:
+            rows = [o for o in self.observations_for(namespace, r, 2 ** 31 - 1, observed_before=observed_before)
+                    if o.predicate in wanted][:limit]
+            if rows:
+                out[(r.type, r.key)] = rows
+        return out
+
+    def edges_to_carriers(
+        self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
+        limit: int = 10_000, observed_before: datetime | None = None,
+    ) -> list[tuple[tuple[str, str], str, str]]:
+        """For each hub, its newest `limit` edges on `via` predicates (either
+        direction) whose far end is the subject of a row on one of
+        `predicates`: (hub (type, key), edge id, that row's id), newest edge
+        first per hub, both rows visible (not tombstoned) and observed at or
+        before `observed_before`. A far end with several such rows appears
+        once per row. What a scope walk needs to complete a hub its gather
+        window cut for the attribute a question names (D-061); backends
+        answer it with one indexed join per hub side, so the hub's edges are
+        never materialized. This default reads through
+        `observations_for_many`."""
+        if not hubs or not via or not predicates:
+            return []
+        edges = self.observations_for_many(namespace, hubs, limit=limit, observed_before=observed_before,
+                                           predicates=list(via))
+        out: list[tuple[tuple[str, str], str, str]] = []
+        for hub in hubs:
+            rows = [(o, o.object if o.subject == hub else o.subject)
+                    for o in edges.get((hub.type, hub.key), [])]
+            rows = [(o, end) for o, end in rows if isinstance(end, EntityRef) and end != hub]
+            attrs = self.observations_for_many(namespace, list({(e.type, e.key): e for _, e in rows}.values()),
+                                               limit=2 ** 31 - 1, observed_before=observed_before,
+                                               predicates=list(predicates))
+            for o, end in rows:
+                out.extend(((hub.type, hub.key), o.id, a.id)
+                           for a in attrs.get((end.type, end.key), []) if a.subject == end)
+        return out
 
     @abstractmethod
     def search_entities(

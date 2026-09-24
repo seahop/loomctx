@@ -143,9 +143,16 @@ class ShardedStore(GraphStore):
 
     def observations_for_many(self, namespace: str, refs: list[EntityRef], limit: int = 100,
                               observed_before: datetime | None = None,
+                              predicates: list[str] | None = None,
                               ) -> dict[tuple[str, str], list[Observation]]:
         return self.shard_for(namespace).observations_for_many(
-            namespace, refs, limit, observed_before=observed_before)
+            namespace, refs, limit, observed_before=observed_before, predicates=predicates)
+
+    def edges_to_carriers(self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
+                          limit: int = 10_000, observed_before: datetime | None = None,
+                          ) -> list[tuple[tuple[str, str], str, str]]:
+        return self.shard_for(namespace).edges_to_carriers(
+            namespace, hubs, via, predicates, limit, observed_before=observed_before)
 
     def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
         yield from self._iter("iter_observations", namespace)

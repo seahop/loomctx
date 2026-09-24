@@ -160,6 +160,10 @@ Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.
 - **Gather cap.** A read collects at most 1,000 observations per entity;
   when a subject has more, the pack says so in `truncated` (gathered/total)
   and the handles reach the rest. A hub entity is never silently sampled.
+  A scope question that names an attribute of the entities behind a hub
+  (`exploited_in_wild` on the CVEs behind a product) reaches every entity
+  that carries it, whatever its age — but only through predicate names the
+  question uses and the registry or the gathered rows know (D-061).
 - **Alias resolution costs money.** Structural aliases (`linux:kernel` vs
   `linux:linux_kernel`) are adjudicated by an LLM, one call per candidate
   (~3 cents on the vulnerability corpus with a flash-class judge); the

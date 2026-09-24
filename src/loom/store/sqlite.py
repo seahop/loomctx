@@ -732,7 +732,11 @@ class SqliteStore(GraphStore):
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 rows = self._conn.execute(
-                    _OBS_SELECT + f" WHERE o.namespace = ? AND o.id IN ({','.join('?' * len(chunk))})"
+                    # `+o.namespace`: a bare namespace term let the planner
+                    # walk the namespace's idx_obs_prov_artifact range instead
+                    # of the primary key — 255 ms vs 4 ms per 500 ids on the
+                    # 542k-row vulns corpus (D-061)
+                    _OBS_SELECT + f" WHERE +o.namespace = ? AND o.id IN ({','.join('?' * len(chunk))})"
                     + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
                 out.extend(common.row_to_observation(r) for r in rows)
         return out
@@ -1264,39 +1268,47 @@ class SqliteStore(GraphStore):
     _GATHER_CHUNK = 200
 
     def _many_query(self, namespace: str, ids: list[str], limit: int,
-                    observed_before: datetime | None) -> tuple[str, tuple]:
+                    observed_before: datetime | None,
+                    predicates: list[str] | None = None) -> tuple[str, tuple]:
         """The `hits` body of the batched gather and its parameters: per
         entity, the newest `limit` rows of each side as its own index range
         with its own LIMIT (idx_obs_subject / idx_obs_object, D-035), so a
         hub with 100k edges contributes 2·limit rows to the window that
         trims per entity — not every edge, per ask (R-9). One generated
-        UNION ALL per chunk; the as_of bound rides each range (D-046)."""
+        UNION ALL per chunk; the as_of bound rides each range (D-046), and
+        so does a predicate filter (D-061)."""
         before_sql, before_args = _observed_before("?", observed_before)
+        pred_sql, pred_args = "", ()
+        if predicates is not None:
+            pred_sql = f" AND o.predicate IN ({','.join('?' * len(predicates))})"
+            pred_args = tuple(predicates)
         subj = ("SELECT * FROM (" + _OBS_SELECT_ENT.format(ent="o.subject_id")
                 + " WHERE o.namespace = ? AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql
-                + " ORDER BY o.observed_at DESC LIMIT ?)")
+                + pred_sql + " ORDER BY o.observed_at DESC LIMIT ?)")
         obj = ("SELECT * FROM (" + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
                + " WHERE o.namespace = ? AND o.object_entity_id = ? AND o.subject_id != ?"
-               + _NOT_TOMBSTONED + before_sql
+               + _NOT_TOMBSTONED + before_sql + pred_sql
                + " ORDER BY o.observed_at DESC LIMIT ?)")
         params: list = []
         for eid in ids:
-            params += (namespace, eid, *before_args, limit, namespace, eid, eid, *before_args, limit)
+            params += (namespace, eid, *before_args, *pred_args, limit,
+                       namespace, eid, eid, *before_args, *pred_args, limit)
         return " UNION ALL ".join([subj, obj] * len(ids)), tuple(params)
 
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
+        predicates: list[str] | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
-        if not refs:
+        if not refs or (predicates is not None and not predicates):
             return result
         with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
             for start in range(0, len(ids), self._GATHER_CHUNK):
                 chunk = ids[start:start + self._GATHER_CHUNK]
-                hits, params = self._many_query(namespace, chunk, limit, observed_before)
+                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates)
                 rows = self._conn.execute(
                     "WITH hits AS (" + hits + "),"
                     " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
@@ -1308,6 +1320,54 @@ class SqliteStore(GraphStore):
                     for ref in owners[row["ent"]]:
                         result.setdefault((ref.type, ref.key), []).append(obs)
         return result
+
+    def edges_to_carriers(
+        self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
+        limit: int = 10_000, observed_before: datetime | None = None,
+    ) -> list[tuple[tuple[str, str], str, str]]:
+        """One join per hub side (D-061): the hub's newest `limit` edges on
+        `via` from its own index range (idx_obs_object inbound, idx_obs_subject
+        outbound), each far end's rows on `predicates` from idx_obs_subject.
+        Only matching id pairs leave the database."""
+        out: list[tuple[tuple[str, str], str, str]] = []
+        if not hubs or not via or not predicates:
+            return out
+        with self._tx(read=True):
+            owners = self._resolve_many(namespace, hubs)
+            for eid, refs in owners.items():
+                rows: list = []
+                for inbound in (True, False):
+                    sql, params = self._carriers_query(namespace, eid, inbound, via, predicates,
+                                                       limit, observed_before)
+                    rows += self._conn.execute(sql, params).fetchall()
+                rows.sort(key=lambda r: (r["at"], r["edge_id"]), reverse=True)
+                for ref in refs:
+                    out.extend(((ref.type, ref.key), r["edge_id"], r["attr_id"]) for r in rows)
+        return out
+
+    @staticmethod
+    def _carriers_query(namespace: str, eid: str, inbound: bool, via: list[str], predicates: list[str],
+                        limit: int, observed_before: datetime | None) -> tuple[str, tuple]:
+        """The join for one hub side. CROSS JOIN fixes the order — the
+        hub's edges outside, the far end's rows inside: left to itself, the
+        planner walked the namespace's whole observation table (7 s on the
+        vulns corpus) instead of 2,785 index probes (19 ms)."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        attr_before = before_sql.replace("o.observed_at", "a.observed_at")
+        if inbound:
+            where, far = "o.object_entity_id = ? AND o.subject_id != ?", "o.subject_id"
+        else:
+            where, far = ("o.subject_id = ? AND o.object_entity_id IS NOT NULL AND o.object_entity_id != ?",
+                          "o.object_entity_id")
+        sql = ("SELECT e.id AS edge_id, e.observed_at AS at, a.id AS attr_id FROM ("
+               f"SELECT o.id, o.observed_at, {far} AS far FROM observations o"
+               f" WHERE o.namespace = ? AND {where} AND o.predicate IN ({','.join('?' * len(via))})"
+               + _NOT_TOMBSTONED + before_sql + " ORDER BY o.observed_at DESC LIMIT ?) e"
+               " CROSS JOIN observations a ON a.namespace = ? AND a.subject_id = e.far"
+               f" AND a.predicate IN ({','.join('?' * len(predicates))}) AND a.id != e.id"
+               " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = a.id)"
+               + attr_before)
+        return sql, (namespace, eid, eid, *via, *before_args, limit, namespace, *predicates, *before_args)
 
     def store_artifact(self, doc: DocumentIn) -> Artifact:
         with self._tx():

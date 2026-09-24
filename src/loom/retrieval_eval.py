@@ -65,7 +65,7 @@ from . import context as _context
 from .agent_eval import Provider, _cited, cite_tokens_in
 from .answer import SYSTEM_PROMPT, render_user_prompt
 from .context import (_aware, _citation, _is_extracted, _render_fact, build_pack, cosines,
-                      covers_valid_at, item_tokens, resolve_scope)
+                      covers_valid_at, item_tokens)
 from .contracts import AskRequest, ContextItem, ContextPack, EntityRef, Observation, ScopeSpec
 from .llm import LLMError, _post_json, embedder_from_env
 
@@ -527,11 +527,14 @@ def in_loom_gather(store, q: Question) -> bool | None:
     gathers for this question — the scope walk and the newest
     `context._GATHER_LIMIT` observations per entity, both under the
     question's time axis. False means loom@B cannot carry the answer at any
-    budget: a product limit on hubs (D-038), reported, never hidden."""
+    budget: a product limit on hubs (D-038), reported, never hidden. The walk
+    is the product's own, question included: a hub the gather limit cut is
+    completed for the attribute the question names (D-061)."""
     if not q.truth_ids:
         return None
     if q.scope is not None:
-        refs = resolve_scope(store, q.namespace, q.scope, as_of=q.as_of, valid_at=q.valid_at)
+        refs = _context.resolve_scope_paths(store, q.namespace, q.scope, as_of=q.as_of,
+                                            valid_at=q.valid_at, question=q.text)[0]
     else:
         refs = [q.subject]
     got = store.observations_for_many(q.namespace, refs, limit=_context._GATHER_LIMIT,
@@ -871,6 +874,15 @@ _LINE = re.compile(r"^- \((\w+)\) (.*) \[([^\]]*)\]$")
 _FACT = re.compile(r"^(\S+) (\S+) (.+?) \((\d{4}-\d{2}-\d{2}), per ([^)]+)\)(?: \[valid (\S+) to (\S+)\])?"
                    r"(?: \[superseded by [0-9a-f]+\])?$")
 _SAYS = re.compile(r"(\S+) says '([^']*)'")
+# siblings a scope pack renders as one item (D-061): `a (date), b (date; edge
+# date) predicate value (per source[, [facts |edges ]valid from each date]);
+# each edge anchor` or `...; anchor edge each`; a member may spell out its
+# windows, `(date [valid X to Y]; edge date [valid X to Y])`. Citations
+# alternate fact, edge per member.
+_GROUP = re.compile(r"^((?:\S+ \([^()]*\), )*\S+ \([^()]*\)) (\S+) (.+?) \(per ([^();,]+)"
+                    r"(?:, (facts |edges |)valid from each date)?\); (?:each (\S+) (\S+)|(\S+) (\S+) each)$")
+_MEMBER = re.compile(r"(\S+) \((\d{4}-\d{2}-\d{2})(?: \[valid (\S+) to (\S+)\])?"
+                     r"(?:; edge (\d{4}-\d{2}-\d{2})(?: \[valid (\S+) to (\S+)\])?)?\)")
 
 
 @dataclass
@@ -898,9 +910,27 @@ def parse_context(prompt: str) -> list[_Line]:
         kind, text, cites = m.groups()
         cite_list = [c.strip() for c in cites.split(",") if c.strip() and not c.strip().startswith("+")]
         f = _FACT.match(text)
+        g = None if f else _GROUP.match(text)
         if f:
             s, p, o, d, src, vf, vt = f.groups()
             out.append(_Line(kind, s, p, o, d, src, vf, vt, cite_list, text))
+        elif g:
+            # one line per member fact and one per member edge, each with
+            # its own citation — what the item says, spelled out
+            members, p, o, src, own, out_edge, anchor, in_anchor, in_edge = g.groups()
+            fact_own = own is not None and own in ("", "facts ")
+            edge_own = own is not None and own in ("", "edges ")
+            for i, (who, d, vf, vt, ed, evf, evt) in enumerate(_MEMBER.findall(members)):
+                fact_cites = cite_list[2 * i:2 * i + 1]
+                edge_cites = cite_list[2 * i + 1:2 * i + 2]
+                ed = ed or d
+                window = (vf, vt) if vf else ((d, "present") if fact_own else (None, None))
+                ewindow = (evf, evt) if evf else ((ed, "present") if edge_own else (None, None))
+                out.append(_Line(kind, who, p, o, d, src, *window, fact_cites, text))
+                if out_edge:
+                    out.append(_Line("relation", who, out_edge, anchor, ed, "", *ewindow, edge_cites, text))
+                else:
+                    out.append(_Line("relation", in_anchor, in_edge, who, ed, "", *ewindow, edge_cites, text))
         else:
             out.append(_Line(kind, "", "", text, "", "", None, None, cite_list, text))
     return out
