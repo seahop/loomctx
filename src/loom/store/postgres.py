@@ -1157,39 +1157,46 @@ class PostgresStore(GraphStore):
         return out
 
     def _many_query(self, namespace: str, ids: list[str], limit: int,
-                    observed_before: datetime | None) -> tuple[str, tuple]:
+                    observed_before: datetime | None,
+                    predicates: list[str] | None = None) -> tuple[str, tuple]:
         """The `hits` body of the batched gather and its parameters: a
         LATERAL per side, so every entity contributes its newest `limit`
         rows of each side from its own index range instead of every edge
-        (R-9; see sqlite.py). The as_of bound rides each range (D-046)."""
+        (R-9; see sqlite.py). The as_of bound rides each range (D-046), and
+        so does a predicate filter (D-061)."""
         before_sql, before_args = _observed_before("%s", observed_before)
+        pred_sql, pred_args = "", ()
+        if predicates is not None:
+            pred_sql, pred_args = " AND o.predicate = ANY(%s)", (list(predicates),)
         sql = (
             "SELECT s.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
             + _OBS_SELECT_ENT.format(ent="o.subject_id")
             + " WHERE o.namespace = %s AND o.subject_id = ids.eid" + _NOT_TOMBSTONED + before_sql
-            + " ORDER BY o.observed_at DESC LIMIT %s) s"
+            + pred_sql + " ORDER BY o.observed_at DESC LIMIT %s) s"
             " UNION ALL "
             "SELECT t.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
             + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
             + " WHERE o.namespace = %s AND o.object_entity_id = ids.eid AND o.subject_id <> ids.eid"
-            + _NOT_TOMBSTONED + before_sql
+            + _NOT_TOMBSTONED + before_sql + pred_sql
             + " ORDER BY o.observed_at DESC LIMIT %s) t"
         )
-        return sql, (list(ids), namespace, *before_args, limit, list(ids), namespace, *before_args, limit)
+        return sql, (list(ids), namespace, *before_args, *pred_args, limit,
+                     list(ids), namespace, *before_args, *pred_args, limit)
 
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
+        predicates: list[str] | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
-        if not refs:
+        if not refs or (predicates is not None and not predicates):
             return result
         with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
             for start in range(0, len(ids), self._MANY_CHUNK):
                 chunk = ids[start:start + self._MANY_CHUNK]
-                hits, params = self._many_query(namespace, chunk, limit, observed_before)
+                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates)
                 rows = self._q(
                     "WITH hits AS (" + hits + "),"
                     " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
@@ -1201,6 +1208,53 @@ class PostgresStore(GraphStore):
                     for ref in owners[row["ent"]]:
                         result.setdefault((ref.type, ref.key), []).append(obs)
         return result
+
+    def edges_to_carriers(
+        self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
+        limit: int = 10_000, observed_before: datetime | None = None,
+    ) -> list[tuple[tuple[str, str], str, str]]:
+        """One join per hub side (D-061; see sqlite.py): the hub's newest
+        `limit` edges on `via` from its own index range, each far end's rows
+        on `predicates` from the subject index. Only id pairs come back."""
+        out: list[tuple[tuple[str, str], str, str]] = []
+        if not hubs or not via or not predicates:
+            return out
+        with self._tx(read=True):
+            owners = self._resolve_many(namespace, hubs)
+            for eid, refs in owners.items():
+                rows: list = []
+                for inbound in (True, False):
+                    rows += self._q(*self._carriers_query(namespace, eid, inbound, via, predicates,
+                                                          limit, observed_before))
+                rows.sort(key=lambda r: (r["at"], r["edge_id"]), reverse=True)
+                for ref in refs:
+                    out.extend(((ref.type, ref.key), r["edge_id"], r["attr_id"]) for r in rows)
+        return out
+
+    @staticmethod
+    def _carriers_query(namespace: str, eid: str, inbound: bool, via: list[str], predicates: list[str],
+                        limit: int, observed_before: datetime | None) -> tuple[str, tuple]:
+        """The join for one hub side: the hub's edges from their own index
+        range, then — LATERAL, so the planner cannot hash the namespace's
+        rows on the predicate instead — an index probe per far end."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        attr_before = before_sql.replace("o.observed_at", "a.observed_at")
+        if inbound:
+            where, far = "o.object_entity_id = %s AND o.subject_id <> %s", "o.subject_id"
+        else:
+            where, far = ("o.subject_id = %s AND o.object_entity_id IS NOT NULL AND o.object_entity_id <> %s",
+                          "o.object_entity_id")
+        sql = ("SELECT e.id AS edge_id, e.observed_at AS at, a.id AS attr_id FROM ("
+               f"SELECT o.id, o.observed_at, {far} AS far FROM observations o"
+               f" WHERE o.namespace = %s AND {where} AND o.predicate = ANY(%s)"
+               + _NOT_TOMBSTONED + before_sql + " ORDER BY o.observed_at DESC LIMIT %s) e"
+               " CROSS JOIN LATERAL (SELECT a.id FROM observations a"
+               " WHERE a.namespace = %s AND a.subject_id = e.far"
+               " AND a.predicate = ANY(%s) AND a.id <> e.id"
+               " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = a.id)"
+               + attr_before + ") a")
+        return sql, (namespace, eid, eid, list(via), *before_args, limit,
+                     namespace, list(predicates), *before_args)
 
     def store_artifact(self, doc: DocumentIn) -> Artifact:
         return retry_on_deadlock(lambda: self._store_artifact(doc))

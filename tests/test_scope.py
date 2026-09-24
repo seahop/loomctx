@@ -180,3 +180,47 @@ def test_scope_subjects_are_bounded():
     ScopeSpec(subjects=[EntityRef(type="host", key=f"h{i}") for i in range(500)])
     with pytest.raises(ValidationError):
         ScopeSpec(subjects=[EntityRef(type="host", key=f"h{i}") for i in range(501)])
+
+
+# ------------------------------------------------ scope topics (D-061) #
+
+def test_a_predicate_is_named_when_every_word_of_it_is_asked():
+    from loom.context import named_predicates
+    vocab = {"runs_software", "runs_os", "exploited_in_wild", "affects", "logged_in_by", "has_weakness"}
+    q = "Which CVEs that CISA lists as exploited in the wild affect software that host:web-01 runs?"
+    assert named_predicates(q, vocab) == {"runs_software", "exploited_in_wild", "affects"}
+    assert named_predicates("which users logged in to web-01?", vocab) == {"logged_in_by"}
+    assert named_predicates("what OS does it run?", vocab) == {"runs_os"}
+    # the names of the entities asked about are the frame, not the topic
+    assert named_predicates("summarize host:weakness-lab", vocab,
+                            [EntityRef(type="host", key="weakness-lab")]) == frozenset()
+    assert named_predicates(None, vocab) == frozenset()
+
+
+def _conflicted_domain(tmp_path):
+    """corp.local's member web-01 carries a runs_os conflict and a login."""
+    store, domain = make_store(tmp_path)
+    web = EntityRef(type="host", key="web-01")
+    for source, value in (("cmdb", "ubuntu-22.04"), ("nmap", "fedora-44")):
+        store.record_claim(ClaimIn(subject=web, predicate="runs_os", object=value,
+                                   observed_at=_at(12), source=source))
+    return store, domain
+
+
+def test_a_reached_entitys_conflict_ships_only_when_the_question_is_about_it(tmp_path):
+    """In a scope pack, a contested fact about an entity the walk reached
+    ships first only when the question names its predicate; otherwise it
+    is a conflict handle — never dropped, never the budget (D-061). The
+    root's own conflicts are unchanged."""
+    store, domain = _conflicted_domain(tmp_path)
+    scope = ScopeSpec(subjects=[domain], expand=["member_of"], depth=1)
+    logins = build_pack(store, AskRequest(scope=scope, question="who logged in?", budget=3000))
+    assert not [i for i in logins.items if i.kind == "conflict"]
+    aside = [h for h in logins.handles if h.kind == "conflict"]
+    assert aside and "host:web-01 runs_os" in aside[0].hint
+    os_pack = build_pack(store, AskRequest(scope=scope, question="which OS do the hosts run?", budget=3000))
+    assert [i for i in os_pack.items if i.kind == "conflict"][0].text.startswith("CONFLICT on host:web-01 runs_os")
+    # asked about web-01 itself, its conflict is the frame's and ships first
+    own = build_pack(store, AskRequest(subject=EntityRef(type="host", key="web-01"),
+                                       question="who logged in?", budget=3000))
+    assert own.items[0].kind == "conflict"

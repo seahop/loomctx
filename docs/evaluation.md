@@ -85,14 +85,23 @@ each group of three is a comparison at the same budget.
 and gather every observation of every entity it reaches, with no per-entity
 limit (`walk_scope`, `candidate_observations`). Loom's own condition keeps
 the product's behavior: the scope walk and the pack see the newest 1,000
-observations per entity (D-038), so on a hub — the Linux kernel product has
-2,740 `affects` edges, and the KEV ones are older and cut first — some
-ground truth is outside Loom's reach at any budget. Every question records
-whether its truth is inside Loom's gather (`in_loom_gather`); the
-scorecard lists the ones that are not, and `--list-questions` marks them
-`OUTSIDE-LOOM-GATHER`. That is a product limitation reported, not hidden:
-the pack says so to the reader (a `coverage:` line), but the answer is not
-in it.
+observations per entity (D-038), plus — when the question names an
+attribute of the entities behind a hub the cap cut — the hub's edges to
+the entities that carry it, whatever their age (D-061: the Linux kernel
+product has 2,785 `affects` edges and its KEV entries are the oldest, so
+before D-061 all six KEV questions were outside Loom's reach at any
+budget). Every question records whether its truth is inside Loom's gather
+(`in_loom_gather`, computed with the product's own question-aware walk);
+the scorecard lists the ones that are not, and `--list-questions` marks
+them `OUTSIDE-LOOM-GATHER`. That is a product limitation reported, not
+hidden: the pack says so to the reader (a `coverage:` line), but the
+answer is not in it.
+
+A scope pack renders siblings the walk reached through one edge that share
+the named attribute's value as one item per four (D-061) — `cve:A (date),
+cve:B (date) exploited_in_wild True (per cisa-kev, valid from each date);
+each affects product:linux:linux_kernel`, citing each fact and each edge —
+and the rule-based reader reads such an item back fact by fact.
 
 The baselines get no time filtering on purpose: the question states the
 date, and reading validity windows and observation dates out of the text is
@@ -228,10 +237,11 @@ has not already applied them?).
   are enforced on the pack builder's estimate, so a `loom@800` prompt may
   bill more than 800 — and so may `vector@800`, which is charged the same way.
 - **Loom's gather cap is Loom's.** `loom@B` sees the newest 1,000
-  observations per entity; the baselines see everything. Questions whose
-  truth lies beyond that cap are kept (removing them would flatter Loom)
-  and listed under the scorecard; read the `loom@B` multi-hop cells with
-  that list next to them.
+  observations per entity (and, past a hub's window, only the entities
+  carrying an attribute the question names); the baselines see
+  everything. Questions whose truth lies beyond that are kept (removing
+  them would flatter Loom) and listed under the scorecard; read the
+  `loom@B` multi-hop cells with that list next to them.
 - **Strict format.** A model that answers well but ignores the two-line
   format scores as wrong. Check the JSON before blaming retrieval.
 - **The scripted reader is optimistic.** It parses windows and dates

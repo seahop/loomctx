@@ -1982,3 +1982,226 @@ def test_sqlite_reads_use_pooled_readers(tmp_path):
                 for k in keys} == expected
     finally:
         plain.close()
+
+
+# ------------------------- predicate filter and hub completion (D-061) #
+
+def test_observations_for_many_filters_by_predicate(store):
+    """`predicates` keeps only rows on those predicates, on both sides,
+    applied before the per-entity limit — the newest `limit` rows *of
+    them*, under the as_of bound — so a hub's edges past its gather window
+    come back in one bounded read."""
+    from datetime import timedelta
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    hub = EntityRef(type="product", key="kernel")
+    claims = [ClaimIn(namespace="m", subject=EntityRef(type="cve", key=f"c{i}"), predicate="affects",
+                      object=hub, observed_at=t + timedelta(minutes=i), source="s") for i in range(30)]
+    claims += [ClaimIn(namespace="m", subject=hub, predicate="made_by", object=EntityRef(type="vendor", key="v"),
+                       observed_at=t + timedelta(minutes=100), source="s")]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="cve", key=f"c{i}"), predicate="exploited_in_wild",
+                       object=True, observed_at=t + timedelta(minutes=200 + i), source="k") for i in (2, 5)]
+    store.record_claims(claims)
+    cves = [EntityRef(type="cve", key=f"c{i}") for i in range(30)]
+    edges = store.observations_for_many("m", [hub], limit=10, predicates=["affects"])[("product", "kernel")]
+    assert [o.subject.key for o in edges] == [f"c{i}" for i in range(29, 19, -1)]      # the newest 10 edges
+    both = store.observations_for_many("m", [hub], limit=100, predicates=["affects", "made_by"])
+    assert len(both[("product", "kernel")]) == 31
+    before = store.observations_for_many("m", [hub], limit=100, observed_before=t + timedelta(minutes=4),
+                                         predicates=["affects"])[("product", "kernel")]
+    assert [o.subject.key for o in before] == ["c4", "c3", "c2", "c1", "c0"]
+    probe = store.observations_for_many("m", cves, limit=2, predicates=["exploited_in_wild"])
+    assert set(probe) == {("cve", "c2"), ("cve", "c5")}                  # nothing matched: absent
+    assert all(o.predicate == "exploited_in_wild" for rows in probe.values() for o in rows)
+    assert store.observations_for_many("m", cves, limit=2, predicates=[]) == {}
+
+
+def test_edges_to_carriers_joins_a_hubs_edges_to_the_far_attribute(store):
+    """(hub, edge, attribute) for the hub's edges on `via` — either
+    direction — whose far end is the subject of a row on `predicates`,
+    newest edge first, within the edge limit and the as_of bound; redacted
+    rows on either side drop out; the base implementation answers the same."""
+    from datetime import timedelta
+    from loom.store.base import GraphStore
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    hub = EntityRef(type="product", key="kernel")
+    claims = [ClaimIn(namespace="m", subject=EntityRef(type="cve", key=f"c{i}"), predicate="affects",
+                      object=hub, observed_at=t + timedelta(minutes=i), source="s") for i in range(10)]
+    claims.append(ClaimIn(namespace="m", subject=hub, predicate="bundles", object=EntityRef(type="lib", key="zlib"),
+                          observed_at=t + timedelta(minutes=20), source="s"))
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="cve", key=f"c{i}"), predicate="exploited_in_wild",
+                       object=True, observed_at=t + timedelta(minutes=30 + i), source="k") for i in (1, 4, 8)]
+    claims.append(ClaimIn(namespace="m", subject=EntityRef(type="lib", key="zlib"), predicate="exploited_in_wild",
+                          object=True, observed_at=t + timedelta(minutes=40), source="k"))
+    claims.append(ClaimIn(namespace="m", subject=EntityRef(type="user", key="x"), predicate="exploited_in_wild",
+                          object=EntityRef(type="cve", key="c2"), observed_at=t, source="k"))   # c2 is its object
+    rows = store.record_claims(claims)
+    by = {(o.subject.key, o.predicate): o.id for o in rows}
+
+    def pairs(s, **kw):
+        return [(e, a) for _, e, a in s.edges_to_carriers("m", [hub], ["affects", "bundles"],
+                                                         ["exploited_in_wild"], **kw)]
+    expected = [(by[("kernel", "bundles")], by[("zlib", "exploited_in_wild")])] + [
+        (by[(f"c{i}", "affects")], by[(f"c{i}", "exploited_in_wild")]) for i in (8, 4, 1)]
+    assert pairs(store) == expected
+    assert pairs(store, limit=3) == expected[:2]            # the newest 3 edges of each side only
+    assert pairs(store, observed_before=t + timedelta(minutes=31)) == [
+        (by[("c1", "affects")], by[("c1", "exploited_in_wild")])]
+    assert GraphStore.edges_to_carriers(store, "m", [hub], ["affects", "bundles"], ["exploited_in_wild"]) \
+        == store.edges_to_carriers("m", [hub], ["affects", "bundles"], ["exploited_in_wild"])
+    store.redact("m", by[("c4", "exploited_in_wild")], "test")
+    store.redact("m", by[("c8", "affects")], "test")
+    assert pairs(store) == [expected[0], expected[3]]
+    assert store.edges_to_carriers("m", [hub], ["affects"], []) == []
+    b = _backend(store, "m")
+    if isinstance(b, SqliteStore):   # the hub's edges outside, index probes inside — never a table scan
+        with b._tx():
+            eid = list(b._resolve_many("m", [hub]))[0]
+            for inbound in (True, False):
+                sql, params = b._carriers_query("m", eid, inbound, ["affects"], ["exploited_in_wild"],
+                                                100, t)
+                details = " | ".join(r["detail"] for r in _exec(b, "EXPLAIN QUERY PLAN " + sql, params))
+                assert ("idx_obs_object" if inbound else "idx_obs_subject") in details, details
+                assert "SEARCH a USING INDEX idx_obs_subject" in details and "SCAN o" not in details, details
+
+
+def _kev_hub(store, n_edges=60, kev=(0, 1, 2), registry=True):
+    """host h1 runs product kernel; `n_edges` CVEs affect it, one a minute,
+    CVE-2026-0000 oldest. The CVEs in `kev` carry exploited_in_wild; every
+    CVE carries a cvss_score two scorers disagree on."""
+    from datetime import timedelta
+    from loom.contracts import PredicateDef, SchemaRegistration
+    t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    host, hub = EntityRef(type="host", key="h1"), EntityRef(type="product", key="kernel")
+    if registry:
+        store.put_schema(SchemaRegistration(namespace="v", predicates=[
+            PredicateDef(name="exploited_in_wild"), PredicateDef(name="cvss_score")]))
+    claims = [ClaimIn(namespace="v", subject=host, predicate="runs_software", object=hub,
+                      observed_at=t, source="inventory")]
+    for i in range(n_edges):
+        cve = EntityRef(type="cve", key=f"CVE-2026-{i:04d}")
+        at = t + timedelta(minutes=10 + i)
+        claims.append(ClaimIn(namespace="v", subject=cve, predicate="affects", object=hub,
+                              observed_at=at, source="nvd", valid_from=at))
+        claims.append(ClaimIn(namespace="v", subject=cve, predicate="cvss_score", object=7.5,
+                              observed_at=at, source="nvd:nist"))
+        claims.append(ClaimIn(namespace="v", subject=cve, predicate="cvss_score", object=5.0,
+                              observed_at=at, source="nvd:cna"))
+        if i in kev:
+            claims.append(ClaimIn(namespace="v", subject=cve, predicate="exploited_in_wild", object=True,
+                                  observed_at=at, source="kev", valid_from=at))
+    store.record_claims(claims)
+    return host, hub
+
+
+_KEV_Q = "Which CVEs that CISA lists as exploited in the wild affect software that host:h1 runs?"
+_KEV_SCOPE = {"expand": ["runs_software", "affects"], "depth": 2}
+
+
+def test_scope_walk_completes_a_truncated_hub_for_the_question(store, monkeypatch):
+    """A hub the gather limit cut is completed for the attribute the
+    question names (D-061): the walk reads the hub's expand edges past its
+    window and admits the far ends that carry the topic predicate — the KEV
+    entries, older than the window — and nothing else past it. Without a
+    question, with one naming no attribute, or with no vocabulary naming
+    the attribute (no registry, nothing gathered shows it), the walk is
+    the recency window it always was."""
+    from loom import context
+    from loom.context import resolve_scope_paths
+    from loom.contracts import ScopeSpec
+    monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
+    host, _ = _kev_hub(store)
+    scope = ScopeSpec(subjects=[host], **_KEV_SCOPE)
+    kev = {f"CVE-2026-{i:04d}" for i in (0, 1, 2)}
+
+    plain, _ = resolve_scope_paths(store, "v", scope)
+    assert not kev & {r.key for r in plain} and len(plain) == 2 + 20
+    truncated: dict = {}
+    got, paths = resolve_scope_paths(store, "v", scope, truncated=truncated, question=_KEV_Q)
+    assert kev <= {r.key for r in got} and len(got) == 2 + 20 + 3     # the window plus the carriers only
+    for k in kev:
+        chain = paths[("cve", k)]
+        assert [o.predicate for o in chain] == ["runs_software", "affects"] and chain[-1].subject.key == k
+    assert truncated[("product", "kernel")].reason == "gather_limit"   # the window is still reported
+    other, _ = resolve_scope_paths(store, "v", scope, question="what software does host:h1 run?")
+    assert {r.key for r in other} == {r.key for r in plain}
+
+
+def test_hub_completion_learns_the_attribute_from_the_registry(store, monkeypatch):
+    """The topic vocabulary is the namespace's registry plus what the walk
+    has gathered: with no registry and nothing gathered showing the
+    predicate, the carriers past the window stay out (the page handle still
+    offers them)."""
+    from loom import context
+    from loom.context import resolve_scope_paths
+    from loom.contracts import ScopeSpec
+    monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
+    host, _ = _kev_hub(store, registry=False)
+    got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE), question=_KEV_Q)
+    assert len(got) == 2 + 20
+
+
+def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
+    """With the entity cap binding, the walk cuts entities that do not
+    carry the question's topic, not the ones that do (D-061); the cut is
+    still reported as scope_cap."""
+    from loom import context
+    from loom.context import resolve_scope_paths
+    from loom.contracts import ScopeSpec
+    monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
+    monkeypatch.setenv("LOOM_MAX_SCOPE_ENTITIES", "8")
+    host, _ = _kev_hub(store)
+    truncated: dict = {}
+    got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
+                                 truncated=truncated, question=_KEV_Q)
+    keys = [r.key for r in got]
+    assert len(got) == 8 and set(keys[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
+    assert any(t.reason == "scope_cap" for t in truncated.values())
+    # no hub at all, just a crowded frontier: the carriers are probed for
+    monkeypatch.setattr(context, "_GATHER_LIMIT", 1000)
+    truncated = {}
+    got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
+                                 truncated=truncated, question=_KEV_Q)
+    assert len(got) == 8 and set(r.key for r in got[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
+    assert not any(t.reason == "gather_limit" for t in truncated.values())
+
+
+def test_topic_pack_carries_the_hub_answer_with_its_edges(store, monkeypatch):
+    """The pack for that question carries every KEV CVE with the edge that
+    reached it, both cited, as sibling items; the CVSS disagreements on the
+    reached CVEs are handed back as conflict handles instead of spending
+    the budget; the pack stays inside its budget; and the scorecard's
+    reader reads the grouped items back fact by fact (D-061)."""
+    from loom import context
+    from loom.answer import render_user_prompt
+    from loom.context import build_pack
+    from loom.contracts import AskRequest, ScopeSpec
+    from loom.retrieval_eval import parse_context
+    monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
+    host, _ = _kev_hub(store, kev=(0, 1, 2, 3, 4, 5))
+    kev_rows = {}
+    for i in range(6):
+        for o in store.observations_for("v", EntityRef(type="cve", key=f"CVE-2026-{i:04d}")):
+            kev_rows.setdefault(o.predicate, {})[o.subject.key] = o
+    facts_by_cve, edges_by_cve = kev_rows["exploited_in_wild"], kev_rows["affects"]
+    for budget in (800, 1600):
+        pack = build_pack(store, AskRequest(namespace="v", scope=ScopeSpec(subjects=[host], **_KEV_SCOPE),
+                                            question=_KEV_Q, budget=budget))
+        assert pack.charged_tokens <= budget
+        assert not [i for i in pack.items if i.kind == "conflict"]
+        assert any(h.kind == "conflict" for h in pack.handles) or pack.omitted_handles
+        grouped = [i for i in pack.items if "exploited_in_wild True" in i.text]
+        assert grouped and all(len(i.citations) == 2 * i.text.count(" (2026-") for i in grouped)
+        cited = {c.observation_id for i in pack.items for c in i.citations}
+        assert {o.id for o in facts_by_cve.values()} | {o.id for o in edges_by_cve.values()} <= cited
+        lines = parse_context(render_user_prompt(_KEV_Q, pack))
+        facts = {ln.subject: ln for ln in lines if ln.predicate == "exploited_in_wild"}
+        assert set(facts) == {f"cve:{k}" for k in facts_by_cve}
+        for subject, ln in facts.items():
+            key = subject.split(":", 1)[1]
+            assert ln.object == "True" and ln.cites == [facts_by_cve[key].id[:12]]
+            assert ln.valid_from == ln.observed and ln.valid_to == "present"
+        edges = {ln.subject: ln for ln in lines if ln.kind == "relation" and ln.predicate == "affects"}
+        for subject in facts:
+            key = subject.split(":", 1)[1]
+            assert edges[subject].object == "product:kernel"
+            assert edges[subject].cites == [edges_by_cve[key].id[:12]]
