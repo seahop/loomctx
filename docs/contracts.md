@@ -141,16 +141,25 @@ what it reaches over the named predicates); `as_of` is knowledge time
 
 **The budget is honest (D-051).** `budget` is the request (clamped to
 `LOOM_MAX_BUDGET`); `charged_tokens` is what the pack charged against it,
-in the compact form an agent actually receives — the answer prompt's
-lines and the MCP agent view: every item's text *plus its citations*
-(one `cite` token, source and date each), and every handle's hint *plus
-its id*. Estimated at 3 characters per token plus a small per-line
-framing cost (a real tokenizer measured 2.7 on rendered facts; the
-scorecard checks the rendered prompt with `cl100k_base` against the
-request). `charged_tokens ≤ budget`, with one carve-out: a pack too small
-to hold a handle beside an item still ships its first handle, so that what
-was cut is always reachable. Handles take at most 15 % of the budget
-(`omitted_handles` counts the rest); conflict items take at most half.
+in the compact form an agent actually receives, sized to the costlier of
+its two surfaces — the MCP concise view (compact JSON) over the answer
+prompt's lines: every item's text *plus its citations* (one
+`"<cite> <source> <date>"` string each) and its JSON framing, and every
+handle's hint *plus its id* (base64, ~1.5 characters a token) and
+framing (D-058). The scorecard checks both the rendered prompt and the
+MCP view's items and handles with `cl100k_base` against the request
+(within 15 %; the view's envelope — namespace, question echo, subject
+list — is ~70 tokens beside it). `charged_tokens ≤ budget`, with one
+carve-out: the first handle always ships, so that what was cut is always
+reachable — when the budget is under two handles, or conflicts, briefs
+and excerpts filled it, the pack exceeds the budget by that handle's cost
+at most. Handles take at most 15 % of the budget (`omitted_handles`
+counts the rest); conflict items take at most half, briefs a quarter
+(`withheld_briefs` counts one that did not fit, or that draws on
+observations a type-scoped key may not see). A scope walk stops at
+`LOOM_MAX_SCOPE_ENTITIES` (2,000) entities and `LOOM_MAX_SCOPE_OBSERVATIONS`
+(100,000) gathered rows; the cut is a `truncated` entry with reason
+`scope_cap`.
 
 **Ranking (D-051).** A question is matched lexically by BM25 over the
 gathered candidates — the document is what the pack renders: the

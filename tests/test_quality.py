@@ -209,6 +209,35 @@ def test_q10b_budget_holds_on_the_mcp_wire(store):
     _score("mcp-wire-budget", worst <= 1.15, f"worst MCP wire/budget ratio {worst:.2f}")
 
 
+def test_q11_a_scope_answers_along_the_predicates_it_walks(store):
+    """D-058: alert -> host -> logins, walked over triggered_on +
+    logged_in_by. The pack spent every budget up to 1,600 on
+    communicated_with ("host" is rare among the gathered rows, "logged" is
+    on every login) and shipped the logins — what the question walks and
+    asks — only as handles. An expand predicate the question names now
+    ranks as the topic."""
+    alert = EntityRef(type="alert", key="AL-2291")
+    host = EntityRef(type="host", key="web-01")
+    scope = ScopeSpec(subjects=[alert], expand=["triggered_on", "logged_in_by"], depth=2)
+    question = ("Which users logged in to the host that alert:AL-2291 triggered on, on 2026-09-01? "
+                "List every user as user:<key>.")
+    truth = {o.object.key for o in store.observations_for("netsec", host, limit=1000)
+             if o.predicate == "logged_in_by" and o.observed_at.date().isoformat() == "2026-09-01"}
+    pack = _ask(store, question, scope=scope, budget=800)
+    facts = [i.text for i in pack.items if i.kind in ("fact", "relation")]
+    found = {t.split()[2].split(":", 1)[1] for t in facts
+             if t.startswith("host:web-01 logged_in_by") and "(2026-09-01," in t}
+    logins = sum(" logged_in_by " in t for t in facts)
+    flows = sum(" communicated_with " in t for t in facts)
+    _score("scope-walked-predicates", truth and found == truth and logins > flows,
+           f"found {sorted(found)} of {sorted(truth)}; {logins} logins vs {flows} flows")
+    # a scope whose walked predicate the question does not name is unchanged:
+    # "who logged in?" over member_of still ranks logins, not memberships
+    domain = ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")], expand=["member_of"])
+    texts = [i.text for i in _ask(store, "who logged in?", scope=domain, budget=800).items if i.kind == "fact"]
+    assert sum(" logged_in_by " in t for t in texts) > sum(" member_of " in t for t in texts)
+
+
 def test_q4b_valid_at_fact_time(store):
     """D-024: 'which host HELD this ip on Aug 20' — exactly one answer."""
     pack = build_pack(store, AskRequest(

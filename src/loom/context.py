@@ -884,6 +884,18 @@ def resolve_scope_paths(
     return resolved, paths
 
 
+def _focus(scope: ScopeSpec | None, question: str | None) -> frozenset[str]:
+    """The scope's own expand predicates that the question names — its
+    words, stemmed, stopwords aside: `logged_in_by` for "which users
+    logged in ...", not `member_of` for "who logged in?" (D-058)."""
+    if scope is None or not scope.expand or not question:
+        return frozenset()
+    asked = {_stem(t) for t in _question_tokens(question)}
+    return frozenset(
+        p for p in scope.expand
+        if ({_stem(w) for w in _WORD.findall(_SEPARATORS.sub(" ", p.lower()))} - _STOPWORDS) & asked)
+
+
 def build_pack(
     store: GraphStore,
     req: AskRequest,
@@ -1025,6 +1037,7 @@ def build_pack(
         semantic=semantic and bool(cos_map),
         briefs=briefs,
         withheld_briefs=withheld,
+        focus=_focus(req.scope, req.question),
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
         # both spellings are the frame, not the topic: the name asked and
@@ -1220,6 +1233,7 @@ def _pack(
     page_before: datetime | None = None,
     page_predicate: str = "",
     withheld_briefs: int = 0,
+    focus: frozenset[str] = frozenset(),
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -1272,9 +1286,18 @@ def _pack(
     if semantic and cos_map:
         legs.append(_normalized({o.id: cos_map[o.id] for o in observations if o.id in cos_map}))
     relevance = _fuse(legs)
+    # A scope's expand predicate that the question names is the question's
+    # topic (D-058): "which users logged in to the host alert X triggered
+    # on", walked over triggered_on + logged_in_by, spent its budget on
+    # communicated_with — "host" is rare among the gathered rows, "logged"
+    # is on every login, so IDF ranked the flows first and the logins
+    # shipped only as handles. Facts on a focus predicate take full
+    # relevance (recency and confidence still order them) and are exempt
+    # from the diversity term.
     scored = sorted(
         (
-            (_score(obs, relevance.get(obs.id, 0.0) if relevance else None,
+            (_score(obs, (1.0 if obs.predicate in focus else relevance.get(obs.id, 0.0))
+                    if relevance else None,
                     _recency(obs, newest), obs.id in superseded_by), obs)
             for obs in observations
         ),
@@ -1396,7 +1419,7 @@ def _pack(
 
     def select(item_budget: int) -> tuple[list[ContextItem], list[ExpansionHandle], int]:
         facts, skipped, inbound, left = _select_facts(
-            scored, item_budget, paths or {}, by_id, superseded_by, subject_keys)
+            scored, item_budget, paths or {}, by_id, superseded_by, subject_keys, focus)
         threads = _thread_handles(namespace, skipped, inbound, as_of, valid_at, page_before) \
             if with_handles else []
         return facts, conflict_handles + page_handles + excerpt_handles + threads, left
@@ -1462,6 +1485,7 @@ def _select_facts(
     by_id: dict[str, Observation],
     superseded_by: dict[str, Observation],
     subject_keys: set[tuple[str, str]],
+    focus: frozenset[str] = frozenset(),
 ) -> tuple[list[ContextItem], dict[tuple[str, str, str], int], set[tuple[str, str, str]], int]:
     """Value-per-token selection with an MMR-style diversity term (D-051).
     Candidates are ordered by score per charged token; each round takes
@@ -1532,7 +1556,8 @@ def _select_facts(
                 skip(obs)
                 continue
             value = density * (_DIVERSITY_LAMBDA
-                               if per_predicate[obs.predicate] >= _DIVERSITY_AFTER else 1.0)
+                               if per_predicate[obs.predicate] >= _DIVERSITY_AFTER
+                               and obs.predicate not in focus else 1.0)
             if value > best_val:
                 best, best_val = (score, cost, obs, text, chain, chain_cost), value
         if best is None:

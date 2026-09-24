@@ -40,10 +40,13 @@ false`). The pack tools' schema is the *agent view* of `ContextPack`
 surface still serializes the contract itself.
 
 - `format: "concise" | "detailed"` on `ask`, `ask_scope`, `expand`.
-  Concise (default) is what an agent carries in context: a 12-hex `cite`
-  token per citation, the first 20 reached subjects plus a total. Detailed
-  keeps the full 32-hex `observation_id` next to each `cite` and lists
-  every reached subject — for auditing, not for the loop.
+  Concise (default) is what an agent carries in context, and what the
+  budget charges: each item is `kind`, `text` and `cites` — one
+  `"<cite> <source> <date>"` string per citation, the 12-hex `cite` token
+  first — the first 20 reached subjects plus a total, and the pack's
+  `charged_tokens` (D-058). Detailed keeps the ranking `score` and full
+  citation objects with the 32-hex `observation_id` next to each `cite`,
+  and lists every reached subject — for auditing, not for the loop.
 - `expand` handles are stateless (the server keeps nothing per handle),
   HMAC-signed when `LOOM_HANDLE_SECRET` is set, and never expire on their
   own — there is no TTL; rotating the secret is what invalidates the ones

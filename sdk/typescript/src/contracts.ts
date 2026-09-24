@@ -237,9 +237,13 @@ export interface ContextPack {
    */
   truncated?: ScopeTruncation[];
   /**
-   * what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, except that a pack too small to hold one handle beside an item still ships its first handle (D-051)
+   * what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, with one exception: the first handle always ships (a pack that cut something must say so): when facts cannot be trimmed to make room for it — the budget is under two handles, or conflicts, briefs and excerpts filled it — charged_tokens exceeds `budget` by at most that one handle's cost (D-051, D-058)
    */
   charged_tokens?: number;
+  /**
+   * entity briefs (dossiers) that exist but were left out: a brief is prose written from every observation it cites, so a type-scoped caller gets it only when it may see all of them, and a brief never takes more than a quarter of the budget (D-058)
+   */
+  withheld_briefs?: number;
 }
 /**
  * Every item is cited (hard constraint 3): facts and conflicts cite
@@ -289,10 +293,12 @@ export interface ExpansionHandle {
   kind?: "more" | "conflict" | "excerpt";
 }
 /**
- * An entity whose observations exceeded the gather limit: only the
- * newest `gathered` of `total` were examined. A reader must not conclude
- * absence about it — "no KEV fact among the kernel's CVEs" means nothing
- * when 1,740 of 2,740 were never looked at (D-038).
+ * Partial coverage a reader must know about. An entity whose
+ * observations exceeded the gather limit: only the newest `gathered` of
+ * `total` were examined. A reader must not conclude absence about it —
+ * "no KEV fact among the kernel's CVEs" means nothing when 1,740 of 2,740
+ * were never looked at (D-038). A scope walk cut by the entity cap is
+ * reported the same way, with reason `scope_cap` (D-058).
  *
  * This interface was referenced by `LoomContracts`'s JSON-Schema
  * via the `definition` "ScopeTruncation".
@@ -301,6 +307,10 @@ export interface ScopeTruncation {
   entity: EntityRef;
   gathered: number;
   total: number;
+  /**
+   * gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` — `gathered` entities are in the pack of at least `total` reached (D-058)
+   */
+  reason?: "gather_limit" | "scope_cap";
 }
 /**
  * Ask + synthesize: retrieve a context pack, then have the configured
