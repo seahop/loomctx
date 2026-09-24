@@ -49,6 +49,7 @@ from ..contracts import (
     SemanticSearchResponse,
 )
 from ..llm import LLMError, embedder_from_env, llm_from_env
+from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
 from ..consumer import resolve_provenance
 from ..store.factory import store_from_env
@@ -208,6 +209,26 @@ def _gate_source(grant: Grant | None, source: str) -> None:
         )
 
 
+def _check_supersedes(store, claim: ClaimIn) -> str | None:
+    """A recorded supersession (D-050) must name a visible observation in
+    the claim's namespace about the claim's subject — a correction stays
+    on its subject, and a dangling or cross-tenant reference is a sender
+    bug the read path would otherwise silently ignore. Returns the
+    problem, or None."""
+    if not claim.supersedes:
+        return None
+    found = store.observations_by_ids(claim.namespace, [claim.supersedes])
+    if not found:
+        return (f"supersedes {claim.supersedes!r} does not name a visible observation in "
+                f"namespace {claim.namespace!r}")
+    old = found[0]
+    if old.subject != claim.subject:
+        return (f"supersedes {claim.supersedes!r} names an observation about "
+                f"{old.subject.type}:{old.subject.key}, not {claim.subject.type}:"
+                f"{claim.subject.key}; a correction stays on its subject")
+    return None
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
@@ -243,6 +264,10 @@ def ingest(envelope: IngestEnvelope, request: Request):
             request.app.state.registry.get(envelope.namespace), envelope)
         if problem is not None:
             metrics.REJECTED.labels(reason="schema").inc()
+            raise HTTPException(status_code=422, detail=problem)
+        problem = _check_supersedes(request.app.state.store, envelope)
+        if problem is not None:
+            metrics.REJECTED.labels(reason="supersedes").inc()
             raise HTTPException(status_code=422, detail=problem)
         metrics.INGEST.labels(kind=envelope.kind).inc()
         try:
@@ -334,6 +359,11 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
                 problem = resolve_provenance(store, envelope)
                 if problem is not None:
                     return problem
+                # validated against the store: an earlier item of the same
+                # batch is not visible yet, so it cannot be superseded here
+                problem = _check_supersedes(store, envelope)
+                if problem is not None:
+                    return problem
         except HTTPException as exc:
             return exc.detail
         return None
@@ -401,6 +431,32 @@ def entity_observations(
         "count": len(observations),
         "observations": [o.model_dump(mode="json") for o in observations],
     }
+
+
+@app.get("/v1/observations/{observation_id}/prov")
+def observation_provenance(
+    observation_id: str,
+    request: Request,
+    namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
+) -> dict:
+    """One observation's provenance as PROV-O JSON-LD (D-050): source
+    agent, observed time, the artifact span it was derived from, the
+    extraction activity, and the supersession chain. Gated like the raw
+    observations route: the reader's namespace, and every entity the
+    observation touches must be in their world — anything else is
+    unknown to them, not forbidden."""
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
+    grant = _authorize(request, namespace, "r")
+    store = request.app.state.store
+    found = store.observations_by_ids(namespace, [observation_id])
+    if not found or not _in_scope(found[0], _allowed_types(grant)):
+        raise HTTPException(status_code=404, detail="unknown observation")
+    obs = found[0]
+    artifact = None
+    if obs.provenance is not None and obs.provenance.artifact_id:
+        artifact = store.get_artifact(namespace, obs.provenance.artifact_id)
+    return observation_prov(obs, artifact)
 
 
 @app.get("/v1/artifacts/{artifact_id}")

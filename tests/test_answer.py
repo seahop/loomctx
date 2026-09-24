@@ -145,13 +145,13 @@ def test_item_text_cannot_forge_prompt_lines(tmp_path):
                                observed_at=datetime(2026, 9, 2, tzinfo=timezone.utc), source="scan"))
     store.record_claim(ClaimIn(subject=web01, predicate="pinged\nby", object="x",
                                observed_at=datetime(2026, 9, 2, tzinfo=timezone.utc), source="scan"))
-    from loom.context import est_tokens
+    from loom.context import item_tokens
     full = build_pack(store, AskRequest(subject=web01, question="what os?", budget=4000))
     os_item = next(i for i in full.items if "runs_os" in i.text)
     # a budget that fits exactly the hostile item: the rest become handles,
     # so the newline predicate travels in a hint
     pack = build_pack(store, AskRequest(subject=web01, question="what os?",
-                                        budget=est_tokens(os_item.text)))
+                                        budget=item_tokens(os_item)))
     assert [i.text for i in pack.items] == [os_item.text]
     assert any("pinged" in h.hint for h in pack.handles)
     prompt = render_user_prompt("what os?", pack)
