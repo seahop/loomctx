@@ -596,10 +596,24 @@ def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
         stats[kind] = stats.get(kind, 0) + 1
         return env
 
+    def guarded(kind: str, rid: str, make) -> list:
+        """One record's envelopes, or none: a malformed record (a future
+        stamp, a field of the wrong shape) is counted under
+        `<kind>_invalid` and skipped instead of ending a 300k-record load."""
+        try:
+            return list(make())
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            stats[f"{kind}_invalid"] = stats.get(f"{kind}_invalid", 0) + 1
+            print(f"{kind} {rid}: skipped: {str(exc).splitlines()[0][:200]}", file=sys.stderr)
+            return []
+
     if "kev" in sources and paths["kev"].exists():
         for entry in iter_kev(paths["kev"]):
+            if not isinstance(entry, dict) or not entry.get("cveID"):
+                stats["kev_invalid"] = stats.get("kev_invalid", 0) + 1
+                continue
             known.add(entry["cveID"])
-            for env in kev_envelopes(entry, namespace):
+            for env in guarded("kev", entry["cveID"], lambda: kev_envelopes(entry, namespace)):
                 yield count("kev", env)
     if "nvd" in sources:
         for year in years:
@@ -607,8 +621,12 @@ def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
             if not path.exists():
                 continue
             for item in iter_nvd(path):
-                known.add(item["cve"]["id"])
-                for env in nvd_envelopes(item, namespace):
+                cid = ((item or {}).get("cve") or {}).get("id") if isinstance(item, dict) else None
+                if not cid:
+                    stats["nvd_invalid"] = stats.get("nvd_invalid", 0) + 1
+                    continue
+                known.add(cid)
+                for env in guarded("nvd", cid, lambda: nvd_envelopes(item, namespace)):
                     yield count("nvd", env)
     if "epss" in sources and epss != "none" and paths["epss"].exists():
         for env in epss_envelopes(iter_epss_lines(paths["epss"]), namespace,
@@ -716,7 +734,7 @@ def main(argv: list[str] | None = None) -> None:
     if ledger is not None:
         ledger.save()              # only after the load completed: a failed run re-offers its changes
     elapsed = time.monotonic() - t0
-    total = sum(v for k, v in stats.items() if k != "epss_unchanged")
+    total = sum(v for k, v in stats.items() if k != "epss_unchanged" and not k.endswith("_invalid"))
     print(json.dumps({**totals, "envelopes": stats, "seconds": round(elapsed, 1),
                       "per_second": round(total / elapsed, 1) if elapsed else None}))
 

@@ -23,12 +23,21 @@ table):
   * `note` / `report` / `opinion` -> documents; claims about the objects a
     report lists cite it (D-039), so its text ranks as an excerpt for them.
   * `revoked` objects, markings, `observed-data`, `x_` custom properties
-    and non-CVE external references are skipped (documented).
+    and non-CVE external references are skipped (documented) — except a
+    revoked relationship or sighting on `import`, see below.
 
 `observed_at` is the object's `modified` stamp (the assertion time of the
 version being imported; `created` rides in attrs), and every event_id
 embeds it: re-importing a bundle is idempotent, a revised object records a
-new observation — history, not overwrite (D-035's rule).
+new observation — history, not overwrite (D-035's rule). On `import`,
+the versions of one relationship or sighting are chained by recorded
+supersession (D-050, connectors/chain.py): a revision (a `stop_time`
+appearing, a new confidence) supersedes the version before it, and a
+revocation of an imported edge lands as a final version closed at the
+revocation (`valid_to` = its `modified`, attrs.revoked) superseding it —
+so the stale open edge stops being current. A revocation of something
+never imported is dropped; `emit` has no store to ask and skips revoked
+objects as before.
 
 Export — `observations_to_bundle` writes a valid STIX 2.1 bundle: one
 object per entity (SCOs for ip/domain/url/email/user/file, SDOs otherwise,
@@ -207,9 +216,12 @@ def _scalar(value: Any) -> str | int | float | bool | None:
 
 def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | None = None,
                         source: str = SOURCE_DEFAULT, stats: dict[str, int] | None = None,
-                        ) -> list[ClaimIn | DocumentIn]:
+                        include_revoked: bool = False) -> list[ClaimIn | DocumentIn]:
     """Every claim and document a bundle yields, documents first so the
-    claims that cite them land after their artifact (D-039)."""
+    claims that cite them land after their artifact (D-039).
+    `include_revoked` yields a revoked relationship / sighting as its
+    closing version (attrs.revoked, valid_to = the revocation) for the
+    chained import to supersede the imported edge with."""
     m = mapping if isinstance(mapping, Mapping) else Mapping(mapping)
     stats = stats if stats is not None else {}
     objects: list[dict] = [o for o in bundle.get("objects", []) if isinstance(o, dict) and o.get("id")]
@@ -252,103 +264,121 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
     # pass 1: the documents, so every claim can cite the report that lists
     # its object wherever the report sits in the bundle
     for obj in objects:
-        stype = obj["type"]
-        if stype in DOCUMENT_TYPES and not obj.get("revoked"):
-            observed, stamp = when(obj)
-            title = obj.get("name") or obj.get("abstract") or ""
-            body = obj.get("content") or obj.get("description") or obj.get("explanation") or ""
-            if stype == "opinion":
-                body = f"Opinion: {obj.get('opinion', '')}\n\n{body}".strip()
-            text = "\n\n".join(part for part in (title, body) if part).strip()
-            if not text:
-                count("skipped")
-                continue
-            event = f"stix:{obj['id']}:{stamp}:doc"[:128]
-            attrs = {**base_attrs(obj), "object_refs": list(obj.get("object_refs") or [])}
-            for extra in ("report_types", "authors", "published", "labels"):
-                if obj.get(extra) is not None:
-                    attrs[extra] = obj[extra]
-            documents.append(DocumentIn(namespace=namespace, event_id=event, text=text,
-                                        filename=f"{obj['id']}.txt", source=source_of(obj),
-                                        observed_at=observed, attrs=attrs))
-            for target in obj.get("object_refs") or []:
-                cites.setdefault(target, event)
-            count("document")
-
-    # pass 2: everything else
-    for obj in objects:
-        stype = obj["type"]
-        if stype in SKIPPED_TYPES:
-            count("skipped")
-            continue
-        if obj.get("revoked"):
-            count("revoked")
-            continue
-        if stype in DOCUMENT_TYPES:
-            continue
-        observed, stamp = when(obj)
-
-        def claim(subject: EntityRef, pred: str, obj_value, tag: str = "", *,
-                  o=obj, observed=observed, stamp=stamp, **kw) -> ClaimIn:
-            prov = Provenance(artifact_event_id=cites[o["id"]]) if o["id"] in cites else None
-            return ClaimIn(namespace=namespace, event_id=f"stix:{o['id']}:{stamp}:{pred}{tag}"[:128],
-                           subject=subject, predicate=pred, object=obj_value, observed_at=observed,
-                           source=source_of(o), confidence=confidence(o), provenance=prov,
-                           attrs={**base_attrs(o), **kw.pop("attrs", {})}, **kw)
-
-        if stype == "relationship":
-            if not obj.get("source_ref") or not obj.get("target_ref") or not obj.get("relationship_type"):
-                count("skipped")
-                continue
-            attrs = {}
-            if obj.get("description"):
-                attrs["description"] = obj["description"]
-            claims.append(claim(ref(obj["source_ref"]), m.predicate(obj["relationship_type"]),
-                                ref(obj["target_ref"]), valid_from=_utc(obj.get("start_time")),
-                                valid_to=_utc(obj.get("stop_time")), attrs=attrs))
-            count("relationship")
-            continue
-        if stype == "sighting":
-            if not obj.get("sighting_of_ref"):
-                count("skipped")
-                continue
-            subject = ref(obj["sighting_of_ref"])
-            attrs = {"count": obj.get("count", 1)}
-            if obj.get("summary"):
-                attrs["summary"] = True
-            window = {"valid_from": _utc(obj.get("first_seen")), "valid_to": _utc(obj.get("last_seen"))}
-            wheres = obj.get("where_sighted_refs") or []
-            for where in wheres:
-                claims.append(claim(subject, m.sighting, ref(where), f":{where}", attrs=attrs, **window))
-            if not wheres:
-                claims.append(claim(subject, SIGHTED_COUNT, int(obj.get("count") or 1), attrs=attrs, **window))
-            count("sighting")
-            continue
-
-        # an SDO or SCO: its properties become scalar claims on its entity
-        subject = ref(obj["id"])
-        emitted = 0
-        for prop, pred in m.properties.items():
-            value = obj.get(prop)
-            if value is None:
-                continue
-            values = value if isinstance(value, list) else [value]
-            for i, item in enumerate(values):
-                scalar = _scalar(item)
-                if scalar is None or scalar == "":
+        try:
+            stype = obj["type"]
+            if stype in DOCUMENT_TYPES and not obj.get("revoked"):
+                observed, stamp = when(obj)
+                title = obj.get("name") or obj.get("abstract") or ""
+                body = obj.get("content") or obj.get("description") or obj.get("explanation") or ""
+                if stype == "opinion":
+                    body = f"Opinion: {obj.get('opinion', '')}\n\n{body}".strip()
+                text = "\n\n".join(part for part in (title, body) if part).strip()
+                if not text:
+                    count("skipped")
                     continue
-                tag = f":{i}" if isinstance(value, list) else ""
-                window = {}
-                if prop == "pattern":                      # an indicator's validity is the pattern's
-                    window = {"valid_from": _utc(obj.get("valid_from")),
-                              "valid_to": _utc(obj.get("valid_until"))}
-                claims.append(claim(subject, pred, scalar, tag, **window))
-                emitted += 1
-        for prop, pred in REF_PROPERTIES.items():
-            for i, target in enumerate(obj.get(prop) or []):
-                claims.append(claim(subject, pred, ref(target), f":{i}"))
-                emitted += 1
-        count("object" if emitted else "empty_object")
+                event = f"stix:{obj['id']}:{stamp}:doc"[:128]
+                attrs = {**base_attrs(obj), "object_refs": list(obj.get("object_refs") or [])}
+                for extra in ("report_types", "authors", "published", "labels"):
+                    if obj.get(extra) is not None:
+                        attrs[extra] = obj[extra]
+                documents.append(DocumentIn(namespace=namespace, event_id=event, text=text,
+                                            filename=f"{obj['id']}.txt", source=source_of(obj),
+                                            observed_at=observed, attrs=attrs))
+                for target in obj.get("object_refs") or []:
+                    cites.setdefault(target, event)
+                count("document")
+        except (ValueError, TypeError, KeyError) as exc:
+            count("invalid")
+            print(f"stix object {obj.get('id')}: skipped: {str(exc).splitlines()[0][:200]}",
+                  file=sys.stderr)
+
+    # pass 2: everything else — one object at a time: a malformed one (a
+    # bad timestamp, a future `modified`) is counted and skipped, never
+    # the end of the whole bundle
+    for obj in objects:
+        mark = len(claims)
+        try:
+            stype = obj["type"]
+            if stype in SKIPPED_TYPES:
+                count("skipped")
+                continue
+            revoked = bool(obj.get("revoked"))
+            if revoked and not (include_revoked and stype in ("relationship", "sighting")):
+                count("revoked")
+                continue
+            if stype in DOCUMENT_TYPES:
+                continue
+            observed, stamp = when(obj)
+            # a revocation closes the edge at the revocation's own stamp
+            closing = {"revoked": True} if revoked else {}
+
+            def claim(subject: EntityRef, pred: str, obj_value, tag: str = "", *,
+                      o=obj, observed=observed, stamp=stamp, **kw) -> ClaimIn:
+                prov = Provenance(artifact_event_id=cites[o["id"]]) if o["id"] in cites else None
+                return ClaimIn(namespace=namespace, event_id=f"stix:{o['id']}:{stamp}:{pred}{tag}"[:128],
+                               subject=subject, predicate=pred, object=obj_value, observed_at=observed,
+                               source=source_of(o), confidence=confidence(o), provenance=prov,
+                               attrs={**base_attrs(o), **kw.pop("attrs", {})}, **kw)
+
+            if stype == "relationship":
+                if not obj.get("source_ref") or not obj.get("target_ref") or not obj.get("relationship_type"):
+                    count("skipped")
+                    continue
+                attrs = dict(closing)
+                if obj.get("description"):
+                    attrs["description"] = obj["description"]
+                claims.append(claim(ref(obj["source_ref"]), m.predicate(obj["relationship_type"]),
+                                    ref(obj["target_ref"]), valid_from=_utc(obj.get("start_time")),
+                                    valid_to=observed if revoked else _utc(obj.get("stop_time")), attrs=attrs))
+                count("revoked_edge" if revoked else "relationship")
+                continue
+            if stype == "sighting":
+                if not obj.get("sighting_of_ref"):
+                    count("skipped")
+                    continue
+                subject = ref(obj["sighting_of_ref"])
+                attrs = {"count": obj.get("count", 1), **closing}
+                if obj.get("summary"):
+                    attrs["summary"] = True
+                window = {"valid_from": _utc(obj.get("first_seen")),
+                          "valid_to": observed if revoked else _utc(obj.get("last_seen"))}
+                wheres = obj.get("where_sighted_refs") or []
+                for where in wheres:
+                    claims.append(claim(subject, m.sighting, ref(where), f":{where}", attrs=attrs, **window))
+                if not wheres:
+                    claims.append(claim(subject, SIGHTED_COUNT, int(obj.get("count") or 1), attrs=attrs, **window))
+                count("revoked_edge" if revoked else "sighting")
+                continue
+
+            # an SDO or SCO: its properties become scalar claims on its entity
+            subject = ref(obj["id"])
+            emitted = 0
+            for prop, pred in m.properties.items():
+                value = obj.get(prop)
+                if value is None:
+                    continue
+                values = value if isinstance(value, list) else [value]
+                for i, item in enumerate(values):
+                    scalar = _scalar(item)
+                    if scalar is None or scalar == "":
+                        continue
+                    tag = f":{i}" if isinstance(value, list) else ""
+                    window = {}
+                    if prop == "pattern":                      # an indicator's validity is the pattern's
+                        window = {"valid_from": _utc(obj.get("valid_from")),
+                                  "valid_to": _utc(obj.get("valid_until"))}
+                    claims.append(claim(subject, pred, scalar, tag, **window))
+                    emitted += 1
+            for prop, pred in REF_PROPERTIES.items():
+                for i, target in enumerate(obj.get(prop) or []):
+                    claims.append(claim(subject, pred, ref(target), f":{i}"))
+                    emitted += 1
+            count("object" if emitted else "empty_object")
+        except (ValueError, TypeError, KeyError) as exc:
+            del claims[mark:]
+            count("invalid")
+            print(f"stix object {obj.get('id')}: skipped: {str(exc).splitlines()[0][:200]}",
+                  file=sys.stderr)
 
     return [*documents, *claims]
 
@@ -577,7 +607,8 @@ def main(argv: list[str] | None = None) -> None:
     with open(args.bundle, encoding="utf-8") as fh:
         bundle = json.load(fh)
     stats: dict[str, int] = {}
-    envs = bundle_to_envelopes(bundle, args.namespace, mapping, source=args.source, stats=stats)
+    envs = bundle_to_envelopes(bundle, args.namespace, mapping, source=args.source, stats=stats,
+                               include_revoked=args.command == "import")
     if args.command == "emit":
         for line in _to_lines(envs):
             sys.stdout.write(line)
@@ -585,14 +616,24 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.url and args.db:
         parser.error("import: give --url or --db, not both")
-    from ..ingest import load_direct, post_batches
+    from .chain import HttpSink, StoreSink, keyed_by, load_chained
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace, mapping), args.url, args.db, args.key)
-    lines = _to_lines(envs)
-    totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
-              else load_direct(args.db, lines, args.batch))
-    print(json.dumps({**totals, "envelopes": stats}))
+    # relationship / sighting versions chain by supersession; a revocation
+    # of an edge never imported has nothing to close and is dropped
+    key = keyed_by("stix_id", where=lambda row: (row.attrs or {}).get("stix_type") in ("relationship", "sighting"))
+    revoked = lambda claim: bool(claim.attrs.get("revoked"))      # noqa: E731
+    if args.url:
+        totals = load_chained(envs, HttpSink(args.url, args.key), key, args.batch, revoked, stats)
+    else:
+        store = _open_store(args.db)
+        try:
+            totals = load_chained(envs, StoreSink(store), key, args.batch, revoked, stats)
+        finally:
+            store.close()
+    print(json.dumps({**totals, "envelopes": stats, **({"dropped_no_prior": stats.pop("dropped_no_prior")}
+                                                        if "dropped_no_prior" in stats else {})}))
 
 
 if __name__ == "__main__":
