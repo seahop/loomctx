@@ -253,9 +253,9 @@ against the code before it was fixed. Landed on branch `release-hardening`.
 | S-23 | P3 | ✅ | (D-058) Expand-path P3s: silent conflict drop in thread expansion, excerpt expansion charged 0, first-handle overrun unstated, supersession from unfiltered rows, import un-redaction window, trailing punctuation, `truncated` counting hidden rows, SQLite migration race. |
 | S-24 | P3 | ✅ | (D-059) MCP `record_claim` skipped the subject check on `supersedes`; uploads bypassed the key's entity types for extraction; gateway HTTP-forward batch reported rejected items as recorded; bodies parsed before auth; scoped keys saw all-type counts. |
 | S-25 | P3 | ✅ | Release hygiene: CHANGELOG stopped at D-049; `docs/interop.md` and `docs/evaluation.md` unlinked; GCP project id in docs; `AGENTS.md` an untracked copy of CLAUDE.md (now a symlink); `.env.*` not ignored; undocumented env vars; `govulncheck@latest` and openapi-generator by tag; no CI concurrency group or lint beyond hard errors (now the full pyflakes set); no TS lockfile; quickstart raced the engine's start-up and the keys recipe failed without `secrets/`. |
-| S-26 | P3 | ⬜ | `fuzzy_merge_candidates` can still fill its limit with permanently declined groups (same shape as S-22's fix). |
-| S-27 | P3 | ⬜ | Scope facts gathered as inbound edges on a reached subject do not carry their path. |
-| S-28 | P3 | ⬜ | No command to undo a decline (needs a store method). |
+| S-26 | P3 | ✅ | (D-060) `fuzzy_merge_candidates` could still fill its limit with permanently declined groups (same shape as S-22's fix). |
+| S-27 | P3 | ✅ | (D-060) Scope facts gathered as inbound edges on a reached subject did not carry their path (now they carry the reached entity's chain). |
+| S-28 | P3 | ✅ | (D-060) No command to undo a decline: now `GraphStore.forget_decline` and `python -m loom.enrich undistinct`. |
 | S-29 | P3 | ⬜ | A KEV `knownRansomwareCampaignUse` flip keeps its event id and is never recorded (fixing it changes KEV event ids). |
 | S-30 | P3 | ⬜ | OCSF/STIX `emit` (export) does not chain versions — it has no store to look earlier versions up in. |
 | S-31 | P3 | ➖ | A shared rate limiter across processes/replicas: buckets stay per process, the effective ceiling (rate × workers × replicas) is documented instead. |
