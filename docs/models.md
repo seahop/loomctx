@@ -11,7 +11,10 @@ it, so it can be re-run when models change (they change monthly).
 
 Measured 2026-09-09 on OpenRouter: eighteen models, three full runs each
 of four tasks against a real corpus (CISA KEV + NVD + EPSS, 465k
-observations), no hints beyond the server's own instructions.
+observations), no hints beyond the server's own instructions. Scored under
+the pre-D-057 rules, where the two-hop task passed on naming one KEV CVE
+and citations were optional — see [How it is measured](#how-it-is-measured);
+the pass counts below are provisional until re-run.
 
 - **Nine models pass every task every time**, from two cents to fifty-eight
   cents per four-task run.
@@ -62,13 +65,34 @@ own instructions:
 | **conflict** | what two scorers say about one CVE's CVSS — read a conflict item, report both sides |
 | **os** | which OS web-01 runs — a conflict on the root subject |
 
-A task **passes** only if the right entities are named, none are invented,
-and every id the model cites appeared in a tool result during that run
-("faithful"). Ground truth is computed from the store. Cost is what
-OpenRouter billed for the run, cache discounts included. Three full runs
-per model, so cells are pass rates; a single flipped task is within
-run-to-run variance, a 12/12 across three independent runs at a stable
-cost is a number you can plan on.
+Ground truth is computed from the store. Every task also requires a
+faithful citation: at least one observation id the model saw in a tool
+result during that run, and no cited id it did not see (a date such as
+20260820 is not taken for an id). Beyond that, a task **passes** when:
+
+- **2-hop exposure** — the answer names at least half of the KEV-listed
+  CVEs that reach web-01 (all of them when there are four or fewer), no CVE
+  that is not in the store, no real CVE that is not KEV-listed for web-01,
+  and, for each CVE it names, the software it reaches web-01 through. The
+  score reports recall and precision alongside.
+- **lease** — the first sentence of the answer, asides removed, names the
+  host whose lease covers the date and no former holder; history in a
+  later sentence or in parentheses is fine.
+- **conflict** — every value the sources report is named (numbers by
+  value, so 17.5 does not count for 7.5).
+- **os** — every reported operating system is named.
+
+Cost is what OpenRouter billed for the run, cache discounts included.
+Calls run at temperature 0 (dropped for a model that rejects the
+parameter). Three full runs per model, so cells are pass rates; a single
+flipped task is within run-to-run variance, a 12/12 across three
+independent runs at a stable cost is a number you can plan on.
+
+**The table below predates these rules (D-057).** It was scored when the
+exposure task passed on naming *any one* KEV CVE with the software
+unchecked, and when an answer with no citation at all counted as
+faithful. Its exposure column in particular overstates what it measured;
+treat it as provisional until it is re-run under the current scorer.
 
 ## Decision table (2026-09-09, OpenRouter, three full runs per model, 20-step cap)
 
@@ -172,9 +196,9 @@ table cost about twelve dollars and two hours.
 This page asks which models can drive Loom's tools. `docs/evaluation.md`
 asks the prior question with `python -m loom.retrieval_eval`: on the same
 store and the same generated questions, does a budgeted context pack beat
-handing the model everything, a vector top-k, or the newest facts — in
-accuracy, tokens, citation support and hallucination on questions that
-have no answer. Run it with the model chosen here before quoting either
+handing the model everything, or cosine ranking or the newest facts at
+the same token budget — in accuracy, tokens, citation support and
+hallucination on questions that have no answer. Run it with the model chosen here before quoting either
 table.
 
 ## Re-running it

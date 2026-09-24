@@ -8,13 +8,15 @@ vector top-k, or the newest facts? Every condition renders its context the
 way `answer.render_user_prompt` does, asks the same model the same
 question, and is scored by the same rules:
 
-  * ``loom@B``   a context pack at token budget B (400, 800, 1600, 3200)
-  * ``full``     every observation about the question's entities — the
-                 "just give it everything" baseline; its token count is
-                 reported honestly and it is not sent past ``--full-cap``
-  * ``vector``   the top-k observations by cosine similarity alone (needs an
-                 embedder, LOOM_EMBED_*; skipped with a note otherwise)
-  * ``recency``  the newest k observations (the trivial baseline)
+  * ``loom@B``     a context pack at token budget B (400, 800, 1600, 3200)
+  * ``vector@B``   observations ranked by cosine similarity alone, filled to
+                   the same budget B with the pack's own token accounting
+                   (needs an embedder, LOOM_EMBED_*; skipped with a note otherwise)
+  * ``recency@B``  the newest observations, filled to budget B
+  * ``full``       every observation about the question's entities, with
+                   no gather cap — the "just give it everything" baseline;
+                   its token count is reported honestly and it is not sent
+                   past ``--full-cap`` (such rows are counted, not scored)
 
 Questions are *generated from the store* with a fixed seed, in six
 families, each with ground truth computed from the observations (never
@@ -27,13 +29,20 @@ answer is "unknown"), numeric lookup, and temporal ordering. The model
 answers in a fixed two-line format so scoring is rule-based: there is no
 LLM judge to disagree with.
 
+A row that was never answered — over ``--full-cap``, past ``--max-cost``,
+a provider error, an empty or length-truncated completion — is not a
+wrong answer and not an abstention: it is counted per condition as "not
+sent / errored" and left out of every accuracy denominator (D-057).
+
     python -m loom.retrieval_eval --db /data/loom.db                    # live model from LOOM_LLM_*
     python -m loom.retrieval_eval --db /data/loom.db --scripted         # rule-based reader, no network
     python -m loom.retrieval_eval --db ... --runs 3 --budgets 400,1600 --families lease,abstention
     python -m loom.retrieval_eval --db ... --list-questions             # what would be asked, with truth
 
 Output: a Markdown scorecard (conditions x metrics, then conditions x
-families), printed and written to ``--out`` (default eval/retrieval-<date>.md).
+families), printed and written to ``--out`` (default eval/retrieval-<date>.md);
+every scored row is appended to ``<out>.jsonl`` as it completes, so a crash
+mid-run loses nothing.
 """
 
 from __future__ import annotations
@@ -48,25 +57,34 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_eval import Provider, _cited
+from . import context as _context
+from .agent_eval import Provider, _cited, cite_tokens_in
 from .answer import SYSTEM_PROMPT, render_user_prompt
-from .context import (_aware, _citation, _render_fact, build_pack, cosines,
-                      covers_valid_at, resolve_scope)
+from .context import (_aware, _citation, _is_extracted, _render_fact, build_pack, cosines,
+                      covers_valid_at, item_tokens, resolve_scope)
 from .contracts import AskRequest, ContextItem, ContextPack, EntityRef, Observation, ScopeSpec
-from .llm import _post_json, embedder_from_env
+from .llm import LLMError, _post_json, embedder_from_env
 
 BUDGETS = (400, 800, 1600, 3200)
 FAMILIES = ("lease", "conflict", "multihop", "abstention", "numeric", "order")
-CONDITIONS = ("loom", "full", "vector", "recency")
-DEFAULT_K = 20                 # items for the vector / recency baselines
+CONDITIONS = ("loom", "vector", "recency", "full")
+BUDGETED = ("loom", "vector", "recency")   # one condition per budget B, compared at equal tokens
 DEFAULT_FULL_CAP = 100_000     # a `full` context above this (est. tokens) is measured, not sent
 DEFAULT_MAX_COST = 1.0         # USD; live calls stop past this when the provider reports cost
-_POOL = 400                    # entities sampled per type when generating questions
+# Room for a reasoning model to think before its two-line answer: at 300 a
+# reasoning model spent the whole cap thinking and returned no content,
+# which scored as an abstention (D-057). A truncated reply is now an error
+# row either way; this only makes one rare.
+DEFAULT_MAX_TOKENS = 2048
 _EMBED_ON_THE_FLY = 2_000      # unembedded candidates the vector baseline embeds itself, per question
-_GATHER_ALL = 100_000
+_VECTOR_CHUNK = 2_000          # stored vectors read and scored per round (bounded memory on hubs)
+_GATHER_ALL = 100_000          # "no cap": the baselines' gather, and ground truth's
+_QUERY_EMBED_ATTEMPTS = 3
+_SNAPSHOT_MIN_ENTITIES = 3     # a predicate on this many entities, all stamped one day, is a snapshot feed
 _CVE = re.compile(r"CVE-\d{4}-\d{4,}")
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 _MISSING_PREDICATES = ("serial_number", "rack_location", "purchase_price", "warranty_expiry")
@@ -100,6 +118,12 @@ class Question:
     valid_at: datetime | None = None
     probe: dict = field(default_factory=dict)  # what the scripted reader looks for
     reject: list[str] = field(default_factory=list)   # entities that are a WRONG answer (lease history)
+    tolerance: float | None = None             # number questions: how far an answer may be off
+    # whether the ground truth lies inside Loom's own gather (the newest
+    # context._GATHER_LIMIT observations per entity) — a question can be
+    # unanswerable for loom@B by construction on a hub, and the scorecard
+    # says so instead of hiding it (D-057)
+    in_loom_gather: bool | None = None
 
     def ask(self, budget: int) -> AskRequest:
         return AskRequest(namespace=self.namespace, subject=self.subject, scope=self.scope,
@@ -125,14 +149,27 @@ def _numeric(o: Observation) -> bool:
     return isinstance(o.object, (int, float)) and not isinstance(o.object, bool)
 
 
-def _pool(store, ns: str, etype: str, rng: random.Random, n: int) -> list[EntityRef]:
-    """A deterministic sample of entities of one type: the first _POOL by
-    key, then `n` of them by the seeded rng (a spread over a 40k-CVE type
-    rather than the lexically first forty)."""
-    found = store.search_entities(ns, "", limit=_POOL, types=(etype,))
-    refs = sorted((EntityRef(type=e.type, key=e.key) for e in found), key=lambda r: r.key)
+Population = dict[str, list[EntityRef]]
+
+
+def population(store, ns: str) -> Population:
+    """Every entity of the namespace, by type, sorted by key: what `_pool`
+    samples from. One scan per generation."""
+    pop: Population = {}
+    for e in store.iter_entities(ns):
+        pop.setdefault(e.type, []).append(EntityRef(type=e.type, key=e.key))
+    for refs in pop.values():
+        refs.sort(key=lambda r: r.key)
+    return pop
+
+
+def _pool(pop: Population, etype: str, rng: random.Random, n: int) -> list[EntityRef]:
+    """A deterministic sample of `n` entities of one type, spread over the
+    whole population by the seeded rng (it used to be the 400 that sort
+    first by key, which on a 40k-CVE type is one corner of the id space)."""
+    refs = pop.get(etype, [])
     if len(refs) <= n:
-        return refs
+        return list(refs)
     return sorted(rng.sample(refs, n), key=lambda r: r.key)
 
 
@@ -140,11 +177,22 @@ def _fmt_date(dt: datetime) -> str:
     return _aware(dt).date().isoformat()
 
 
+def _tolerance(value: float) -> float:
+    """How far a numeric answer may be off: half a unit in the last decimal
+    place the value was recorded with (41234.56 -> 0.005, an EPSS score of
+    0.00043 -> 0.000005, a port -> 0.5), with a relative floor of one part
+    per billion for float noise. A fixed absolute tolerance fits one scale
+    only (0.005 is half a cent on an invoice, but let `0` pass for most
+    EPSS scores); a fixed relative one lets an invoice drift by dollars."""
+    exponent = min(0, Decimal(repr(float(value))).normalize().as_tuple().exponent)
+    return max(0.5 * 10.0 ** exponent, abs(value) * 1e-9, 1e-12)
+
+
 # ---- family 1: lease at T ---------------------------------------------- #
 
-def _lease_questions(store, ns: str, rng: random.Random, cap: int) -> list[Question]:
+def _lease_questions(store, ns: str, rng: random.Random, cap: int, pop: Population) -> list[Question]:
     out: list[Question] = []
-    ips = _pool(store, ns, "ip", rng, 40)
+    ips = _pool(pop, "ip", rng, 40)
     # reassigned addresses first: the knowledge-update case is what matters
     scored = []
     for ip in ips:
@@ -189,42 +237,56 @@ def _lease_questions(store, ns: str, rng: random.Random, cap: int) -> list[Quest
 
 # ---- family 2: conflict awareness -------------------------------------- #
 
-def _conflicts_of(store, ns: str, ref: EntityRef) -> dict[str, dict[str, Observation]]:
+def reference_time(store, ns: str, candidates: list[EntityRef]) -> datetime:
+    """The instant conflict questions are asked at: the newest observation
+    about the sampled entities. Derived from the store, so the same store
+    and seed ask the same questions next week (it used to be the wall
+    clock: a validity window closing between two runs changed the set)."""
+    newest = None
+    for ref in candidates:
+        got = store.observations_for(ns, ref, limit=1)
+        if got and (newest is None or _aware(got[0].observed_at) > newest):
+            newest = _aware(got[0].observed_at)
+    return newest or datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _conflicts_of(store, ns: str, ref: EntityRef, at: datetime) -> dict[str, dict[str, Observation]]:
     """predicate -> {value: newest observation}, for the scalar predicates of
-    `ref` where two or more sources currently disagree (mirrors
-    context._find_conflicts: closed validity windows are history)."""
-    now = datetime.now(timezone.utc)
+    `ref` where two or more sources disagree at `at` (mirrors
+    context._find_conflicts with as_of=at: closed validity windows are history)."""
     by_pred: dict[str, dict[str, Observation]] = {}
-    for o in _obs(store, ns, ref):
+    for o in _obs(store, ns, ref, before=at):
         if o.subject != ref or not _scalar(o):
             continue
-        if o.valid_to is not None and _aware(o.valid_to) <= now:
+        if o.valid_to is not None and _aware(o.valid_to) <= at:
             continue
         by_pred.setdefault(o.predicate, {}).setdefault(str(o.object), o)
     return {p: v for p, v in by_pred.items()
             if len(v) >= 2 and len({o.source for o in v.values()}) >= 2}
 
 
-def _candidates(store, ns: str, rng: random.Random, per_type: int = 40) -> list[EntityRef]:
-    summary = store.namespace_summary().get(ns, {})
+def _candidates(pop: Population, rng: random.Random, per_type: int = 40) -> list[EntityRef]:
     refs: list[EntityRef] = []
-    for etype in sorted(summary):
-        refs.extend(_pool(store, ns, etype, rng, per_type))
+    for etype in sorted(pop):
+        refs.extend(_pool(pop, etype, rng, per_type))
     return refs
 
 
 def _conflict_questions(store, ns: str, rng: random.Random, cap: int,
-                        candidates: list[EntityRef]) -> list[Question]:
+                        candidates: list[EntityRef], at: datetime) -> list[Question]:
     out: list[Question] = []
+    date = at.date().isoformat()
     for ref in candidates:
-        for pred, by_value in sorted(_conflicts_of(store, ns, ref).items()):
+        for pred, by_value in sorted(_conflicts_of(store, ns, ref, at).items()):
             values = sorted(by_value)
+            # asked as_of the reference instant, so loom@B's conflict
+            # detection uses the same horizon the truth was computed at
             out.append(Question(
                 id=f"conflict:{ref.type}:{ref.key}:{pred}", family="conflict", namespace=ns,
-                text=f"What is the {pred} of {_ref(ref.type, ref.key)}? If sources disagree, "
-                     "say so and give every value.",
+                text=f"As of {date}, what is the {pred} of {_ref(ref.type, ref.key)}? If sources "
+                     "disagree, say so and give every value.",
                 kind="conflict", truth=values, truth_ids=[by_value[v].id for v in values],
-                subject=ref, probe={"subject": _ref(ref.type, ref.key), "predicate": pred}))
+                subject=ref, as_of=at, probe={"subject": _ref(ref.type, ref.key), "predicate": pred}))
             if len(out) >= cap:
                 return out
     return out
@@ -232,18 +294,18 @@ def _conflict_questions(store, ns: str, rng: random.Random, cap: int,
 
 # ---- family 3: multi-hop ----------------------------------------------- #
 
-def _has_vulns(store, ns: str) -> bool:
-    summary = store.namespace_summary().get(ns, {})
-    if "cve" not in summary or "product" not in summary:
+def _has_vulns(store, ns: str, pop: Population) -> bool:
+    if "cve" not in pop or "product" not in pop:
         return False
     return any(o.predicate == "runs_software"
-               for h in _pool(store, ns, "host", random.Random(0), 20)
+               for h in _pool(pop, "host", random.Random(0), 20)
                for o in _obs(store, ns, h))
 
 
 def _kev_exposure(store, ns: str, host: EntityRef) -> tuple[list[str], dict[str, Observation]]:
     """KEV-listed CVEs affecting a product the host runs (agent_eval's
-    truth, for any host): product keys, and cve -> its KEV observation."""
+    truth, for any host), walked without the pack builder's gather cap:
+    product keys, and cve -> its KEV observation."""
     products = sorted({o.object.key for o in _obs(store, ns, host)
                        if o.predicate == "runs_software" and isinstance(o.object, EntityRef)})
     cves: set[str] = set()
@@ -260,10 +322,10 @@ def _kev_exposure(store, ns: str, host: EntityRef) -> tuple[list[str], dict[str,
     return products, kev
 
 
-def _multihop_questions(store, ns: str, rng: random.Random, cap: int) -> list[Question]:
+def _multihop_questions(store, ns: str, rng: random.Random, cap: int, pop: Population) -> list[Question]:
     out: list[Question] = []
-    if _has_vulns(store, ns):
-        for host in _pool(store, ns, "host", rng, 40):
+    if _has_vulns(store, ns, pop):
+        for host in _pool(pop, "host", rng, 40):
             products, kev = _kev_exposure(store, ns, host)
             if not kev:
                 continue
@@ -279,7 +341,7 @@ def _multihop_questions(store, ns: str, rng: random.Random, cap: int) -> list[Qu
                 break
         return out
     # the seed corpus: alert -> host -> domain, and alert -> host -> the users of that day
-    for alert in _pool(store, ns, "alert", rng, 20):
+    for alert in _pool(pop, "alert", rng, 20):
         fired = [o for o in _obs(store, ns, alert)
                  if o.predicate == "triggered_on" and isinstance(o.object, EntityRef)]
         if not fired:
@@ -317,14 +379,13 @@ def _multihop_questions(store, ns: str, rng: random.Random, cap: int) -> list[Qu
 # ---- family 4: abstention ---------------------------------------------- #
 
 def _abstention_questions(store, ns: str, rng: random.Random, cap: int,
-                          candidates: list[EntityRef]) -> list[Question]:
+                          candidates: list[EntityRef], pop: Population) -> list[Question]:
     out: list[Question] = []
-    summary = store.namespace_summary().get(ns, {})
     # (a) entities that do not exist, shaped like ones that do
-    for etype in sorted(summary):
+    for etype in sorted(pop):
         if len(out) >= cap // 2:
             break
-        sample = _pool(store, ns, etype, rng, 1)
+        sample = _pool(pop, etype, rng, 1)
         if not sample:
             continue
         key = sample[0].key
@@ -375,25 +436,31 @@ def _numeric_questions(store, ns: str, rng: random.Random, cap: int,
             sources = {o.source for o in obs}
             label = _ref(ref.type, ref.key)
             if len(values) == 1 and len(sources) == 1:
+                value = float(obs[0].object)
                 out.append(Question(
                     id=f"numeric:{ref.type}:{ref.key}:{pred}", family="numeric", namespace=ns,
                     text=f"What is the {pred} of {label}? Answer with the number.",
-                    kind="number", truth=float(obs[0].object), truth_ids=[obs[0].id], subject=ref,
+                    kind="number", truth=value, truth_ids=[obs[0].id], subject=ref,
+                    tolerance=_tolerance(value),
                     probe={"subject": label, "predicate": pred, "agg": "single"}))
             elif len(sources) >= 2 and len(values) >= 2:
                 src = sorted(sources)[0]
                 newest = sorted((o for o in obs if o.source == src), key=lambda o: _aware(o.observed_at))[-1]
+                value = float(newest.object)
                 out.append(Question(
                     id=f"numeric:{ref.type}:{ref.key}:{pred}@{src}", family="numeric", namespace=ns,
                     text=f"What {pred} did the source '{src}' report for {label}? Answer with the number.",
-                    kind="number", truth=float(newest.object), truth_ids=[newest.id], subject=ref,
+                    kind="number", truth=value, truth_ids=[newest.id], subject=ref,
+                    tolerance=_tolerance(value),
                     probe={"subject": label, "predicate": pred, "source": src, "agg": "single"}))
             elif len(sources) == 1 and len(values) >= 3:
                 top = max(obs, key=lambda o: float(o.object))
+                value = float(top.object)
                 out.append(Question(
                     id=f"numeric:{ref.type}:{ref.key}:max-{pred}", family="numeric", namespace=ns,
                     text=f"What is the largest {pred} ever recorded for {label}? Answer with the number.",
-                    kind="number", truth=float(top.object), truth_ids=[top.id], subject=ref,
+                    kind="number", truth=value, truth_ids=[top.id], subject=ref,
+                    tolerance=_tolerance(value),
                     probe={"subject": label, "predicate": pred, "agg": "max"}))
             else:
                 continue
@@ -404,11 +471,29 @@ def _numeric_questions(store, ns: str, rng: random.Random, cap: int,
 
 # ---- family 6: temporal ordering --------------------------------------- #
 
+def snapshot_predicates(store, ns: str, candidates: list[EntityRef]) -> set[str]:
+    """Predicates whose every observation, over at least
+    _SNAPSHOT_MIN_ENTITIES sampled entities, carries one observed date: a
+    bulk snapshot feed (EPSS stamps every score with the day it was
+    fetched). Asking whether such a fact was observed before another is
+    answerable without reading a date — the feed is always the newest —
+    so the ordering family leaves them out (D-057)."""
+    dates: dict[str, set[str]] = {}
+    entities: dict[str, set[str]] = {}
+    for ref in candidates:
+        for o in _obs(store, ns, ref):
+            dates.setdefault(o.predicate, set()).add(_fmt_date(o.observed_at))
+            entities.setdefault(o.predicate, set()).add(f"{o.subject.type}:{o.subject.key}")
+    return {p for p, ds in dates.items()
+            if len(ds) == 1 and len(entities[p]) >= _SNAPSHOT_MIN_ENTITIES}
+
+
 def _order_questions(store, ns: str, rng: random.Random, cap: int,
                      candidates: list[EntityRef]) -> list[Question]:
     out: list[Question] = []
+    stamped = snapshot_predicates(store, ns, candidates)
     for ref in candidates:
-        obs = _obs(store, ns, ref)
+        obs = [o for o in _obs(store, ns, ref) if o.predicate not in stamped]
         # facts that render uniquely (one observation per subject/predicate/object)
         rendered: dict[str, list[Observation]] = {}
         for o in obs:
@@ -437,24 +522,46 @@ def _order_questions(store, ns: str, rng: random.Random, cap: int,
     return out
 
 
+def in_loom_gather(store, q: Question) -> bool | None:
+    """Whether every ground-truth observation is among what `build_pack`
+    gathers for this question — the scope walk and the newest
+    `context._GATHER_LIMIT` observations per entity, both under the
+    question's time axis. False means loom@B cannot carry the answer at any
+    budget: a product limit on hubs (D-038), reported, never hidden."""
+    if not q.truth_ids:
+        return None
+    if q.scope is not None:
+        refs = resolve_scope(store, q.namespace, q.scope, as_of=q.as_of, valid_at=q.valid_at)
+    else:
+        refs = [q.subject]
+    got = store.observations_for_many(q.namespace, refs, limit=_context._GATHER_LIMIT,
+                                      observed_before=q.as_of)
+    seen = {o.id for obs in got.values() for o in obs}
+    return set(q.truth_ids) <= seen
+
+
 def generate_questions(store, namespaces: list[str], seed: int = 7, per_family: int = 8,
-                       families: list[str] | None = None) -> list[Question]:
+                       families: list[str] | None = None,
+                       reference: datetime | None = None) -> list[Question]:
     """Every family over every namespace, deterministic for (store, seed).
-    `per_family` caps each family per namespace."""
+    `per_family` caps each family per namespace; `reference` pins the
+    instant conflict questions are asked at (default: `reference_time`)."""
     wanted = [f for f in FAMILIES if not families or f in families]
     out: list[Question] = []
     for ns in namespaces:
         rng = random.Random(f"{seed}:{ns}")
-        candidates = _candidates(store, ns, rng)
+        pop = population(store, ns)
+        candidates = _candidates(pop, rng)
         for fam in wanted:
             if fam == "lease":
-                out.extend(_lease_questions(store, ns, rng, per_family))
+                out.extend(_lease_questions(store, ns, rng, per_family, pop))
             elif fam == "conflict":
-                out.extend(_conflict_questions(store, ns, rng, per_family, candidates))
+                at = _aware(reference) if reference else reference_time(store, ns, candidates)
+                out.extend(_conflict_questions(store, ns, rng, per_family, candidates, at))
             elif fam == "multihop":
-                out.extend(_multihop_questions(store, ns, rng, per_family))
+                out.extend(_multihop_questions(store, ns, rng, per_family, pop))
             elif fam == "abstention":
-                out.extend(_abstention_questions(store, ns, rng, max(2, per_family // 2), candidates))
+                out.extend(_abstention_questions(store, ns, rng, max(2, per_family // 2), candidates, pop))
             elif fam == "numeric":
                 out.extend(_numeric_questions(store, ns, rng, per_family, candidates))
             elif fam == "order":
@@ -464,6 +571,7 @@ def generate_questions(store, namespaces: list[str], seed: int = 7, per_family: 
     for q in out:
         if q.id not in seen:
             seen.add(q.id)
+            q.in_loom_gather = in_loom_gather(store, q)
             unique.append(q)
     return unique
 
@@ -478,12 +586,13 @@ class Context:
     tokens_est: int
     build_ms: float
     items: int
-    note: str = ""               # why it was skipped, when it was
+    note: str = ""               # why it was skipped / not sent, when it was
 
 
 def est_prompt_tokens(text: str) -> int:
-    """The same chars/4 estimate the pack builder budgets with, over the
-    whole rendered prompt. The provider's own count sits beside it in the
+    """A rough, model-neutral chars/4 count over the whole rendered prompt
+    (budgets are enforced with the pack builder's own len/3 item
+    accounting, D-051). The provider's own count sits beside it in the
     table when the model reports usage."""
     return max(1, len(text) // 4)
 
@@ -496,21 +605,72 @@ def _pack_ids(pack: ContextPack) -> set[str]:
     return ids
 
 
+def _fact_item(o: Observation) -> ContextItem:
+    return ContextItem(kind="fact", text=_render_fact(o), score=1.0, citations=[_citation(o)])
+
+
 def _synthetic_pack(q: Question, observations: list[Observation]) -> ContextPack:
-    items = [ContextItem(kind="fact", text=_render_fact(o), score=1.0, citations=[_citation(o)])
-             for o in observations]
+    items = [_fact_item(o) for o in observations]
     return ContextPack(namespace=q.namespace, subjects=q.roots(), question=q.text,
-                       budget=max(1, sum(est_prompt_tokens(i.text) for i in items) + 1), items=items)
+                       budget=max(1, sum(item_tokens(i) for i in items) + 1), items=items)
+
+
+def _fill(ranked: list[Observation], budget: int) -> list[Observation]:
+    """The best-ranked observations that fit `budget`, charged exactly as
+    the pack builder charges an item (text plus citation, D-051), so a
+    baseline at B holds as many tokens of evidence as loom@B may."""
+    chosen: list[Observation] = []
+    used = 0
+    for o in ranked:
+        cost = item_tokens(_fact_item(o))
+        if used + cost <= budget:
+            chosen.append(o)
+            used += cost
+        if budget - used < 12:          # no rendered fact is smaller
+            break
+    return chosen
+
+
+def walk_scope(store, ns: str, scope: ScopeSpec) -> list[EntityRef]:
+    """`resolve_scope` without the gather cap: every entity the scope's
+    edges reach, however many edges a hub has (the kernel product has
+    2,740 `affects`; the capped walk sees the newest 1,000). The baselines
+    walk this, so `full` really is everything. Like the product, it does
+    not hop through edges mined from documents unless the scope says so."""
+    expand = set(scope.expand)
+    if not expand and scope.depth > 0:
+        from .registry import containment_predicates
+        expand = set(containment_predicates(store.get_schema(ns)))
+    seen = {(r.type, r.key) for r in scope.subjects}
+    resolved = list(scope.subjects)
+    frontier = list(scope.subjects)
+    for _ in range(scope.depth):
+        if not expand or not frontier:
+            break
+        got = store.observations_for_many(ns, frontier, limit=_GATHER_ALL)
+        nxt: list[EntityRef] = []
+        for ref in frontier:
+            for obs in got.get((ref.type, ref.key), []):
+                if obs.predicate not in expand:
+                    continue
+                if not scope.follow_extracted and _is_extracted(obs):
+                    continue
+                ends = [obs.subject] + ([obs.object] if isinstance(obs.object, EntityRef) else [])
+                for end in ends:
+                    if (end.type, end.key) not in seen:
+                        seen.add((end.type, end.key))
+                        resolved.append(end)
+                        nxt.append(end)
+        frontier = nxt
+    return resolved
 
 
 def candidate_observations(store, q: Question) -> list[Observation]:
     """Everything about the question's entities: the subject, or every
-    entity the scope reaches (no time axis applied — the baselines get the
-    whole history and must read the dates themselves). Newest first."""
-    if q.scope is not None:
-        refs = resolve_scope(store, q.namespace, q.scope)
-    else:
-        refs = [q.subject]
+    entity the scope reaches, uncapped (no time axis applied — the
+    baselines get the whole history and must read the dates themselves).
+    Newest first."""
+    refs = walk_scope(store, q.namespace, q.scope) if q.scope is not None else [q.subject]
     got = store.observations_for_many(q.namespace, refs, limit=_GATHER_ALL)
     seen: set[str] = set()
     out: list[Observation] = []
@@ -519,64 +679,113 @@ def candidate_observations(store, q: Question) -> list[Observation]:
             if o.id not in seen:
                 seen.add(o.id)
                 out.append(o)
-    out.sort(key=lambda o: _aware(o.observed_at), reverse=True)
+    out.sort(key=lambda o: (_aware(o.observed_at), o.id), reverse=True)
     return out
 
 
-def _vectors(store, q: Question, observations: list[Observation], embedder) -> dict[str, list[float]]:
-    ids = [o.id for o in observations]
-    have = store.embeddings_for(q.namespace, ids, embedder.model) if ids else {}
-    missing = [o for o in observations if o.id not in have][:_EMBED_ON_THE_FLY]
-    for start in range(0, len(missing), 128):
-        chunk = missing[start:start + 128]
-        for o, vec in zip(chunk, embedder.embed([_render_fact(o) for o in chunk])):
-            have[o.id] = vec
-    return have
+def _query_vector(embedder, text: str) -> list[float]:
+    """The question's embedding, retried: one stalled call used to end a
+    paid run. `embed_query` is the short-timeout ask-time path; the last
+    attempt goes through the batch path with its own retries."""
+    last: Exception | None = None
+    for attempt in range(_QUERY_EMBED_ATTEMPTS):
+        try:
+            if attempt + 1 == _QUERY_EMBED_ATTEMPTS or not hasattr(embedder, "embed_query"):
+                return embedder.embed([text])[0]
+            return embedder.embed_query(text)
+        except Exception as exc:  # noqa: BLE001 — retried, then raised to the row
+            last = exc
+            time.sleep(min(4.0, 0.5 * 2 ** attempt))
+    raise last  # type: ignore[misc]
 
 
-def build_context(store, q: Question, condition: str, embedder=None, k: int = DEFAULT_K,
-                  full_cap: int = DEFAULT_FULL_CAP) -> Context:
+def _vector_rank(store, q: Question, observations: list[Observation], embedder) -> tuple[list[Observation], str]:
+    """Every candidate by cosine to the question, best first, reading stored
+    vectors a chunk at a time (a multi-hop candidate set on a hub runs to
+    tens of thousands); candidates without a stored vector are embedded on
+    the fly up to _EMBED_ON_THE_FLY, and the rest are reported."""
+    query = _query_vector(embedder, q.text)
+    sims: dict[str, float] = {}
+    missing: list[Observation] = []
+    for start in range(0, len(observations), _VECTOR_CHUNK):
+        chunk = observations[start:start + _VECTOR_CHUNK]
+        have = store.embeddings_for(q.namespace, [o.id for o in chunk], embedder.model)
+        sims.update(cosines(query, have))
+        missing.extend(o for o in chunk if o.id not in have)
+    for start in range(0, min(len(missing), _EMBED_ON_THE_FLY), 128):
+        chunk = missing[start:min(start + 128, _EMBED_ON_THE_FLY)]
+        vectors = dict(zip((o.id for o in chunk), embedder.embed([_render_fact(o) for o in chunk])))
+        sims.update(cosines(query, vectors))
+    note = ""
+    if len(sims) < len(observations):
+        note = f"{len(observations) - len(sims)} candidates had no vector"
+    ranked = sorted((o for o in observations if o.id in sims), key=lambda o: (-sims[o.id], o.id))
+    return ranked, note
+
+
+class _Cache:
+    """Per-question work the budgeted baselines share: the uncapped gather
+    and the cosine ranking are the same for vector@400 and vector@3200.
+    Holds one question at a time (the run loop is question-major); the time
+    each took is charged to every condition that uses it."""
+
+    def __init__(self):
+        self.qid: str | None = None
+        self.data: dict[str, tuple[Any, float]] = {}
+
+    def get(self, q: Question, key: str, fn: Callable[[], Any]) -> tuple[Any, float]:
+        if self.qid != q.id:
+            self.qid, self.data = q.id, {}
+        if key not in self.data:
+            t0 = time.monotonic()
+            value = fn()
+            self.data[key] = (value, (time.monotonic() - t0) * 1000)
+        return self.data[key]
+
+
+def build_context(store, q: Question, condition: str, embedder=None,
+                  full_cap: int = DEFAULT_FULL_CAP, cache: _Cache | None = None) -> Context:
     t0 = time.monotonic()
-    if condition.startswith("loom@"):
-        budget = int(condition.split("@", 1)[1])
-        pack = build_pack(store, q.ask(budget), embedder=embedder)
+    name, _, b = condition.partition("@")
+    if name == "loom":
+        pack = build_pack(store, q.ask(int(b)), embedder=embedder)
         prompt = render_user_prompt(q.text, pack)
         return Context(condition, prompt, _pack_ids(pack), est_prompt_tokens(prompt),
                        (time.monotonic() - t0) * 1000, len(pack.items))
-    observations = candidate_observations(store, q)
-    note = ""
-    if condition == "full":
-        chosen = observations
-    elif condition == "recency":
-        chosen = observations[:k]
-    elif condition == "vector":
-        if embedder is None:
-            return Context(condition, "", set(), 0, 0.0, 0, note="skipped: no embedder (LOOM_EMBED_*)")
-        vectors = _vectors(store, q, observations, embedder)
-        query = embedder.embed_query(q.text) if hasattr(embedder, "embed_query") else embedder.embed([q.text])[0]
-        sims = cosines(query, vectors)
-        chosen = sorted((o for o in observations if o.id in sims), key=lambda o: -sims[o.id])[:k]
-        if len(vectors) < len(observations):
-            note = f"{len(observations) - len(vectors)} candidates had no vector"
-    else:
+    if name not in ("full", "vector", "recency") or (name == "full") == bool(b):
         raise ValueError(f"unknown condition {condition!r}")
+    if name == "vector" and embedder is None:
+        return Context(condition, "", set(), 0, 0.0, 0, note="skipped: no embedder (LOOM_EMBED_*)")
+    cache = cache or _Cache()
+    observations, shared_ms = cache.get(q, "candidates", lambda: candidate_observations(store, q))
+    note = ""
+    if name == "full":
+        chosen = observations
+    elif name == "recency":
+        chosen = _fill(observations, int(b))
+    else:
+        (ranked, note), rank_ms = cache.get(q, "vector", lambda: _vector_rank(store, q, observations, embedder))
+        shared_ms += rank_ms
+        chosen = _fill(ranked, int(b))
     pack = _synthetic_pack(q, chosen)
     prompt = render_user_prompt(q.text, pack)
     tokens = est_prompt_tokens(prompt)
-    if condition == "full" and tokens > full_cap:
+    if name == "full" and tokens > full_cap:
         note = f"not sent: {tokens:,} tokens exceeds --full-cap {full_cap:,}"
-    return Context(condition, prompt, _pack_ids(pack), tokens, (time.monotonic() - t0) * 1000,
-                   len(chosen), note)
+    return Context(condition, prompt, _pack_ids(pack), tokens,
+                   shared_ms + (time.monotonic() - t0) * 1000, len(chosen), note)
 
 
 def condition_names(budgets: tuple[int, ...] | list[int], conditions: list[str] | None = None) -> list[str]:
+    """Budget-major (loom@400, vector@400, recency@400, loom@800, ...) so
+    the table reads as comparisons at equal tokens, then `full`."""
     wanted = conditions or list(CONDITIONS)
-    names: list[str] = []
-    for c in wanted:
-        if c == "loom":
-            names.extend(f"loom@{b}" for b in budgets)
-        else:
-            names.append(c)
+    unknown = [c for c in wanted if c not in CONDITIONS]
+    if unknown:
+        raise ValueError(f"unknown condition(s) {unknown}; choose from {', '.join(CONDITIONS)}")
+    names = [f"{c}@{b}" for b in budgets for c in wanted if c in BUDGETED]
+    if "full" in wanted:
+        names.append("full")
     return names
 
 
@@ -585,36 +794,61 @@ def condition_names(budgets: tuple[int, ...] | list[int], conditions: list[str] 
 class LiveModel:
     """One system+user completion per question through the configured
     provider (LOOM_LLM_*, any OpenAI-compatible endpoint or Anthropic);
-    OpenRouter is asked to report the billed cost per call (D-037)."""
+    OpenRouter is asked to report the billed cost per call (D-037).
+    Temperature 0, unless the model rejects the parameter (some reasoning
+    models do): then it is dropped for the rest of the run and noted."""
 
-    def __init__(self, provider: Provider, max_tokens: int = 300):
+    def __init__(self, provider: Provider, max_tokens: int = DEFAULT_MAX_TOKENS,
+                 reasoning_effort: str | None = None):
         self.provider = provider
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.model = provider.model
+        self.temperature: float | None = 0.0
 
     def answer(self, q: Question, system: str, prompt: str) -> tuple[str, dict]:
+        try:
+            return self._call(system, prompt)
+        except LLMError as exc:
+            if self.temperature is None or "temperature" not in str(exc).lower():
+                raise
+            self.temperature = None        # rejected: retry once without, and keep it off
+            return self._call(system, prompt)
+
+    def _call(self, system: str, prompt: str) -> tuple[str, dict]:
         p = self.provider
         if p.kind == "openai":
             headers = {"authorization": f"Bearer {p.api_key}"} if p.api_key else {}
             body: dict = {"model": p.model, "max_tokens": self.max_tokens, "messages": [
                 {"role": "system", "content": system}, {"role": "user", "content": prompt}]}
+            if self.temperature is not None:
+                body["temperature"] = self.temperature
             if "openrouter.ai" in p.base_url:
                 body["usage"] = {"include": True}
+                if self.reasoning_effort:
+                    # a reasoning model's thinking counts against max_tokens;
+                    # the reasoning text itself is not needed back
+                    body["reasoning"] = {"effort": self.reasoning_effort, "exclude": True}
             data = _post_json(p.base_url + "/chat/completions", body, headers, timeout=180)
-            msg = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            msg = choice.get("message") or {}
             content = msg.get("content") or ""
             if isinstance(content, list):
                 content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
             u = data.get("usage") or {}
             return str(content), {"in": int(u.get("prompt_tokens") or 0), "out": int(u.get("completion_tokens") or 0),
-                                  "cost": float(u.get("cost") or 0.0)}
-        data = _post_json(p.base_url + "/v1/messages", {
-            "model": p.model, "max_tokens": self.max_tokens, "system": system,
-            "messages": [{"role": "user", "content": prompt}]},
-            {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}, timeout=180)
+                                  "cost": float(u.get("cost") or 0.0), "finish": choice.get("finish_reason")}
+        body = {"model": p.model, "max_tokens": self.max_tokens, "system": system,
+                "messages": [{"role": "user", "content": prompt}]}
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        data = _post_json(p.base_url + "/v1/messages", body,
+                          {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}, timeout=180)
         text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
         u = data.get("usage") or {}
-        return text, {"in": int(u.get("input_tokens") or 0), "out": int(u.get("output_tokens") or 0), "cost": 0.0}
+        stop = data.get("stop_reason")
+        return text, {"in": int(u.get("input_tokens") or 0), "out": int(u.get("output_tokens") or 0), "cost": 0.0,
+                      "finish": "length" if stop == "max_tokens" else stop}
 
 
 class CannedModel:
@@ -632,7 +866,10 @@ class CannedModel:
 
 
 _LINE = re.compile(r"^- \((\w+)\) (.*) \[([^\]]*)\]$")
-_FACT = re.compile(r"^(\S+) (\S+) (.+?) \((\d{4}-\d{2}-\d{2}), per ([^)]+)\)(?: \[valid (\S+) to (\S+)\])?$")
+# a corrected fact carries `[superseded by <cite>]` (D-050) in packs only;
+# the reader used to fail to parse it, costing loom@B orderings it carried
+_FACT = re.compile(r"^(\S+) (\S+) (.+?) \((\d{4}-\d{2}-\d{2}), per ([^)]+)\)(?: \[valid (\S+) to (\S+)\])?"
+                   r"(?: \[superseded by [0-9a-f]+\])?$")
 _SAYS = re.compile(r"(\S+) says '([^']*)'")
 
 
@@ -766,6 +1003,8 @@ class ScriptedReader:
 # ---------------------------------------------------------------- scoring #
 
 _UNKNOWN = ("unknown", "notknown", "insufficient", "cannot", "none", "notincontext", "nodata")
+_ASIDE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]")
+_ORDER_ANSWER = re.compile(r"^\W*([ab])\b", re.IGNORECASE)
 
 
 def _loose(text: str) -> str:
@@ -774,6 +1013,37 @@ def _loose(text: str) -> str:
 
 def _strip_type(value: str) -> str:
     return value.split(":", 1)[1] if re.match(r"^[a-z_]+:", value) else value
+
+
+def _asserted(value: str) -> str:
+    """The value without its asides: `laptop-17 (moved from web-01 on Aug 10)`
+    asserts laptop-17; the history in brackets is not the answer."""
+    prev = None
+    while prev != value:
+        prev, value = value, _ASIDE.sub(" ", value)
+    return value
+
+
+def _names(text: str, key: str) -> bool:
+    """`key` appears in `text` as a whole token (case-insensitive): web-01
+    is not named by web-010. Falls back to separator-insensitive equality of
+    the whole value (`Ubuntu 22.04` names ubuntu-22.04)."""
+    low, k = text.lower(), key.lower()
+    if re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", low):
+        return True
+    loose = _loose(k)
+    return bool(loose) and any(_loose(part) == loose
+                               for part in re.split(r"[,;|]|\band\b", _strip_type(low)))
+
+
+def _names_value(text: str, value: str) -> bool:
+    """A conflict value named in the reply: numbers by value (7.5 is not
+    named by 17.5), everything else as a token."""
+    if _NUMBER.fullmatch(value):
+        target = float(value)
+        return any(abs(float(n) - target) <= _tolerance(target)
+                   for n in _NUMBER.findall(text.replace(",", "")))
+    return _names(text, value) or _loose(value) in {_loose(p) for p in re.split(r"[,;|]", text)}
 
 
 def parse_answer(text: str) -> tuple[str, list[str]]:
@@ -790,8 +1060,7 @@ def parse_answer(text: str) -> tuple[str, list[str]]:
     if not value:
         value = text.strip().splitlines()[0].strip() if text.strip() else ""
     source = cites_line if cites_line is not None else text
-    cites = sorted(set(re.findall(r"\b[0-9a-f]{8,32}\b", source)))
-    return value, cites
+    return value, sorted(set(cite_tokens_in(source)))
 
 
 def _is_unknown(value: str) -> bool:
@@ -809,16 +1078,15 @@ def score(q: Question, reply: str, ctx: Context) -> dict:
     elif unknown:
         ok = False
     elif q.kind == "entity":
-        low = _loose(value)
-        ok = _loose(_strip_type(str(q.truth))) in low
-        wrong = [r for r in q.reject if _loose(r) in low]
+        asserted = _asserted(value)
+        wrong = [r for r in q.reject if _names(asserted, r)]
         detail["rejected"] = wrong
-        ok = ok and not wrong
+        ok = _names(asserted, _strip_type(str(q.truth))) and not wrong
     elif q.kind == "ids":
         if q.probe.get("id_regex"):
             found = re.findall(q.probe["id_regex"], value)
         else:
-            found = [t for t in re.split(r"[,\s]+", value) if t]
+            found = [t for t in re.split(r"[,\s]+", _asserted(value)) if t]
         got = {_loose(_strip_type(m)) for m in found}
         truth = {_loose(_strip_type(t)) for t in q.truth}
         hits = got & truth
@@ -826,15 +1094,20 @@ def score(q: Question, reply: str, ctx: Context) -> dict:
                       recall=round(len(hits) / len(truth), 3) if truth else 0.0)
         ok = got == truth
     elif q.kind == "conflict":
-        named = [v for v in q.truth if _loose(v) in _loose(value)]
+        # every value must be named: saying "conflict" alone (or "no
+        # conflict, 7.5") is not an answer to "give every value"
+        named = [v for v in q.truth if _names_value(value, v)]
         detail["values_named"] = named
-        ok = len(named) == len(q.truth) or "conflict" in value.lower()
+        ok = len(named) == len(q.truth)
     elif q.kind == "number":
         nums = _NUMBER.findall(value.replace(",", ""))
         got = float(nums[0]) if nums else None
-        ok = got is not None and abs(got - float(q.truth)) <= 0.005   # half a cent, half a hundredth of a score
+        tol = q.tolerance if q.tolerance is not None else _tolerance(float(q.truth))
+        ok = got is not None and abs(got - float(q.truth)) <= tol
     elif q.kind == "order":
-        ok = _loose(value)[:1] == q.truth.lower()
+        # exactly A or B: "Both" used to pass for B on its first letter
+        m = _ORDER_ANSWER.match(value)
+        ok = bool(m) and m.group(1).upper() == q.truth
     else:
         ok = False
     truth_ids = set(q.truth_ids)
@@ -863,42 +1136,71 @@ class Record:
     cost: float
     score: dict
     note: str = ""
+    # ok: answered and scored | not_sent: over --full-cap / past --max-cost |
+    # error: context build, provider, empty or truncated reply | skipped
+    status: str = "ok"
+
+
+def _status(note: str) -> str:
+    for prefix in ("skipped", "not sent", "error"):
+        if note.startswith(prefix):
+            return prefix.replace(" ", "_")
+    return "ok"
+
+
+_UNSCORED = {"pass_": None, "abstained": None, "hallucinated": None, "support_pack": None,
+             "support_answer": None, "cites": 0, "cites_unseen": 0}
 
 
 def evaluate(store, questions: list[Question], model, conditions: list[str], embedder=None,
-             k: int = DEFAULT_K, full_cap: int = DEFAULT_FULL_CAP, runs: int = 1,
-             max_cost: float = DEFAULT_MAX_COST, progress: Callable[[str], None] | None = None) -> list[Record]:
+             full_cap: int = DEFAULT_FULL_CAP, runs: int = 1, max_cost: float = DEFAULT_MAX_COST,
+             progress: Callable[[str], None] | None = None,
+             sink: Callable[[Record], None] | None = None) -> list[Record]:
+    """Every (run, question, condition) row. A row whose context could not
+    be built, whose call failed, whose reply was empty or cut at
+    max_tokens, or that was never sent is recorded with its reason and no
+    score. `sink` sees each record the moment it exists (the CLI appends it
+    to a JSONL file), so a crash loses nothing that was paid for."""
     records: list[Record] = []
     spent = 0.0
+    cache = _Cache()
+    live = isinstance(model, LiveModel)
     for run in range(max(1, runs)):
         for q in questions:
             for cond in conditions:
-                ctx = build_context(store, q, cond, embedder, k, full_cap)
-                note = ctx.note
                 reply, usage = "", {"in": None, "out": 0, "cost": 0.0}
-                if note.startswith("skipped") or note.startswith("not sent"):
+                try:
+                    ctx = build_context(store, q, cond, embedder, full_cap, cache)
+                    note = ctx.note
+                except Exception as exc:  # noqa: BLE001 — one bad build must not sink the run
+                    ctx = Context(cond, "", set(), 0, 0.0, 0)
+                    note = f"error: context: {type(exc).__name__}: {str(exc)[:120]}"
+                if note.startswith(("skipped", "not sent", "error")):
                     pass
                 elif spent > max_cost:
                     note = f"not sent: spend ${spent:.2f} exceeded --max-cost ${max_cost:.2f}"
                 else:
                     try:
                         reply, usage = model.answer(q, SYSTEM, ctx.prompt)
+                        if usage.get("finish") == "length":
+                            note = f"error: reply cut at max_tokens ({usage.get('out')} out)"
+                        elif not reply.strip():
+                            note = f"error: empty reply (finish_reason={usage.get('finish')!r})"
                     except Exception as exc:  # noqa: BLE001 — one bad call must not sink the table
                         note = f"error: {type(exc).__name__}: {str(exc)[:120]}"
                         usage = {"in": None, "out": 0, "cost": 0.0}
                 spent += float(usage.get("cost") or 0.0)
-                s = score(q, reply, ctx)
-                if note and not reply:
-                    s["pass_"] = False
-                    s["abstained"] = False
-                    s["hallucinated"] = False
-                    s["support_answer"] = None
-                records.append(Record(run, q.id, q.family, cond, reply, ctx.tokens_est,
-                                      usage.get("in") if isinstance(model, LiveModel) else None,
-                                      round(ctx.build_ms, 2), float(usage.get("cost") or 0.0), s, note))
+                status = _status(note)
+                s = score(q, reply, ctx) if status == "ok" else dict(_UNSCORED)
+                rec = Record(run, q.id, q.family, cond, reply, ctx.tokens_est,
+                             usage.get("in") if live else None,
+                             round(ctx.build_ms, 2), float(usage.get("cost") or 0.0), s, note, status)
+                records.append(rec)
+                if sink:
+                    sink(rec)
                 if progress:
-                    progress(f"run {run + 1} {cond:<10} {q.id:<50} {'PASS' if s['pass_'] else 'FAIL'}"
-                             f" {ctx.tokens_est:>7} tok  {note}")
+                    mark = {"ok": "PASS" if s["pass_"] else "FAIL"}.get(status, status.upper())
+                    progress(f"run {run + 1} {cond:<13} {q.id:<50} {mark:<8} {ctx.tokens_est:>7} tok  {note}")
     return records
 
 
@@ -917,77 +1219,93 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 def summarize(records: list[Record], conditions: list[str]) -> dict[str, dict]:
-    """Per condition: accuracy (overall, per family, per run), tokens,
-    latency, citation support, hallucinations, cost."""
+    """Per condition: accuracy (overall, per family, per run) over the rows
+    that were answered, the rows that were not (not sent / errored, with
+    reasons), tokens, latency, citation support, hallucinations, cost."""
     out: dict[str, dict] = {}
     for cond in conditions:
         rs = [r for r in records if r.condition == cond]
         if not rs:
             continue
-        if all(r.note.startswith("skipped") for r in rs):
-            out[cond] = {"skipped": rs[0].note, "n": len(rs), "notes": [rs[0].note], "families": {}}
+        if all(r.status == "skipped" for r in rs):
+            out[cond] = {"skipped": rs[0].note, "n": 0, "notes": [rs[0].note], "families": {}}
             continue
+        ok = [r for r in rs if r.status == "ok"]
         runs = sorted({r.run for r in rs})
-        per_run = [sum(r.score["pass_"] for r in rs if r.run == n) / max(1, sum(1 for r in rs if r.run == n))
-                   for n in runs]
+        per_run = [sum(r.score["pass_"] for r in ok if r.run == n) / m
+                   for n in runs if (m := sum(1 for r in ok if r.run == n))]
         families: dict[str, tuple[int, int]] = {}
         for fam in FAMILIES:
-            fr = [r for r in rs if r.family == fam]
+            fr = [r for r in ok if r.family == fam]
             if fr:
                 families[fam] = (sum(r.score["pass_"] for r in fr), len(fr))
-        sent = [r for r in rs if not r.note]
-        provider = [r.tokens_provider for r in rs if r.tokens_provider]
-        abst = [r for r in rs if r.family == "abstention"]
-        others = [r for r in rs if r.family != "abstention" and not r.note]
-        supp_p = [r for r in rs if r.score.get("support_pack") is not None]
-        supp_a = [r for r in rs if r.score.get("support_answer") is not None]
+        measured = [r for r in rs if r.status != "skipped" and not r.note.startswith("error: context")]
+        provider = [r.tokens_provider for r in ok if r.tokens_provider]
+        abst = [r for r in ok if r.family == "abstention"]
+        others = [r for r in ok if r.family != "abstention"]
+        supp_p = [r for r in ok if r.score.get("support_pack") is not None]
+        supp_a = [r for r in ok if r.score.get("support_answer") is not None]
+        passed = sum(r.score["pass_"] for r in ok)
         out[cond] = {
-            "n": len(rs), "passed": sum(r.score["pass_"] for r in rs),
-            "accuracy": sum(r.score["pass_"] for r in rs) / len(rs),
+            "n": len(ok), "passed": passed, "rows": len(rs),
+            "accuracy": passed / len(ok) if ok else None,
             "accuracy_runs": per_run,
             "accuracy_stdev": statistics.stdev(per_run) if len(per_run) > 1 else 0.0,
             "families": families,
-            "tokens_est": statistics.mean(r.tokens_est for r in rs),
-            "tokens_est_max": max(r.tokens_est for r in rs),
+            "tokens_est": statistics.mean(r.tokens_est for r in measured) if measured else 0.0,
+            "tokens_est_max": max((r.tokens_est for r in measured), default=0),
             "tokens_provider": statistics.mean(provider) if provider else None,
-            "build_p50": _percentile([r.build_ms for r in rs], 50),
-            "build_p95": _percentile([r.build_ms for r in rs], 95),
+            "build_p50": _percentile([r.build_ms for r in measured], 50),
+            "build_p95": _percentile([r.build_ms for r in measured], 95),
             "support_pack": (sum(r.score["support_pack"] for r in supp_p), len(supp_p)),
             "support_answer": (sum(r.score["support_answer"] for r in supp_a), len(supp_a)),
-            "unseen": (sum(1 for r in sent if r.score["cites_unseen"]), len(sent)),
+            "unseen": (sum(1 for r in ok if r.score["cites_unseen"]), len(ok)),
             "hallucinated": (sum(r.score["hallucinated"] for r in abst), len(abst)),
             "abstained": (sum(r.score["abstained"] for r in others), len(others)),
             "cost": sum(r.cost for r in rs),
-            "not_sent": sum(1 for r in rs if r.note),
+            "not_sent": sum(1 for r in rs if r.status == "not_sent"),
+            "errored": sum(1 for r in rs if r.status == "error"),
             "notes": sorted({r.note for r in rs if r.note}),
         }
     return out
 
 
-def markdown(summary: dict[str, dict], meta: dict) -> str:
+def cost_capped(records: list[Record]) -> int:
+    return sum(1 for r in records if r.note.startswith("not sent: spend"))
+
+
+def markdown(summary: dict[str, dict], meta: dict, questions: list[Question] | None = None) -> str:
     runs = meta.get("runs", 1)
-    lines = [f"# Retrieval evaluation — {meta.get('date', '')}", "",
-             f"Store: `{meta.get('store', '?')}` · namespaces: {', '.join(meta.get('namespaces', []))} · "
-             f"model: `{meta.get('model', '?')}` · embedder: {meta.get('embedder') or 'none'} · "
-             f"questions: {meta.get('questions', 0)} ({meta.get('per_family', '')}) · runs: {runs} · "
-             f"k: {meta.get('k', DEFAULT_K)} · seed: {meta.get('seed', '')}", ""]
+    lines = [f"# Retrieval evaluation — {meta.get('date', '')}", ""]
+    if meta.get("cost_capped"):
+        lines += [f"> **INCOMPLETE: {meta['cost_capped']} rows were not sent because spend passed "
+                  f"--max-cost ${meta.get('max_cost', 0):.2f}.** Their conditions are compared on "
+                  "different question subsets; raise --max-cost and re-run before quoting this table.", ""]
+    lines += [f"Store: `{meta.get('store', '?')}` · namespaces: {', '.join(meta.get('namespaces', []))} · "
+              f"model: `{meta.get('model', '?')}` · embedder: {meta.get('embedder') or 'none'} · "
+              f"questions: {meta.get('questions', 0)} ({meta.get('per_family', '')}) · runs: {runs} · "
+              f"seed: {meta.get('seed', '')}", ""]
     acc_head = "Accuracy" + (f" (mean ± sd over {runs} runs)" if runs > 1 else "")
-    lines.append(f"| Condition | {acc_head} | Tokens est (mean / max) | Tokens provider | Build p50 / p95 ms | "
-                 "Support@pack | Support@answer | Unseen cites | Hallucinated (abstention) | "
-                 "Abstained (other) | Cost |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(f"| Condition | n | Not sent / errored | {acc_head} | Tokens est (mean / max) | Tokens provider | "
+                 "Build p50 / p95 ms | Truth in context | Support@answer | Unseen cites | "
+                 "Hallucinated (abstention) | Abstained (other) | Cost |")
+    lines.append("| --- |" + " --- |" * 12)
     for cond, s in summary.items():
         if "skipped" in s:
-            lines.append(f"| `{cond}` | {s['skipped']} |" + " - |" * 9)
+            lines.append(f"| `{cond}` | 0 | {s['skipped']} |" + " - |" * 10)
             continue
-        acc = f"{100 * s['accuracy']:.0f}% ({s['passed']}/{s['n']})"
-        if runs > 1:
+        dropped = f"{s['not_sent']} / {s['errored']}" if s["not_sent"] or s["errored"] else "0"
+        if s["accuracy"] is None:
+            acc = "- (none answered)"
+        elif runs > 1 and s["accuracy_runs"]:
             acc = f"{100 * statistics.mean(s['accuracy_runs']):.0f}% ± {100 * s['accuracy_stdev']:.0f}"
+        else:
+            acc = f"{100 * s['accuracy']:.0f}% ({s['passed']}/{s['n']})"
         prov = f"{s['tokens_provider']:,.0f}" if s["tokens_provider"] else "-"
         cost = f"${s['cost']:.3f}" if s["cost"] else "-"
         lines.append(
-            f"| `{cond}` | {acc} | {s['tokens_est']:,.0f} / {s['tokens_est_max']:,} | {prov} | "
-            f"{s['build_p50']:.0f} / {s['build_p95']:.0f} | {_pct(*s['support_pack'])} | "
+            f"| `{cond}` | {s['n']} | {dropped} | {acc} | {s['tokens_est']:,.0f} / {s['tokens_est_max']:,} | "
+            f"{prov} | {s['build_p50']:.0f} / {s['build_p95']:.0f} | {_pct(*s['support_pack'])} | "
             f"{_pct(*s['support_answer'])} | {_pct(*s['unseen'])} | {_pct(*s['hallucinated'])} | "
             f"{_pct(*s['abstained'])} | {cost} |")
     fams = [f for f in FAMILIES if any(f in s["families"] for s in summary.values())]
@@ -998,14 +1316,28 @@ def markdown(summary: dict[str, dict], meta: dict) -> str:
             p, n = s["families"].get(f, (0, 0))
             cells.append(_pct(p, n) if n else "-")
         lines.append(f"| `{cond}` | " + " | ".join(cells) + " |")
+    if questions:
+        outside = [q for q in questions if q.in_loom_gather is False]
+        lines += ["", f"Ground truth outside Loom's gather (the newest {_context._GATHER_LIMIT:,} "
+                      f"observations per entity): {len(outside)} of {len(questions)} questions"
+                  + (" — " + ", ".join(f"`{q.id}`" for q in outside[:12])
+                     + (" …" if len(outside) > 12 else "") if outside else "")
+                  + ". `loom@B` cannot carry these at any budget; the baselines gather without a cap."]
     notes = sorted({n for s in summary.values() for n in s["notes"]})
     if notes:
-        lines += ["", "Notes:"] + [f"- {n}" for n in notes]
-    lines += ["", "Support@pack: the ground-truth observation ids were among the context's citations. "
-              "Support@answer: the model cited them. Unseen cites: replies citing an id the context "
-              "did not carry. Hallucinated: an abstention question answered with anything but "
-              "`unknown`. Abstained: a non-abstention question answered `unknown`. Tokens est is "
-              "chars/4 over the rendered prompt; tokens provider is the model's own prompt count."]
+        shown = notes[:20]
+        lines += ["", "Notes:"] + [f"- {n}" for n in shown] + (
+            [f"- … and {len(notes) - len(shown)} more (see the JSONL)"] if len(notes) > len(shown) else [])
+    lines += ["", "n: rows answered and scored; accuracy and every rate are over these. Not sent / "
+              "errored: rows never answered (over --full-cap, past --max-cost / a provider error, an "
+              "empty or max_tokens-truncated reply), excluded from every denominator. Budgeted "
+              "baselines (`vector@B`, `recency@B`) are filled to the same B as `loom@B` with the pack's "
+              "own token accounting. Truth in context: the ground-truth observation ids were among the "
+              "context's citations. Support@answer: the model cited them. Unseen cites: replies citing "
+              "an id the context did not carry. Hallucinated: an abstention question answered with "
+              "anything but `unknown`. Abstained: a non-abstention question answered `unknown`. Tokens "
+              "est is chars/4 over the rendered prompt (sent or not); tokens provider is the model's "
+              "own prompt count."]
     return "\n".join(lines) + "\n"
 
 
@@ -1013,7 +1345,8 @@ def describe(questions: list[Question]) -> str:
     lines = []
     for q in questions:
         axis = f" valid_at={q.valid_at.date()}" if q.valid_at else (f" as_of={q.as_of.date()}" if q.as_of else "")
-        lines.append(f"{q.id}\n    {q.text}\n    truth={q.truth!r}{axis} ids={[i[:12] for i in q.truth_ids]}")
+        gather = "" if q.in_loom_gather is not False else " OUTSIDE-LOOM-GATHER"
+        lines.append(f"{q.id}\n    {q.text}\n    truth={q.truth!r}{axis} ids={[i[:12] for i in q.truth_ids]}{gather}")
     return "\n".join(lines)
 
 
@@ -1030,30 +1363,42 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model", help="override LOOM_LLM_MODEL")
     parser.add_argument("--scripted", action="store_true", help="the rule-based reader instead of a model (no network)")
     parser.add_argument("--canned", help="JSON file of question id -> reply; unmapped questions answer unknown")
-    parser.add_argument("--budgets", default=",".join(str(b) for b in BUDGETS))
+    parser.add_argument("--budgets", default=",".join(str(b) for b in BUDGETS),
+                        help="token budgets B for loom@B, vector@B and recency@B")
     parser.add_argument("--conditions", default=",".join(CONDITIONS), help="subset of " + ",".join(CONDITIONS))
     parser.add_argument("--families", help="subset of " + ",".join(FAMILIES))
     parser.add_argument("--per-family", type=int, default=8, help="questions per family per namespace")
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--k", type=int, default=DEFAULT_K, help="items for the vector / recency baselines")
+    parser.add_argument("--reference-time", help="ISO instant conflict questions are asked at "
+                                                 "(default: the newest observation about the sampled entities)")
     parser.add_argument("--full-cap", type=int, default=DEFAULT_FULL_CAP,
                         help="a full context above this many estimated tokens is measured but not sent")
-    parser.add_argument("--max-cost", type=float, default=DEFAULT_MAX_COST, help="USD ceiling for live calls")
-    parser.add_argument("--max-tokens", type=int, default=300, help="completion cap per answer")
+    parser.add_argument("--max-cost", type=float, default=DEFAULT_MAX_COST,
+                        help="USD ceiling for live calls; rows past it are not sent, and the scorecard "
+                             "is marked INCOMPLETE (exit status 3)")
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                        help="completion cap per answer (a reasoning model thinks inside it); a reply "
+                             "cut at the cap is an error row, never an answer")
+    parser.add_argument("--reasoning-effort", help="OpenRouter reasoning effort (e.g. low) for reasoning models")
     parser.add_argument("--runs", type=int, default=1, help="repeat everything N times; report variance")
-    parser.add_argument("--out", help="Markdown scorecard path (default eval/retrieval-<date>.md)")
-    parser.add_argument("--json", help="also write every record here")
+    parser.add_argument("--out", help="Markdown scorecard path (default eval/retrieval-<date>.md); "
+                                      "rows stream to the same path with .jsonl")
+    parser.add_argument("--json", help="also write every question and record here at the end")
     parser.add_argument("--list-questions", action="store_true", help="print the generated questions and exit")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
     from .store.factory import store_from_env, store_from_url
     store = store_from_url(args.db) if args.db else store_from_env()
+    date = datetime.now(timezone.utc).date().isoformat()
+    out = Path(args.out or f"eval/retrieval-{date}.md")
+    stream = out.with_suffix(".jsonl")
     try:
         namespaces = ([n.strip() for n in args.namespaces.split(",") if n.strip()] if args.namespaces
                       else sorted(store.namespace_summary()))
         families = [f.strip() for f in args.families.split(",")] if args.families else None
-        questions = generate_questions(store, namespaces, args.seed, args.per_family, families)
+        reference = datetime.fromisoformat(args.reference_time.replace("Z", "+00:00")) if args.reference_time else None
+        questions = generate_questions(store, namespaces, args.seed, args.per_family, families, reference)
         if args.list_questions:
             print(describe(questions))
             print(f"\n{len(questions)} questions ({_family_counts(questions)})")
@@ -1068,29 +1413,38 @@ def main(argv: list[str] | None = None) -> None:
         elif args.scripted:
             model = ScriptedReader()
         else:
-            model = LiveModel(Provider.from_env(args.model), args.max_tokens)
+            model = LiveModel(Provider.from_env(args.model), args.max_tokens, args.reasoning_effort)
         embedder = embedder_from_env()
         progress = None if args.quiet else (lambda line: print(line, flush=True))
-        records = evaluate(store, questions, model, conditions, embedder, args.k, args.full_cap,
-                           args.runs, args.max_cost, progress)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(stream, "w") as fh:
+            def sink(rec: Record) -> None:
+                fh.write(json.dumps(rec.__dict__, default=str) + "\n")
+                fh.flush()
+            records = evaluate(store, questions, model, conditions, embedder, args.full_cap,
+                               args.runs, args.max_cost, progress, sink)
     finally:
         store.close()
     summary = summarize(records, conditions)
-    meta = {"date": datetime.now(timezone.utc).date().isoformat(), "store": args.db or os.environ.get("LOOM_DB", "loom.db"),
+    capped = cost_capped(records)
+    meta = {"date": date, "store": args.db or os.environ.get("LOOM_DB", "loom.db"),
             "namespaces": namespaces, "model": model.model, "embedder": getattr(embedder, "model", None),
             "questions": len(questions), "per_family": _family_counts(questions), "runs": args.runs,
-            "k": args.k, "seed": args.seed}
-    table = markdown(summary, meta)
+            "seed": args.seed, "budgets": list(budgets), "max_cost": args.max_cost, "cost_capped": capped,
+            "max_tokens": args.max_tokens, "full_cap": args.full_cap}
+    table = markdown(summary, meta, questions)
     print("\n" + table)
-    out = Path(args.out or f"eval/retrieval-{meta['date']}.md")
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(table)
-    print(f"scorecard: {out}")
+    print(f"scorecard: {out}\nrows: {stream}")
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"meta": meta, "questions": [q.__dict__ for q in questions],
                        "records": [r.__dict__ for r in records]}, fh, indent=2, default=str)
         print(f"records: {args.json}")
+    if capped:
+        print(f"\n!!! INCOMPLETE: {capped} rows were not sent — spend passed --max-cost "
+              f"${args.max_cost:.2f}. Raise it and re-run before quoting this table. !!!", file=sys.stderr)
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
