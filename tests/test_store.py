@@ -413,6 +413,45 @@ def test_export_import_keeps_redactions_and_aliases(store, tmp_path):
     dst.close()
 
 
+def test_an_import_never_serves_a_redacted_row(store, tmp_path):
+    """D-058: dumps wrote tombstones after the observations they redact, so
+    an import served every redacted row for its whole length. Exports now
+    put tombstones first, and an old-order dump that can be re-read gets
+    its tombstones applied in a first pass."""
+    import io
+    from loom.lifecycle import export_jsonl, import_jsonl
+    secret = store.record_claim(_claim(event_id="evt-s"))
+    store.redact("default", secret.id, "spill")
+    buf = io.StringIO()
+    export_jsonl(store, buf, namespace=None)
+    kinds = [json.loads(line)["type"] for line in buf.getvalue().splitlines()]
+    assert kinds.index("tombstone") < kinds.index("observation")
+
+    order: list[str] = []
+
+    class Recording(SqliteStore):
+        def restore_observation(self, obs):
+            order.append("observation")
+            super().restore_observation(obs)
+
+        def restore_tombstone(self, *args):
+            order.append("tombstone")
+            super().restore_tombstone(*args)
+
+    old_order = sorted(buf.getvalue().splitlines(), key=lambda line: json.loads(line)["type"] == "tombstone")
+    dst = Recording(tmp_path / "old-order.db")
+    try:
+        assert import_jsonl(dst, old_order)["tombstones"] == 1
+        assert order.index("tombstone") < order.index("observation")
+        assert dst.observations_for("default", EntityRef(type="host", key="web-01")) == []
+        order.clear()
+        streamed = (line for line in buf.getvalue().splitlines())   # not re-readable: file order
+        import_jsonl(dst, streamed)
+        assert order.index("tombstone") < order.index("observation")
+    finally:
+        dst.close()
+
+
 def test_timestamps_order_by_instant_not_text(store):
     """H-B5: 16:03+02:00 is EARLIER than 15:00Z even though it sorts later as text."""
     from datetime import timedelta, timezone as tz
@@ -508,6 +547,53 @@ def test_count_and_artifact_citation_scope(store):
     assert store.artifact_cited_within("default", art.id, ("vendor",)) is False
     assert store.artifact_cited_within("default", art.id, ()) is False
     assert a.id  # keep a referenced
+
+
+def test_a_restored_tombstone_drops_briefs_citing_it(store):
+    """D-058: restore_tombstone (lifecycle import) re-applies a redaction
+    like `redact` does — a brief quoting the row does not survive it."""
+    obs = store.record_claim(login_claim())
+    host = EntityRef(type="host", key="web-01")
+    store.put_dossier("default", host, "jdoe logs in", 1, [obs.id])
+    store.restore_tombstone("default", obs.id, "pii", OBSERVED)
+    assert store.get_dossier("default", host) is None
+    assert store.observations_for("default", host) == []
+
+
+def test_resolve_refs_and_corrections_of(store):
+    """D-058: the read path resolves its subjects to canonical entities
+    (a merged-away name included) and finds the corrections of rows
+    outside the window it gathered."""
+    web01, alias = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="WEB01")
+    old = store.record_claim(login_claim())
+    store.record_claim(login_claim().model_copy(update={"subject": alias, "event_id": "a1"}))
+    assert store.merge_entities("default", alias, web01)
+    got = store.resolve_refs("default", [alias, web01, EntityRef(type="host", key="nope")])
+    assert got == {("host", "WEB01"): web01, ("host", "web-01"): web01}
+    assert store.resolve_refs("default", []) == {}
+    later = OBSERVED.replace(day=5)
+    fix = store.record_claim(login_claim().model_copy(update={
+        "object": "someone-else", "observed_at": later, "supersedes": old.id, "event_id": "fix"}))
+    assert [o.id for o in store.corrections_of("default", [old.id])] == [fix.id]
+    assert store.corrections_of("default", [old.id], observed_before=OBSERVED) == []
+    assert store.corrections_of("default", []) == []
+    store.redact("default", fix.id, "wrong")
+    assert store.corrections_of("default", [old.id]) == []
+
+
+def test_count_observations_for_a_type_scoped_reader(store):
+    """D-058: a truncation total counts only what the reader could see."""
+    host = EntityRef(type="host", key="web-01")
+    store.record_claim(login_claim())                                   # host -> user
+    store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "linux", "event_id": "os"}))  # host -> scalar
+    store.record_claim(ClaimIn(subject=EntityRef(type="ip", key="10.0.4.7"), predicate="assigned_to",
+                               object=host, observed_at=OBSERVED, source="dhcp"))   # ip -> host
+    assert store.count_observations("default", host) == 3
+    assert store.count_observations("default", host, allowed_types=("host",)) == 1
+    assert store.count_observations("default", host, allowed_types=("host", "ip")) == 2
+    assert store.count_observations("default", host, allowed_types=("host", "ip", "user")) == 3
+    assert store.count_observations("default", host, allowed_types=()) == 0
 
 
 def test_redaction_invalidates_briefs_built_on_it(store):
@@ -661,6 +747,35 @@ def test_nearest_chunks_filter_by_artifact(store):
     only_b = store.nearest_chunks("default", "m", _unit(1, 0), limit=3, artifact_ids=[b.id])
     assert [c["text"] for c, _ in only_b] == ["cccc"]
     assert store.nearest_chunks("default", "m", _unit(1, 0), 3, artifact_ids=[]) == []
+
+
+def test_nearest_chunks_filters_by_artifact_inside_the_index(store, monkeypatch):
+    """D-058: the artifact filter ran after a namespace-wide ANN and needed
+    `limit` survivors, so nearly every ask decoded every chunk vector of
+    every cited artifact in Python. With an index the k nearest among the
+    cited artifacts come from the index alone; chunks the index has not
+    caught up with still count (the exact scan covers the lag)."""
+    from loom.contracts import DocumentIn
+    import loom.store.common as common
+    docs = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED,
+                                            event_id=f"d{i}")) for i in range(6)]
+    # five decoy documents sit right on the query; the cited one is off to the side
+    for i, doc in enumerate(docs[:5]):
+        store.put_doc_chunks("default", doc.id, "m", [(j, j, j + 1, f"decoy{i}-{j}", _unit(1, 0.01 * j, 0))
+                                                      for j in range(20)])
+    cited = docs[5]
+    store.put_doc_chunks("default", cited.id, "m", [(j, j, j + 1, f"cited-{j}", _unit(0.2, 1, 0.1 * j))
+                                                    for j in range(10)])
+    backend = store.vector_backend()
+    if backend != "exact":
+        def no_python_scan(*a, **k):
+            raise AssertionError("exact scan in Python despite an index")
+        monkeypatch.setattr(common, "cosines", no_python_scan)
+    hits = store.nearest_chunks("default", "m", _unit(1, 0, 0), limit=4, artifact_ids=[cited.id])
+    assert [c["text"] for c, _ in hits] == ["cited-0", "cited-1", "cited-2", "cited-3"]
+    monkeypatch.undo()
+    # fewer chunks than `limit` is an answer, not a reason to scan
+    assert len(store.nearest_chunks("default", "m", _unit(1, 0, 0), limit=64, artifact_ids=[cited.id])) == 10
 
 
 def test_vector_index_backfill_and_exact_fallback_agree(store):
@@ -1177,6 +1292,24 @@ def test_observations_for_many_matches_one_by_one(store):
     assert store.observations_for_many("m", [], limit=5) == {}
 
 
+def test_settled_groups_do_not_starve_merge_candidates(store):
+    """D-058: a group whose every cross-type pair was declined stayed a
+    candidate forever; fifty of them filled merge_candidates' limit and no
+    new collision was ever offered again."""
+    for key in ("a-key", "b-key", "c-key"):
+        for etype in ("user", "group"):
+            store.upsert_entity("ns", EntityRef(type=etype, key=key))
+    store.upsert_entity("ns", EntityRef(type="role", key="c-key"))
+    store.remember_decline("ns", "user:a-key", "group:a-key", "different things")
+    store.remember_decline("ns", "group:b-key", "user:b-key", "different things")
+    store.remember_decline("ns", "group:c-key", "user:c-key", "different things")   # role:c-key still open
+    assert [g[0].key for g in store.merge_candidates("ns", limit=1)] == ["c-key"]
+    assert [sorted(e.type for e in g) for g in store.merge_candidates(limit=5)] == [["group", "role", "user"]]
+    store.remember_decline("ns", "role:c-key", "user:c-key", "no")
+    store.remember_decline("ns", "group:c-key", "role:c-key", "no")
+    assert store.merge_candidates("ns") == []
+
+
 def test_declines_are_stored_symmetrically(store):
     store.remember_decline("ns", "product:b", "product:a", "different vendors")
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
@@ -1237,6 +1370,48 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
         again.close()
+
+
+def test_two_processes_migrating_one_old_file_both_open(tmp_path):
+    """D-058: the engine and a worker opening a pre-v6 file at once both
+    saw `supersedes` missing; the second ALTER died on "duplicate column
+    name". Migration now runs under BEGIN IMMEDIATE and re-reads the shape
+    inside the lock, and a duplicate column is tolerated regardless."""
+    import sqlite3
+    import threading
+    path = tmp_path / "old.db"
+    SqliteStore(path).close()
+    raw = sqlite3.connect(path)
+    raw.execute("DROP INDEX idx_obs_supersedes")
+    raw.execute("ALTER TABLE observations DROP COLUMN supersedes")
+    raw.execute("UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
+    raw.commit()
+    raw.close()
+    barrier, opened, errors = threading.Barrier(4), [], []
+
+    def open_it():
+        barrier.wait()
+        try:
+            opened.append(SqliteStore(path))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_it) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(opened) == 4
+    assert all(s.schema_version() == 6 for s in opened)
+    for s in opened:
+        s.close()
+    # the losing side of a race that slipped past the check: tolerated
+    s = SqliteStore(path)
+    try:
+        s._missing_columns = lambda: [("observations", "supersedes", "TEXT")]
+        s._migrate_locked()
+    finally:
+        s.close()
 
 
 def test_schema_version_is_never_written_down(store, tmp_path, caplog):

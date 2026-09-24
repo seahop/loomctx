@@ -381,7 +381,7 @@ def test_scope_facts_arrive_with_their_path(tmp_path):
                        observed_at=datetime(2026, 9, 8, tzinfo=timezone.utc)) for i in range(6)]
     store.record_claims(claims)
     scope = ScopeSpec(subjects=[host], expand=["runs_software", "affects"], depth=2)
-    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="exploited", budget=200))
+    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="exploited", budget=300))
     texts = [(i.kind, i.text) for i in pack.items]
     idx = {p: n for n, (k, txt) in enumerate(texts) for p in ("runs_software", "affects", "exploited_in_wild") if p in txt}
     assert set(idx) == {"runs_software", "affects", "exploited_in_wild"}
@@ -465,7 +465,7 @@ def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
     # handle for the unexamined window comes first, D-051; lift the handle
     # share so both ship at a budget that fits nothing)
     monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
-    small = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=200))
+    small = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=300))
     thread = next(h for h in small.handles if "'affects'" in h.hint)
     more = expand_pack(store, thread.id, budget=3000)
     assert more.truncated and more.truncated[0].total == 9
@@ -539,7 +539,7 @@ def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
     assert all("old" in i.text for i in pack.items)
     # the expanded thread handle inherits the bound
     monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
-    tiny = build_pack(store, AskRequest(subject=host, question="", budget=200, as_of=_at(7, 31)))
+    tiny = build_pack(store, AskRequest(subject=host, question="", budget=300, as_of=_at(7, 31)))
     thread = next(h for h in tiny.handles if "'old'" in h.hint)
     more = expand_pack(store, thread.id, budget=4000)
     assert more.truncated and more.truncated[0].total == 7
@@ -676,13 +676,13 @@ def test_packing_prefers_diversity_over_twenty_identical_logins(tmp_path, monkey
     claims += [ClaimIn(subject=host, predicate="listens_on_port", object=port, source="nmap-scan",
                        observed_at=_at(7, 22)) for port in (80, 443)]
     store.record_claims(claims)
-    pack = build_pack(store, AskRequest(subject=host, question="what is going on with this host?", budget=500))
+    pack = build_pack(store, AskRequest(subject=host, question="what is going on with this host?", budget=700))
     kinds = [i.text.split()[1] for i in pack.items if i.kind == "fact"]
     assert len(kinds) >= 10
     assert kinds[:3] == ["logged_in_by"] * 3                     # the best-scoring thread still leads
     assert "communicated_with" in kinds and "listens_on_port" in kinds
     assert kinds.count("logged_in_by") <= len(kinds) - 4
-    assert pack.charged_tokens <= 500
+    assert pack.charged_tokens <= 700
     # the cut logins are still one thread
     assert any("'logged_in_by'" in h.hint for h in pack.handles)
     store.close()
@@ -698,7 +698,7 @@ def test_long_facts_are_charged_by_their_length(tmp_path):
     store.record_claims(
         [ClaimIn(subject=host, predicate="note", object="x" * 900, source="wiki", observed_at=t)]
         + [ClaimIn(subject=host, predicate=f"fact_{i}", object=i, source="s", observed_at=t) for i in range(12)])
-    pack = build_pack(store, AskRequest(subject=host, question="", budget=400))
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=560))
     assert not any(i.text.split()[1] == "note" for i in pack.items)
     assert sum(1 for i in pack.items if i.kind == "fact") >= 8
     assert any("'note'" in h.hint for h in pack.handles)
@@ -862,7 +862,7 @@ def test_a_page_keeps_its_window_for_the_threads_it_cuts(tmp_path, monkeypatch):
     first = build_pack(store, AskRequest(subject=host, question="who", budget=3000))
     page = next(h for h in first.handles if "not examined" in h.hint)
     monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)   # room for the page's own next page AND a thread
-    tiny = expand_pack(store, page.id, budget=200)
+    tiny = expand_pack(store, page.id, budget=300)
     thread = next(h for h in tiny.handles if "'logged_in_by'" in h.hint)
     assert decode_handle(thread.id)["before"] == decode_handle(page.id)["before"]
     more = expand_pack(store, thread.id, budget=3000)
@@ -892,8 +892,15 @@ class _FakeStore:
                 if observed_before is None or o.observed_at <= observed_before]
         return {(r.type, r.key): [o for o in rows if o.subject == r] for r in refs}
 
-    def count_observations(self, namespace, ref, observed_before=None):
+    def count_observations(self, namespace, ref, observed_before=None, allowed_types=None):
         return len(self.observations_for_many(namespace, [ref], observed_before=observed_before)[(ref.type, ref.key)])
+
+    def resolve_refs(self, namespace, refs):
+        return {}
+
+    def corrections_of(self, namespace, ids, observed_before=None):
+        return [o for o in self.rows if o.supersedes in ids
+                and (observed_before is None or o.observed_at <= observed_before)]
 
     def get_dossier(self, namespace, ref):
         return None
@@ -963,3 +970,287 @@ def test_superseded_fact_is_discounted_in_the_recency_overview(monkeypatch):
     pack = ctx._pack(namespace="d", subjects=[host], question=None, as_of=None, budget=3000, observations=rows)
     score = {i.citations[0].observation_id[0]: i.score for i in pack.items}
     assert score["b"] > score["c"] > score["a"]
+
+
+# ------------------------------------------------ read-path hardening (D-058)
+
+def _claims(store, rows, namespace="default"):
+    return store.record_claims([ClaimIn(namespace=namespace, **r) for r in rows])
+
+
+def test_a_source_that_moved_on_is_not_a_side(tmp_path):
+    """cmdb said ubuntu-20.04 in January and ubuntu-22.04 in March; nmap
+    says ubuntu-22.04 in April. Every source's CURRENT claim agrees — the
+    January row is cmdb's own history, not a side of a conflict."""
+    store = SqliteStore(tmp_path / "moved.db")
+    web01 = EntityRef(type="host", key="web-01")
+    _claims(store, [
+        dict(subject=web01, predicate="runs_os", object="ubuntu-20.04", observed_at=_at(1, 5), source="cmdb"),
+        dict(subject=web01, predicate="runs_os", object="ubuntu-22.04", observed_at=_at(3, 5), source="cmdb"),
+        dict(subject=web01, predicate="runs_os", object="ubuntu-22.04", observed_at=_at(4, 5), source="nmap"),
+    ])
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=2000))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    # a real disagreement between current claims still surfaces, with only
+    # the current claims as its sides
+    _claims(store, [dict(subject=web01, predicate="runs_os", object="ubuntu-24.04",
+                         observed_at=_at(5, 5), source="nmap")])
+    pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=2000))
+    conflict = next(i for i in pack.items if i.kind == "conflict")
+    assert "ubuntu-24.04" in conflict.text and "ubuntu-22.04" in conflict.text
+    assert "20.04" not in conflict.text and len(conflict.citations) == 2
+    # several values one source asserts at one instant are a set
+    _claims(store, [
+        dict(subject=web01, predicate="listens_on_port", object=p, observed_at=_at(6, 1), source="nmap")
+        for p in (80, 443)
+    ] + [dict(subject=web01, predicate="listens_on_port", object=22, observed_at=_at(6, 2), source="cmdb")])
+    pack = build_pack(store, AskRequest(subject=web01, question="ports", budget=2000))
+    assert not [i for i in pack.items if i.kind == "conflict" and "listens_on_port" in i.text]
+    store.close()
+
+
+def test_the_planted_demo_conflicts_still_surface(tmp_path):
+    """The talk's two conflict moments (src/loom/seed.py) survive the
+    newest-claim-per-source rule."""
+    from loom.seed import cmd_load
+    cmd_load(str(tmp_path / "seed.db"), seed=42)
+    store = SqliteStore(tmp_path / "seed.db")
+    for ns, subject, predicate in (("netsec", EntityRef(type="host", key="web-01"), "runs_os"),
+                                   ("procurement", EntityRef(type="vendor", key="initech"), "contract_owner")):
+        pack = build_pack(store, AskRequest(namespace=ns, subject=subject, question=predicate, budget=800))
+        assert pack.items[0].kind == "conflict" and predicate in pack.items[0].text, (ns, pack.items[:1])
+    store.close()
+
+
+def _dossier_store(tmp_path, n_logins=3):
+    """web-01 with a host-only fact, user logins, and a brief written from all of them."""
+    store = SqliteStore(tmp_path / "brief.db")
+    web01 = EntityRef(type="host", key="web-01")
+    rows = _claims(store, [
+        dict(subject=web01, predicate="runs_os", object="ubuntu-22.04", observed_at=_at(8, 1), source="cmdb"),
+    ] + [
+        dict(subject=web01, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i:03d}"),
+             observed_at=_at(8, 2 + i % 25, i % 24), source="auth-log")
+        for i in range(n_logins)
+    ])
+    store.put_dossier("default", web01, "web-01 runs ubuntu; u000 and u001 log in daily", len(rows),
+                      [o.id for o in rows])
+    return store, web01, rows
+
+
+def test_a_brief_reaches_a_type_scoped_key_only_if_it_may_see_every_citation(tmp_path):
+    """The brief's prose was written from the user logins too: a host-only
+    key used to receive it because ONE citation (runs_os) was visible."""
+    store, web01, _ = _dossier_store(tmp_path)
+    req = AskRequest(subject=web01, question="summary", budget=2000)
+    scoped = build_pack(store, req, allowed_types=("host",))
+    assert not [i for i in scoped.items if i.kind == "brief"]
+    assert scoped.withheld_briefs == 1
+    everyone = build_pack(store, req, allowed_types=("host", "user"))
+    assert [i for i in everyone.items if i.kind == "brief"] and everyone.withheld_briefs == 0
+    # a present-tense brief is no answer to "what was true then" either
+    past = build_pack(store, req.model_copy(update={"valid_at": _at(8, 3)}))
+    assert not [i for i in past.items if i.kind == "brief"] and past.withheld_briefs == 0
+    store.close()
+
+
+def test_a_brief_is_capped_at_a_quarter_of_the_budget(tmp_path):
+    """A brief citing 100 observations charged ~1,000 tokens of an
+    800-token pack before any fact. It now carries its newest supporting
+    observations within a quarter of the budget, charged honestly."""
+    import loom.context as ctx
+    store, web01, rows = _dossier_store(tmp_path, n_logins=99)
+    pack = build_pack(store, AskRequest(subject=web01, question="summary", budget=800))
+    brief = next(i for i in pack.items if i.kind == "brief")
+    assert item_tokens(brief) <= 800 * ctx._BRIEF_BUDGET_SHARE
+    assert 1 <= len(brief.citations) <= ctx._BRIEF_MAX_CITES
+    newest = sorted(rows, key=lambda o: o.observed_at, reverse=True)[:len(brief.citations)]
+    assert [c.observation_id for c in brief.citations] == [o.id for o in newest]
+    assert [i for i in pack.items if i.kind == "fact"], "facts still fit"
+    assert pack.charged_tokens == sum(item_tokens(i) for i in pack.items) + sum(
+        handle_tokens(h) for h in pack.handles) <= 800
+    # a budget whose quarter cannot hold the brief's text withholds it, counted
+    tiny = build_pack(store, AskRequest(subject=web01, question="summary", budget=60))
+    assert not [i for i in tiny.items if i.kind == "brief"] and tiny.withheld_briefs == 1
+    store.close()
+
+
+def test_a_merged_away_name_asks_about_the_canonical_entity(tmp_path):
+    """host:WEB01 folded into host:web-01: asking by the old name used to
+    return the canonical rows but no conflicts (they were grouped under a
+    subject nothing matched), and a scope rooted at it listed web-01 as a
+    second, 'reached' subject."""
+    store = SqliteStore(tmp_path / "alias.db")
+    web01, alias = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="WEB01")
+    _claims(store, [
+        dict(subject=web01, predicate="runs_os", object="fedora-44", observed_at=_at(8, 1), source="cmdb"),
+        dict(subject=alias, predicate="runs_os", object="ubuntu-22.04", observed_at=_at(8, 2), source="nmap"),
+        dict(subject=alias, predicate="member_of", object=EntityRef(type="domain", key="corp"),
+             observed_at=_at(8, 2), source="ad"),
+    ])
+    assert store.merge_entities("default", alias, web01)
+    pack = build_pack(store, AskRequest(subject=alias, question="what os?", budget=2000))
+    assert pack.subjects == [web01] and pack.items[0].kind == "conflict"
+    scope = ScopeSpec(subjects=[alias, web01], expand=["member_of"], depth=1)
+    scoped = build_pack(store, AskRequest(scope=scope, question="what os?", budget=2000))
+    assert [(s.type, s.key) for s in scoped.subjects] == [("host", "web-01"), ("domain", "corp")]
+    assert scoped.items[0].kind == "conflict"
+    # a handle minted before the merge still expands onto the canonical rows
+    from loom.context import encode_handle
+    handle = encode_handle("default", alias, "runs_os", None)
+    assert expand_pack(store, handle, 2000).items
+    store.close()
+
+
+def test_the_scope_walk_is_capped_and_says_so(tmp_path, monkeypatch):
+    """500 anchors at depth 3 over a hub reached everything in reach, each
+    gathered up to 1,000 rows. The walk now stops at the entity cap and
+    the ask at its row cap; both cuts are reported, never silent."""
+    store = SqliteStore(tmp_path / "cap.db")
+    domain = EntityRef(type="domain", key="corp")
+    _claims(store, [
+        dict(subject=EntityRef(type="host", key=f"h{i:02d}"), predicate="member_of", object=domain,
+             observed_at=_at(8, 1 + i % 25), source="ad") for i in range(30)
+    ] + [
+        dict(subject=EntityRef(type="host", key=f"h{i:02d}"), predicate="runs_os", object="linux",
+             observed_at=_at(8, 1), source="cmdb") for i in range(30)
+    ])
+    scope = ScopeSpec(subjects=[domain], expand=["member_of"], depth=1)
+    req = AskRequest(scope=scope, question="os", budget=4000)
+    assert build_pack(store, req).truncated == []
+    monkeypatch.setenv("LOOM_MAX_SCOPE_ENTITIES", "10")
+    pack = build_pack(store, req)
+    assert len(pack.subjects) == 10
+    cut = [t for t in pack.truncated if t.reason == "scope_cap"]
+    assert cut and cut[0].entity == domain and (cut[0].gathered, cut[0].total) == (10, 31)
+    assert not [h for h in pack.handles if "not examined" in h.hint]   # reported, not paged
+    from loom.answer import render_user_prompt
+    assert "the scope was cut at 10 entities (at least 31 reached" in render_user_prompt("os", pack)
+    # the row cap: the domain's 30 edges fill it; its members are left out, and counted
+    monkeypatch.delenv("LOOM_MAX_SCOPE_ENTITIES")
+    monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "30")
+    pack = build_pack(store, req)
+    cut = [t for t in pack.truncated if t.reason == "scope_cap"]
+    assert pack.subjects == [domain] and cut and (cut[0].gathered, cut[0].total) == (1, 31)
+    store.close()
+
+
+def test_a_thread_expansion_hands_back_a_conflict_that_does_not_fit(tmp_path):
+    """A thread handle spends its budget on the thread and mints no
+    handles — but a conflict too big for it was dropped without a trace."""
+    store, web01 = make_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=web01, question="os", budget=40))
+    handle = next(h for h in pack.handles if h.kind == "conflict")
+    more = expand_pack(store, handle.id, budget=handle.est_tokens - 1)
+    assert not [i for i in more.items if i.kind == "conflict"]
+    assert [h.kind for h in more.handles] == ["conflict"]
+    assert expand_pack(store, handle.id, budget=handle.est_tokens).items[0].kind == "conflict"
+    store.close()
+
+
+def test_an_excerpt_expansion_charges_its_citations(tmp_path):
+    from loom.context import encode_handle
+    from loom.contracts import DocumentIn
+    store = SqliteStore(tmp_path / "ex.db")
+    art = store.store_artifact(DocumentIn(text="alpha beta gamma", source="ir", observed_at=_at(8, 1)))
+    store.put_doc_chunks("default", art.id, "m", [(i, i * 6, i * 6 + 5, w, [1.0, 0.0])
+                                                  for i, w in enumerate(("alpha", "beta", "gamma"))])
+    handle = encode_handle("default", EntityRef(type="host", key="web-01"), "", None,
+                           excerpt={"artifact_id": art.id, "seq": 1, "model": "m"})
+    pack = expand_pack(store, handle, budget=2000)
+    assert len(pack.items) == 3
+    assert pack.charged_tokens == sum(item_tokens(i) for i in pack.items) > sum(
+        est_tokens(i.text) for i in pack.items)
+    one = sum(item_tokens(i) for i in pack.items[:1])
+    assert sum(item_tokens(i) for i in expand_pack(store, handle, budget=one).items) <= one
+    store.close()
+
+
+def test_the_charge_exceeds_the_budget_only_by_the_first_handle(tmp_path):
+    """D-051/D-058 contract: charged_tokens <= budget, except the first
+    handle, which always ships and overruns by at most its own cost."""
+    store, web01 = make_store(tmp_path)
+    for budget in range(20, 400, 7):
+        for q in ("os", "who logged in?", ""):
+            pack = build_pack(store, AskRequest(subject=web01, question=q, budget=budget))
+            first = handle_tokens(pack.handles[0]) if pack.handles else 0
+            assert pack.charged_tokens <= budget + first, (budget, q)
+            assert sum(item_tokens(i) for i in pack.items) <= budget, (budget, q)
+    store.close()
+
+
+def test_expansion_supersession_sees_only_what_the_reader_sees(tmp_path):
+    """expand_pack derived supersession from every gathered row: a
+    correction outside the reader's types still retired a fact and leaked
+    its id prefix. And a page's window ends before the corrections of its
+    rows were made — they are now looked up by id."""
+    from loom.context import encode_handle
+    store = SqliteStore(tmp_path / "sup.db")
+    web01 = EntityRef(type="host", key="web-01")
+    old = _claims(store, [dict(subject=web01, predicate="runs_os", object="fedora-44",
+                               observed_at=_at(7, 1), source="cmdb")])[0]
+    hidden = _claims(store, [dict(subject=web01, predicate="runs_os", object=EntityRef(type="os", key="ubuntu"),
+                                  observed_at=_at(8, 1), source="cmdb", supersedes=old.id)])[0]
+    thread = encode_handle("default", web01, "runs_os", None)
+    scoped = expand_pack(store, thread, 2000, allowed_types=("host",))
+    assert scoped.items and not [i for i in scoped.items if "superseded" in i.text]
+    everyone = expand_pack(store, thread, 2000)
+    assert any(f"superseded by {hidden.id[:12]}" in i.text for i in everyone.items)
+    # a page window that ends before the correction still marks the row
+    page = encode_handle("default", web01, "", None, before=_at(7, 15), question="os")
+    paged = [i.text for i in expand_pack(store, page, 2000).items]
+    assert paged and all(f"superseded by {hidden.id[:12]}" in t for t in paged)
+    # ...but not by a correction made after the handle's as_of
+    past = encode_handle("default", web01, "", _at(7, 20), before=_at(7, 15), question="os")
+    assert not any("superseded" in i.text for i in expand_pack(store, past, 2000).items)
+    store.close()
+
+
+def test_a_truncation_counts_only_rows_the_reader_may_see(tmp_path, monkeypatch):
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "vis.db")
+    web01 = EntityRef(type="host", key="web-01")
+    _claims(store, [
+        dict(subject=web01, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+             observed_at=_at(8, 1 + i), source="auth") for i in range(6)
+    ] + [
+        dict(subject=web01, predicate="talks_to", object=EntityRef(type="host", key=f"h{i}"),
+             observed_at=_at(7, 1 + i), source="flow") for i in range(3)
+    ])
+    everyone = build_pack(store, AskRequest(subject=web01, question="x", budget=2000))
+    assert [(t.gathered, t.total) for t in everyone.truncated] == [(5, 9)]
+    # the host-only reader saw none of the 5 gathered logins, and may see 3 rows in all
+    scoped = build_pack(store, AskRequest(subject=web01, question="x", budget=2000), allowed_types=("host",))
+    assert [(t.gathered, t.total) for t in scoped.truncated] == [(0, 3)]
+    store.close()
+
+
+def test_the_scope_walk_does_not_follow_a_superseded_edge(tmp_path):
+    """An open finding (host -has_finding-> finding) that a later closed
+    row supersedes is history: a valid_at walk used to follow the open row
+    (its window never ends) and pull the finding in as current."""
+    store = SqliteStore(tmp_path / "walk.db")
+    host, finding = EntityRef(type="host", key="web-01"), EntityRef(type="finding", key="F-1")
+    opened = _claims(store, [dict(subject=host, predicate="has_finding", object=finding,
+                                  observed_at=_at(8, 1), valid_from=_at(8, 1), source="ocsf")])[0]
+    _claims(store, [dict(subject=host, predicate="has_finding", object=finding, observed_at=_at(9, 1),
+                         valid_from=_at(8, 1), valid_to=_at(8, 20), source="ocsf", supersedes=opened.id)])
+    scope = ScopeSpec(subjects=[host], expand=["has_finding"], depth=1)
+    after = build_pack(store, AskRequest(scope=scope, question="findings", budget=2000, valid_at=_at(9, 1)))
+    assert after.subjects == [host]
+    during = build_pack(store, AskRequest(scope=scope, question="findings", budget=2000, valid_at=_at(8, 10)))
+    assert during.subjects == [host, finding]                   # through the closed row that covers T
+    # as of before the correction, the open row is current again
+    before = build_pack(store, AskRequest(scope=scope, question="findings", budget=2000, as_of=_at(8, 15)))
+    assert before.subjects == [host, finding]
+    store.close()
+
+
+def test_a_question_ending_in_punctuation_still_names_its_entity(tmp_path):
+    from loom.answer import auto_subjects
+    from loom.context import _question_tokens
+    store, web01 = make_store(tmp_path)
+    assert auto_subjects(store, "default", "Summarize web-01.") == [web01]
+    assert "web-01" in _question_tokens("is it web-01?") and "web-01." not in _question_tokens("web-01.")
+    store.close()

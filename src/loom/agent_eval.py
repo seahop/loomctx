@@ -335,6 +335,10 @@ def _collect_ids(text: str, seen: set[str]) -> None:
         seen.add(m.group(1))
     for m in re.finditer(r'"cite":\s*"([0-9a-f]{12})"', text):   # compact citations carry the token only
         seen.add(m.group(1))
+    # concise MCP items cite as strings, token first (D-058): "<cite> <source> <date>",
+    # or "<artifact_id> @<span> <source> <date>" for a passage
+    for m in re.finditer(r'"([0-9a-f]{12}|[0-9a-f]{32}) (?:@\d+-\d+ )?[^"]*\d{4}-\d{2}-\d{2}"', text):
+        seen.add(m.group(1))
     for m in re.finditer(r'\[doc:([0-9a-f]{8})', text):   # excerpt renderings cite a prefix
         seen.add(m.group(1))
 

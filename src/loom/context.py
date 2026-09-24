@@ -66,23 +66,31 @@ from .contracts import (
 from .contracts import ExpansionHandle
 from .store.base import GraphStore
 
-# Token accounting (D-051). The charged form is the compact rendering an agent
-# actually receives — `render_user_prompt` in answer.py and the MCP agent
-# view: the item text, one `cite` (12 hex) + source + date per citation, and
-# for a handle its hint plus id. cl100k measured 2.7 chars/token on rendered
-# seed facts (identifiers and dates tokenize badly), hence len/3 + 4 rather
-# than the len/4 + 8 that charged item text only and let citations and up to
-# 32 handles ride free (an "800-token" pack was ~2,500 on the wire).
+# Token accounting (D-051, D-058). The charged form is the compact rendering
+# an agent actually receives, sized to the costlier of its two surfaces: the
+# MCP concise view (compact JSON: an item's kind, text and `cites` strings;
+# a handle's id, hint, estimate and kind), which `render_user_prompt` in
+# answer.py undercuts. cl100k on seed packs: item text 2.76 chars/token,
+# cite strings (hex token, source, ISO date) 2.0, handle ids (base64) 1.47,
+# JSON framing 12 tokens an item and 17 a handle. D-051 charged text at
+# len/3 + 4 and a citation at a third of its length, which held for the
+# prompt but left the MCP wire at 2.8x the budget (indented JSON, citation
+# objects, ISO timestamps) — 1.4x even once the view was compact.
 _CHARS_PER_TOKEN = 3
-_ITEM_OVERHEAD_TOKENS = 4       # list framing per rendered line
-_CITE_FIXED_CHARS = 12 + 10     # the cite token and a date; the source name is added
-_CITE_OVERHEAD_TOKENS = 2
-_FACT_TOKENS_ESTIMATE = 36      # one rendered fact with its citation (handle estimates)
+_ITEM_OVERHEAD_TOKENS = 4       # framing of one rendered line (est_tokens)
+_ITEM_FRAME_TOKENS = 8          # an item's JSON keys beyond that line framing
+_CITE_CHARS_PER_TOKEN = 2       # hex, source and ISO date tokenize badly
+_CITE_OVERHEAD_TOKENS = 1       # the list separator
+_HANDLE_ID_CHARS_PER_TOKEN = 1.5  # base64
+_HANDLE_FRAME_TOKENS = 13       # a handle's JSON keys, estimate and kind
+_FACT_TOKENS_ESTIMATE = 50      # one rendered fact with its citation (handle estimates)
 _HANDLE_BUDGET_SHARE = 0.15     # handles are a menu, not a second payload
 _GATHER_LIMIT = 1000
 _MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
 _MAX_HANDLES = 32              # a scope over a hub produced 8,234 handles (D-035)
 _CONFLICT_BUDGET_SHARE = 0.5   # conflicts ship first, but never as the whole pack (D-035)
+_BRIEF_BUDGET_SHARE = 0.25     # briefs orient; they never crowd out the facts (D-058)
+_BRIEF_MAX_CITES = 8           # a brief's newest supporting observations (answer.py renders 8)
 _QUERY_CACHE_SIZE = 256
 _RECENCY_HALF_LIFE_DAYS = 30.0  # recency = 1 / (1 + age / half-life)
 # Ranking (D-051): BM25 over the gathered candidates, fused with cosine by
@@ -143,7 +151,10 @@ def try_embed_query(embedder, question: str) -> list[float] | None:
 _query_cache: dict[tuple[str, str], list[float]] = {}
 _query_cache_lock = threading.Lock()
 
-_WORD = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
+# A word ends on a letter or digit: "Summarize web-01." must yield web-01,
+# not `web-01.`, or the entity never resolves and the lexical leg misses
+# every question that ends in a key (D-058).
+_WORD = re.compile(r"[a-z0-9](?:[a-z0-9_.:-]*[a-z0-9])?")
 
 
 def est_tokens(text: str) -> int:
@@ -151,9 +162,20 @@ def est_tokens(text: str) -> int:
     return max(1, len(text) // _CHARS_PER_TOKEN) + _ITEM_OVERHEAD_TOKENS
 
 
+def cite_text(cite: Citation) -> str:
+    """A citation in the compact form an agent receives: the 12-hex cite
+    token, source and date (the MCP concise view, D-058); a document
+    citation names its full artifact id and span, which get_artifact and
+    excerpt handles take."""
+    date = cite.observed_at.date().isoformat()
+    if cite.observation_id:
+        return f"{cite.observation_id[:12]} {cite.source} {date}"
+    return f"{cite.artifact_id} @{cite.span_start}-{cite.span_end} {cite.source} {date}"
+
+
 def cite_tokens(cite: Citation) -> int:
-    """One citation in its compact form: `cite` token, source, date."""
-    return (_CITE_FIXED_CHARS + len(cite.source)) // _CHARS_PER_TOKEN + _CITE_OVERHEAD_TOKENS
+    """One citation in its compact form (`cite_text`)."""
+    return -(-len(cite_text(cite)) // _CITE_CHARS_PER_TOKEN) + _CITE_OVERHEAD_TOKENS
 
 
 def item_tokens(item: ContextItem) -> int:
@@ -163,12 +185,13 @@ def item_tokens(item: ContextItem) -> int:
 
 def handle_tokens(handle: ExpansionHandle) -> int:
     """What a pack charges for a handle: its hint plus the opaque id, which an
-    agent carries in context like any other text."""
-    return est_tokens(handle.hint) + est_tokens(handle.id)
+    agent carries in context like any other text, plus its framing."""
+    return (est_tokens(handle.hint) + math.ceil(len(handle.id) / _HANDLE_ID_CHARS_PER_TOKEN)
+            + _HANDLE_FRAME_TOKENS)
 
 
 def _charge(text: str, citations: list[Citation]) -> int:
-    return est_tokens(text) + sum(cite_tokens(c) for c in citations)
+    return est_tokens(text) + _ITEM_FRAME_TOKENS + sum(cite_tokens(c) for c in citations)
 
 
 def _tokens(text: str) -> set[str]:
@@ -439,8 +462,12 @@ def _find_conflicts(
     flows, the products a CVE affects), so when any one source itself
     asserts several current objects the predicate is a set on this
     subject and another source's different object is an addition, not a
-    contradiction. Scalars keep the older rule: several values from one
-    source are a time series and only the newest per value competes.
+    contradiction. For a scalar, a source's values over time are its own
+    time series: only its newest assertion is its current claim (D-058).
+    cmdb ubuntu-20.04 in January, cmdb ubuntu-22.04 in March and nmap
+    ubuntu-22.04 in April agree — keeping cmdb's January value as a side
+    made that a conflict. Several values one source asserts at the same
+    instant (ports 80 and 443) are a set, like an entity-valued edge.
     `exclude` holds superseded observations (D-050): a corrected fact is
     history, not a side."""
     horizon = as_of or _now()
@@ -457,17 +484,24 @@ def _find_conflicts(
     for predicate, rows in sorted(by_predicate.items()):
         rows.sort(key=lambda o: _aware(o.observed_at), reverse=True)
         entity_valued = any(isinstance(o.object, EntityRef) for o in rows)
-        # newest observation per (source, normalized value)
+        # newest observation per (source, normalized value); for a scalar,
+        # only the values at the source's newest instant (rows are newest
+        # first, so the first row per source sets that instant)
         per_source: dict[str, dict[str, Observation]] = {}
+        latest: dict[str, datetime] = {}
         for o in rows:
+            if not entity_valued:
+                at = latest.setdefault(o.source, _aware(o.observed_at))
+                if _aware(o.observed_at) < at:
+                    continue  # a value this source has since moved on from
             per_source.setdefault(o.source, {}).setdefault(_norm_value(o.object), o)
         # Differing values from ONE source are a time series or legitimate
         # update (invoice amounts, an OS upgrade), not a conflict. Only
         # cross-source disagreement gets flagged.
         if len(per_source) < 2:
             continue
-        if entity_valued and any(len(values) > 1 for values in per_source.values()):
-            continue  # a set-valued edge on this subject, not a single truth
+        if any(len(values) > 1 for values in per_source.values()):
+            continue  # a set-valued predicate on this subject, not a single truth
         by_value: dict[str, Observation] = {}
         for values in per_source.values():
             for norm, o in values.items():
@@ -677,31 +711,38 @@ Truncations = dict[tuple[str, str], ScopeTruncation]
 
 
 def _gather(store: GraphStore, namespace: str, ref: EntityRef,
-            truncated: Truncations, as_of: datetime | None = None) -> list[Observation]:
+            truncated: Truncations, as_of: datetime | None = None,
+            allowed_types: tuple[str, ...] | None = None) -> list[Observation]:
     """observations_for under the gather limit, recording when the limit
     cut something off: a hub with 2,740 edges yields its newest 1,000 and
     the pack must say so (D-038). The count is only taken when the limit
     was actually hit, so ordinary entities pay nothing."""
-    return _gather_many(store, namespace, [ref], truncated, as_of).get((ref.type, ref.key), [])
+    return _gather_many(store, namespace, [ref], truncated, as_of,
+                        allowed_types).get((ref.type, ref.key), [])
 
 
 def _gather_many(store: GraphStore, namespace: str, refs: list[EntityRef],
                  truncated: Truncations, as_of: datetime | None = None,
+                 allowed_types: tuple[str, ...] | None = None,
                  ) -> dict[tuple[str, str], list[Observation]]:
     """One round trip per chunk for a whole frontier or subject list, with
     the same truncation accounting (D-043: a 1,077-entity scope was 1,077
     round trips — 5 s on Postgres across a network). `as_of` is pushed
     into the query as the observed_before bound (D-046): filtering after a
     newest-first LIMIT gave an entity with more than the limit of newer
-    rows an empty time-travel pack, and a truncation total blind to T."""
+    rows an empty time-travel pack, and a truncation total blind to T.
+    A type-scoped caller's truncation counts only rows it could see, on
+    both sides of the ratio (D-058)."""
     as_of = _aware(as_of) if as_of is not None else None
     got = store.observations_for_many(namespace, refs, limit=_GATHER_LIMIT, observed_before=as_of)
     for ref in refs:
         obs = got.get((ref.type, ref.key), [])
         if len(obs) >= _GATHER_LIMIT and (ref.type, ref.key) not in truncated:
-            total = store.count_observations(namespace, ref, observed_before=as_of)
-            if total > len(obs):
-                truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=len(obs), total=total)
+            total = store.count_observations(namespace, ref, observed_before=as_of,
+                                             allowed_types=allowed_types)
+            seen = sum(_in_scope(o, allowed_types) for o in obs)
+            if total > seen:
+                truncated[(ref.type, ref.key)] = ScopeTruncation(entity=ref, gathered=seen, total=total)
     return got
 
 
@@ -718,11 +759,40 @@ def resolve_scope(
                                allowed_types=allowed_types)[0]
 
 
+def canonical_refs(store: GraphStore, namespace: str, refs: list[EntityRef]) -> list[EntityRef]:
+    """Each ref as the entity it names, deduplicated in order (D-058): a
+    name a merge folded away (host:WEB01 after WEB01 -> web-01) asks about
+    the canonical entity — its rows, its conflicts, its scope — instead of
+    gathering the canonical rows under a subject nothing matches. Unknown
+    refs pass through unchanged."""
+    mapping = store.resolve_refs(namespace, refs) if refs else {}
+    out: list[EntityRef] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in refs:
+        canonical = mapping.get((ref.type, ref.key), ref)
+        if (canonical.type, canonical.key) not in seen:
+            seen.add((canonical.type, canonical.key))
+            out.append(canonical)
+    return out
+
+
+_SCOPE_CHUNK = 400                     # entities per gather round trip (the stores' own chunk)
+_SCOPE_CAP_KEY = ("", "scope_cap")     # the walk's own entry in a Truncations map
+
+
+def _record_scope_cap(truncated: Truncations, at: EntityRef, kept: int, reached: int) -> None:
+    prior = truncated.get(_SCOPE_CAP_KEY)
+    truncated[_SCOPE_CAP_KEY] = ScopeTruncation(
+        entity=prior.entity if prior else at, gathered=kept,
+        total=max(reached, prior.total if prior else 0), reason="scope_cap")
+
+
 def resolve_scope_paths(
     store: GraphStore, namespace: str, scope: ScopeSpec,
     truncated: Truncations | None = None,
     as_of: datetime | None = None, valid_at: datetime | None = None,
     allowed_types: tuple[str, ...] | None = None,
+    gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
@@ -732,47 +802,85 @@ def resolve_scope_paths(
 
     The walk follows only edges the pack itself would show (D-046): none
     observed after `as_of`, none whose validity window misses `valid_at`,
+    none a visible correction has superseded (D-050, D-058),
     none touching an entity outside `allowed_types` (D-021: a scoped reader
     must not hop *through* a node they cannot see), and — unless the scope
     says `follow_extracted` — none mined from a document (D-023): a
     hostile document could otherwise rewrite the topology a scope walks
     and pull its own entities into the pack.
+
+    Roots are resolved to canonical entities first, so a merged-away name
+    is one root, not a second "reached" subject beside its canonical twin.
+    The walk is bounded (D-058): at most LOOM_MAX_SCOPE_ENTITIES entities,
+    and it stops expanding once LOOM_MAX_SCOPE_OBSERVATIONS rows are held —
+    500 anchors at depth 3 over a 2,740-edge hub otherwise gathered up to
+    1,000 rows for every entity in reach. A cut is recorded in `truncated`
+    (reason scope_cap), never silent. `gathered_out` receives the frontier
+    gathers so the pack need not fetch those entities a second time.
     """
+    from .config import max_scope_entities, max_scope_observations
     expand = set(scope.expand)
     if not expand and scope.depth > 0:
         from .registry import containment_predicates
         expand = set(containment_predicates(store.get_schema(namespace)))
-    seen = {(r.type, r.key) for r in scope.subjects}
-    resolved = list(scope.subjects)
-    frontier = list(scope.subjects)
+    roots = canonical_refs(store, namespace, list(scope.subjects))
+    seen = {(r.type, r.key) for r in roots}
+    resolved = list(roots)
+    frontier = list(roots)
     paths: Paths = {}
     truncated = truncated if truncated is not None else {}
+    cap, row_cap = max_scope_entities(), max_scope_observations()
+    held = 0                                # rows gathered for the walk
+    beyond: set[tuple[str, str]] = set()   # reached, but past the entity cap
+    cut_at: EntityRef | None = None
     for _ in range(scope.depth):
-        if not expand or not frontier:
+        if not expand or not frontier or cut_at is not None:
             break
         next_frontier: list[EntityRef] = []
-        gathered = _gather_many(store, namespace, frontier, truncated, as_of)
-        for ref in frontier:
-            via = paths.get((ref.type, ref.key), [])
-            for obs in gathered.get((ref.type, ref.key), []):
-                if obs.predicate not in expand:
-                    continue
-                if not _in_scope(obs, allowed_types):
-                    continue
-                if valid_at is not None and not covers_valid_at(obs, valid_at):
-                    continue
-                if not scope.follow_extracted and _is_extracted(obs):
-                    continue
-                ends = [obs.subject]
-                if isinstance(obs.object, EntityRef):
-                    ends.append(obs.object)
-                for end in ends:
-                    if (end.type, end.key) not in seen:
-                        seen.add((end.type, end.key))
+        for start in range(0, len(frontier), _SCOPE_CHUNK):
+            chunk = frontier[start:start + _SCOPE_CHUNK]
+            if cut_at is not None or held >= row_cap:
+                cut_at = cut_at or chunk[0]
+                break
+            gathered = _gather_many(store, namespace, chunk, truncated, as_of, allowed_types)
+            held += sum(len(rows) for rows in gathered.values())
+            if gathered_out is not None:
+                gathered_out.update(gathered)
+            # a corrected edge is history (D-050), not topology: an open
+            # finding a later closed row supersedes must not pull its
+            # entities in — the same visible, as-of-bounded rule the pack
+            # applies (D-058)
+            retired = _supersession([o for rows in gathered.values() for o in rows
+                                     if _in_scope(o, allowed_types)])
+            for ref in chunk:
+                via = paths.get((ref.type, ref.key), [])
+                for obs in gathered.get((ref.type, ref.key), []):
+                    if obs.predicate not in expand or obs.id in retired:
+                        continue
+                    if not _in_scope(obs, allowed_types):
+                        continue
+                    if valid_at is not None and not covers_valid_at(obs, valid_at):
+                        continue
+                    if not scope.follow_extracted and _is_extracted(obs):
+                        continue
+                    ends = [obs.subject]
+                    if isinstance(obs.object, EntityRef):
+                        ends.append(obs.object)
+                    for end in ends:
+                        key = (end.type, end.key)
+                        if key in seen:
+                            continue
+                        if len(resolved) >= cap:
+                            beyond.add(key)   # counted, so the report can say how much was cut
+                            cut_at = cut_at or ref
+                            continue
+                        seen.add(key)
                         resolved.append(end)
                         next_frontier.append(end)
-                        paths[(end.type, end.key)] = via + [obs]
+                        paths[key] = via + [obs]
         frontier = next_frontier
+    if cut_at is not None:
+        _record_scope_cap(truncated, cut_at, len(resolved), len(resolved) + len(beyond))
     return resolved, paths
 
 
@@ -782,21 +890,43 @@ def build_pack(
     embedder=None,
     allowed_types: tuple[str, ...] | None = None,
 ) -> ContextPack:
+    from .config import max_scope_observations
     paths: Paths = {}
     truncated: Truncations = {}
+    gathered: dict[tuple[str, str], list[Observation]] = {}
+    asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     if req.scope is not None:
         subjects, paths = resolve_scope_paths(
             store, req.namespace, req.scope, truncated,
-            as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types)
+            as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
+            gathered_out=gathered)
     else:
-        subjects = [req.subject]
+        # the entity the name resolves to — a merged-away alias included (D-058)
+        subjects = canonical_refs(store, req.namespace, [req.subject])
     if allowed_types is not None:
         # scoped keys see a scoped world (D-013a): entities reached by
         # expansion outside the allowlist simply aren't there
         subjects = [s for s in subjects if s.type in allowed_types]
+    # The walk already gathered its frontiers; fetch the rest, within the
+    # ask's row bound (D-058) — subjects past it are left out and reported.
+    held = sum(len(rows) for rows in gathered.values())
+    row_cap = max_scope_observations()
+    examined = {key for key in gathered}
+    missing = [s for s in subjects if (s.type, s.key) not in examined]
+    for start in range(0, len(missing), _SCOPE_CHUNK):
+        if held >= row_cap:
+            break
+        chunk = missing[start:start + _SCOPE_CHUNK]
+        got = _gather_many(store, req.namespace, chunk, truncated, req.as_of, allowed_types)
+        held += sum(len(rows) for rows in got.values())
+        gathered.update(got)
+        examined.update((s.type, s.key) for s in chunk)
+    left_out = [s for s in subjects if (s.type, s.key) not in examined]
+    if left_out:
+        subjects = [s for s in subjects if (s.type, s.key) in examined]
+        _record_scope_cap(truncated, left_out[0], len(subjects), len(subjects) + len(left_out))
     observations: list[Observation] = []
     seen_ids: set[str] = set()  # an obs can reach us via several subjects
-    gathered = _gather_many(store, req.namespace, subjects, truncated, req.as_of)
     for ref in subjects:
         for obs in gathered.get((ref.type, ref.key), []):
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
@@ -854,20 +984,31 @@ def build_pack(
 
     # Dossier briefs: the cheap orientation layer, when the enrichment
     # worker has built one for a subject. A brief is a present-tense
-    # summary, so it is withheld from as-of (time-travel) reads (H-C2). It
-    # cites the observations it was synthesized from; ones no longer
-    # visible (redacted, out of scope) simply drop out of the citation list.
-    briefs: list[tuple[EntityRef, str, list[Citation]]] = []
-    if req.as_of is None:
+    # summary, so it is withheld from as-of and valid-at (time-travel)
+    # reads (H-C2, D-058). It cites the observations it was synthesized
+    # from; ones outside the gathered window simply drop out of the list.
+    # Its TEXT, though, was written from all of them: a type-scoped key
+    # gets a brief only if it may see every observation the brief cites —
+    # one visible citation used to ship a summary of user logins to a
+    # host-only key (D-058).
+    briefs: list[tuple[EntityRef, str, list[Observation]]] = []
+    withheld = 0
+    if req.as_of is None and req.valid_at is None:
         by_id = {o.id: o for o in observations}
         for ref in subjects[:3]:
             dossier = store.get_dossier(req.namespace, ref)
             if not dossier:
                 continue
-            cites = [_citation(by_id[i]) for i in dossier.get("observation_ids", [])
-                     if i in by_id]
-            if cites:
-                briefs.append((ref, dossier["brief"], cites))
+            ids = dossier.get("observation_ids", [])
+            if allowed_types is not None:
+                unseen = [i for i in ids if i not in by_id]
+                if any(not _in_scope(o, allowed_types)
+                       for o in store.observations_by_ids(req.namespace, unseen)):
+                    withheld += 1
+                    continue
+            cited = [by_id[i] for i in ids if i in by_id]
+            if cited:
+                briefs.append((ref, dossier["brief"], cited))
 
     return _pack(
         namespace=req.namespace,
@@ -883,9 +1024,12 @@ def build_pack(
         # then, rather than by a neutral cosine that mutes the keywords
         semantic=semantic and bool(cos_map),
         briefs=briefs,
+        withheld_briefs=withheld,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
-        roots=list(req.scope.subjects) if req.scope is not None else [req.subject],
+        # both spellings are the frame, not the topic: the name asked and
+        # the entity it resolved to
+        roots=asked + [s for s in subjects if (s.type, s.key) not in paths],
         truncated=list(truncated.values()),
         page_cursors=_oldest(gathered),
     )
@@ -961,18 +1105,28 @@ def expand_pack(
     budget = min(budget, max_budget())
     if isinstance(meta.get("excerpt"), dict):
         return _expand_excerpt(store, meta, subject, budget, allowed_types)
+    # a handle minted before a merge names the folded-away entity (D-058)
+    subject = canonical_refs(store, meta["ns"], [subject])[0]
     truncated: Truncations = {}
     # A page handle (D-051) carries the window's edge: gather at or before
     # it, which is also at or before `as_of` when both are set.
     bound = as_of
     if before is not None:
         bound = before if as_of is None else min(_aware(before), _aware(as_of))
-    gathered = _gather(store, meta["ns"], subject, truncated, bound)
+    gathered = _gather(store, meta["ns"], subject, truncated, bound, allowed_types)
     predicate = meta["predicate"]
-    observations = [
-        o for o in gathered
-        if (not predicate or o.predicate == predicate) and _in_scope(o, allowed_types)
-    ]
+    visible = [o for o in gathered if _in_scope(o, allowed_types)]
+    observations = [o for o in visible if not predicate or o.predicate == predicate]
+    # A correction outside this thread still acts on it (D-050) — but only
+    # one this reader may see (a hidden one acted, and leaked its id
+    # prefix, D-058), and wherever it lies: a page's window ends before the
+    # corrections of its rows were made, so they are looked up by id, as
+    # of the handle's `as_of` only.
+    known = {o.id for o in visible}
+    corrections = [c for c in store.corrections_of(
+                       meta["ns"], [o.id for o in observations],
+                       observed_before=_aware(as_of) if as_of is not None else None)
+                   if c.id not in known and _in_scope(c, allowed_types)]
     return _pack(
         namespace=meta["ns"],
         subjects=[subject],
@@ -989,8 +1143,7 @@ def expand_pack(
         # for packs that must also carry facts (D-046).
         conflict_share=1.0 if before is None else _CONFLICT_BUDGET_SHARE,
         truncated=list(truncated.values()),
-        # a correction outside this thread still acts on it (D-050)
-        superseded_by=_supersession(gathered),
+        superseded_by=_supersession(visible + corrections),
         page_cursors=_oldest(gathered, subject),
         page_before=before,
         page_predicate=predicate,
@@ -1034,14 +1187,15 @@ def _expand_excerpt(
             )
             rendered = (f'"{ch["text"]}" [doc:{artifact_id[:8]} '
                         f'@{ch["span_start"]}-{ch["span_end"]}]')
-            cost = est_tokens(rendered)
+            cost = _charge(rendered, [cite])   # text AND citation, like every pack (D-058)
             if cost <= remaining:
                 items.append(ContextItem(
                     kind="doc_excerpt", text=rendered,
                     score=1.0 if ch["seq"] == seq else 0.8, citations=[cite]))
                 remaining -= cost
     return ContextPack(namespace=ns, subject=subject, subjects=[subject],
-                       question=None, budget=budget, items=items, handles=[])
+                       question=None, budget=budget, items=items, handles=[],
+                       charged_tokens=sum(item_tokens(i) for i in items))
 
 
 def _pack(
@@ -1054,7 +1208,7 @@ def _pack(
     with_handles: bool = True,
     cos_map: dict[str, float] | None = None,
     semantic: bool = False,
-    briefs: list[tuple[EntityRef, str, list[Citation]]] | None = None,
+    briefs: list[tuple[EntityRef, str, list[Observation]]] | None = None,
     excerpts: list[tuple[float, Citation, str, int, str]] | None = None,
     valid_at: datetime | None = None,
     paths: dict[tuple[str, str], list[str]] | None = None,
@@ -1065,10 +1219,12 @@ def _pack(
     page_cursors: dict[tuple[str, str], datetime] | None = None,
     page_before: datetime | None = None,
     page_predicate: str = "",
+    withheld_briefs: int = 0,
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
-    briefs, document excerpts (half of what is left), then facts by value
+    briefs (capped at a quarter, D-058), document excerpts (half of what
+    is left), then facts by value
     per charged token with the diversity term, then handles within their
     share. Every item and handle is charged in its compact rendered form
     and `charged_tokens` reports the sum. `superseded_by` (D-050) is
@@ -1154,10 +1310,12 @@ def _pack(
                 items.append(item)
                 remaining -= cost
                 conflict_remaining -= cost
-            elif with_handles:
+            else:
                 # est_tokens is the exact cost the expansion charges (text
                 # plus citations), so a caller passing it as the expansion
-                # budget is guaranteed the conflict (D-046).
+                # budget is guaranteed the conflict (D-046). Minted even in
+                # a thread expansion, which otherwise carries no handles: a
+                # conflict that does not fit is never dropped silently (D-058).
                 conflict_handles.append(ExpansionHandle(
                     id=encode_handle(namespace, subj, predicate, as_of, valid_at, before=page_before),
                     hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "
@@ -1165,14 +1323,32 @@ def _pack(
                     est_tokens=cost, kind="conflict",
                 ))
 
-    # Then dossier briefs — the orientation layer (phase 4).
-    for ref, brief, cites in briefs or []:
+    # Then dossier briefs — the orientation layer (phase 4) — within their
+    # share (D-058): a brief cites up to a hundred observations, and at
+    # ~10 tokens a citation one brief took 1,000-1,400 tokens of an
+    # 800-token pack before any fact. It carries its newest supporting
+    # observations (at most _BRIEF_MAX_CITES, what the prompt renders),
+    # each still a real source of the summary; a brief whose text does
+    # not fit the share is withheld and counted.
+    brief_remaining = int(budget * _BRIEF_BUDGET_SHARE)
+    for ref, brief, cited in briefs or []:
         text = f"{ref.type}:{ref.key} — {brief}"
-        cost = _charge(text, cites)
-        if cost <= remaining:
+        room = min(brief_remaining, remaining)
+        cites: list[Citation] = []
+        cost = est_tokens(text)
+        for obs in sorted(cited, key=lambda o: _aware(o.observed_at), reverse=True)[:_BRIEF_MAX_CITES]:
+            cite = _citation(obs)
+            if cites and cost + cite_tokens(cite) > room:
+                break
+            cites.append(cite)
+            cost += cite_tokens(cite)
+        if cost <= room:
             items.append(ContextItem(kind="brief", text=text, score=0.99,
                                      citations=cites))
             remaining -= cost
+            brief_remaining -= cost
+        else:
+            withheld_briefs += 1
 
     # Relevant document passages (D-020): top-ranked excerpts from the
     # documents behind this entity's facts, capped so they inform without
@@ -1247,7 +1423,10 @@ def _pack(
     for handle in handles[:_MAX_HANDLES]:
         cost = handle_tokens(handle)
         # the first handle always ships: a pack that cut something must be
-        # able to say so
+        # able to say so. The loop above makes room for it by trimming
+        # facts; only when the budget is under two handles, or the fixed
+        # items (conflicts, briefs, excerpts) left no room, does it ride
+        # over the budget — by its own cost at most, as the contract says
         if shipped and spent + cost > allowance:
             break
         shipped.append(handle)
@@ -1272,6 +1451,7 @@ def _pack(
         omitted_handles=omitted,
         truncated=truncated or [],
         charged_tokens=sum(item_tokens(i) for i in items) + sum(handle_tokens(h) for h in shipped),
+        withheld_briefs=withheld_briefs,
     )
 
 
@@ -1412,6 +1592,8 @@ def _page_handles(
         return []
     handles = []
     for t in truncated:
+        if t.reason != "gather_limit":
+            continue  # a scope cut is reported, not paged: narrow the scope instead
         cursor = page_cursors.get((t.entity.type, t.entity.key))
         if cursor is None:
             continue

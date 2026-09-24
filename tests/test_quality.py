@@ -165,6 +165,50 @@ def test_q10_budget_holds_under_a_real_tokenizer(store):
     _score("real-tokenizer-budget", worst <= 1.15, f"worst wire/budget ratio {worst:.2f}")
 
 
+def test_q10b_budget_holds_on_the_mcp_wire(store):
+    """D-058: D-051 measured the answer prompt only. What an MCP agent
+    received for an 800-token pack was ~2,200 tokens (indented JSON,
+    citation objects, ISO timestamps, a score per item). The concise view
+    is now compact and the charge is sized to it: items and handles as the
+    agent receives them stay within 15 % of the budget; the envelope
+    (namespace, question echo, subject list) is a fixed ~70 tokens beside
+    it, not charged."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+    except Exception as exc:  # noqa: BLE001 — no package, or offline with no cached encoding
+        pytest.skip(f"tiktoken encoding unavailable: {exc}")
+    import pydantic_core
+    from loom import mcp_server
+    from loom.context import expand_pack
+
+    def body_tokens(pack) -> int:
+        view = mcp_server._agent_view(pack)
+        wire = pydantic_core.to_json(view).decode()
+        envelope = pydantic_core.to_json({**view, "items": [], "handles": []}).decode()
+        assert len(enc.encode(envelope)) <= 200, envelope
+        return len(enc.encode(wire)) - len(enc.encode(envelope))
+
+    scope = ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")], expand=["member_of"])
+    asks = [
+        ("netsec", EntityRef(type="host", key="web-01"), None, "what operating system does this run?"),
+        ("netsec", EntityRef(type="host", key="db-01"), None, ""),
+        ("netsec", EntityRef(type="ip", key="10.0.4.7"), None, "which host was assigned this ip?"),
+        ("procurement", EntityRef(type="vendor", key="initech"), None, "who owns this contract?"),
+        ("netsec", None, scope, "who logged in?"),
+    ]
+    worst = 0.0
+    for ns, subject, sc, question in asks:
+        for budget in (200, 400, 800, 1200, 3200):
+            pack = _ask(store, question, subject=subject, scope=sc, budget=budget, namespace=ns)
+            packs = [pack] + [expand_pack(store, h.id, budget) for h in pack.handles[:2]]
+            for p in packs:
+                real = body_tokens(p)
+                worst = max(worst, real / budget)
+                assert real <= budget * 1.15, (question, budget, real, p.charged_tokens)
+    _score("mcp-wire-budget", worst <= 1.15, f"worst MCP wire/budget ratio {worst:.2f}")
+
+
 def test_q4b_valid_at_fact_time(store):
     """D-024: 'which host HELD this ip on Aug 20' — exactly one answer."""
     pack = build_pack(store, AskRequest(

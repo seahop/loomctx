@@ -20,3 +20,31 @@ def max_budget() -> int:
         return value if value > 0 else _DEFAULT_MAX_BUDGET
     except ValueError:
         return _DEFAULT_MAX_BUDGET
+
+
+_DEFAULT_MAX_SCOPE_ENTITIES = 2_000
+_DEFAULT_MAX_SCOPE_OBSERVATIONS = 100_000
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def max_scope_entities() -> int:
+    """Ceiling on the entities one scope resolves to (D-058). 500 anchors
+    at depth 3 over a 2,740-edge hub reached every entity in reach, each
+    gathered up to 1,000 rows. The cut is reported in the pack's
+    `truncated` (reason scope_cap), never silent. LOOM_MAX_SCOPE_ENTITIES."""
+    return _positive_int("LOOM_MAX_SCOPE_ENTITIES", _DEFAULT_MAX_SCOPE_ENTITIES)
+
+
+def max_scope_observations() -> int:
+    """Ceiling on the observations one ask gathers across all its subjects
+    (D-058): the memory bound the entity cap alone does not give, since
+    each entity may bring up to the gather limit. LOOM_MAX_SCOPE_OBSERVATIONS."""
+    return _positive_int("LOOM_MAX_SCOPE_OBSERVATIONS", _DEFAULT_MAX_SCOPE_OBSERVATIONS)

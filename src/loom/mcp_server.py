@@ -43,13 +43,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import RootModel
 
 try:  # the SDK moved the wire types into their own package in 2.x
-    from mcp_types import ToolAnnotations
+    from mcp_types import CallToolResult, TextContent, ToolAnnotations
 except ImportError:  # pragma: no cover - older SDK layout
-    from mcp.types import ToolAnnotations
+    from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
-from .context import build_pack, decode_handle, expand_pack, semantic_search
+from .context import build_pack, cite_text, decode_handle, expand_pack, semantic_search
 from .contracts import (AnswerRequest, AskRequest, ClaimIn, EntityRef, ExpansionHandle,
                         Observation, PredicateDef, ScopeSpec, ScopeTruncation,
                         SemanticSearchResponse)
@@ -183,7 +183,8 @@ INSTRUCTIONS = (
     "tool-result limits. Every pack tool takes format='concise' (default: "
     "12-hex `cite` tokens, subjects summarized) or 'detailed' (full 32-hex "
     "observation ids next to each cite, every reached subject listed). "
-    "Cite facts by the `cite` token on their citations. A pack's "
+    "Cite facts by their 12-hex `cite` token (the first word of each entry "
+    "in an item's `cites`). A pack's "
     "`truncated` list names entities whose observations were only partly "
     "examined — never conclude absence about those. Conflict items mean "
     "sources disagree — never resolve them silently; record_claim writes "
@@ -283,18 +284,27 @@ class AgentCitation(TypedDict):
 
 
 class AgentItem(TypedDict):
+    """format='concise': `cites` holds one compact string per citation —
+    "<cite> <source> <date>", the 12-hex cite token first (an excerpt:
+    "<artifact_id> @<span> <source> <date>") — the form the pack's budget
+    charges (D-058). format='detailed' carries the ranking `score` and full
+    `citations` objects instead, for auditing; it is not budget-sized."""
     kind: Literal["brief", "fact", "relation", "doc_excerpt", "conflict"]
     text: str
-    score: float
-    citations: list[AgentCitation]
+    cites: NotRequired[list[str]]
+    score: NotRequired[float]
+    citations: NotRequired[list[AgentCitation]]
 
 
 class AgentPack(TypedDict):
     """A ContextPack as an agent reads it (items first, compact citations,
-    reached subjects summarized unless format='detailed')."""
+    reached subjects summarized unless format='detailed'). charged_tokens
+    is what the pack charged against `budget` (D-051); in the concise
+    format it is sized to what this view carries (D-058)."""
     namespace: str
     question: str | None
     budget: int
+    charged_tokens: int
     format: Format
     items: list[AgentItem]
     handles: list[ExpansionHandle]
@@ -307,6 +317,7 @@ class AgentPack(TypedDict):
     valid_at: NotRequired[datetime]
     truncated: NotRequired[list[ScopeTruncation]]
     coverage_warning: NotRequired[str]
+    withheld_briefs: NotRequired[int]
 
 
 class ObservationList(TypedDict):
@@ -385,23 +396,26 @@ def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
     d = pack.model_dump(mode="json", exclude_none=True)
     # a 12-hex `cite` token per citation: two of 216 scorecard task-runs
     # mangled a hand-copied 32-hex id by one character (D-041); the
-    # answer route already cites by this prefix. The 32-hex observation_id
-    # is dropped once the token stands for it (compact citations: agents
-    # carry every pack in context) unless the caller asked for detail;
-    # artifact citations keep their id, which excerpt handles and
-    # get_artifact take.
-    for item in d.get("items", []):
-        for c in item.get("citations", []):
-            ref = c.get("observation_id") or c.get("artifact_id") or ""
-            if ref:
-                c["cite"] = ref[:12]
-            if c.get("observation_id") and not detailed:
-                del c["observation_id"]
+    # answer route already cites by this prefix. Concise items carry each
+    # citation as one string, token first — the form the pack charges
+    # (D-058): citation objects with ISO timestamps and a score per item
+    # made an 800-token pack ~2,200 tokens on the MCP wire. Artifact
+    # citations keep their full id, which excerpt handles and get_artifact
+    # take. 'detailed' keeps the objects and the 32-hex observation ids.
+    if detailed:
+        for item in d.get("items", []):
+            for c in item.get("citations", []):
+                c["cite"] = (c.get("observation_id") or c.get("artifact_id") or "")[:12]
+        items = d.get("items", [])
+    else:
+        items = [{"kind": i.kind, "text": i.text, "cites": [cite_text(c) for c in i.citations]}
+                 for i in pack.items]
     subjects = d.get("subjects", [])
     shown = len(subjects) if detailed else _SUBJECTS_SHOWN
     view: dict[str, Any] = {
         "namespace": d.get("namespace"), "question": d.get("question"),
-        "budget": d.get("budget"), "format": fmt, "items": d.get("items", []),
+        "budget": d.get("budget"), "charged_tokens": d.get("charged_tokens", 0),
+        "format": fmt, "items": items,
         "handles": d.get("handles", []), "omitted_handles": d.get("omitted_handles", 0),
         "subjects_total": len(subjects),
         "subjects": subjects[:shown],
@@ -416,10 +430,15 @@ def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
     if d.get("truncated"):
         view["truncated"] = d["truncated"]
         view["coverage_warning"] = "; ".join(
+            f"the scope was cut at {t['gathered']:,} entities (at least {t['total']:,} reached, "
+            f"stopped while expanding {t['entity']['type']}:{t['entity']['key']})"
+            if t.get("reason") == "scope_cap" else
             f"{t['entity']['type']}:{t['entity']['key']}: only the newest {t['gathered']:,} of "
             f"{t['total']:,} observations were examined"
             for t in d["truncated"]
         ) + " — do not conclude that something is absent for these entities; ask about them directly, narrow with valid_at, or expand a handle"
+    if d.get("withheld_briefs"):
+        view["withheld_briefs"] = d["withheld_briefs"]
     return view  # type: ignore[return-value]
 
 
@@ -838,9 +857,30 @@ def _surface_errors(fn):
     return wrapped
 
 
+def _compact_text(fn):
+    """The SDK mirrors a structured result into its text block as JSON
+    indented two spaces; on a pack a third of the tokens an agent received
+    were indentation (D-058). Pack tools return their result with a
+    compact mirror instead — same data, same structuredContent."""
+    import functools
+
+    import pydantic_core
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        return CallToolResult(content=[TextContent(type="text", text=pydantic_core.to_json(
+            result, fallback=str).decode())], structured_content=result)
+
+    return wrapped
+
+
+_PACK_TOOLS = ("ask", "ask_scope", "expand", "answer")
+
 for _fn in TOOLS:
+    _impl = _compact_text(_fn) if _fn.__name__ in _PACK_TOOLS else _fn
     mcp.tool(name=_fn.__name__, title=TOOL_META[_fn.__name__][0],
-             annotations=_annotations(_fn.__name__))(_surface_errors(_fn))
+             annotations=_annotations(_fn.__name__))(_surface_errors(_impl))
 
 
 def main() -> None:

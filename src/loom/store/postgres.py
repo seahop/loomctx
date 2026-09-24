@@ -514,7 +514,7 @@ class PostgresStore(GraphStore):
                 " WHERE e.namespace = %s AND e.model = %s AND NOT EXISTS"
                 "   (SELECT 1 FROM tombstones t WHERE t.observation_id = e.ref_id)",
                 (namespace, model))
-            scored = common.cosines(query, {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows})
+            scored = common.cosines(query, {r["ref_id"]: common.unpack_array(r["vector"]) for r in rows})
         return common.top_k(scored, limit)
 
     def nearest_chunks(
@@ -526,19 +526,30 @@ class PostgresStore(GraphStore):
         name = common.vec_table("vchk", model, len(query))
         with self._tx(read=True):
             best: list[tuple[str, float]] = []
-            if self._has_index(name):
-                self._tune_hnsw(limit)
+            indexed = self._has_index(name)
+            if indexed:
                 sql = (f"SELECT ref_id, 1 - (embedding <=> %s::vector) AS score FROM {name}"
                        " WHERE namespace = %s")
                 params: tuple = (self._vlit(query), namespace)
                 if artifact_ids is not None:
-                    sql += " AND artifact_id = ANY(%s)"
-                    params += (list(artifact_ids),)
-                sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
-                params += (self._vlit(query), limit)
+                    # Restricted to the cited documents (D-058): an exact
+                    # distance sort over their rows, fetched through the
+                    # (namespace, artifact_id) index — `+ 0` keeps the
+                    # planner off the HNSW order, whose post-filter starved
+                    # on nearly every ask and fell through to decoding every
+                    # chunk of every cited artifact in Python.
+                    sql += " AND artifact_id = ANY(%s) ORDER BY (embedding <=> %s::vector) + 0 LIMIT %s"
+                    params += (list(artifact_ids), self._vlit(query), limit)
+                else:
+                    self._tune_hnsw(limit)
+                    sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+                    params += (self._vlit(query), limit)
                 best = sorted(((r["ref_id"], float(r["score"])) for r in self._q(sql, params)),
                               key=lambda h: -h[1])
-            if len(best) < limit:   # no index, or the post-filter starved it: exact scan
+            # short of `limit`: fewer chunks exist (done), or there is no
+            # index / it lags the chunk table the worker backfills it from
+            if len(best) < limit and (not indexed or artifact_ids is None
+                                      or self._chunk_count(namespace, model, artifact_ids) > len(best)):
                 sql = "SELECT id, vector FROM doc_chunks WHERE namespace = %s AND model = %s"
                 params = (namespace, model)
                 if artifact_ids is not None:
@@ -546,7 +557,7 @@ class PostgresStore(GraphStore):
                     params += (list(artifact_ids),)
                 rows = self._q(sql, params)
                 best = common.top_k(
-                    common.cosines(query, {r["id"]: common.unpack_vector(r["vector"]) for r in rows}), limit)
+                    common.cosines(query, {r["id"]: common.unpack_array(r["vector"]) for r in rows}), limit)
             if not best:
                 return []
             rows = self._q(
@@ -556,6 +567,11 @@ class PostgresStore(GraphStore):
                 " WHERE c.id = ANY(%s)", ([cid for cid, _ in best],))
         by_id = {r["id"]: common.row_to_chunk(r) for r in rows}
         return [(by_id[cid], s) for cid, s in best if cid in by_id]
+
+    def _chunk_count(self, namespace: str, model: str, artifact_ids: list[str]) -> int:
+        return int(self._q(
+            "SELECT COUNT(*) AS n FROM doc_chunks WHERE namespace = %s AND model = %s"
+            " AND artifact_id = ANY(%s)", (namespace, model, list(artifact_ids)))[0]["n"])
 
     def ensure_vector_index(self, model: str) -> dict:
         out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
@@ -611,6 +627,35 @@ class PostgresStore(GraphStore):
                 " WHERE o.namespace = %s AND o.supersedes = ANY(%s)" + _NOT_TOMBSTONED,
                 (namespace, list(ids)))
         return {r["sid"] for r in rows}
+
+    def corrections_of(
+        self, namespace: str, ids: list[str], observed_before: datetime | None = None,
+    ) -> list[Observation]:
+        if not ids:
+            return []
+        before_sql, before_args = _observed_before("%s", observed_before)
+        with self._tx(read=True):
+            rows = self._q(
+                _OBS_SELECT + " WHERE o.namespace = %s AND o.supersedes = ANY(%s)"
+                + _NOT_TOMBSTONED + before_sql, (namespace, list(ids), *before_args))
+        return [common.row_to_observation(r) for r in rows]
+
+    def resolve_refs(
+        self, namespace: str, refs: list[EntityRef],
+    ) -> dict[tuple[str, str], EntityRef]:
+        out: dict[tuple[str, str], EntityRef] = {}
+        if not refs:
+            return out
+        with self._tx(read=True):
+            owners = self._resolve_many(namespace, refs)
+            if not owners:
+                return out
+            rows = self._q("SELECT id, type, key FROM entities WHERE id = ANY(%s)", (list(owners),))
+        for r in rows:
+            canonical = EntityRef(type=r["type"], key=r["key"])
+            for ref in owners[r["id"]]:
+                out[(ref.type, ref.key)] = canonical
+        return out
 
     _PREFIX_CAP = 20
 
@@ -912,11 +957,20 @@ class PostgresStore(GraphStore):
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
         with self._tx():
+            # fully declined groups are settled and must not occupy the
+            # limit (D-058; see sqlite.py). Declines store the pair sorted
+            # by code point, hence the "C" collation in the comparison.
+            side = "(e{n}.type || ':' || e{n}.key) COLLATE \"C\""
+            s1, s2 = side.format(n=1), side.format(n=2)
             rows = self._q(
-                "SELECT namespace, key FROM entities"
-                + (" WHERE namespace = %s" if namespace else "")
-                + " GROUP BY namespace, key HAVING COUNT(DISTINCT type) > 1"
-                " ORDER BY namespace, key LIMIT %s",
+                "SELECT DISTINCT e1.namespace, e1.key FROM entities e1"
+                " JOIN entities e2 ON e2.namespace = e1.namespace AND e2.key = e1.key"
+                "  AND e2.type <> e1.type"
+                " WHERE TRUE" + (" AND e1.namespace = %s" if namespace else "")
+                + " AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
+                "   WHERE d.namespace = e1.namespace"
+                f"    AND d.a = LEAST({s1}, {s2}) AND d.b = GREATEST({s1}, {s2}))"
+                " ORDER BY e1.namespace, e1.key LIMIT %s",
                 ((namespace, limit) if namespace else (limit,)),
             )
             groups = []
@@ -945,20 +999,33 @@ class PostgresStore(GraphStore):
         return [common.row_to_entity(r) for r in rows]
 
     def count_observations(
-        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None,
+        allowed_types: tuple[str, ...] | None = None,
     ) -> int:
         with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
             before_sql, before_args = _observed_before("%s", observed_before)
+            # a type-scoped caller's count: the far end of each half must be
+            # in its types too (see sqlite.py)
+            subj_types, obj_types, type_args = "", "", ()
+            if allowed_types is not None:
+                if not allowed_types:
+                    return 0
+                subj_types = (" AND (o.object_entity_id IS NULL OR EXISTS (SELECT 1 FROM entities x"
+                              " WHERE x.id = o.object_entity_id AND x.type = ANY(%s)))")
+                obj_types = " AND EXISTS (SELECT 1 FROM entities x WHERE x.id = o.subject_id AND x.type = ANY(%s))"
+                type_args = (list(allowed_types),)
             rows = self._q(
                 "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
-                "          AND o.subject_id = %s" + _NOT_TOMBSTONED + before_sql + ")"
+                "          AND o.subject_id = %s" + _NOT_TOMBSTONED + before_sql + subj_types + ")"
                 "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = %s"
-                "          AND o.object_entity_id = %s AND o.subject_id <> %s" + _NOT_TOMBSTONED + before_sql + ")"
+                "          AND o.object_entity_id = %s AND o.subject_id <> %s" + _NOT_TOMBSTONED
+                + before_sql + obj_types + ")"
                 " AS n",
-                (namespace, entity.id, *before_args, namespace, entity.id, entity.id, *before_args),
+                (namespace, entity.id, *before_args, *type_args,
+                 namespace, entity.id, entity.id, *before_args, *type_args),
             )
         return int(rows[0]["n"])
 
@@ -1496,12 +1563,16 @@ class PostgresStore(GraphStore):
             if not rows:
                 return False
             self._put_tombstone(namespace, observation_id, reason, common.now())
-            self._x(
-                "DELETE FROM dossiers WHERE namespace = %s AND observation_ids LIKE %s",
-                (namespace, f'%"{observation_id}"%'),
-            )
+            self._drop_briefs_citing(namespace, observation_id)
             self._hwm_reset(self._DOSSIER_HWM)   # a dropped brief is rebuilt next tick
             return True
+
+    def _drop_briefs_citing(self, namespace: str, observation_id: str) -> None:
+        """A brief synthesized from a redacted observation may still be
+        quoting it (H-D8) — on redact and on a restored tombstone (D-058)."""
+        if self._x("DELETE FROM dossiers WHERE namespace = %s AND observation_ids LIKE %s",
+                   (namespace, f'%"{observation_id}"%')):
+            self._hwm_reset(self._DOSSIER_HWM)
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:
         cutoff = common.iso(before)
@@ -1675,6 +1746,7 @@ class PostgresStore(GraphStore):
     ) -> None:
         with self._tx():
             self._put_tombstone(namespace, observation_id, reason, recorded_at)
+            self._drop_briefs_citing(namespace, observation_id)
 
     def wipe(self) -> None:
         with self._tx():

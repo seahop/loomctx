@@ -36,17 +36,22 @@ def _line(kind: str, data) -> str:
 
 def export_jsonl(store: GraphStore, out, namespace: str | None) -> dict[str, int]:
     """Everything a faithful restore needs, in dependency order: entities,
-    observations, artifacts, then the merge aliases (D-019) and redaction
-    tombstones (D-016) that qualify them, the schema registries (D-024),
+    the redaction tombstones (D-016), observations, artifacts, then the
+    merge aliases (D-019) that qualify them, the schema registries (D-024),
     the adjudication declines (D-044) and the merge log that keeps merges
     reversible (schema v5). Tombstoned observations ARE exported (audit),
     and their tombstones ride along so a restore never un-redacts anything
-    (hardening H-B4)."""
+    (hardening H-B4) — ahead of the observations they redact, so a restore
+    streaming this file never serves a redacted row, even for the length
+    of the import (D-058)."""
     counts = {"entities": 0, "observations": 0, "artifacts": 0,
               "aliases": 0, "tombstones": 0, "schemas": 0, "declines": 0, "merges": 0}
     for entity in store.iter_entities(namespace):
         out.write(_line("entity", entity.model_dump(mode="json")))
         counts["entities"] += 1
+    for tomb in store.iter_tombstones(namespace):
+        out.write(_line("tombstone", tomb))
+        counts["tombstones"] += 1
     for obs in store.iter_observations(namespace):
         out.write(_line("observation", obs.model_dump(mode="json")))
         counts["observations"] += 1
@@ -56,9 +61,6 @@ def export_jsonl(store: GraphStore, out, namespace: str | None) -> dict[str, int
     for alias in store.iter_aliases(namespace):
         out.write(_line("alias", alias))
         counts["aliases"] += 1
-    for tomb in store.iter_tombstones(namespace):
-        out.write(_line("tombstone", tomb))
-        counts["tombstones"] += 1
     for schema in store.iter_schemas(namespace):
         out.write(_line("schema", schema.model_dump(mode="json")))
         counts["schemas"] += 1
@@ -71,15 +73,46 @@ def export_jsonl(store: GraphStore, out, namespace: str | None) -> dict[str, int
     return counts
 
 
+def _restore_tombstone(store: GraphStore, data: dict) -> None:
+    store.restore_tombstone(
+        data["namespace"], data["observation_id"], data["reason"],
+        datetime.fromisoformat(data["recorded_at"]),
+    )
+
+
+def _records(lines):
+    for line in lines:
+        line = line.strip()
+        if line:
+            yield json.loads(line)
+
+
 def import_jsonl(store: GraphStore, lines) -> dict[str, int]:
+    """Restore an export. Tombstones land before any observation (D-058):
+    dumps written before that order put them last, so a re-readable input
+    (a list, or a seekable file) gets a first pass that applies only the
+    tombstones — otherwise every redacted row was served, un-redacted,
+    for the length of the import, and briefs citing it survived it."""
     counts = {"entities": 0, "observations": 0, "artifacts": 0,
               "aliases": 0, "tombstones": 0, "schemas": 0, "declines": 0, "merges": 0,
               "skipped": 0}
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        record = json.loads(line)
+    early = False
+    rereadable = isinstance(lines, (list, tuple))
+    if not rereadable and hasattr(lines, "seekable"):
+        try:
+            rereadable = lines.seekable()
+        except (OSError, ValueError):
+            rereadable = False
+    if rereadable:
+        start = lines.tell() if hasattr(lines, "tell") else 0
+        for record in _records(lines):
+            if record.get("type") == "tombstone":
+                _restore_tombstone(store, record.get("data", {}))
+                counts["tombstones"] += 1
+        if hasattr(lines, "seek"):
+            lines.seek(start)
+        early = True
+    for record in _records(lines):
         kind, data = record.get("type"), record.get("data", {})
         if kind == "observation":
             store.restore_observation(Observation.model_validate(data))
@@ -97,11 +130,9 @@ def import_jsonl(store: GraphStore, lines) -> dict[str, int]:
             )
             counts["aliases"] += 1
         elif kind == "tombstone":
-            store.restore_tombstone(
-                data["namespace"], data["observation_id"], data["reason"],
-                datetime.fromisoformat(data["recorded_at"]),
-            )
-            counts["tombstones"] += 1
+            if not early:
+                _restore_tombstone(store, data)
+                counts["tombstones"] += 1
         elif kind == "schema":
             store.put_schema(SchemaRegistration.model_validate(data))
             counts["schemas"] += 1

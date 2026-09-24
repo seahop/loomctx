@@ -52,7 +52,7 @@ def test_lease_task_scores_a_faithful_cited_answer(seeded_db):
     def final(messages):
         pack = json.loads(_last_tool_output(messages))
         item = next(i for i in pack["items"] if "laptop-17" in i["text"])
-        cite = item["citations"][0]["cite"]
+        cite = item["cites"][0].split()[0]            # concise cites: "<cite> <source> <date>" (D-058)
         return f"laptop-17 held 10.0.4.7 on that date [{cite}]."
     model = Scripted([
         [("find_entity", {"query": "10.0.4.7", "namespace": "netsec"})],
@@ -232,11 +232,14 @@ def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retri
     ae._collect_ids('{"citations":[{"artifact_id":"0123456789abcdef0123456789abcdef","span_start":1}]} "[doc:deadbeef @0-10]"'
                     ' {"cite":"fedcba987654","source":"s"}', seen)
     assert {"0123456789abcdef0123456789abcdef", "deadbeef", "fedcba987654"} <= seen
+    ae._collect_ids('{"cites":["a1b2c3d4e5f6 nmap-scan 2026-08-07",'
+                    '"00112233445566778899aabbccddeeff @0-10 ir 2026-09-01"]}', seen)
+    assert {"a1b2c3d4e5f6", "00112233445566778899aabbccddeeff"} <= seen
     assert ae._cited("[fedcba98] and [fedcba987654] and [fedcba9876543210]", seen)["citations_unseen"] == 0
     model = Scripted([
         [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec"})],
         "",                                                     # transient empty completion
-        lambda messages: "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["cite"] + "]",
+        lambda messages: "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["cites"][0].split()[0] + "]",
     ])
     r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0]
     assert r.error is None and r.score["pass"] and r.steps == 3

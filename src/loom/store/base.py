@@ -153,12 +153,15 @@ class GraphStore(ABC):
 
     @abstractmethod
     def count_observations(
-        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None,
+        allowed_types: tuple[str, ...] | None = None,
     ) -> int:
         """Visible observations touching ref (subject or object) — the
         connectivity signal entity resolution ranks by (H-E3), and the
         denominator of a pack's `truncated` report (D-038), which must use
-        the same `observed_before` bound as the gather."""
+        the same `observed_before` bound as the gather. `allowed_types`
+        counts only rows whose subject and object entity both fall in those
+        types — what a type-scoped caller could see (D-058)."""
 
     @abstractmethod
     def subjects_citing(
@@ -232,6 +235,26 @@ class GraphStore(ABC):
         caller checking specific rows (PROV export, a single-row view).
         A `supersedes` that names an unknown id is dangling, not an error
         (claims may arrive out of order), and never appears here."""
+
+    @abstractmethod
+    def corrections_of(
+        self, namespace: str, ids: list[str], observed_before: datetime | None = None,
+    ) -> list[Observation]:
+        """Visible observations whose `supersedes` names one of `ids`,
+        observed at or before `observed_before` when given (the `as_of`
+        axis: a correction made after T has not happened as of T). How an
+        expansion over a window learns of a correction outside it (D-058);
+        served by the supersedes index."""
+
+    @abstractmethod
+    def resolve_refs(
+        self, namespace: str, refs: list[EntityRef],
+    ) -> dict[tuple[str, str], EntityRef]:
+        """(type, key) of each ref -> the canonical entity it names: itself,
+        or — for a name a merge folded away — the entity it was merged into
+        (D-019). Unknown refs are absent. The read path resolves its subjects
+        once at entry so an alias asks about the same rows, conflicts and
+        scope as the canonical name (D-058)."""
 
     @abstractmethod
     def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
@@ -463,7 +486,10 @@ class GraphStore(ABC):
     @abstractmethod
     def restore_tombstone(
         self, namespace: str, observation_id: str, reason: str, recorded_at: datetime
-    ) -> None: ...
+    ) -> None:
+        """Re-apply an exported redaction. Like `redact`, it drops any brief
+        that cites the observation: a restore must not leave a dossier
+        quoting what it redacts (D-058)."""
 
     @abstractmethod
     def wipe(self) -> None:

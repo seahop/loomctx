@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -263,7 +264,8 @@ def test_pack_view_is_shaped_for_agents(store):
                                 depth=1, budget=2000)
     keys = list(view)
     assert keys.index("items") < keys.index("subjects") and view["subjects_total"] == 3
-    assert all(None not in c.values() for i in view["items"] for c in i["citations"])
+    assert all(i["cites"] and all(c.count(" ") >= 2 for c in i["cites"]) for i in view["items"])
+    assert 0 < view["charged_tokens"] <= view["budget"]
     assert "omitted_handles" in view and "subjects_note" not in view
     mcp_server._SUBJECTS_SHOWN, saved = 1, mcp_server._SUBJECTS_SHOWN
     try:
@@ -284,13 +286,15 @@ def test_agent_view_warns_about_partial_coverage(store, monkeypatch):
 def test_pack_view_offers_a_short_cite_token(store):
     """D-041: models mangle hand-copied 32-hex ids; a 12-hex token is what to
     cite — and once it stands for the observation, the 32-hex id is dropped
-    from the view (compact citations; source and observed_at stay)."""
+    from the view. Concise citations are one string each, token first
+    ("<cite> <source> <date>"), the form the budget charges (D-058)."""
     view = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
-    cites = [c for i in view["items"] for c in i["citations"]]
-    assert cites and all(len(c["cite"]) == 12 and "observation_id" not in c for c in cites)
-    assert all(c["source"] and c["observed_at"] for c in cites)
+    cites = [c.split(" ") for i in view["items"] for c in i["cites"]]
+    assert cites and all(len(c) == 3 and len(c[0]) == 12 for c in cites)
+    assert all(c[1] and len(c[2]) == 10 for c in cites)          # source, then YYYY-MM-DD
     ids = {o.id for o in store.observations_for("default", EntityRef(type="host", key="web-01"))}
-    assert all(any(i.startswith(c["cite"]) for i in ids) for c in cites)
+    assert all(any(i.startswith(c[0]) for i in ids) for c in cites)
+    assert not any(i in json.dumps(view) for i in ids)          # no 32-hex id rides along
 
 
 def test_cite_tokens_resolve_through_expand_and_get_observations(store):
@@ -424,9 +428,11 @@ def test_detailed_format_keeps_ids_and_lists_every_subject(store):
     concise = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
     detailed = mcp_server.ask("host:web-01", "who logged in?", budget=2000, format="detailed")
     assert concise["format"] == "concise" and detailed["format"] == "detailed"
-    c_cites = [c for i in concise["items"] for c in i["citations"]]
+    c_cites = [c for i in concise["items"] for c in i["cites"]]
     d_cites = [c for i in detailed["items"] for c in i["citations"]]
-    assert c_cites and all("observation_id" not in c for c in c_cites)
+    assert c_cites and all(isinstance(c, str) for c in c_cites)
+    assert all("score" not in i and "citations" not in i for i in concise["items"])
+    assert all("score" in i and "cites" not in i for i in detailed["items"])
     assert d_cites and all(len(c["observation_id"]) == 32 and c["observation_id"].startswith(c["cite"])
                            for c in d_cites)
     mcp_server._SUBJECTS_SHOWN, saved = 1, mcp_server._SUBJECTS_SHOWN

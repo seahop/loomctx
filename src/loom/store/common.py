@@ -42,12 +42,6 @@ def norm_key(key: str) -> str:
     return _NORM.sub("", lowered)
 
 
-def norm_key_may_change(key: str) -> bool:
-    """Cheap pre-filter for the v5 norm_key recompute: only keys carrying
-    one of the characters the numeric rule preserves can differ."""
-    return any(c in key for c in ".:/-")
-
-
 _SLUG = re.compile(r"[^a-z0-9]+")
 
 
@@ -104,6 +98,19 @@ def unpack_vector(raw) -> list[float]:
     return json.loads(raw)
 
 
+def unpack_array(raw):
+    """unpack_vector for the exact-scan hot path: a zero-copy float32 view
+    of a packed vector when numpy is installed — no list of Python floats
+    per row, which was most of the cost of scanning thousands of chunk
+    vectors (D-058). Legacy JSON rows, or no numpy, fall back to the list."""
+    if _np is not None:
+        if isinstance(raw, memoryview):
+            raw = raw.tobytes()
+        if isinstance(raw, (bytes, bytearray)) and raw[:4] == _VEC_MAGIC and len(raw) % 4 == 0:
+            return _np.frombuffer(raw, dtype="<f4", offset=4)
+    return unpack_vector(raw)
+
+
 def raw_f32(vec: list[float]) -> bytes:
     """The bare float32 buffer sqlite-vec accepts as a vector literal."""
     import array
@@ -129,7 +136,7 @@ def cosines(query: list[float], vectors: dict[str, list[float]]) -> dict[str, fl
     if _np is None or not fitting:
         return {k: cosine(query, v) for k, v in fitting.items()}
     keys = list(fitting)
-    m = _np.asarray([fitting[k] for k in keys], dtype=float)
+    m = _np.vstack([_np.asarray(fitting[k], dtype=float) for k in keys])
     q = _np.asarray(query, dtype=float)
     norms = _np.linalg.norm(m, axis=1) * (_np.linalg.norm(q) or 1.0)
     with _np.errstate(divide="ignore", invalid="ignore"):
@@ -170,15 +177,6 @@ def prefix_bounds(prefix: str) -> tuple[str, str | None]:
     if not stem:
         return prefix, None
     return prefix, stem[:-1] + chr(ord(stem[-1]) + 1)
-
-
-def like_pattern(query: str) -> str:
-    """Prefix pattern for LIKE ... ESCAPE '\\' with the user's metacharacters
-    neutralized, so `web_01` doesn't match `webX01` and `%` isn't a wildcard."""
-    escaped = (
-        query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    )
-    return escaped.lower() + "%"
 
 
 def row_to_entity(row: Mapping[str, Any]) -> Entity:
