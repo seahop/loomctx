@@ -238,7 +238,7 @@ _SEARCH_SQL = (
 )
 _PREFIX_END = "\U0010ffff"
 
-SCHEMA_VERSION = 6  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9)
+SCHEMA_VERSION = 6  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -655,6 +655,13 @@ class PostgresStore(GraphStore):
             # v5: numeric keys keep their punctuation in norm_key; recompute
             # the rows that can differ, in Python, where the rule lives.
             cur.execute("SELECT id, key, norm_key FROM entities WHERE key ~ '[.:/-]'")
+            changed = [(nk, r["id"]) for r in cur.fetchall()
+                       if (nk := common.norm_key(r["key"])) != r["norm_key"]]
+            if changed:
+                cur.executemany("UPDATE entities SET norm_key = %s WHERE id = %s", changed)
+        if current < 6:
+            # v6: colon-structured hex keys keep their separators (see common.norm_key)
+            cur.execute("SELECT id, key, norm_key FROM entities WHERE position(':' in key) > 0")
             changed = [(nk, r["id"]) for r in cur.fetchall()
                        if (nk := common.norm_key(r["key"])) != r["norm_key"]]
             if changed:

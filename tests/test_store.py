@@ -1200,6 +1200,20 @@ def test_norm_key_keeps_the_structure_of_numeric_keys():
     assert norm_key("10_0_4_7") == "10047"       # underscores are spelling
 
 
+def test_norm_key_keeps_the_structure_of_hex_keys():
+    """v6: IPv6 and MAC addresses — hex digits with colons — keep their
+    separators; case and whitespace still fold; a colon alone is not
+    enough when letters outside a-f are present (that is spelling)."""
+    from loom.store.common import norm_key
+    assert norm_key("2001:DB8::1") == norm_key(" 2001:db8::1 ") == "2001:db8::1"
+    assert len({norm_key(k) for k in ("2001:db8::1", "2001:db8::10", "2001:db8:0:0:0:0:0:1", "2001:db81::")}) == 4
+    assert norm_key("fe80::1%eth0") == "fe801eth0"                # a zone id is not hex: spelling rule
+    assert norm_key("AA:BB:CC:DD:EE:FF") == "aa:bb:cc:dd:ee:ff"
+    assert norm_key("aa-bb-cc-dd-ee-ff") == "aabbccddeeff"         # no colon: the old rule (D-049 named it)
+    assert norm_key("::ffff:10.0.4.7") == "::ffff:10.0.4.7" and norm_key("2001:db8::/32") == "2001:db8::/32"
+    assert norm_key("cisco:ios") == "ciscoios" and norm_key("deadbeef") == "deadbeef"
+
+
 def test_fuzzy_candidates_do_not_group_distinct_ips(store):
     for key in ("10.0.4.7", "100.4.7", "1.0.0.47"):
         store.upsert_entity("default", EntityRef(type="ip", key=key))
@@ -1468,16 +1482,24 @@ def test_supersedes_is_recorded_and_round_trips(store, tmp_path):
 
 def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     """A v5 file gains the column, its index and the version bump on open;
-    rows written before the column carry no supersession."""
+    rows written before the column carry no supersession; norm_key is
+    recomputed for the keys the hex rule changes (those carrying ':')."""
     _raw(store)
     from loom.store.sqlite import SCHEMA_VERSION
     before = store.record_claim(login_claim())
+    store.upsert_entity("default", EntityRef(type="ip", key="2001:db8::1"))
+    store.upsert_entity("default", EntityRef(type="mac", key="AA:BB:CC:DD:EE:FF"))
+    _exec(store, "UPDATE entities SET norm_key = '2001db81' WHERE key = '2001:db8::1'")          # as v5 wrote them
+    _exec(store, "UPDATE entities SET norm_key = 'aabbccddeeff' WHERE key = 'AA:BB:CC:DD:EE:FF'")
     _exec(store, "DROP INDEX idx_obs_supersedes")
     _exec(store, "ALTER TABLE observations DROP COLUMN supersedes")
     _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
         assert again.schema_version() == SCHEMA_VERSION == 6
+        rows = _exec(again, "SELECT key, norm_key FROM entities WHERE key <> 'web-01' AND key <> 'jdoe' ORDER BY key")
+        assert [(r["key"], r["norm_key"]) for r in rows] == [
+            ("2001:db8::1", "2001:db8::1"), ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")]
         obs = again.observations_for("default", EntityRef(type="host", key="web-01"))
         assert [o.id for o in obs] == [before.id] and obs[0].supersedes is None
         later = again.record_claim(login_claim().model_copy(update={"supersedes": before.id}))

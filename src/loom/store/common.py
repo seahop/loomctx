@@ -22,15 +22,22 @@ _WS = re.compile(r"\s+")
 # digit-dominated keys — IPs, CIDRs, ports, versions — where the punctuation
 # IS the structure: stripping it made 10.0.4.7, 100.4.7 and 1.0.0.47 collide
 _NUMERIC = re.compile(r"^[\d.:/\-]+$")
+# colon-structured hex keys — IPv6 addresses, MAC addresses, address:port —
+# where the colons (and dots, for v4-mapped forms) are the structure too:
+# 2001:db8::1 and 2001:db8:0:0:0:0:0:1 stay distinct from 2001db81 (v6)
+_HEX_STRUCTURED = re.compile(r"^(?=.*:)[0-9a-f.:/]+$")
 
 
 def norm_key(key: str) -> str:
     """The fuzzy-match key (D-024 entity resolution tier 2): lowercase with
     punctuation/whitespace stripped, so web-01 / WEB_01 / web01 collide.
     A key made only of digits and `. : / -` keeps those characters (only
-    case and whitespace fold): 10.0.4.7 and 100.4.7 are different things."""
+    case and whitespace fold): 10.0.4.7 and 100.4.7 are different things.
+    So does a key with a colon made only of hex digits and `. : /` (IPv6,
+    MAC addresses): fe80::1 and FE80::1 collide, fe80::1 and fe80::10 do
+    not (schema v6)."""
     lowered = _WS.sub("", key.lower())
-    if _NUMERIC.match(lowered):
+    if _NUMERIC.match(lowered) or _HEX_STRUCTURED.match(lowered):
         return lowered
     return _NORM.sub("", lowered)
 

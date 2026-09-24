@@ -231,7 +231,8 @@ _PREFIX_END = "\U0010ffff"
 # anything that must run exactly once (a backfill) is keyed by version here.
 # v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
 # lease owners, lower(key) index, numeric norm_key rule (recompute);
-# v6: observations.supersedes (D-050); tick-scan indexes and high-water marks (R-9)
+# v6: observations.supersedes (D-050); tick-scan indexes and high-water marks
+# (R-9); hex/colon norm_key rule (recompute keys carrying ':')
 SCHEMA_VERSION = 6
 
 _NOT_TOMBSTONED = (
@@ -388,6 +389,14 @@ class SqliteStore(GraphStore):
             rows = self._conn.execute(
                 "SELECT id, key, norm_key FROM entities WHERE instr(key, '.') > 0"
                 " OR instr(key, ':') > 0 OR instr(key, '/') > 0 OR instr(key, '-') > 0").fetchall()
+            self._conn.executemany(
+                "UPDATE entities SET norm_key = ? WHERE id = ?",
+                [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
+        if current < 6:
+            # v6: colon-structured hex keys (IPv6, MAC) keep their separators
+            # too; only keys carrying ':' can differ.
+            rows = self._conn.execute(
+                "SELECT id, key, norm_key FROM entities WHERE instr(key, ':') > 0").fetchall()
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
