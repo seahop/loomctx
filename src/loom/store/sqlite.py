@@ -1358,7 +1358,7 @@ class SqliteStore(GraphStore):
                     (namespace, model, *chunk),
                 ).fetchall()
                 for row in rows:
-                    result[row["ref_id"]] = common.unpack_vector(row["vector"])
+                    result[row["ref_id"]] = common.unpack_array(row["vector"])
         return result
 
     # hex value of the id's last character, 0..15: the shard key (D-031)

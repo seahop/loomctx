@@ -1417,12 +1417,19 @@ def _pack(
     page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
                                  page_before, page_predicate, question)
 
+    pool = _fact_pool(scored, paths or {}, by_id, superseded_by)
+    edge_costs: dict[str, int] = {}
+    unminted = 0   # threads past the handle cap: counted, never encoded
+
     def select(item_budget: int) -> tuple[list[ContextItem], list[ExpansionHandle], int]:
+        nonlocal unminted
         facts, skipped, inbound, left = _select_facts(
-            scored, item_budget, paths or {}, by_id, superseded_by, subject_keys, focus)
-        threads = _thread_handles(namespace, skipped, inbound, as_of, valid_at, page_before) \
-            if with_handles else []
-        return facts, conflict_handles + page_handles + excerpt_handles + threads, left
+            pool, item_budget, by_id, subject_keys, focus, edge_costs)
+        fixed = conflict_handles + page_handles + excerpt_handles
+        threads, unminted = _thread_handles(
+            namespace, skipped, inbound, as_of, valid_at, page_before,
+            limit=max(0, _MAX_HANDLES - len(fixed))) if with_handles else ([], 0)
+        return facts, fixed + threads, left
 
     share = int(budget * _HANDLE_BUDGET_SHARE)
     item_budget = fixed_remaining
@@ -1454,7 +1461,7 @@ def _pack(
             break
         shipped.append(handle)
         spent += cost
-    omitted = len(handles) - len(shipped)
+    omitted = len(handles) - len(shipped) + unminted
     items.extend(facts)
 
     # Handles are in priority order (conflicts, pages past the gather cap,
@@ -1478,14 +1485,36 @@ def _pack(
     )
 
 
-def _select_facts(
+Pool = list[tuple[float, float, int, Observation, str, list[str]]]
+
+
+def _fact_pool(
     scored: list[tuple[float, Observation]],
-    budget: int,
     paths: dict[tuple[str, str], list[str]],
     by_id: dict[str, Observation],
     superseded_by: dict[str, Observation],
+) -> Pool:
+    """Every candidate fact rendered and priced once per pack, densest
+    first: (score per token, score, cost, obs, text, path)."""
+    pool: Pool = []
+    for score, obs in scored:
+        path = paths.get((obs.subject.type, obs.subject.key), [])
+        if any(pid not in by_id for pid in path):
+            continue  # an edge of the chain is not visible in this view: neither is the fact
+        text = _render_fact(obs, superseded_by.get(obs.id))
+        cost = _charge(text, [_citation(obs)])
+        pool.append((score / cost, score, cost, obs, text, path))
+    pool.sort(key=lambda e: e[0], reverse=True)
+    return pool
+
+
+def _select_facts(
+    pool: Pool,
+    budget: int,
+    by_id: dict[str, Observation],
     subject_keys: set[tuple[str, str]],
     focus: frozenset[str] = frozenset(),
+    edge_costs: dict[str, int] | None = None,
 ) -> tuple[list[ContextItem], dict[tuple[str, str, str], int], set[tuple[str, str, str]], int]:
     """Value-per-token selection with an MMR-style diversity term (D-051).
     Candidates are ordered by score per charged token; each round takes
@@ -1505,6 +1534,7 @@ def _select_facts(
 
     Returns (items, skipped thread counts, inbound thread keys, budget left).
     """
+    edge_costs = edge_costs if edge_costs is not None else {}
     remaining = budget
     items: list[ContextItem] = []
     included: set[str] = set()
@@ -1528,15 +1558,14 @@ def _select_facts(
         key = (owner.type, owner.key, obs.predicate)
         skipped[key] = skipped.get(key, 0) + 1
 
-    pool: list[tuple[float, float, int, Observation, str, list[str]]] = []
-    for score, obs in scored:
-        path = paths.get((obs.subject.type, obs.subject.key), [])
-        if any(pid not in by_id for pid in path):
-            continue  # an edge of the chain is not visible in this view: neither is the fact
-        text = _render_fact(obs, superseded_by.get(obs.id))
-        cost = _charge(text, [_citation(obs)])
-        pool.append((score / cost, score, cost, obs, text, path))
-    pool.sort(key=lambda e: e[0], reverse=True)
+    def edge_cost(edge: Observation) -> int:
+        # a chain edge is re-priced for every candidate it precedes, in
+        # every round: memoized per pack (30k renders on a 1,082-entity scope)
+        cost = edge_costs.get(edge.id)
+        if cost is None:
+            cost = edge_costs[edge.id] = _charge(_render_fact(edge), [_citation(edge)])
+        return cost
+
     dead: set[str] = set()  # chosen, shipped as an edge, or unaffordable for good
     while True:
         best = None
@@ -1550,7 +1579,7 @@ def _select_facts(
                 dead.add(obs.id)
                 continue  # already shipped as part of another fact's path
             chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
-            chain_cost = sum(_charge(_render_fact(p), [_citation(p)]) for p in chain)
+            chain_cost = sum(edge_cost(p) for p in chain)
             if cost + chain_cost > remaining:
                 dead.add(obs.id)
                 skip(obs)
@@ -1586,11 +1615,14 @@ def _select_facts(
 def _thread_handles(
     namespace: str, skipped: dict[tuple[str, str, str], int], inbound: set[tuple[str, str, str]],
     as_of: datetime | None, valid_at: datetime | None, page_before: datetime | None,
-) -> list[ExpansionHandle]:
+    limit: int = _MAX_HANDLES,
+) -> tuple[list[ExpansionHandle], int]:
+    """The `limit` biggest skipped threads as handles, and how many more
+    there were: a 1,082-entity scope encoded 11k handles per pack to ship
+    32 of them (D-058)."""
     handles = []
-    for (stype, skey, predicate), count in sorted(
-        skipped.items(), key=lambda kv: kv[1], reverse=True
-    ):
+    ranked = sorted(skipped.items(), key=lambda kv: kv[1], reverse=True)
+    for (stype, skey, predicate), count in ranked[:limit]:
         subj = EntityRef(type=stype, key=skey)
         direction = "pointing at" if (stype, skey, predicate) in inbound else "for"
         handles.append(ExpansionHandle(
@@ -1598,7 +1630,7 @@ def _thread_handles(
             hint=f"{count} more '{predicate}' observations {direction} {stype}:{skey}",
             est_tokens=count * _FACT_TOKENS_ESTIMATE,
         ))
-    return handles
+    return handles, len(ranked) - len(handles)
 
 
 def _page_handles(

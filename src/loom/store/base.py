@@ -210,7 +210,11 @@ class GraphStore(ABC):
     @abstractmethod
     def embeddings_for(
         self, namespace: str, ref_ids: list[str], model: str
-    ) -> dict[str, list[float]]: ...
+    ) -> dict[str, list[float]]:
+        """ref_id -> its vector for `model`. A vector is a float sequence:
+        a read-only float32 numpy view when numpy is installed — decoding
+        1,000 gathered 1,536-dim vectors into Python floats cost ~120 ms
+        of every semantic ask, the view ~35 ms with the cosine (D-058)."""
 
     @abstractmethod
     def observations_without_embeddings(

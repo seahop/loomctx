@@ -1268,7 +1268,7 @@ class PostgresStore(GraphStore):
                 " WHERE namespace = %s AND model = %s AND ref_id = ANY(%s)",
                 (namespace, model, ref_ids),
             )
-        return {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows}
+        return {r["ref_id"]: common.unpack_array(r["vector"]) for r in rows}
 
     # hex value of the id's last character, 0..15: the shard key (D-031)
     _SHARD_EXPR = "(position(right(o.id, 1) in '0123456789abcdef') - 1)"
