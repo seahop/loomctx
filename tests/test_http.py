@@ -109,6 +109,43 @@ def test_ask_and_expand_roundtrip_signed(tmp_path, monkeypatch):
         assert client.post("/v1/expand", json={"handle": tampered, "budget": 400}).status_code == 400
 
 
+def test_supersedes_must_name_a_visible_observation_about_the_same_subject(tmp_path, monkeypatch):
+    """D-050: a recorded supersession is validated at the door — on the
+    single route and per item in a batch — against the store."""
+    with make_client(tmp_path, monkeypatch) as client:
+        old = client.post("/v1/ingest", json={**CLAIM, "predicate": "runs_os", "object": "fedora-44"})
+        assert old.status_code == 200
+        old_id = old.json()["observation_id"]
+        good = client.post("/v1/ingest", json={
+            **CLAIM, "predicate": "runs_os", "object": "ubuntu-22.04",
+            "observed_at": "2026-09-02T00:00:00Z", "supersedes": old_id})
+        assert good.status_code == 200, good.text
+        dangling = client.post("/v1/ingest", json={**CLAIM, "predicate": "runs_os", "object": "x",
+                                                   "supersedes": "0" * 32})
+        assert dangling.status_code == 422 and "supersedes" in dangling.json()["detail"]
+        assert "does not name a visible observation" in dangling.json()["detail"]
+        other = client.post("/v1/ingest", json={
+            **CLAIM, "subject": {"type": "host", "key": "web-02"}, "predicate": "runs_os",
+            "object": "x", "supersedes": old_id})
+        assert other.status_code == 422
+        assert "host:web-01, not host:web-02" in other.json()["detail"]
+        # another namespace cannot see it either
+        foreign = client.post("/v1/ingest", json={**CLAIM, "namespace": "other", "predicate": "runs_os",
+                                                  "object": "x", "supersedes": old_id})
+        assert foreign.status_code == 422 and "namespace 'other'" in foreign.json()["detail"]
+        # batch: validated per item against the store; an item recorded
+        # earlier in the same batch is not visible yet
+        r = client.post("/v1/ingest/batch", json=[
+            {**CLAIM, "predicate": "runs_os", "object": "debian", "event_id": "b1",
+             "observed_at": "2026-09-03T00:00:00Z", "supersedes": old_id},
+            {**CLAIM, "predicate": "runs_os", "object": "arch", "event_id": "b2",
+             "observed_at": "2026-09-03T00:00:00Z", "supersedes": "f" * 32},
+        ])
+        body = r.json()
+        assert r.status_code == 200 and (body["recorded"], body["rejected"]) == (1, 1)
+        assert "supersedes" in body["results"][1]["detail"]
+
+
 def test_invalid_envelope_rejected(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/ingest", json={"kind": "claim", "predicate": "x"})

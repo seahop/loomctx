@@ -208,6 +208,26 @@ def _gate_source(grant: Grant | None, source: str) -> None:
         )
 
 
+def _check_supersedes(store, claim: ClaimIn) -> str | None:
+    """A recorded supersession (D-050) must name a visible observation in
+    the claim's namespace about the claim's subject — a correction stays
+    on its subject, and a dangling or cross-tenant reference is a sender
+    bug the read path would otherwise silently ignore. Returns the
+    problem, or None."""
+    if not claim.supersedes:
+        return None
+    found = store.observations_by_ids(claim.namespace, [claim.supersedes])
+    if not found:
+        return (f"supersedes {claim.supersedes!r} does not name a visible observation in "
+                f"namespace {claim.namespace!r}")
+    old = found[0]
+    if old.subject != claim.subject:
+        return (f"supersedes {claim.supersedes!r} names an observation about "
+                f"{old.subject.type}:{old.subject.key}, not {claim.subject.type}:"
+                f"{claim.subject.key}; a correction stays on its subject")
+    return None
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
@@ -243,6 +263,10 @@ def ingest(envelope: IngestEnvelope, request: Request):
             request.app.state.registry.get(envelope.namespace), envelope)
         if problem is not None:
             metrics.REJECTED.labels(reason="schema").inc()
+            raise HTTPException(status_code=422, detail=problem)
+        problem = _check_supersedes(request.app.state.store, envelope)
+        if problem is not None:
+            metrics.REJECTED.labels(reason="supersedes").inc()
             raise HTTPException(status_code=422, detail=problem)
         metrics.INGEST.labels(kind=envelope.kind).inc()
         try:
@@ -332,6 +356,11 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
                 if problem is not None:
                     return problem
                 problem = resolve_provenance(store, envelope)
+                if problem is not None:
+                    return problem
+                # validated against the store: an earlier item of the same
+                # batch is not visible yet, so it cannot be superseded here
+                problem = _check_supersedes(store, envelope)
                 if problem is not None:
                     return problem
         except HTTPException as exc:

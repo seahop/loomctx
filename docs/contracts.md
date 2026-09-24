@@ -233,6 +233,22 @@ apply to claims whose `source` starts with `doc:` or that carry
 `attrs.extracted`, never to a sender's structured claim that cites its
 document.
 
+## Supersession: a claim that corrects an earlier observation
+
+`ClaimIn.supersedes` names an earlier observation this one corrects or
+replaces (D-050). It is recorded, never inferred: the old row stays for
+audit and for `as_of` reads before the correction, but is no longer
+current. Ingest validates it at the door — `/v1/ingest` answers `422`,
+a batch rejects the item — unless it names a *visible* observation in
+the same namespace about the same subject (a batch validates against the
+store, so an item cannot supersede one recorded earlier in the same
+batch). On the read side, an observation that a visible later observation
+supersedes is excluded from conflict detection (a corrected value is not
+a side), ranks as history (half score), and renders with a
+`[superseded by <cite>]` suffix; for an `as_of` earlier than the
+correction it is current again. The store column that persists the field
+lands with the store work of the same decision.
+
 ## Schema registry
 
 `SchemaRegistration`: per-namespace `entity_types` (name, description, facets) and

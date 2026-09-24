@@ -869,3 +869,97 @@ def test_a_page_keeps_its_window_for_the_threads_it_cuts(tmp_path, monkeypatch):
     users = {i.text.split()[2] for i in more.items}
     assert users <= {f"user:u{i}" for i in range(8)} and "user:u11" not in users
     store.close()
+
+
+# -------------------------------------------------------- D-050 supersession #
+
+def _obs(id, predicate, obj, when, source, supersedes=None, subject=None):
+    return Observation(id=id, namespace="d", subject=subject or EntityRef(type="host", key="web-01"),
+                       predicate=predicate, object=obj, observed_at=when, recorded_at=when,
+                       source=source, confidence=1.0, supersedes=supersedes)
+
+
+class _FakeStore:
+    """Hands build_pack a fixed observation list (the store column that
+    persists `supersedes` lands separately; the read path is written
+    against the contract field)."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def observations_for_many(self, namespace, refs, limit=100, observed_before=None):
+        rows = [o for o in self.rows
+                if observed_before is None or o.observed_at <= observed_before]
+        return {(r.type, r.key): [o for o in rows if o.subject == r] for r in refs}
+
+    def count_observations(self, namespace, ref, observed_before=None):
+        return len(self.observations_for_many(namespace, [ref], observed_before=observed_before)[(ref.type, ref.key)])
+
+    def get_dossier(self, namespace, ref):
+        return None
+
+
+def _supersession_rows():
+    """asset-inventory said fedora (X), nmap-scan says ubuntu (Z): a
+    conflict — until asset-inventory corrects itself with ubuntu (Y),
+    naming X."""
+    return [
+        _obs("x" * 32, "runs_os", "fedora-44", _at(7, 5), "asset-inventory"),
+        _obs("z" * 32, "runs_os", "ubuntu-22.04", _at(8, 20), "nmap-scan"),
+        _obs("y" * 32, "runs_os", "ubuntu-22.04", _at(9, 1), "asset-inventory", supersedes="x" * 32),
+    ]
+
+
+def test_superseded_observation_is_history_not_a_side(monkeypatch):
+    """D-050: a recorded supersession retires the corrected fact from
+    conflict detection, ranks it as history and says so in its text."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 2))
+    host = EntityRef(type="host", key="web-01")
+    pack = build_pack(_FakeStore(_supersession_rows()), AskRequest(
+        namespace="d", subject=host, question="what os?", budget=3000))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    facts = {i.citations[0].observation_id: i for i in pack.items if i.kind == "fact"}
+    old, new, scan = facts["x" * 32], facts["y" * 32], facts["z" * 32]
+    assert old.text.endswith(f"[superseded by {'y' * 12}]")
+    assert "superseded" not in new.text and "superseded" not in scan.text
+    assert old.score < scan.score < new.score
+    assert item_tokens(old) > item_tokens(new)   # the suffix is charged like any text
+    # as of a moment before the correction, the old fact is current again:
+    # the conflict is back and the suffix is gone
+    past = build_pack(_FakeStore(_supersession_rows()), AskRequest(
+        namespace="d", subject=host, question="what os?", budget=3000, as_of=_at(8, 25)))
+    assert [i.kind for i in past.items][0] == "conflict"
+    assert all("superseded" not in i.text for i in past.items)
+
+
+def test_supersession_needs_the_correction_in_view():
+    """Only a visible later observation retires another; a `supersedes`
+    pointing outside the gathered set (redacted, another subject) does
+    nothing, and self-reference is ignored."""
+    import loom.context as ctx
+    rows = _supersession_rows()
+    assert set(ctx._supersession(rows)) == {"x" * 32}
+    assert ctx._supersession(rows[:2]) == {}
+    stray = _obs("w" * 32, "runs_os", "debian", _at(9, 3), "cmdb", supersedes="nope")
+    loop = _obs("v" * 32, "runs_os", "debian", _at(9, 3), "cmdb", supersedes="v" * 32)
+    assert set(ctx._supersession(rows + [stray, loop])) == {"x" * 32}
+    # the newest correction wins when two name the same observation
+    again = _obs("u" * 32, "runs_os", "ubuntu-24.04", _at(9, 4), "asset-inventory", supersedes="x" * 32)
+    assert ctx._supersession(rows + [again])["x" * 32].id == "u" * 32
+
+
+def test_superseded_fact_is_discounted_in_the_recency_overview(monkeypatch):
+    """With no question the pack is a recency overview; the superseded
+    fact still ranks at half, below the older fact that replaced nothing."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 2))
+    host = EntityRef(type="host", key="web-01")
+    rows = [
+        _obs("a" * 32, "owner", "alice", _at(9, 1), "cmdb"),
+        _obs("b" * 32, "owner", "bob", _at(9, 1), "cmdb", supersedes="a" * 32),
+        _obs("c" * 32, "note", "x", _at(8, 1), "wiki"),
+    ]
+    pack = ctx._pack(namespace="d", subjects=[host], question=None, as_of=None, budget=3000, observations=rows)
+    score = {i.citations[0].observation_id[0]: i.score for i in pack.items}
+    assert score["b"] > score["c"] > score["a"]
