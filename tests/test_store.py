@@ -1077,7 +1077,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -1182,7 +1182,7 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
 
 
 # ------------------------------------------------------- schema v5 #
@@ -1198,6 +1198,20 @@ def test_norm_key_keeps_the_structure_of_numeric_keys():
     assert norm_key("10.0.4.7:443") == "10.0.4.7:443" and norm_key("2026-09-01") == "2026-09-01"
     assert norm_key("v1.2.3") == "v123"          # letters: spelling, not structure
     assert norm_key("10_0_4_7") == "10047"       # underscores are spelling
+
+
+def test_norm_key_keeps_the_structure_of_hex_keys():
+    """v6: IPv6 and MAC addresses — hex digits with colons — keep their
+    separators; case and whitespace still fold; a colon alone is not
+    enough when letters outside a-f are present (that is spelling)."""
+    from loom.store.common import norm_key
+    assert norm_key("2001:DB8::1") == norm_key(" 2001:db8::1 ") == "2001:db8::1"
+    assert len({norm_key(k) for k in ("2001:db8::1", "2001:db8::10", "2001:db8:0:0:0:0:0:1", "2001:db81::")}) == 4
+    assert norm_key("fe80::1%eth0") == "fe801eth0"                # a zone id is not hex: spelling rule
+    assert norm_key("AA:BB:CC:DD:EE:FF") == "aa:bb:cc:dd:ee:ff"
+    assert norm_key("aa-bb-cc-dd-ee-ff") == "aabbccddeeff"         # no colon: the old rule (D-049 named it)
+    assert norm_key("::ffff:10.0.4.7") == "::ffff:10.0.4.7" and norm_key("2001:db8::/32") == "2001:db8::/32"
+    assert norm_key("cisco:ios") == "ciscoios" and norm_key("deadbeef") == "deadbeef"
 
 
 def test_fuzzy_candidates_do_not_group_distinct_ips(store):
@@ -1218,7 +1232,7 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 5
+        assert again.schema_version() == SCHEMA_VERSION == 6
         rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
@@ -1260,6 +1274,13 @@ def test_search_entities_uses_the_lower_key_index(store):
     else:
         from loom.store import postgres as pg
         assert _exec(store, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_entity_lower_key'")
+        # enough rows and fresh statistics that the planner has a real
+        # choice: on a 3-row table with no stats every (namespace, ...)
+        # index costs the same and any of them may be picked
+        _exec(store, "INSERT INTO entities (id, namespace, type, key, created_at, norm_key)"
+                     " SELECT md5(i::text), 'default', 'host', 'k' || i, '2026-01-01T00:00:00+00:00', 'k' || i"
+                     " FROM generate_series(1, 500) i")
+        _exec(store, "ANALYZE entities")
         with store._tx():   # one transaction: the planner hint and the EXPLAIN share a connection
             store._x("SET LOCAL enable_seqscan = off")
             plan = store._q("EXPLAIN " + pg._SEARCH_SQL, ("default", "web", "web" + pg._PREFIX_END))
@@ -1409,3 +1430,342 @@ def test_sqlite_transactions_are_reentrant(store):
             store.record_claim(login_claim(namespace="lost"))
             raise RuntimeError("outer failure")
     assert store.observations_for("lost", EntityRef(type="host", key="web-01")) == []
+
+
+# ------------------------------------------------------- schema v6 #
+
+def test_supersedes_is_recorded_and_round_trips(store, tmp_path):
+    """D-050: a claim may name the observation it corrects. The edge is
+    stored, served on every read path, carried by export/import, and
+    `superseded_ids` reports exactly the rows a visible later observation
+    names — a redacted superseder no longer counts, an unknown target is
+    a dangling pointer, not an error."""
+    import io
+    from loom.lifecycle import export_jsonl, import_jsonl
+    host = EntityRef(type="host", key="web-01")
+    old = store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-43"}))
+    assert old.supersedes is None
+    new = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-44", "supersedes": old.id, "event_id": "evt-sup"}))
+    assert new.supersedes == old.id
+    by_read = {o.id: o for o in store.observations_for("default", host)}
+    assert by_read[new.id].supersedes == old.id and by_read[old.id].supersedes is None
+    many = {o.id: o for o in store.observations_for_many("default", [host])[("host", "web-01")]}
+    assert many[new.id].supersedes == old.id
+    assert store.observations_by_ids("default", [new.id])[0].supersedes == old.id
+    replay = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-44", "supersedes": old.id, "event_id": "evt-sup"}))
+    assert replay.id == new.id and replay.supersedes == old.id            # the dedupe path carries it too
+    assert store.superseded_ids("default", [old.id, new.id, "nope"]) == {old.id}
+    assert store.superseded_ids("other", [old.id]) == set()               # namespace-scoped
+    assert store.superseded_ids("default", []) == set()
+    dangling = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-45", "supersedes": "0" * 32}))
+    assert dangling.supersedes == "0" * 32 and store.superseded_ids("default", ["0" * 32]) == {"0" * 32}
+
+    buf = io.StringIO()
+    export_jsonl(store, buf, "default")
+    assert any(json.loads(l)["data"].get("supersedes") == old.id for l in buf.getvalue().splitlines())
+    dst = SqliteStore(tmp_path / "restored-sup.db")
+    try:
+        buf.seek(0)
+        import_jsonl(dst, buf)
+        restored = {o.id: o for o in dst.iter_observations("default")}
+        assert restored[new.id].supersedes == old.id
+        assert dst.superseded_ids("default", [old.id]) == {old.id}
+    finally:
+        dst.close()
+
+    store.redact("default", new.id, "wrong correction")
+    assert store.superseded_ids("default", [old.id]) == set()             # only a visible superseder counts
+
+
+def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
+    """A v5 file gains the column, its index and the version bump on open;
+    rows written before the column carry no supersession; norm_key is
+    recomputed for the keys the hex rule changes (those carrying ':')."""
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    before = store.record_claim(login_claim())
+    store.upsert_entity("default", EntityRef(type="ip", key="2001:db8::1"))
+    store.upsert_entity("default", EntityRef(type="mac", key="AA:BB:CC:DD:EE:FF"))
+    _exec(store, "UPDATE entities SET norm_key = '2001db81' WHERE key = '2001:db8::1'")          # as v5 wrote them
+    _exec(store, "UPDATE entities SET norm_key = 'aabbccddeeff' WHERE key = 'AA:BB:CC:DD:EE:FF'")
+    _exec(store, "DROP INDEX idx_obs_supersedes")
+    _exec(store, "ALTER TABLE observations DROP COLUMN supersedes")
+    _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
+    again = _reopen(store, tmp_path)
+    try:
+        assert again.schema_version() == SCHEMA_VERSION == 6
+        rows = _exec(again, "SELECT key, norm_key FROM entities WHERE key <> 'web-01' AND key <> 'jdoe' ORDER BY key")
+        assert [(r["key"], r["norm_key"]) for r in rows] == [
+            ("2001:db8::1", "2001:db8::1"), ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")]
+        obs = again.observations_for("default", EntityRef(type="host", key="web-01"))
+        assert [o.id for o in obs] == [before.id] and obs[0].supersedes is None
+        later = again.record_claim(login_claim().model_copy(update={"supersedes": before.id}))
+        assert again.superseded_ids("default", [before.id]) == {before.id} and later.supersedes == before.id
+        if isinstance(again, SqliteStore):
+            plan = _exec(again, "EXPLAIN QUERY PLAN SELECT supersedes FROM observations o"
+                                " WHERE o.namespace = ? AND o.supersedes IN (?, ?)", ("default", "a", "b"))
+            assert any("idx_obs_supersedes" in r["detail"] for r in plan), plan
+        else:
+            assert _exec(again, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_obs_supersedes'")
+    finally:
+        again.close()
+
+
+# ------------------------------------------- worker tick scans (R-9) #
+
+def _meta(store, key):
+    rows = _exec(store, "SELECT value FROM loom_meta WHERE key = ?", (key,))
+    return rows[0]["value"] if rows else None
+
+
+def _examined(store, table, mark):
+    """Rows a tick walks: the recorded_at range from the mark (the query's
+    only non-anti-join predicate, served by the recorded_at index)."""
+    return _exec(store, f"SELECT COUNT(*) AS n FROM {table} WHERE recorded_at >= ?", (mark,))[0]["n"]
+
+
+def test_embedding_backlog_scans_from_a_high_water_mark(store, tmp_path):
+    """A tick examines the rows recorded since the previous tick plus the
+    slack window — not the whole table — and a backfilled row below the
+    mark (an import with an old recorded_at) is found by the periodic
+    rescan within `_RESCAN_EVERY` ticks."""
+    _raw(store)
+    from loom.contracts import Observation
+    store._HWM_SLACK, store._RESCAN_EVERY = 2, 3
+    ids = [store.record_claim(login_claim().model_copy(
+        update={"object": EntityRef(type="user", key=f"u{i}")})).id for i in range(12)]
+
+    def tick(limit=5):
+        got = store.observations_without_embeddings("m", limit)
+        store.put_embeddings("default", "m", [(o.id, [1.0, 0.0]) for o in got])
+        return [o.id for o in got]
+
+    assert tick() == ids[:5]                    # the first tick of a process scans from the start
+    assert tick() == ids[5:10]                  # then from the mark
+    assert tick() == ids[10:]
+    mark = _meta(store, "hwm:embed:m:0/1")
+    assert mark is not None
+    assert 0 < _examined(store, "observations", mark) <= store._HWM_SLACK + 5 < len(ids)
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._EMBED_BACKLOG_SQL.format(shard=""), (mark, "m", 5))
+        assert any("idx_obs_recorded" in r["detail"] for r in plan), plan
+    assert tick() == []                         # tick 4: the periodic rescan, nothing pending
+    old = Observation(id=uuid_hex(), namespace="default", subject=EntityRef(type="host", key="web-01"),
+                      predicate="p", object="x", observed_at=OBSERVED, source="s", confidence=1.0,
+                      recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    store.restore_observation(old)              # a backfill lands far below the mark
+    assert old.recorded_at.isoformat() < _meta(store, "hwm:embed:m:0/1")
+    assert tick() == [] and tick() == []        # incremental ticks do not see it ...
+    assert tick() == [old.id]                   # ... the rescan does
+    store.wipe()
+    assert _meta(store, "hwm:embed:m:0/1") is None
+
+
+def uuid_hex():
+    import uuid
+    return uuid.uuid4().hex
+
+
+def test_chunk_backlog_scans_from_a_high_water_mark(store, tmp_path):
+    from loom.contracts import Artifact, DocumentIn
+    _raw(store)
+    store._HWM_SLACK, store._RESCAN_EVERY = 1, 3
+    ids = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED)).id
+           for i in range(6)]
+
+    def tick(limit=2, lease=None):
+        got = store.artifacts_needing_chunks("m", limit, lease=lease)
+        for a in got:
+            store.put_doc_chunks("default", a.id, "m", [(0, 0, 3, "doc", [1.0, 0.0])],
+                                 worker_id=lease[0] if lease else None)
+        return [a.id for a in got]
+
+    assert tick() == ids[:2]
+    assert tick(lease=("w", 60)) == ids[2:4]
+    assert tick() == ids[4:]
+    mark = _meta(store, "hwm:chunks:m")
+    assert 0 < _examined(store, "artifacts", mark) <= store._HWM_SLACK + 2 < len(ids)
+    assert tick() == []
+    old = Artifact(id=uuid_hex(), namespace="default", content_type="text/plain", text="late import",
+                   source="s", observed_at=OBSERVED, recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    store.restore_artifact(old)
+    assert tick() == [] and tick() == []
+    assert tick() == [old.id]
+
+
+def test_dossier_candidates_are_incremental(store, tmp_path):
+    """Only entities with a row since the mark — or holding a lease — are
+    evaluated; a failed build (lease lapses without put_dossier) is
+    re-offered, and a dropped brief (redact, merge) resets the mark so the
+    rebuild does not wait for the periodic rescan."""
+    _raw(store)
+    store._HWM_SLACK, store._RESCAN_EVERY = 0, 100
+    host, other = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="db-01")
+    for i in range(4):
+        store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"u{i}")}))
+    store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-44"}))
+    cands = store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60))
+    assert [(c[1], c[2]) for c in cands] == [(host, 5)]
+    store.put_dossier("default", host, "brief", 5, [], worker_id="w")
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60)) == []
+    mark = _meta(store, "hwm:dossier")
+    assert mark is not None and _examined(store, "observations", mark) == 1
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._DOSSIER_SQL, (mark, "2099", 5, 3, 4))
+        assert any("idx_obs_subject_recorded" in r["detail"] for r in plan), plan
+    for i in range(3):                                   # three NEW rows: stale again
+        store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"n{i}")}))
+    cands = store.dossier_candidates(min_new=3, min_total=5, lease=("w", 0))   # a lease that lapses at once
+    assert [(c[1], c[2]) for c in cands] == [(host, 8)]
+    # the build fails (no put_dossier). Another entity's row, and a tick that
+    # offers host again through its newest row, move the mark past every row
+    # of host ...
+    store.record_claim(login_claim().model_copy(update={"subject": other, "object": "x", "predicate": "runs_os"}))
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 0)) == [("default", host, 8)]
+    mark = _meta(store, "hwm:dossier")
+    assert _examined(store, "observations", mark) == 1                       # only the other entity's row is at the mark
+    # ... yet it is re-offered: its lapsed lease keeps it in the touched set
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60)) == [("default", host, 8)]
+    store.put_dossier("default", host, "brief 2", 8, [], worker_id="w")
+    assert store.dossier_candidates(min_new=3, min_total=5) == []
+    assert _meta(store, "hwm:dossier") is not None
+    victim = store.observations_for("default", host, limit=1)[0]
+    store.redact("default", victim.id, "spill")           # drops no brief here, still resets the mark
+    assert _meta(store, "hwm:dossier") is None
+    store.dossier_candidates(min_new=3, min_total=5)
+    assert _meta(store, "hwm:dossier") is not None
+    assert store.merge_entities("default", other, host)
+    assert _meta(store, "hwm:dossier") is None            # both briefs dropped: rebuild next tick
+    assert [c[1] for c in store.dossier_candidates(min_new=3, min_total=5)] == [host]
+
+
+# ------------------------------------ per-entity pre-limit in the gather (R-9) #
+
+def _backend(store, namespace):
+    return store.shard_for(namespace) if hasattr(store, "shard_for") else store
+
+
+def test_observations_for_many_prelimits_each_entity(store):
+    """The batched gather takes each entity's newest `limit` rows of each
+    side from an index range with its own LIMIT, so a hub contributes at
+    most 2·limit rows to the per-entity trim instead of every edge — and
+    the answer is exactly what per-ref observations_for gives, with and
+    without an as_of bound."""
+    from datetime import timedelta
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    hub = EntityRef(type="host", key="hub")
+    claims = [ClaimIn(namespace="m", subject=hub, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                      observed_at=t + timedelta(minutes=i), source="s") for i in range(300)]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="ip", key=f"10.0.0.{i}"), predicate="assigned_to", object=hub,
+                       observed_at=t + timedelta(minutes=500 + i), source="s") for i in range(50)]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="host", key=f"leaf{i}"), predicate="runs_os", object=f"os{i}",
+                       observed_at=t + timedelta(minutes=i), source="s") for i in range(20)]
+    claims.append(ClaimIn(namespace="m", subject=hub, predicate="peer_of", object=hub, observed_at=t + timedelta(minutes=700), source="s"))
+    store.record_claims(claims)
+    refs = ([hub] + [EntityRef(type="host", key=f"leaf{i}") for i in range(20)]
+            + [EntityRef(type="user", key="u7"), EntityRef(type="ip", key="10.0.0.3"), EntityRef(type="host", key="nope")])
+    for limit, before in ((10, None), (25, t + timedelta(minutes=250)), (400, None), (3, t + timedelta(minutes=520))):
+        many = store.observations_for_many("m", refs, limit=limit, observed_before=before)
+        assert ("host", "nope") not in many and set(many) <= {(r.type, r.key) for r in refs}
+        for r in refs:   # a ref with nothing visible as of `before` is absent, like an unknown one
+            one = store.observations_for("m", r, limit=limit, observed_before=before)
+            assert [o.id for o in many.get((r.type, r.key), [])] == [o.id for o in one], (r, limit, before)
+    assert set(store.observations_for_many("m", refs, limit=10)) == {(r.type, r.key) for r in refs if r.key != "nope"}
+    # cost: what the gather materializes before the per-entity trim
+    b = _backend(store, "m")
+    with b._tx():
+        ids = list(b._resolve_many("m", refs))
+        hits, params = b._many_query("m", ids, 10, None)
+        n = _exec(b, "WITH hits AS (" + hits + ") SELECT COUNT(*) AS n FROM hits", params)[0]["n"]
+    assert len(ids) == 23 and n <= 2 * 10 * len(ids) and n < 351     # the hub alone has 351 rows
+    if isinstance(b, SqliteStore):
+        plan = _exec(b, "EXPLAIN QUERY PLAN WITH hits AS (" + hits + ") SELECT COUNT(*) AS n FROM hits", params)
+        details = " | ".join(r["detail"] for r in plan)
+        assert "idx_obs_subject" in details and "idx_obs_object" in details and "SCAN o" not in details, details
+
+
+# ---------------------------------------------- iter_entities(since=) (R-9) #
+
+def test_iter_entities_since_is_incremental(store):
+    """The alias scan can ask for the entities created since its last pass
+    instead of the whole namespace; the bound is inclusive and rides the
+    (namespace, created_at) index."""
+    from datetime import timedelta
+    a = store.upsert_entity("default", EntityRef(type="host", key="a"))
+    b = store.upsert_entity("default", EntityRef(type="host", key="b"))
+    store.upsert_entity("team-b", EntityRef(type="host", key="elsewhere"))
+    assert [e.key for e in store.iter_entities("default", since=b.created_at)] == ["b"]
+    assert [e.key for e in store.iter_entities("default", since=a.created_at)] == ["a", "b"]
+    assert list(store.iter_entities("default", since=b.created_at + timedelta(seconds=1))) == []
+    assert {e.key for e in store.iter_entities(None, since=a.created_at)} == {"a", "b", "elsewhere"}
+    assert [e.key for e in store.iter_entities("default")] == ["a", "b"]          # unchanged default
+    b_ = _backend(store, "default")
+    if isinstance(b_, SqliteStore):
+        plan = _exec(b_, "EXPLAIN QUERY PLAN SELECT * FROM entities WHERE 1=1 AND namespace = ? AND created_at >= ?"
+                         " AND (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT ?", ("default", "2026", "", "", 10))
+        assert any("idx_entity_created" in r["detail"] for r in plan), plan
+
+
+# ------------------------------------------------ SQLite readers (R-9) #
+
+def test_sqlite_reads_use_pooled_readers(tmp_path):
+    """WAL serves readers beside the writer, so the read-only methods
+    borrow pooled read connections instead of queueing on the writer's
+    lock: N threads reading at once get identical answers with no
+    'database is locked'; a reader sees only committed state while a read
+    inside the writer's own transaction sees its uncommitted rows; a store
+    with no readers answers identically."""
+    import threading
+    store = SqliteStore(tmp_path / "r.db", readers=3)
+    assert len(store._readers) == 3
+    keys = [f"h{i}" for i in range(40)]
+    store.record_claims([login_claim().model_copy(update={
+        "subject": EntityRef(type="host", key=k), "object": EntityRef(type="user", key=f"u{i % 5}"),
+        "observed_at": OBSERVED.replace(minute=i % 60)}) for i, k in enumerate(keys * 3)])
+    expected = {k: [o.id for o in store.observations_for("default", EntityRef(type="host", key=k))] for k in keys}
+    assert all(len(v) == 3 for v in expected.values())
+    errors: list[Exception] = []
+
+    def reader(n):
+        try:
+            for i in range(150):
+                k = keys[(n * 7 + i) % len(keys)]
+                got = [o.id for o in store.observations_for("default", EntityRef(type="host", key=k))]
+                assert got == expected[k]
+                assert store.count_observations("default", EntityRef(type="host", key=k)) == 3
+                assert store.search_entities("default", k)[0].key == k
+                assert set(store.observations_for_many("default", [EntityRef(type="host", key=k)])) == {("host", k)}
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert store._reader_pool.qsize() == 3                     # every reader came back
+    host = EntityRef(type="host", key="web-01")
+    with store._tx():
+        store.record_claim(login_claim(namespace="inner"))
+        assert len(store.observations_for("inner", host)) == 1       # same thread: joins the write
+        seen: list[int] = []
+        t = threading.Thread(target=lambda: seen.append(len(store.observations_for("inner", host))))
+        t.start()
+        t.join()
+        assert seen == [0]                                            # another thread: committed state only
+    assert len(store.observations_for("inner", host)) == 1 and store.ping()
+    assert [e.key for e in store.iter_entities("inner")] == ["web-01", "jdoe"]
+    store.close()
+    plain = SqliteStore(tmp_path / "r.db", readers=0)
+    try:
+        assert plain._reader_pool is None
+        assert {k: [o.id for o in plain.observations_for("default", EntityRef(type="host", key=k))]
+                for k in keys} == expected
+    finally:
+        plain.close()

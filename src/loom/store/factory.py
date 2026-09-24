@@ -29,7 +29,10 @@ def store_from_url(url: str, read_url: str | None = _FROM_ENV) -> GraphStore:
         return PostgresStore(url, read_dsn=read_url or None)
     from .sqlite import SqliteStore
 
-    return SqliteStore(url)
+    # LOOM_DB_READERS: read connections per process beside the one writer
+    # (R-9); the store's default applies when unset
+    raw = os.environ.get("LOOM_DB_READERS", "").strip()
+    return SqliteStore(url, readers=int(raw) if raw.isdigit() else None)
 
 
 def shard_specs(raw: str) -> dict[str, tuple[str, str | None]]:

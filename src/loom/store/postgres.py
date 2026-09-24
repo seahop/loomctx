@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS observations (
     source           TEXT NOT NULL,
     confidence       DOUBLE PRECISION NOT NULL,
     provenance_json  TEXT,
-    attrs_json       TEXT NOT NULL DEFAULT '{}'
+    attrs_json       TEXT NOT NULL DEFAULT '{}',
+    supersedes       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -200,6 +201,7 @@ ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_by TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_by TEXT;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS supersedes TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -217,6 +219,14 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key) text_pattern_ops);
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
+CREATE INDEX IF NOT EXISTS idx_obs_supersedes
+    ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
+-- worker tick scans (R-9): see sqlite.py
+CREATE INDEX IF NOT EXISTS idx_obs_subject_recorded ON observations (subject_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
+    ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_created ON entities (namespace, created_at);
 """
 
 # search_entities: a half-open range with the text_pattern_ops operators —
@@ -228,7 +238,7 @@ _SEARCH_SQL = (
 )
 _PREFIX_END = "\U0010ffff"
 
-SCHEMA_VERSION = 5  # keep in step with sqlite.py (v5: merge_log, lease owners, lower(key) index, norm_key recompute)
+SCHEMA_VERSION = 6  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -254,11 +264,38 @@ _OBS_SELECT_ENT = (
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
 )
 
+# tick scans from a high-water mark (R-9): see sqlite.py for the semantics
+_EMBED_BACKLOG_SQL = (
+    _OBS_SELECT
+    + " WHERE o.recorded_at >= %s"
+    " AND NOT EXISTS (SELECT 1 FROM embeddings em WHERE em.ref_id = o.id AND em.model = %s)"
+    + _NOT_TOMBSTONED + "{shard}"
+    " ORDER BY o.recorded_at LIMIT %s"
+)
+
+_DOSSIER_SQL = (
+    "WITH touched AS ("
+    "  SELECT DISTINCT o.subject_id AS eid FROM observations o WHERE o.recorded_at >= %s"
+    "  UNION SELECT id FROM entities WHERE dossier_claimed_until IS NOT NULL)"
+    " SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh"
+    " FROM touched t JOIN entities e ON e.id = t.eid"
+    " JOIN observations o ON o.subject_id = e.id"
+    "   AND NOT EXISTS (SELECT 1 FROM tombstones t2 WHERE t2.observation_id = o.id)"
+    " LEFT JOIN dossiers d ON d.namespace = e.namespace AND d.entity_id = e.id"
+    " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
+    "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < %s)"
+    " GROUP BY e.id, d.observation_count"
+    " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s AND COUNT(DISTINCT o.predicate) >= 2)"
+    "     OR (d.observation_count IS NOT NULL AND COUNT(o.id) >= %s)"
+    " ORDER BY COUNT(DISTINCT o.predicate) * COUNT(DISTINCT o.source) DESC, COUNT(o.id) DESC,"
+    "          e.created_at LIMIT %s"
+)
+
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
-    " recorded_at, source, confidence, provenance_json, attrs_json)"
-    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    " recorded_at, source, confidence, provenance_json, attrs_json, supersedes)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 _ON_EVENT_CONFLICT = (
@@ -301,6 +338,7 @@ class PostgresStore(GraphStore):
 
         self._psycopg = psycopg
         self._local = threading.local()   # the connection borrowed by _tx()
+        self._ticks: dict[str, int] = {}   # tick-scan calls per mark (R-9)
         size = pool_size or int(os.environ.get("LOOM_DB_POOL", "") or self._DEFAULT_POOL)
 
         def pool(url: str) -> ConnectionPool:
@@ -564,6 +602,16 @@ class PostgresStore(GraphStore):
                 (namespace, list(ids)))
         return [common.row_to_observation(r) for r in rows]
 
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT DISTINCT o.supersedes AS sid FROM observations o"
+                " WHERE o.namespace = %s AND o.supersedes = ANY(%s)" + _NOT_TOMBSTONED,
+                (namespace, list(ids)))
+        return {r["sid"] for r in rows}
+
     _PREFIX_CAP = 20
 
     def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
@@ -607,6 +655,13 @@ class PostgresStore(GraphStore):
             # v5: numeric keys keep their punctuation in norm_key; recompute
             # the rows that can differ, in Python, where the rule lives.
             cur.execute("SELECT id, key, norm_key FROM entities WHERE key ~ '[.:/-]'")
+            changed = [(nk, r["id"]) for r in cur.fetchall()
+                       if (nk := common.norm_key(r["key"])) != r["norm_key"]]
+            if changed:
+                cur.executemany("UPDATE entities SET norm_key = %s WHERE id = %s", changed)
+        if current < 6:
+            # v6: colon-structured hex keys keep their separators (see common.norm_key)
+            cur.execute("SELECT id, key, norm_key FROM entities WHERE position(':' in key) > 0")
             changed = [(nk, r["id"]) for r in cur.fetchall()
                        if (nk := common.norm_key(r["key"])) != r["norm_key"]]
             if changed:
@@ -688,6 +743,7 @@ class PostgresStore(GraphStore):
             self._x("DELETE FROM dossiers WHERE namespace = %s AND entity_id IN (%s, %s)",
                     (namespace, src.id, dst.id))
             self._x("DELETE FROM entities WHERE id = %s", (src.id,))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
@@ -764,6 +820,7 @@ class PostgresStore(GraphStore):
                     (namespace, src.id, dst.id if dst else src.id))
             self._x("DELETE FROM merge_log_observations WHERE merge_id = %s", (m["id"],))
             self._x("DELETE FROM merge_log WHERE id = %s", (m["id"],))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
@@ -1019,6 +1076,27 @@ class PostgresStore(GraphStore):
                         out.setdefault(eid, []).append(r)
         return out
 
+    def _many_query(self, namespace: str, ids: list[str], limit: int,
+                    observed_before: datetime | None) -> tuple[str, tuple]:
+        """The `hits` body of the batched gather and its parameters: a
+        LATERAL per side, so every entity contributes its newest `limit`
+        rows of each side from its own index range instead of every edge
+        (R-9; see sqlite.py). The as_of bound rides each range (D-046)."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        sql = (
+            "SELECT s.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+            + _OBS_SELECT_ENT.format(ent="o.subject_id")
+            + " WHERE o.namespace = %s AND o.subject_id = ids.eid" + _NOT_TOMBSTONED + before_sql
+            + " ORDER BY o.observed_at DESC LIMIT %s) s"
+            " UNION ALL "
+            "SELECT t.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+            + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
+            + " WHERE o.namespace = %s AND o.object_entity_id = ids.eid AND o.subject_id <> ids.eid"
+            + _NOT_TOMBSTONED + before_sql
+            + " ORDER BY o.observed_at DESC LIMIT %s) t"
+        )
+        return sql, (list(ids), namespace, *before_args, limit, list(ids), namespace, *before_args, limit)
+
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
@@ -1026,23 +1104,17 @@ class PostgresStore(GraphStore):
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs:
             return result
-        before_sql, before_args = _observed_before("%s", observed_before)
         with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
             for start in range(0, len(ids), self._MANY_CHUNK):
                 chunk = ids[start:start + self._MANY_CHUNK]
+                hits, params = self._many_query(namespace, chunk, limit, observed_before)
                 rows = self._q(
-                    "WITH hits AS ("
-                    + _OBS_SELECT_ENT.format(ent="o.subject_id") +
-                    " WHERE o.namespace = %s AND o.subject_id = ANY(%s)" + _NOT_TOMBSTONED + before_sql +
-                    " UNION ALL "
-                    + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
-                    " WHERE o.namespace = %s AND o.object_entity_id = ANY(%s)"
-                    "   AND o.subject_id <> o.object_entity_id" + _NOT_TOMBSTONED + before_sql +
-                    "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
+                    "WITH hits AS (" + hits + "),"
+                    " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
                     " SELECT * FROM ranked WHERE rn <= %s ORDER BY ent, observed_at DESC",
-                    (namespace, chunk, *before_args, namespace, chunk, *before_args, limit),
+                    (*params, limit),
                 )
                 for row in rows:
                     obs = common.row_to_observation(row)
@@ -1140,16 +1212,45 @@ class PostgresStore(GraphStore):
         shard_sql, shard_args = "", ()
         if shard is not None and shard[1] > 1:
             shard_sql, shard_args = f" AND {self._SHARD_EXPR} %% %s = %s", (shard[1], shard[0])
+        key = f"hwm:embed:{model}:{shard[0]}/{shard[1]}" if shard_sql else f"hwm:embed:{model}:0/1"
         with self._tx():
+            start = self._hwm_start(key)
             rows = self._q(
-                _OBS_SELECT
-                + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
-                "   WHERE em.ref_id = o.id AND em.model = %s)"
-                + _NOT_TOMBSTONED + shard_sql
-                + " ORDER BY o.recorded_at LIMIT %s",
-                (model, *shard_args, limit),
+                _EMBED_BACKLOG_SQL.format(shard=shard_sql),
+                (start, model, *shard_args, limit),
             )
+            self._hwm_advance(key, "observations", rows[0]["recorded_at"] if rows else None)
             return [common.row_to_observation(r) for r in rows]
+
+    # tick-scan high-water marks (R-9): the semantics are documented in
+    # sqlite.py; the marks live in loom_meta on the primary
+    _HWM_SLACK = 1000
+    _RESCAN_EVERY = 16
+
+    def _hwm_start(self, key: str) -> str:
+        n = self._ticks.get(key, 0)
+        self._ticks[key] = n + 1
+        if n % self._RESCAN_EVERY == 0:
+            return ""
+        rows = self._q("SELECT value FROM loom_meta WHERE key = %s", (key,))
+        return rows[0]["value"] if rows else ""
+
+    def _hwm_advance(self, key: str, table: str, top: str | None) -> None:
+        if top is None:
+            top = self._q(f"SELECT MAX(recorded_at) AS m FROM {table}")[0]["m"]
+            if top is None:
+                return
+        rows = self._q(
+            f"SELECT recorded_at FROM {table} WHERE recorded_at <= %s"
+            " ORDER BY recorded_at DESC LIMIT 1 OFFSET %s", (top, self._HWM_SLACK))
+        if not rows:
+            return
+        self._x("INSERT INTO loom_meta (key, value) VALUES (%s, %s)"
+                " ON CONFLICT (key) DO UPDATE SET value = GREATEST(loom_meta.value, EXCLUDED.value)",
+                (key, rows[0]["recorded_at"]))
+
+    def _hwm_reset(self, key: str) -> None:
+        self._x("DELETE FROM loom_meta WHERE key = %s", (key,))
 
     def pending_artifacts(
         self, limit: int = 4, now: datetime | None = None,
@@ -1221,7 +1322,7 @@ class PostgresStore(GraphStore):
             ) > 0
 
     _NEEDS_CHUNKS = (
-        "a.text IS NOT NULL"
+        "a.recorded_at >= %s AND a.text IS NOT NULL"   # from the high-water mark (R-9)
         # blank docs would re-queue forever (H-D4); TRIM alone strips only
         # spaces, so name the whitespace set explicitly
         " AND BTRIM(a.text, E' \\t\\n\\r') <> ''"
@@ -1232,11 +1333,13 @@ class PostgresStore(GraphStore):
     def artifacts_needing_chunks(
         self, model: str, limit: int = 4, lease: tuple[str, float] | None = None
     ) -> list[Artifact]:
+        key = f"hwm:chunks:{model}"
         with self._tx():
+            start = self._hwm_start(key)
             if lease is None:
                 rows = self._q(
                     f"SELECT * FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
-                    " ORDER BY a.recorded_at LIMIT %s", (model, limit))
+                    " ORDER BY a.recorded_at LIMIT %s", (start, model, limit))
             else:
                 moment = common.now()
                 until = common.iso(moment + timedelta(seconds=lease[1]))
@@ -1247,7 +1350,8 @@ class PostgresStore(GraphStore):
                     "   ORDER BY a.recorded_at LIMIT %s FOR UPDATE SKIP LOCKED)"
                     " UPDATE artifacts a SET chunk_claimed_until = %s, chunk_claimed_by = %s"
                     " FROM picked WHERE a.id = picked.id RETURNING a.*",
-                    (model, common.iso(moment), limit, until, lease[0]))
+                    (start, model, common.iso(moment), limit, until, lease[0]))
+            self._hwm_advance(key, "artifacts", min((r["recorded_at"] for r in rows), default=None))
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
@@ -1349,31 +1453,21 @@ class PostgresStore(GraphStore):
                     (entity.id,))
             return True
 
+    _DOSSIER_HWM = "hwm:dossier"
+
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
         lease: tuple[str, float] | None = None,
     ) -> list[tuple[str, EntityRef, int]]:
         moment = common.now()
         with self._tx():
-            rows = self._q(
-                # richness over volume (D-044): several predicates from several
-                # senders outrank a one-predicate firehose, which gets no brief
-                "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh"
-                " FROM entities e"
-                " JOIN observations o ON o.subject_id = e.id"
-                "   AND NOT EXISTS (SELECT 1 FROM tombstones t"
-                "                   WHERE t.observation_id = o.id)"
-                " LEFT JOIN dossiers d ON d.namespace = e.namespace"
-                "   AND d.entity_id = e.id"
-                " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
-                "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < %s)"
-                " GROUP BY e.id, d.observation_count"
-                " HAVING (d.observation_count IS NULL AND COUNT(o.id) >= %s AND COUNT(DISTINCT o.predicate) >= 2)"
-                "     OR (d.observation_count IS NOT NULL AND COUNT(o.id) >= %s)"
-                " ORDER BY COUNT(DISTINCT o.predicate) * COUNT(DISTINCT o.source) DESC, COUNT(o.id) DESC,"
-                "          e.created_at LIMIT %s",
-                (common.iso(moment), min_total, min_new, limit),
-            )
+            # incremental over the entities touched since the mark (see
+            # sqlite.py); the mark advances only on a tick that did not
+            # fill its limit
+            start = self._hwm_start(self._DOSSIER_HWM)
+            rows = self._q(_DOSSIER_SQL, (start, common.iso(moment), min_total, min_new, limit))
+            if len(rows) < limit:
+                self._hwm_advance(self._DOSSIER_HWM, "observations", None)
             out = []
             for r in rows:
                 if lease is not None:
@@ -1406,6 +1500,7 @@ class PostgresStore(GraphStore):
                 "DELETE FROM dossiers WHERE namespace = %s AND observation_ids LIKE %s",
                 (namespace, f'%"{observation_id}"%'),
             )
+            self._hwm_reset(self._DOSSIER_HWM)   # a dropped brief is rebuilt next tick
             return True
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:
@@ -1473,10 +1568,13 @@ class PostgresStore(GraphStore):
             out.setdefault(r["namespace"], {})[r["type"]] = int(r["n"])
         return out
 
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = %s" if namespace else "")
-        for row in self._pages(sql, (namespace,) if namespace else (),
-                               ("created_at", "id")):
+    def iter_entities(
+        self, namespace: str | None = None, since: datetime | None = None
+    ) -> Iterator[Entity]:
+        sql = ("SELECT * FROM entities WHERE 1=1" + (" AND namespace = %s" if namespace else "")
+               + (" AND created_at >= %s" if since else ""))
+        params = (*((namespace,) if namespace else ()), *((common.iso(since),) if since else ()))
+        for row in self._pages(sql, params, ("created_at", "id")):
             yield common.row_to_entity(row)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
@@ -1585,6 +1683,8 @@ class PostgresStore(GraphStore):
                           "aliases", "artifacts", "entities", "schemas",
                           "resolution_declines", *self._vec_tables):
                 self._x(f"DELETE FROM {table}")
+            self._x("DELETE FROM loom_meta WHERE key LIKE 'hwm:%%'")
+            self._ticks.clear()
 
     def close(self) -> None:
         self._pool.close()
@@ -1733,6 +1833,7 @@ class PostgresStore(GraphStore):
             source=claim.source,
             confidence=claim.confidence,
             provenance=self._resolve_provenance(claim),
+            supersedes=claim.supersedes,
             attrs=claim.attrs,
         )
         inserted = self._x(
@@ -1753,7 +1854,7 @@ class PostgresStore(GraphStore):
             common.iso(obs.valid_from), common.iso(obs.valid_to),
             common.iso(obs.recorded_at), obs.source, obs.confidence,
             json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
-            json.dumps(obs.attrs),
+            json.dumps(obs.attrs), obs.supersedes,
         )
 
     def _insert_artifact(self, artifact: Artifact, suffix: str = "") -> bool:

@@ -8,7 +8,10 @@ whose object is an entity, so the graph is queryable from either end.
 
 Every public method runs inside `_tx()`: lock, commit on success, ROLLBACK on
 any exception — a failing statement can never leave half a batch behind for
-the next unrelated commit to persist (hardening H-B1).
+the next unrelated commit to persist (hardening H-B1). Writes serialize on
+one connection; the read-only methods borrow from a small pool of read
+connections (`_tx(read=True)`), which WAL lets run beside the writer and
+each other instead of queueing on its lock (R-9).
 
 Ingest is idempotent: an envelope carrying an event_id is deduplicated on
 (namespace, event_id) — a cheap pre-check for replays, backed by
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import sqlite3
 import threading
 import uuid
@@ -87,7 +91,8 @@ CREATE TABLE IF NOT EXISTS observations (
     source           TEXT NOT NULL,
     confidence       REAL NOT NULL,
     provenance_json  TEXT,
-    attrs_json       TEXT NOT NULL DEFAULT '{}'
+    attrs_json       TEXT NOT NULL DEFAULT '{}',
+    supersedes       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -205,6 +210,15 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key));
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
+CREATE INDEX IF NOT EXISTS idx_obs_supersedes
+    ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
+-- worker tick scans (R-9): recorded_at ranges from a high-water mark, and a
+-- per-subject lookup that does not need the namespace
+CREATE INDEX IF NOT EXISTS idx_obs_subject_recorded ON observations (subject_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
+    ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_created ON entities (namespace, created_at);
 """
 
 # search_entities: a half-open range on the indexed expression (the LIKE
@@ -220,8 +234,10 @@ _PREFIX_END = "\U0010ffff"
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
 # v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
-# lease owners, lower(key) index, numeric norm_key rule (recompute)
-SCHEMA_VERSION = 5
+# lease owners, lower(key) index, numeric norm_key rule (recompute);
+# v6: observations.supersedes (D-050); tick-scan indexes and high-water marks
+# (R-9); hex/colon norm_key rule (recompute keys carrying ':')
+SCHEMA_VERSION = 6
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -247,11 +263,43 @@ _OBS_SELECT_ENT = (
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
 )
 
+# The enrichment backlog (D-018/D-031), scanned from a high-water mark (R-9)
+_EMBED_BACKLOG_SQL = (
+    _OBS_SELECT
+    + " WHERE o.recorded_at >= ?"
+    " AND NOT EXISTS (SELECT 1 FROM embeddings em WHERE em.ref_id = o.id AND em.model = ?)"
+    + _NOT_TOMBSTONED + "{shard}"
+    " ORDER BY o.recorded_at LIMIT ?"
+)
+
+# Dossier candidacy (H-E2, D-044), incremental (R-9): only entities with a
+# row recorded since the mark — or holding a dossier lease, expired or not,
+# so a failed build is re-offered once its lease lapses — are evaluated.
+# Richness over volume: several predicates from several senders outrank a
+# one-predicate firehose, which gets no brief.
+_DOSSIER_SQL = (
+    "WITH touched AS ("
+    "  SELECT DISTINCT o.subject_id AS eid FROM observations o WHERE o.recorded_at >= ?"
+    "  UNION SELECT id FROM entities WHERE dossier_claimed_until IS NOT NULL)"
+    " SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
+    "        d.observation_count AS have,"
+    "        COUNT(DISTINCT o.predicate) AS preds, COUNT(DISTINCT o.source) AS srcs"
+    " FROM touched t JOIN entities e ON e.id = t.eid"
+    " JOIN observations o ON o.subject_id = e.id"
+    "   AND NOT EXISTS (SELECT 1 FROM tombstones t2 WHERE t2.observation_id = o.id)"
+    " LEFT JOIN dossiers d ON d.namespace = e.namespace AND d.entity_id = e.id"
+    " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
+    "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
+    " GROUP BY e.id"
+    " HAVING (have IS NULL AND fresh >= ? AND preds >= 2) OR (have IS NOT NULL AND fresh >= ?)"
+    " ORDER BY preds * srcs DESC, fresh DESC, e.created_at LIMIT ?"
+)
+
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
-    " recorded_at, source, confidence, provenance_json, attrs_json)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " recorded_at, source, confidence, provenance_json, attrs_json, supersedes)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _ON_EVENT_CONFLICT = (
@@ -260,19 +308,25 @@ _ON_EVENT_CONFLICT = (
 
 
 class SqliteStore(GraphStore):
-    def __init__(self, path: str | Path):
+    _READERS = 4   # read connections per store (LOOM_DB_READERS in the factory)
+
+    def __init__(self, path: str | Path, readers: int | None = None):
         # Re-entrant: a public method that calls another public method
         # (unmerge -> dossier drop, lifecycle helpers, ...) must not deadlock
         # on its own lock; `_tx` commits only at the outermost level.
         self._lock = threading.RLock()
         self._depth = 0
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._owner: int | None = None      # the thread inside the write transaction
+        self._local = threading.local()     # the read connection a thread borrowed
+        self._ticks: dict[str, int] = {}   # tick-scan calls per mark (R-9)
+        self._path = str(path)
+        self._writer = sqlite3.connect(self._path, check_same_thread=False)
+        self._writer.row_factory = sqlite3.Row
+        self._writer.execute("PRAGMA journal_mode=WAL")
+        self._writer.execute("PRAGMA synchronous=NORMAL")
         # 15 s: several enrichment workers writing 512-vector batches can
         # hold the write lock past 5 s (D-039)
-        self._conn.execute("PRAGMA busy_timeout=15000")
+        self._writer.execute("PRAGMA busy_timeout=15000")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS loom_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         current = self._meta_version()
@@ -299,12 +353,45 @@ class SqliteStore(GraphStore):
                 "sqlite: %d row(s) violate foreign keys (pre-existing data);"
                 " reads skip them, a lifecycle export/import cleans them",
                 len(dangling))
+        # Readers (R-9): WAL serves any number of readers beside one writer,
+        # but every read used to queue on the writer's lock. A memory
+        # database is private to its connection, so it gets none.
+        if readers is None:
+            readers = self._READERS
+        if self._path == ":memory:":
+            readers = 0
+        self._readers = [self._open_reader() for _ in range(max(0, readers))]
+        self._reader_pool: queue.LifoQueue | None = None
+        if self._readers:
+            self._reader_pool = queue.LifoQueue()
+            for conn in self._readers:
+                self._reader_pool.put(conn)
+
+    def _open_reader(self) -> sqlite3.Connection:
+        # autocommit mode: `_tx(read=True)` brackets its statements in an
+        # explicit BEGIN/COMMIT so a multi-statement read sees one snapshot
+        conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=15000")
+        if self._vec:
+            self._load_vec_extension(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """The connection for the current statement: the writer while this
+        thread is inside a write transaction (or outside any), otherwise
+        the read connection it borrowed in `_tx(read=True)`."""
+        if self._owner == threading.get_ident():
+            return self._writer
+        reader = getattr(self._local, "reader", None)
+        return reader if reader is not None else self._writer
 
     def _migrate(self) -> None:
         """Bring pre-existing database files up to the current shape:
         idempotent column adds first, then one-shot versioned steps."""
         wanted = {
-            "observations": [("event_id", "TEXT")],
+            "observations": [("event_id", "TEXT"), ("supersedes", "TEXT")],
             "artifacts": [("event_id", "TEXT"),
                           ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
                           ("next_attempt_at", "TEXT"),
@@ -347,6 +434,14 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
+        if current < 6:
+            # v6: colon-structured hex keys (IPv6, MAC) keep their separators
+            # too; only keys carrying ':' can differ.
+            rows = self._conn.execute(
+                "SELECT id, key, norm_key FROM entities WHERE instr(key, ':') > 0").fetchall()
+            self._conn.executemany(
+                "UPDATE entities SET norm_key = ? WHERE id = ?",
+                [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
         if current < SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
             self._conn.execute(
                 "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
@@ -359,17 +454,21 @@ class SqliteStore(GraphStore):
         return int(row["value"]) if row else 0
 
     def schema_version(self) -> int:
-        with self._tx():
+        with self._tx(read=True):
             return self._meta_version()
 
     # ------------------------------------------------- vector index (D-025)
 
+    @staticmethod
+    def _load_vec_extension(conn: sqlite3.Connection) -> None:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
     def _load_vec(self) -> bool:
         try:
-            import sqlite_vec
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
+            self._load_vec_extension(self._writer)
         except Exception as exc:  # noqa: BLE001 — any failure means "no ANN"
             logging.getLogger("loom.store").info(
                 "sqlite-vec unavailable (%s): vector search uses exact scans", exc)
@@ -443,7 +542,7 @@ class SqliteStore(GraphStore):
     def nearest_observations(
         self, namespace: str, model: str, query: list[float], limit: int = 20
     ) -> list[tuple[str, float]]:
-        with self._tx():
+        with self._tx(read=True):
             hits = self._vec_query("vobs", model, namespace, query, limit * 2) if self._vec else None
             if hits is not None:
                 scored = {rid: s for rid, _, s in hits}
@@ -466,7 +565,7 @@ class SqliteStore(GraphStore):
         artifact_ids: list[str] | None = None,
     ) -> list[tuple[dict, float]]:
         wanted = set(artifact_ids) if artifact_ids is not None else None
-        with self._tx():
+        with self._tx(read=True):
             scored: dict[str, float] = {}
             hits = (self._vec_query("vchk", model, namespace, query, max(limit * 8, 128))
                     if self._vec else None)
@@ -515,7 +614,7 @@ class SqliteStore(GraphStore):
                 # exactly this model's tables (one per dimension seen) — a
                 # bare `{kind}_` prefix matched every model, so a model whose
                 # index did not exist yet was skipped as "already indexed"
-                vec_tables = common.vec_tables_for(kind, model, self._vec_tables)
+                vec_tables = common.vec_tables_for(kind, model, list(self._vec_tables))
                 total = self._conn.execute(
                     f"SELECT COUNT(*) AS n FROM {table} WHERE model = ?", (model,)).fetchone()["n"]
                 indexed = sum(self._conn.execute(f"SELECT COUNT(*) AS n FROM {n}").fetchone()["n"]
@@ -544,7 +643,7 @@ class SqliteStore(GraphStore):
         if not ids:
             return []
         out: list[Observation] = []
-        with self._tx():
+        with self._tx(read=True):
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 rows = self._conn.execute(
@@ -553,13 +652,27 @@ class SqliteStore(GraphStore):
                 out.extend(common.row_to_observation(r) for r in rows)
         return out
 
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        out: set[str] = set()
+        with self._tx(read=True):
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = self._conn.execute(
+                    "SELECT DISTINCT o.supersedes AS sid FROM observations o"
+                    f" WHERE o.namespace = ? AND o.supersedes IN ({','.join('?' * len(chunk))})"
+                    + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
+                out.update(r["sid"] for r in rows)
+        return out
+
     _PREFIX_CAP = 20
 
     def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
         if not prefix:
             return []
         lo, hi = common.prefix_bounds(prefix)
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 _OBS_SELECT + " WHERE o.namespace = ? AND o.id >= ?"
                 + (" AND o.id < ?" if hi is not None else "") + _NOT_TOMBSTONED
@@ -568,24 +681,53 @@ class SqliteStore(GraphStore):
         return [common.row_to_observation(r) for r in rows]
 
     @contextmanager
-    def _tx(self):
-        """One locked transaction: commit on success, rollback on error so a
-        failure never leaks partial writes into a later commit (H-B1).
-        Nested entries (a public method calling another) join the outer
-        transaction: only the outermost commits or rolls back."""
+    def _tx(self, read: bool = False):
+        """One transaction. The default takes the process lock and the
+        writer: commit on success, rollback on error so a failure never
+        leaks partial writes into a later commit (H-B1); nested entries (a
+        public method calling another) join the outer transaction, and only
+        the outermost commits or rolls back. `read=True` borrows a pooled
+        read connection instead, so reads run beside the writer and each
+        other (WAL) — unless this thread is inside a write transaction (the
+        read joins it and sees its uncommitted rows) or already holds a
+        reader (it joins that snapshot)."""
+        me = threading.get_ident()
+        if read and self._reader_pool is not None and self._owner != me:
+            if getattr(self._local, "reader", None) is not None:
+                yield
+                return
+            conn = self._reader_pool.get()
+            self._local.reader = conn
+            try:
+                conn.execute("BEGIN")
+                try:
+                    yield
+                except BaseException:
+                    conn.rollback()
+                    raise
+                else:
+                    conn.commit()
+            finally:
+                self._local.reader = None
+                self._reader_pool.put(conn)
+            return
         with self._lock:
+            if self._depth == 0:
+                self._owner = me
             self._depth += 1
             try:
                 yield
             except BaseException:
                 if self._depth == 1:
-                    self._conn.rollback()
+                    self._writer.rollback()
                 raise
             else:
                 if self._depth == 1:
-                    self._conn.commit()
+                    self._writer.commit()
             finally:
                 self._depth -= 1
+                if self._depth == 0:
+                    self._owner = None
 
     # ------------------------------------------------------------ public API
 
@@ -594,7 +736,7 @@ class SqliteStore(GraphStore):
             return self._upsert_entity(namespace, ref)
 
     def get_entity(self, namespace: str, ref: EntityRef) -> Entity | None:
-        with self._tx():
+        with self._tx(read=True):
             return self._resolve_entity(namespace, ref)
 
     def add_alias(self, namespace: str, alias: EntityRef, into: EntityRef) -> None:
@@ -637,6 +779,7 @@ class SqliteStore(GraphStore):
                 (namespace, src.id, dst.id),
             )
             self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
@@ -719,10 +862,11 @@ class SqliteStore(GraphStore):
             # 5. the log rows: the merge no longer happened
             self._conn.execute("DELETE FROM merge_log_observations WHERE merge_id = ?", (m["id"],))
             self._conn.execute("DELETE FROM merge_log WHERE id = ?", (m["id"],))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
-        with self._tx():
+        with self._tx(read=True):
             parents = self._conn.execute(
                 "SELECT * FROM merge_log" + (" WHERE namespace = ?" if namespace else "")
                 + " ORDER BY recorded_at, id", (namespace,) if namespace else ()).fetchall()
@@ -750,7 +894,7 @@ class SqliteStore(GraphStore):
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT namespace, norm_key FROM entities WHERE norm_key <> ''"
                 + (" AND namespace = ?" if namespace else "")
@@ -787,7 +931,7 @@ class SqliteStore(GraphStore):
             return merged
 
     def get_schema(self, namespace: str) -> SchemaRegistration | None:
-        with self._tx():
+        with self._tx(read=True):
             row = self._conn.execute(
                 "SELECT registration_json FROM schemas WHERE namespace = ?",
                 (namespace,),
@@ -795,7 +939,7 @@ class SqliteStore(GraphStore):
         return common.row_to_schema(row) if row else None
 
     def iter_schemas(self, namespace: str | None = None) -> Iterator[SchemaRegistration]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT registration_json FROM schemas"
                 + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace",
@@ -806,7 +950,7 @@ class SqliteStore(GraphStore):
     def merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT namespace, key FROM entities"
                 + (" WHERE namespace = ?" if namespace else "")
@@ -833,7 +977,7 @@ class SqliteStore(GraphStore):
         if types is not None:
             type_sql = f" AND type IN ({','.join('?' * len(types))})" if types else " AND 0"
             type_args = tuple(types)
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 _SEARCH_SQL + type_sql + " ORDER BY (lower(key) != ?), type, key LIMIT ?",
                 (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
@@ -843,7 +987,7 @@ class SqliteStore(GraphStore):
     def count_observations(
         self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
     ) -> int:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
@@ -873,7 +1017,7 @@ class SqliteStore(GraphStore):
             tm = ",".join("?" * len(allowed_types))
             type_sql = f" AND s.type IN ({tm}) AND (ob.id IS NULL OR ob.type IN ({tm}))"
             type_args = tuple(allowed_types) * 2
-        with self._tx():
+        with self._tx(read=True):
             # the per-artifact cut happens in SQL: a document cited by
             # thousands of claims returns per_artifact rows, not all of them
             rows = self._conn.execute(
@@ -901,7 +1045,7 @@ class SqliteStore(GraphStore):
         if not allowed_types:
             return False
         marks = ",".join("?" * len(allowed_types))
-        with self._tx():
+        with self._tx(read=True):
             row = self._conn.execute(
                 "SELECT 1 FROM observations o"
                 " JOIN entities s ON s.id = o.subject_id"
@@ -927,7 +1071,7 @@ class SqliteStore(GraphStore):
         self, namespace: str, ref: EntityRef, limit: int = 100,
         observed_before: datetime | None = None,
     ) -> list[Observation]:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return []
@@ -981,6 +1125,31 @@ class SqliteStore(GraphStore):
                         out.setdefault(eid, []).append(r)
         return out
 
+    # entities per gather statement: two LIMITed subqueries each, kept
+    # under SQLITE_MAX_COMPOUND_SELECT (500 terms)
+    _GATHER_CHUNK = 200
+
+    def _many_query(self, namespace: str, ids: list[str], limit: int,
+                    observed_before: datetime | None) -> tuple[str, tuple]:
+        """The `hits` body of the batched gather and its parameters: per
+        entity, the newest `limit` rows of each side as its own index range
+        with its own LIMIT (idx_obs_subject / idx_obs_object, D-035), so a
+        hub with 100k edges contributes 2·limit rows to the window that
+        trims per entity — not every edge, per ask (R-9). One generated
+        UNION ALL per chunk; the as_of bound rides each range (D-046)."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        subj = ("SELECT * FROM (" + _OBS_SELECT_ENT.format(ent="o.subject_id")
+                + " WHERE o.namespace = ? AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql
+                + " ORDER BY o.observed_at DESC LIMIT ?)")
+        obj = ("SELECT * FROM (" + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
+               + " WHERE o.namespace = ? AND o.object_entity_id = ? AND o.subject_id != ?"
+               + _NOT_TOMBSTONED + before_sql
+               + " ORDER BY o.observed_at DESC LIMIT ?)")
+        params: list = []
+        for eid in ids:
+            params += (namespace, eid, *before_args, limit, namespace, eid, eid, *before_args, limit)
+        return " UNION ALL ".join([subj, obj] * len(ids)), tuple(params)
+
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
@@ -988,24 +1157,17 @@ class SqliteStore(GraphStore):
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs:
             return result
-        before_sql, before_args = _observed_before("?", observed_before)
-        with self._tx():
+        with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
-            for start in range(0, len(ids), self._MANY_CHUNK):
-                chunk = ids[start:start + self._MANY_CHUNK]
-                marks = ",".join("?" for _ in chunk)
+            for start in range(0, len(ids), self._GATHER_CHUNK):
+                chunk = ids[start:start + self._GATHER_CHUNK]
+                hits, params = self._many_query(namespace, chunk, limit, observed_before)
                 rows = self._conn.execute(
-                    "WITH hits AS ("
-                    + _OBS_SELECT_ENT.format(ent="o.subject_id") +
-                    f" WHERE o.namespace = ? AND o.subject_id IN ({marks})" + _NOT_TOMBSTONED + before_sql +
-                    " UNION ALL "
-                    + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
-                    f" WHERE o.namespace = ? AND o.object_entity_id IN ({marks})"
-                    "   AND o.subject_id != o.object_entity_id" + _NOT_TOMBSTONED + before_sql +
-                    "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
+                    "WITH hits AS (" + hits + "),"
+                    " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
                     " SELECT * FROM ranked WHERE rn <= ? ORDER BY ent, observed_at DESC",
-                    (namespace, *chunk, *before_args, namespace, *chunk, *before_args, limit),
+                    (*params, limit),
                 ).fetchall()
                 for row in rows:
                     obs = common.row_to_observation(row)
@@ -1040,16 +1202,18 @@ class SqliteStore(GraphStore):
         return artifact
 
     def artifact_by_event(self, namespace: str, event_id: str) -> Artifact | None:
-        with self._tx():
+        with self._tx(read=True):
             return self._artifact_by_event(namespace, event_id)
 
     def get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
-        with self._tx():
+        with self._tx(read=True):
             return self._get_artifact(namespace, artifact_id)
 
     def ping(self) -> bool:
         try:
             with self._tx():
+                self._conn.execute("SELECT 1").fetchone()
+            with self._tx(read=True):
                 self._conn.execute("SELECT 1").fetchone()
             return True
         except sqlite3.Error:
@@ -1075,7 +1239,7 @@ class SqliteStore(GraphStore):
         self, namespace: str, ref_ids: list[str], model: str
     ) -> dict[str, list[float]]:
         result: dict[str, list[float]] = {}
-        with self._tx():
+        with self._tx(read=True):
             for start in range(0, len(ref_ids), 500):
                 chunk = ref_ids[start:start + 500]
                 rows = self._conn.execute(
@@ -1097,16 +1261,62 @@ class SqliteStore(GraphStore):
         shard_sql, shard_args = "", ()
         if shard is not None and shard[1] > 1:
             shard_sql, shard_args = f" AND {self._SHARD_EXPR} % ? = ?", (shard[1], shard[0])
+        key = f"hwm:embed:{model}:{shard[0]}/{shard[1]}" if shard_sql else f"hwm:embed:{model}:0/1"
         with self._tx():
+            start = self._hwm_start(key)
             rows = self._conn.execute(
-                _OBS_SELECT
-                + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
-                "   WHERE em.ref_id = o.id AND em.model = ?)"
-                + _NOT_TOMBSTONED + shard_sql
-                + " ORDER BY o.recorded_at LIMIT ?",
-                (model, *shard_args, limit),
+                _EMBED_BACKLOG_SQL.format(shard=shard_sql),
+                (start, model, *shard_args, limit),
             ).fetchall()
+            self._hwm_advance(key, "observations", rows[0]["recorded_at"] if rows else None)
             return [common.row_to_observation(r) for r in rows]
+
+    # ---------------------------------------- tick-scan high-water marks (R-9)
+    # A worker tick used to walk the whole table in recorded_at order with a
+    # per-row anti-join, so an idle fleet re-examined every embedded row every
+    # few seconds. The persisted mark (loom_meta, one per model and shard)
+    # bounds the walk to rows recorded since the previous tick. The mark is
+    # kept `_HWM_SLACK` rows below the oldest row a tick still needs — or the
+    # newest row when nothing is pending — so writers with skewed clocks and
+    # a batch that failed after it was fetched are re-examined; it never moves
+    # back (max on write, so two workers on one partition cannot regress it).
+    # Every `_RESCAN_EVERY`-th tick — and a process's first — walks from the
+    # beginning, which is how a backfilled row (an import with an old
+    # recorded_at) is found. `wipe()` forgets the marks.
+    _HWM_SLACK = 1000
+    _RESCAN_EVERY = 16
+
+    def _hwm_start(self, key: str) -> str:
+        """The recorded_at to scan from on this tick ('' = from the start)."""
+        n = self._ticks.get(key, 0)
+        self._ticks[key] = n + 1
+        if n % self._RESCAN_EVERY == 0:
+            return ""
+        row = self._conn.execute("SELECT value FROM loom_meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else ""
+
+    def _hwm_advance(self, key: str, table: str, top: str | None) -> None:
+        """Persist the mark `_HWM_SLACK` rows below `top` (the oldest row
+        this tick still needs; None = everything up to the newest row was
+        examined). Never moves back."""
+        if top is None:
+            top = self._conn.execute(f"SELECT MAX(recorded_at) AS m FROM {table}").fetchone()["m"]
+            if top is None:
+                return
+        row = self._conn.execute(
+            f"SELECT recorded_at FROM {table} WHERE recorded_at <= ?"
+            " ORDER BY recorded_at DESC LIMIT 1 OFFSET ?", (top, self._HWM_SLACK)).fetchone()
+        if row is None:
+            return
+        self._conn.execute(
+            "INSERT INTO loom_meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
+            (key, row["recorded_at"]))
+
+    def _hwm_reset(self, key: str) -> None:
+        """Forget a mark: the next tick scans from the beginning (a dropped
+        dossier must be rebuilt without waiting for the periodic rescan)."""
+        self._conn.execute("DELETE FROM loom_meta WHERE key = ?", (key,))
 
     def pending_artifacts(
         self, limit: int = 4, now: datetime | None = None,
@@ -1178,7 +1388,7 @@ class SqliteStore(GraphStore):
             ).rowcount > 0
 
     _NEEDS_CHUNKS = (
-        "a.text IS NOT NULL"
+        "a.recorded_at >= ? AND a.text IS NOT NULL"   # from the high-water mark (R-9)
         # blank docs would re-queue forever (H-D4); TRIM alone strips only
         # spaces, so name the whitespace set explicitly
         " AND TRIM(a.text, ' ' || char(9) || char(10) || char(13)) <> ''"
@@ -1189,11 +1399,13 @@ class SqliteStore(GraphStore):
     def artifacts_needing_chunks(
         self, model: str, limit: int = 4, lease: tuple[str, float] | None = None
     ) -> list[Artifact]:
+        key = f"hwm:chunks:{model}"
         with self._tx():
+            start = self._hwm_start(key)
             if lease is None:
                 rows = self._conn.execute(
                     f"SELECT * FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
-                    " ORDER BY a.recorded_at LIMIT ?", (model, limit)).fetchall()
+                    " ORDER BY a.recorded_at LIMIT ?", (start, model, limit)).fetchall()
             else:
                 moment = common.now()
                 until = common.iso(moment + timedelta(seconds=lease[1]))
@@ -1202,7 +1414,8 @@ class SqliteStore(GraphStore):
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < ?)"
                     "   ORDER BY a.recorded_at LIMIT ?) RETURNING *",
-                    (until, lease[0], model, common.iso(moment), limit)).fetchall()
+                    (until, lease[0], start, model, common.iso(moment), limit)).fetchall()
+            self._hwm_advance(key, "artifacts", min((r["recorded_at"] for r in rows), default=None))
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
@@ -1233,7 +1446,7 @@ class SqliteStore(GraphStore):
         if not artifact_ids:
             return []
         out = []
-        with self._tx():
+        with self._tx(read=True):
             for start in range(0, len(artifact_ids), 400):
                 chunk = artifact_ids[start:start + 400]
                 rows = self._conn.execute(
@@ -1252,7 +1465,7 @@ class SqliteStore(GraphStore):
     ) -> list[dict]:
         if not seqs:
             return []
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT c.artifact_id, c.seq, c.span_start, c.span_end,"
                 " c.text, c.vector, a.source, a.observed_at"
@@ -1264,7 +1477,7 @@ class SqliteStore(GraphStore):
         return [common.row_to_chunk(r) for r in rows]
 
     def get_dossier(self, namespace: str, ref: EntityRef) -> dict | None:
-        with self._tx():
+        with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)  # aliases too (H-B6)
             if entity is None:
                 return None
@@ -1300,36 +1513,24 @@ class SqliteStore(GraphStore):
                 "UPDATE entities SET dossier_claimed_until = NULL WHERE id = ?", (entity.id,))
             return True
 
+    _DOSSIER_HWM = "hwm:dossier"
+
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
         lease: tuple[str, float] | None = None,
     ) -> list[tuple[str, EntityRef, int]]:
         moment = common.now()
         with self._tx():
-            # Only observations recorded AFTER the last brief count as
-            # "new", so the scan is bounded by fresh rows, not the whole
-            # table (H-E2). Total counts for the few winners come after.
+            # Candidates are evaluated among the entities touched since the
+            # mark (see _DOSSIER_SQL); total counts for the few winners come
+            # after. The mark advances only when the tick did not fill its
+            # limit — a backlog is re-evaluated in full until it drains.
+            start = self._hwm_start(self._DOSSIER_HWM)
             rows = self._conn.execute(
-                # Richness over volume (D-044): the first real run briefed
-                # the load generator's hosts because they had the most rows.
-                # A brief is for an entity with several kinds of fact from
-                # several senders; a one-predicate firehose gets none.
-                "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
-                "       d.observation_count AS have,"
-                "       COUNT(DISTINCT o.predicate) AS preds, COUNT(DISTINCT o.source) AS srcs"
-                " FROM entities e"
-                " JOIN observations o ON o.subject_id = e.id"
-                "   AND NOT EXISTS (SELECT 1 FROM tombstones t"
-                "                   WHERE t.observation_id = o.id)"
-                " LEFT JOIN dossiers d ON d.namespace = e.namespace"
-                "   AND d.entity_id = e.id"
-                " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
-                "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
-                " GROUP BY e.id"
-                " HAVING (have IS NULL AND fresh >= ? AND preds >= 2) OR (have IS NOT NULL AND fresh >= ?)"
-                " ORDER BY preds * srcs DESC, fresh DESC, e.created_at LIMIT ?",
-                (common.iso(moment), min_total, min_new, limit),
+                _DOSSIER_SQL, (start, common.iso(moment), min_total, min_new, limit),
             ).fetchall()
+            if len(rows) < limit:
+                self._hwm_advance(self._DOSSIER_HWM, "observations", None)
             out = []
             for r in rows:
                 ref = EntityRef(type=r["type"], key=r["key"])
@@ -1364,6 +1565,7 @@ class SqliteStore(GraphStore):
                 "DELETE FROM dossiers WHERE namespace = ? AND observation_ids LIKE ?",
                 (namespace, f'%"{observation_id}"%'),
             )
+            self._hwm_reset(self._DOSSIER_HWM)   # a dropped brief is rebuilt next tick
             return True
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:
@@ -1405,7 +1607,7 @@ class SqliteStore(GraphStore):
         if not self._vec:
             return
         self._refresh_vec_tables()
-        for name in self._vec_tables:
+        for name in list(self._vec_tables):
             source = "observations" if name.startswith("vobs_") else "doc_chunks"
             stale = self._conn.execute(
                 f"SELECT ref_id FROM {name} WHERE namespace = ?"
@@ -1420,7 +1622,7 @@ class SqliteStore(GraphStore):
     def _pages(self, sql: str, params: tuple, order_cols: tuple[str, str]):
         last = ("", "")
         while True:
-            with self._tx():
+            with self._tx(read=True):
                 rows = self._conn.execute(
                     sql + f" AND ({order_cols[0]}, {order_cols[1]}) > (?, ?)"
                     f" ORDER BY {order_cols[0]}, {order_cols[1]} LIMIT ?",
@@ -1441,7 +1643,7 @@ class SqliteStore(GraphStore):
             yield common.row_to_observation(row)
 
     def namespace_summary(self) -> dict[str, dict[str, int]]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT namespace, type, COUNT(*) AS n FROM entities"
                 " GROUP BY namespace, type ORDER BY namespace, type").fetchall()
@@ -1450,10 +1652,13 @@ class SqliteStore(GraphStore):
             out.setdefault(r["namespace"], {})[r["type"]] = int(r["n"])
         return out
 
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        sql = "SELECT * FROM entities WHERE 1=1" + (" AND namespace = ?" if namespace else "")
-        for row in self._pages(sql, (namespace,) if namespace else (),
-                               ("created_at", "id")):
+    def iter_entities(
+        self, namespace: str | None = None, since: datetime | None = None
+    ) -> Iterator[Entity]:
+        sql = ("SELECT * FROM entities WHERE 1=1" + (" AND namespace = ?" if namespace else "")
+               + (" AND created_at >= ?" if since else ""))
+        params = (*((namespace,) if namespace else ()), *((common.iso(since),) if since else ()))
+        for row in self._pages(sql, params, ("created_at", "id")):
             yield common.row_to_entity(row)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
@@ -1463,7 +1668,7 @@ class SqliteStore(GraphStore):
             yield common.row_to_artifact(row)
 
     def iter_aliases(self, namespace: str | None = None) -> Iterator[dict]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT a.namespace, a.alias, e.type, e.key"
                 " FROM aliases a JOIN entities e ON e.id = a.entity_id"
@@ -1485,7 +1690,7 @@ class SqliteStore(GraphStore):
                 (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
 
     def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT * FROM resolution_declines"
                 + (" WHERE namespace = ?" if namespace else "") + " ORDER BY namespace, a, b",
@@ -1495,13 +1700,13 @@ class SqliteStore(GraphStore):
                    "reason": r["reason"], "decided_at": r["decided_at"]}
 
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT a, b FROM resolution_declines WHERE namespace = ?", (namespace,)).fetchall()
         return {(r["a"], r["b"]) for r in rows}
 
     def iter_tombstones(self, namespace: str | None = None) -> Iterator[dict]:
-        with self._tx():
+        with self._tx(read=True):
             rows = self._conn.execute(
                 "SELECT * FROM tombstones"
                 + (" WHERE namespace = ?" if namespace else "")
@@ -1562,10 +1767,14 @@ class SqliteStore(GraphStore):
                           "aliases", "artifacts", "entities", "schemas",
                           "resolution_declines", *self._vec_tables):
                 self._conn.execute(f"DELETE FROM {table}")
+            self._conn.execute("DELETE FROM loom_meta WHERE key LIKE 'hwm:%'")
+            self._ticks.clear()
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            self._writer.close()
+            for conn in self._readers:
+                conn.close()
 
     # ------------------------------------------------- internals (no commit)
 
@@ -1710,6 +1919,7 @@ class SqliteStore(GraphStore):
             source=claim.source,
             confidence=claim.confidence,
             provenance=self._resolve_provenance(claim),
+            supersedes=claim.supersedes,
             attrs=claim.attrs,
         )
         cur = self._conn.execute(
@@ -1730,7 +1940,7 @@ class SqliteStore(GraphStore):
             common.iso(obs.valid_from), common.iso(obs.valid_to),
             common.iso(obs.recorded_at), obs.source, obs.confidence,
             json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
-            json.dumps(obs.attrs),
+            json.dumps(obs.attrs), obs.supersedes,
         )
 
     def _insert_artifact(

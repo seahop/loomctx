@@ -224,6 +224,16 @@ class GraphStore(ABC):
         in no particular order."""
 
     @abstractmethod
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        """Of the given observation ids, those that a *visible* (not
+        tombstoned) observation in the namespace names in its `supersedes`
+        (D-050: recorded supersession, never inferred). The read path
+        derives supersession from the rows it gathered; this serves a
+        caller checking specific rows (PROV export, a single-row view).
+        A `supersedes` that names an unknown id is dangling, not an error
+        (claims may arrive out of order), and never appears here."""
+
+    @abstractmethod
     def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
         """Visible observations whose id starts with `prefix` — how a
         12-hex cite token from a pack resolves back to its observation —
@@ -392,7 +402,13 @@ class GraphStore(ABC):
         the matching tombstones are exported alongside via iter_tombstones)."""
 
     @abstractmethod
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]: ...
+    def iter_entities(
+        self, namespace: str | None = None, since: datetime | None = None
+    ) -> Iterator[Entity]:
+        """Every entity, oldest created first. `since` keeps those created
+        at or after that instant, so a periodic scan (the enrichment alias
+        pass) can be incremental instead of re-reading the namespace every
+        tick (R-9); served by the (namespace, created_at) index."""
 
     @abstractmethod
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]: ...

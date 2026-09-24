@@ -150,8 +150,9 @@ class ShardedStore(GraphStore):
     def iter_observations(self, namespace: str | None = None) -> Iterator[Observation]:
         yield from self._iter("iter_observations", namespace)
 
-    def iter_entities(self, namespace: str | None = None) -> Iterator[Entity]:
-        yield from self._iter("iter_entities", namespace)
+    def iter_entities(self, namespace: str | None = None,
+                      since: datetime | None = None) -> Iterator[Entity]:
+        yield from self._iter("iter_entities", namespace, since=since)
 
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
         yield from self._iter("iter_artifacts", namespace)
@@ -171,12 +172,12 @@ class ShardedStore(GraphStore):
     def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
         yield from self._iter("iter_merges", namespace)
 
-    def _iter(self, name: str, namespace: str | None):
+    def _iter(self, name: str, namespace: str | None, **kwargs):
         if namespace is not None:
-            yield from getattr(self.shard_for(namespace), name)(namespace)
+            yield from getattr(self.shard_for(namespace), name)(namespace, **kwargs)
             return
         for s in self._all:
-            yield from getattr(s, name)(None)
+            yield from getattr(s, name)(None, **kwargs)
 
     def ensure_vector_index(self, model: str) -> dict:
         out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
