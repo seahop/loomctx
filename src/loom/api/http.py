@@ -51,6 +51,7 @@ from ..contracts import (
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
+from ..ratelimit import RateLimitMiddleware
 from ..consumer import resolve_provenance
 from ..store.factory import store_from_env
 
@@ -163,7 +164,8 @@ class _ResponseHygiene:
 
 
 app.add_middleware(_RequestSizeCap)
-app.add_middleware(_ResponseHygiene)   # outermost: covers the cap's own 413 too
+app.add_middleware(RateLimitMiddleware)   # per-grant buckets (D-056); rejects before a body is read
+app.add_middleware(_ResponseHygiene)      # outermost: covers the cap's own 413 and the 429 too
 
 
 def _authorize(request: Request, namespace: str, action: str) -> Grant | None:

@@ -236,6 +236,10 @@ export interface ContextPack {
    * entities whose observations exceeded the gather limit: coverage is partial there, so absence cannot be concluded (D-038)
    */
   truncated?: ScopeTruncation[];
+  /**
+   * what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, except that a pack too small to hold one handle beside an item still ships its first handle (D-051)
+   */
+  charged_tokens?: number;
 }
 /**
  * Every item is cited (hard constraint 3): facts and conflicts cite
