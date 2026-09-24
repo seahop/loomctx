@@ -559,6 +559,7 @@ def evaluate(db: str | None, task_names: list[str] | None, model: str | None = N
 def write_json(path: str, payload: Any) -> None:
     """Replace `path` atomically: a reader (or a crash) never sees half a file."""
     tmp = f"{path}.tmp"
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(tmp, "w") as fh:
         json.dump(payload, fh, indent=2, default=str)
     os.replace(tmp, path)

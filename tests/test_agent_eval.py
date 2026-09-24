@@ -282,7 +282,7 @@ def test_results_are_handed_over_as_each_task_finishes(seeded_db, tmp_path):
                   "valid_at": "2026-08-20T00:00:00Z"})], cite,
         [("ask", {"subject": "host:web-01", "question": "os?", "namespace": "netsec"})], "no idea",
     ])
-    out = tmp_path / "t.json"
+    out = tmp_path / "not-yet" / "t.json"          # the directory is created, not a crash mid-run
     got = []
 
     def keep(r):

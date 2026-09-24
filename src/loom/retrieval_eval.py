@@ -590,8 +590,9 @@ class Context:
 
 
 def est_prompt_tokens(text: str) -> int:
-    """The same chars/4 estimate the pack builder budgets with, over the
-    whole rendered prompt. The provider's own count sits beside it in the
+    """A rough, model-neutral chars/4 count over the whole rendered prompt
+    (budgets are enforced with the pack builder's own len/3 item
+    accounting, D-051). The provider's own count sits beside it in the
     table when the model reports usage."""
     return max(1, len(text) // 4)
 
