@@ -1068,6 +1068,27 @@ class PostgresStore(GraphStore):
                         out.setdefault(eid, []).append(r)
         return out
 
+    def _many_query(self, namespace: str, ids: list[str], limit: int,
+                    observed_before: datetime | None) -> tuple[str, tuple]:
+        """The `hits` body of the batched gather and its parameters: a
+        LATERAL per side, so every entity contributes its newest `limit`
+        rows of each side from its own index range instead of every edge
+        (R-9; see sqlite.py). The as_of bound rides each range (D-046)."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        sql = (
+            "SELECT s.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+            + _OBS_SELECT_ENT.format(ent="o.subject_id")
+            + " WHERE o.namespace = %s AND o.subject_id = ids.eid" + _NOT_TOMBSTONED + before_sql
+            + " ORDER BY o.observed_at DESC LIMIT %s) s"
+            " UNION ALL "
+            "SELECT t.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+            + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
+            + " WHERE o.namespace = %s AND o.object_entity_id = ids.eid AND o.subject_id <> ids.eid"
+            + _NOT_TOMBSTONED + before_sql
+            + " ORDER BY o.observed_at DESC LIMIT %s) t"
+        )
+        return sql, (list(ids), namespace, *before_args, limit, list(ids), namespace, *before_args, limit)
+
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
@@ -1075,23 +1096,17 @@ class PostgresStore(GraphStore):
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs:
             return result
-        before_sql, before_args = _observed_before("%s", observed_before)
         with self._tx(read=True):
             owners = self._resolve_many(namespace, refs)
             ids = list(owners)
             for start in range(0, len(ids), self._MANY_CHUNK):
                 chunk = ids[start:start + self._MANY_CHUNK]
+                hits, params = self._many_query(namespace, chunk, limit, observed_before)
                 rows = self._q(
-                    "WITH hits AS ("
-                    + _OBS_SELECT_ENT.format(ent="o.subject_id") +
-                    " WHERE o.namespace = %s AND o.subject_id = ANY(%s)" + _NOT_TOMBSTONED + before_sql +
-                    " UNION ALL "
-                    + _OBS_SELECT_ENT.format(ent="o.object_entity_id") +
-                    " WHERE o.namespace = %s AND o.object_entity_id = ANY(%s)"
-                    "   AND o.subject_id <> o.object_entity_id" + _NOT_TOMBSTONED + before_sql +
-                    "), ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
+                    "WITH hits AS (" + hits + "),"
+                    " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
                     " SELECT * FROM ranked WHERE rn <= %s ORDER BY ent, observed_at DESC",
-                    (namespace, chunk, *before_args, namespace, chunk, *before_args, limit),
+                    (*params, limit),
                 )
                 for row in rows:
                     obs = common.row_to_observation(row)

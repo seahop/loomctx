@@ -1613,3 +1613,48 @@ def test_dossier_candidates_are_incremental(store, tmp_path):
     assert store.merge_entities("default", other, host)
     assert _meta(store, "hwm:dossier") is None            # both briefs dropped: rebuild next tick
     assert [c[1] for c in store.dossier_candidates(min_new=3, min_total=5)] == [host]
+
+
+# ------------------------------------ per-entity pre-limit in the gather (R-9) #
+
+def _backend(store, namespace):
+    return store.shard_for(namespace) if hasattr(store, "shard_for") else store
+
+
+def test_observations_for_many_prelimits_each_entity(store):
+    """The batched gather takes each entity's newest `limit` rows of each
+    side from an index range with its own LIMIT, so a hub contributes at
+    most 2·limit rows to the per-entity trim instead of every edge — and
+    the answer is exactly what per-ref observations_for gives, with and
+    without an as_of bound."""
+    from datetime import timedelta
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    hub = EntityRef(type="host", key="hub")
+    claims = [ClaimIn(namespace="m", subject=hub, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                      observed_at=t + timedelta(minutes=i), source="s") for i in range(300)]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="ip", key=f"10.0.0.{i}"), predicate="assigned_to", object=hub,
+                       observed_at=t + timedelta(minutes=500 + i), source="s") for i in range(50)]
+    claims += [ClaimIn(namespace="m", subject=EntityRef(type="host", key=f"leaf{i}"), predicate="runs_os", object=f"os{i}",
+                       observed_at=t + timedelta(minutes=i), source="s") for i in range(20)]
+    claims.append(ClaimIn(namespace="m", subject=hub, predicate="peer_of", object=hub, observed_at=t + timedelta(minutes=700), source="s"))
+    store.record_claims(claims)
+    refs = ([hub] + [EntityRef(type="host", key=f"leaf{i}") for i in range(20)]
+            + [EntityRef(type="user", key="u7"), EntityRef(type="ip", key="10.0.0.3"), EntityRef(type="host", key="nope")])
+    for limit, before in ((10, None), (25, t + timedelta(minutes=250)), (400, None), (3, t + timedelta(minutes=520))):
+        many = store.observations_for_many("m", refs, limit=limit, observed_before=before)
+        assert ("host", "nope") not in many and set(many) <= {(r.type, r.key) for r in refs}
+        for r in refs:   # a ref with nothing visible as of `before` is absent, like an unknown one
+            one = store.observations_for("m", r, limit=limit, observed_before=before)
+            assert [o.id for o in many.get((r.type, r.key), [])] == [o.id for o in one], (r, limit, before)
+    assert set(store.observations_for_many("m", refs, limit=10)) == {(r.type, r.key) for r in refs if r.key != "nope"}
+    # cost: what the gather materializes before the per-entity trim
+    b = _backend(store, "m")
+    with b._tx():
+        ids = list(b._resolve_many("m", refs))
+        hits, params = b._many_query("m", ids, 10, None)
+        n = _exec(b, "WITH hits AS (" + hits + ") SELECT COUNT(*) AS n FROM hits", params)[0]["n"]
+    assert len(ids) == 23 and n <= 2 * 10 * len(ids) and n < 351     # the hub alone has 351 rows
+    if isinstance(b, SqliteStore):
+        plan = _exec(b, "EXPLAIN QUERY PLAN WITH hits AS (" + hits + ") SELECT COUNT(*) AS n FROM hits", params)
+        details = " | ".join(r["detail"] for r in plan)
+        assert "idx_obs_subject" in details and "idx_obs_object" in details and "SCAN o" not in details, details
