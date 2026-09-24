@@ -368,6 +368,11 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
         if "openrouter.ai" in p.base_url:
             body["usage"] = {"include": True}   # billed cost per call, cache discounts included
         data = _post_at_zero(p, p.base_url + "/chat/completions", body, headers)
+        if not data.get("choices"):
+            # OpenRouter reports an upstream failure as a 200 with an error
+            # body: the provider's outage, not the model's answer
+            raise LLMError(f"provider returned no choices: {str(data.get('error') or data)[:300]}",
+                           transient=True)
         msg = data["choices"][0]["message"]
         calls = []
         for tc in msg.get("tool_calls") or []:
@@ -461,6 +466,9 @@ class RunResult:
     truth: dict = field(default_factory=dict)
     score: dict = field(default_factory=dict)
     error: str | None = None
+    # the provider failed (after its retries), not the model: excluded from
+    # pass rates and shown as not run, never scored as a fail
+    infra: bool = False
 
 
 async def run_task(session, provider: Provider, task: Task, store,
@@ -509,6 +517,7 @@ async def run_task(session, provider: Provider, task: Task, store,
             result.error = f"no final answer within {MAX_STEPS} steps"
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
+        result.infra = isinstance(exc, LLMError) and exc.transient
     if result.answer == "\x00retry":
         result.answer = ""
         result.error = result.error or "empty completion twice"
@@ -551,7 +560,15 @@ def evaluate(db: str | None, task_names: list[str] | None, model: str | None = N
         async def run_all(session, instructions):
             out = []
             for t in tasks:
-                out.append(await run_task(session, provider, t, store, caller, instructions))
+                result = await run_task(session, provider, t, store, caller, instructions)
+                if result.infra:
+                    # one more try after a provider outage; what the failed
+                    # attempt cost is still counted
+                    spent = result.usage
+                    result = await run_task(session, provider, t, store, caller, instructions)
+                    for k in ("in", "out", "cost"):
+                        result.usage[k] = result.usage.get(k, 0) + spent.get(k, 0)
+                out.append(result)
                 if on_result:
                     on_result(out[-1])
             return out
@@ -593,10 +610,12 @@ def scorecard(runs: dict[str, list[RunResult]], repeat: int = 1) -> list[dict]:
         for r in results:
             by.setdefault(r.task, []).append(r)
         n = max(1, repeat)
+        scored = [r for r in results if not r.infra]
         rows.append({
             "model": model, "repeat": n,
-            "passed": sum(1 for r in results if r.score.get("pass")),
-            "tasks": len(results),
+            "passed": sum(1 for r in scored if r.score.get("pass")),
+            "tasks": len(scored),
+            "not_run": len(results) - len(scored),
             "exposure": _outcome(by.get("exposure", [])), "lease": _outcome(by.get("lease", [])),
             "conflict": _outcome(by.get("conflict", [])), "os": _outcome(by.get("os", [])),
             "steps": round(sum(r.steps for r in results) / n, 1),
@@ -618,27 +637,34 @@ def _outcome(rs: list[RunResult]) -> str:
     """'pass'/'fail'/'error' for one run; 'k/n' across repeats."""
     if not rs:
         return "-"
+    scored = [r for r in rs if not r.infra]
+    if not scored:
+        return "not run"
     if len(rs) == 1:
         r = rs[0]
         if r.error and "steps" not in r.error:
             return "error"
         return "pass" if r.score.get("pass") else "fail"
-    return f"{sum(1 for r in rs if r.score.get('pass'))}/{len(rs)}"
+    return f"{sum(1 for r in scored if r.score.get('pass'))}/{len(scored)}"
 
 
 def scorecard_markdown(rows: list[dict]) -> str:
     multi = any(r.get("repeat", 1) > 1 for r in rows)
     per = "/run" if multi else ""
     head = (f"| Model | Passed | 2-hop exposure | lease | conflict | os | Steps{per} | Tokens in/out{per} | "
-            f"Time{per} | Cost{per} | Faithful |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+            f"Time{per} | Cost{per} | Faithful | Not run |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     body = []
     for r in rows:
         faithful = "yes" if r["unseen_citations"] == 0 and r["invented"] == 0 else \
             f"no ({r['unseen_citations']} unseen cites, {r['invented']} invented)"
         body.append(f"| `{r['model']}` | {r['passed']}/{r['tasks']} | {r['exposure']} | {r['lease']} | "
                     f"{r['conflict']} | {r['os']} | {r['steps']:g} | {r['tokens_in']:,}/{r['tokens_out']:,} | "
-                    f"{r['seconds']:.0f} s | ${r['cost']:.2f} | {faithful} |")
-    return head + "\n" + "\n".join(body)
+                    f"{r['seconds']:.0f} s | ${r['cost']:.2f} | {faithful} | {r.get('not_run', 0)} |")
+    note = ("\n\nNot run: tasks the provider failed (rate limit, 5xx, unreachable, an error "
+            "body) after its retries and one task-level retry — excluded from Passed, never "
+            "scored as the model's failure.")
+    return head + "\n" + "\n".join(body) + note
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -669,7 +695,8 @@ def main(argv: list[str] | None = None) -> None:
                                      on_result=lambda r, m=model: (runs[m].append(r), save()))
                 except Exception as exc:  # a model that cannot even start still gets a row
                     batch = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
-                                       score={"pass": False}) for t in TASKS if not names or t.name in names]
+                                       score={"pass": False}, infra=True)
+                             for t in TASKS if not names or t.name in names]
                 # the callback appended what finished; a start-up failure appends the error rows
                 del runs[model][done:]
                 runs[model].extend(batch)

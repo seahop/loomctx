@@ -316,7 +316,7 @@ def test_scorecard_ranks_passes_then_cost():
     assert [r["model"] for r in rows] == ["cheap/good", "pricey/good", "cheap/bad", "broken/x"]
     assert rows[0]["cost"] == 0.06 and rows[3]["exposure"] == "error"
     md = ae.scorecard_markdown(rows)
-    assert md.count("\n") == 5 and "| `cheap/good` | 2/2 | pass | pass |" in md
+    assert md.count("\n| `") == 4 and "| `cheap/good` | 2/2 | pass | pass |" in md
     # repeats: pass counts per task, per-run averages, sorted by pass RATE
     rows = ae.scorecard({
         "flaky/x": [rr("exposure", True, 0.4), rr("lease", True, 0.1), rr("exposure", False, 0.4), rr("lease", True, 0.1)],
@@ -326,6 +326,41 @@ def test_scorecard_ranks_passes_then_cost():
     assert rows[1]["exposure"] == "1/2" and rows[1]["passed"] == 3 and rows[1]["tasks"] == 4
     assert rows[0]["cost"] == 0.4 and rows[0]["cost_total"] == 0.8 and rows[0]["steps"] == 6
     assert "Cost/run" in ae.scorecard_markdown(rows) and "| `flaky/x` | 3/4 | 1/2 | 2/2 |" in ae.scorecard_markdown(rows)
+
+
+def test_provider_outages_are_retried_then_not_scored(seeded_db):
+    """A 5xx / rate limit / error body is the provider's failure, not the
+    model's answer: the task runs once more, and if it fails again it is
+    'not run' — out of the pass rate, cost still counted."""
+    from loom.llm import LLMError
+
+    class Flaky(Scripted):
+        def __init__(self, turns, outages):
+            super().__init__(turns)
+            self.outages = outages
+
+        def __call__(self, provider, system, messages, tools):
+            if self.outages:
+                self.outages -= 1
+                raise LLMError("provider returned 503: upstream", transient=True)
+            return super().__call__(provider, system, messages, tools)
+
+    def cite(messages):
+        return "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["cites"][0].split()[0] + "]"
+    lease = [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec",
+                      "valid_at": "2026-08-20T00:00:00Z"})]
+    # one outage: retried, and the retry is scored normally
+    [r] = ae.evaluate(seeded_db, ["lease"], model="fake", caller=Flaky([lease, cite], 1))
+    assert not r.infra and r.score["pass"]
+    # two outages: not run, excluded from the pass rate, shown in its own column
+    [r] = ae.evaluate(seeded_db, ["lease"], model="fake", caller=Flaky([], 2))
+    assert r.infra and not r.score["pass"]
+    ok = ae.RunResult(task="os", answer="", steps=1, score={"pass": True})
+    [row] = ae.scorecard({"m": [r, ok]})
+    assert row["passed"] == 1 and row["tasks"] == 1 and row["not_run"] == 1 and row["lease"] == "not run"
+    assert ae.scorecard_markdown([row]).split("\n")[2].endswith("| 1 |")
+    # a request the provider rejects outright (400) is the model's problem: scored
+    assert not LLMError("provider returned 400: bad tool schema").transient
 
 
 def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retries(seeded_db):

@@ -45,12 +45,16 @@ class LLMError(RuntimeError):
     """The provider call failed; the HTTP layer maps this to a 502.
 
     `public` is the short, safe-to-return form; str(exc) carries the full
-    detail (provider body excerpt, URL) for server logs only.
+    detail (provider body excerpt, URL) for server logs only. `transient`
+    marks a failure that says nothing about the request (rate limit, 5xx,
+    unreachable — after the retries): an evaluation must not score it as
+    the model's answer.
     """
 
-    def __init__(self, message: str, public: str | None = None):
+    def __init__(self, message: str, public: str | None = None, transient: bool = False):
         super().__init__(message)
         self.public = public or "LLM provider error (see server logs)"
+        self.transient = transient
 
 
 class LLMClient(ABC):
@@ -143,7 +147,8 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
             except Exception:  # noqa: BLE001 — a synthetic HTTPError may carry no body
                 detail = ""
             last = LLMError(f"provider returned {exc.code}: {detail}",
-                            public=f"LLM provider returned HTTP {exc.code}")
+                            public=f"LLM provider returned HTTP {exc.code}",
+                            transient=exc.code in _RETRYABLE)
             if exc.code not in _RETRYABLE:
                 raise last from exc
             retry_after = _retry_after_seconds(
@@ -152,7 +157,7 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
                 delay = min(_MAX_RETRY_AFTER, retry_after)
         except (urllib.error.URLError, TimeoutError) as exc:
             last = LLMError(f"provider unreachable: {exc}",
-                            public="LLM provider unreachable")
+                            public="LLM provider unreachable", transient=True)
         if attempt + 1 < attempts:
             time.sleep(delay)
     assert last is not None
