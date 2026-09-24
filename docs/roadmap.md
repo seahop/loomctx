@@ -37,7 +37,7 @@ presentable.
 - ✅ HTTP: `/healthz`, `POST /v1/ingest` (claims → 200 recorded; documents →
   202 accepted, artifact stored verbatim, extraction pending),
   `GET /v1/entities/{type}/{key}/observations`, `GET /v1/artifacts/{id}`
-- ✅ Seed corpus: `python -m loom.seed` — 591 deterministic claims + 5
+- ✅ Seed corpus: `python -m loom.seed` — 592 deterministic claims + 5
   documents across `netsec` and `procurement`, with planted demo moments
   (IP lease reassignment, two cross-source conflicts, incident report doc)
 - ✅ Schema registry persistence + claim validation (2026-09-08, D-024):

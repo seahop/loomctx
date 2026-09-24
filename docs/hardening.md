@@ -149,7 +149,7 @@ which change measured numbers and wait for the frozen-volume rehearsal.
 | J-3 | ✅ | The after-alias Act 3 rehearsal shows Claude Code grepping a spilled `ask_scope` result (7 of 26 calls); the demo prompt now asks for budget 1500 on scope asks — needs a rehearsal to confirm. |
 | J-4 | ✅ | "Before the talk: 5 minutes" was ~35 min plus a judge-model dependency; script now says night-before, pinned judge, frozen volume, `--offline` reload; Act 2 numbers marked re-verify. |
 | J-5 | ✅ | Native Anthropic client failed on every current model (thinking block first). |
-| J-6 | ✅ | Seed 580/590/591, handles 69/77 (both wrong: 67 at budget 400), models 14/18/20 and 168/216 runs, tests "~215": one value each. |
+| J-6 | ✅ | Seed 580/590/591 (592 since the D-050 supersession moment), handles 69/77 (both wrong: 67 at budget 400), models 14/18/20 and 168/216 runs, tests "~215": one value each. |
 | J-7 | ✅ | Act 3 narration still described the pre-D-042 seam as unplanted; fallback transcripts unreadable projected → `demo/act3-*.md`. |
 
 ## K. Read path (D-046)
@@ -214,8 +214,8 @@ which change measured numbers and wait for the frozen-volume rehearsal.
 | R-3 | ⬜ | Packing: value-per-token with an MMR diversity term instead of greedy trim by score; cosine normalized within the gathered set (real embedders compress to ~0.27–0.40, so recency dominates). |
 | R-4 | ⬜ | Entity-valued conflicts never surface (`isinstance(object, EntityRef): continue`); `str()` value normalization false-conflicts `True`/`"true"`. |
 | R-5 | ⬜ | Pagination past the gather cap: a `before:` cursor in the handle payload so the 1,740 truncated kernel CVEs are reachable. |
-| R-6 | ⬜ | Scorecard: `test_quality.py` is eight booleans with no baseline. A small labeled set over the vulns corpus, MRR/nDCG, a recency-only and a full-context baseline, abstention and as-of cases, an NLI/LLM-judge citation *support* check, cost columns. |
-| R-7 | ⬜ | MCP 2026-07-28: `outputSchema` from the contracts, `readOnlyHint` annotations, handle TTL in the `expand` description, a `format: concise|detailed` knob, consider merging `ask`/`ask_scope`. |
-| R-8 | ⬜ | Explicit, cited supersession edge (recorded, never inferred); PROV-O JSON-LD export; STIX 2.1 / OCSF predicate mapping in the registry; CISA Vulnrichment as a third vuln source. |
-| R-9 | ⬜ | Worker tick scans (`observations_without_embeddings`, `dossier_candidates`) walk from the beginning each tick — high-water marks; `observations_for_many` has no per-entity pre-limit (a hub materializes every row). |
-| R-10 | ⬜ | Engine-side per-grant rate limiting (a valid reader can burn LLM spend on `/v1/answer` without bound in the default shape). |
+| R-6 | ✅ | (D-053) Scorecard: `test_quality.py` is eight booleans with no baseline. A small labeled set over the vulns corpus, MRR/nDCG, a recency-only and a full-context baseline, abstention and as-of cases, an NLI/LLM-judge citation *support* check, cost columns. |
+| R-7 | ✅ | (D-055) MCP 2026-07-28: `outputSchema` from the contracts, `readOnlyHint` annotations, handle TTL in the `expand` description, a `format: concise|detailed` knob, consider merging `ask`/`ask_scope`. |
+| R-8 | 🔨 | (STIX/OCSF + Vulnrichment landed, D-055/D-056; supersession + PROV-O in D-050) Explicit, cited supersession edge (recorded, never inferred); PROV-O JSON-LD export; STIX 2.1 / OCSF predicate mapping in the registry; CISA Vulnrichment as a third vuln source. |
+| R-9 | ✅ | (D-054) Worker tick scans (`observations_without_embeddings`, `dossier_candidates`) walk from the beginning each tick — high-water marks; `observations_for_many` has no per-entity pre-limit (a hub materializes every row). |
+| R-10 | ✅ | (D-056) Engine-side per-grant rate limiting (a valid reader can burn LLM spend on `/v1/answer` without bound in the default shape). |

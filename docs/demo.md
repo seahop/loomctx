@@ -23,7 +23,7 @@ rehearsal, not for loading.
 ```bash
 git clone https://github.com/seahop/Loom && cd Loom
 docker compose up -d --build loom
-docker compose exec loom python -m loom.seed load                          # prints: loaded 591 claims and 5 documents
+docker compose exec loom python -m loom.seed load                          # prints: loaded 592 claims and 5 documents
 docker compose exec --user 10001 loom python -m loom.connectors.vulns load \
     --db /data/loom.db --bridge-seed-hosts                                 # ~110 s incl. feed download, ~525k envelopes (re-verify on the frozen volume)
 docker compose exec -e LOOM_LLM_MODEL=google/gemini-3.5-flash-lite loom \

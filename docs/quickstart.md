@@ -12,7 +12,7 @@ curl -s localhost:8000/healthz          # {"status":"ok"}
 
 ## 2. Load the demo corpus
 
-591 claims and 5 documents across two namespaces (`netsec`, `procurement`),
+592 claims and 5 documents across two namespaces (`netsec`, `procurement`),
 with planted demo moments (an IP-lease reassignment, cross-source conflicts,
 an incident report).
 

@@ -1763,6 +1763,108 @@ support@pack replaces for these answer shapes. `docs/evaluation.md` has
 the talk command; the real-corpus table with the chosen model is a
 rehearsal-week task. Local output lives in `eval/` (gitignored).
 
+## D-054 · Store after R-9: incremental worker ticks, per-entity gather limits, WAL readers (2026-09-24, schema v6)
+
+- **Worker ticks are incremental.** `observations_without_embeddings`,
+  `artifacts_needing_chunks` and `dossier_candidates` walked their tables
+  from the beginning every tick (a per-row anti-join over everything
+  already embedded). Each backlog now starts from a per-(model, shard)
+  high-water mark in `loom_meta` (`hwm:*`), kept 1,000 rows below the
+  oldest pending row and monotonic, with a full rescan on a process's
+  first and every 16th tick to catch backfills with old `recorded_at` and
+  leases that expired unreleased. Dossier candidacy evaluates only
+  entities touched since the mark or holding a lease, over a new
+  `(subject_id, recorded_at)` index the namespace-led index could not
+  serve; anything that drops a brief (redact, merge, unmerge) resets the
+  mark. Accepted: a row that lands below the mark waits for the rescan.
+- **The gather pre-limits per entity.** `observations_for_many` pulled
+  every row of up to 400 entities before the window function trimmed, so
+  a hub cost its degree per ask. Each entity's newest `limit` rows per
+  side now come from an index range with its own LIMIT (`LATERAL` on
+  Postgres; a generated `UNION ALL` of 200 entities per statement on
+  SQLite, under the compound-select bound). 20k-edge hub, limit 20:
+  SQLite 101 → 21 ms, Postgres 170 → 13 ms.
+- **SQLite reads use WAL readers.** One writer plus a pool of four read
+  connections (`LOOM_DB_READERS`, 0 restores the single connection);
+  reads inside a thread's own write transaction still join it. Reads
+  racing batch ingest: 63 → 649 reads/s, p50 61 → 6 ms. Known cost: a
+  pure-read multi-threaded mix loses about 40 % to GIL convoying (2.9k →
+  1.7k reads/s at 8 threads); revisit on a free-threaded interpreter.
+- **`iter_entities(since=)`** over `entities (namespace, created_at)`, so
+  the alias pass can be incremental. **`norm_key`** keeps the separators
+  of colon-separated hex keys (IPv6, MAC, host:port); v6 recomputes keys
+  carrying `:`.
+- **Schema v6** = `observations.supersedes` (D-050), five indexes and the
+  norm_key recompute; an older image warns and skips DDL (H-B12).
+
+## D-055 · MCP 2026-07-28 alignment, the third scorer, extraction retries (2026-09-24)
+
+- **Every MCP tool publishes an `outputSchema`** derived from the
+  contract models and returns `structuredContent` beside the text mirror;
+  the pack tools' schema is the *agent view* of `ContextPack` (TypedDicts
+  nested over contract models) — presentation, not a second contract;
+  HTTP still serializes `ContextPack`. Annotations: `readOnlyHint` on all
+  read tools, `destructiveHint: false` everywhere (append-only),
+  `idempotentHint` on every tool but `answer`, `openWorldHint: false`.
+  `format: concise|detailed` on ask/ask_scope/expand (concise = cite
+  tokens and twenty subjects; detailed = 32-hex ids and every subject).
+  Handles are described as stateless, HMAC-signed when a secret is set,
+  without TTL, invalidated only by secret rotation. `record_claim`
+  derives a content-addressed `event_id` when none is given (a retried
+  write-back is one observation) and takes `supersedes` (cite token or id)
+  — a recorded correction, never inferred (D-050). `ask` and `ask_scope`
+  stay two tools with disjoint descriptions; the server instructions
+  recommend budget ≤ 1500 for scope asks, the size at which Claude Code
+  stopped spilling tool results to disk in the rehearsal.
+- **CISA's ADP is the third scorer.** NVD 2.0 metric entries whose
+  `source` is the CISA ADP org id land as source `cisa-adp` (they surfaced
+  as `nvd:<uuid>`), so CNA-vs-CISA is a readable cross-source conflict;
+  SSVC decision points from the CVE 5.1 ADP container become `ssvc_*`
+  claims when a record carries it (the NVD feeds do not).
+- **Extraction retries only what failed (amends D-047).** A partly
+  garbled document stays `pending`; parsed windows are remembered by
+  content hash per process, so the retry spends only the failed windows;
+  at the attempt bound a partial is `done` with the offsets logged, not
+  `failed`. A vanished blob is `skipped` by extraction (chunking needs a
+  store-side marker — open). The alias pass asks `iter_entities(since=)`
+  and skips the walk when nothing is new. `agent_eval`'s Anthropic path
+  uses `max_tokens` 8000 with adaptive thinking (`LOOM_AGENT_THINKING=off`
+  to disable); refusals are errors.
+- **Seed:** 592 claims — a same-source `contract_owner` correction that
+  `supersedes` its predecessor, resolved at load time: "recorded
+  correction, not a conflict" next to the two-source initech conflict.
+
+## D-056 · Engine-side rate limiting; STIX 2.1 and OCSF as connectors (2026-09-24)
+
+- **The gateway's bucket model also runs in the engine**
+  (`loom.ratelimit.RateLimitMiddleware`, pure ASGI): auth first, one token
+  bucket per grant id, never one for a raw header value, an LRU-bounded
+  map, and a second stricter bucket for the LLM and embedder routes
+  (`/v1/answer`, `/v1/entities/semantic`) so a valid reader cannot burn
+  provider spend without bound. Dials `LOOM_RATE_PER_SEC` (the gateway's
+  name), `LOOM_RATE_BURST`, `LOOM_RATE_LLM_PER_SEC`, `LOOM_RATE_LLM_BURST`;
+  unset = unlimited, so dev mode is unchanged; open mode limits per client
+  IP only when dialled. The keys file gains `rate_per_sec`, `rate_burst`,
+  `rate_llm_per_sec` (engine and Go loader; the gateway ignores the LLM
+  field), hot-reloaded and retuning the live bucket; zero or negative is a
+  configuration error that disables the entry. 429 with `Retry-After`;
+  probes and scrapes are never limited.
+- **Interop lives in connectors, not core.** `loom.connectors.stix`
+  (bundle → envelopes, observations → a valid 2.1 bundle) and
+  `loom.connectors.ocsf` (`vulnerability_finding` in and out) plus a
+  non-strict schema registration; the engine learns nothing about either
+  standard, and a `mapping` dict overrides the default table per
+  namespace. Identity conventions: a STIX `vulnerability` with a CVE
+  reference and an OCSF `cve.uid` both land on `cve:<id>`, the entity the
+  vulns connector writes, with the same predicate names, so one CVE reads
+  as one record whatever produced it; a scanner's CVSS is its own source
+  so conflicts surface honestly (D-035). STIX `observed_at` is the
+  object's `modified` (event ids embed it: replays dedupe, revisions
+  append); reports and notes are documents cited by the claims of the
+  objects they list (D-039). Skipped by design: revoked objects, markings,
+  `observed-data`, custom properties. Exports carry per-item Loom
+  citations (`x_loom_observation_id`, `unmapped.loom_observation_ids`).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

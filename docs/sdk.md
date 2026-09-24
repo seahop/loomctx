@@ -274,7 +274,7 @@ What ships today are operator modules, each run inside the image
 (`docker compose run --rm loom python -m loom.<module> ...`):
 
 ```bash
-python -m loom.seed load                 # deterministic demo corpus (591 claims, 5 documents)
+python -m loom.seed load                 # deterministic demo corpus (592 claims, 5 documents)
 python -m loom.keys generate ...         # mint/list/revoke/update API keys (D-013a); file defaults to secrets/keys.json
 python -m loom.lifecycle export|import|purge|redact   # backup, migration, retention (D-016)
 python -m loom.ingest file.jsonl --url … # bulk loader: NDJSON envelopes over HTTP batches or straight into a store (D-034)
