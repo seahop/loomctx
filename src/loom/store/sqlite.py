@@ -208,6 +208,12 @@ CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(ke
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 CREATE INDEX IF NOT EXISTS idx_obs_supersedes
     ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
+-- worker tick scans (R-9): recorded_at ranges from a high-water mark, and a
+-- per-subject lookup that does not need the namespace
+CREATE INDEX IF NOT EXISTS idx_obs_subject_recorded ON observations (subject_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
+CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
+    ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
 """
 
 # search_entities: a half-open range on the indexed expression (the LIKE
@@ -224,7 +230,7 @@ _PREFIX_END = "\U0010ffff"
 # anything that must run exactly once (a backfill) is keyed by version here.
 # v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
 # lease owners, lower(key) index, numeric norm_key rule (recompute);
-# v6: observations.supersedes (D-050)
+# v6: observations.supersedes (D-050); tick-scan indexes and high-water marks (R-9)
 SCHEMA_VERSION = 6
 
 _NOT_TOMBSTONED = (
@@ -251,6 +257,38 @@ _OBS_SELECT_ENT = (
     " FROM observations o JOIN entities e ON e.id = o.subject_id"
 )
 
+# The enrichment backlog (D-018/D-031), scanned from a high-water mark (R-9)
+_EMBED_BACKLOG_SQL = (
+    _OBS_SELECT
+    + " WHERE o.recorded_at >= ?"
+    " AND NOT EXISTS (SELECT 1 FROM embeddings em WHERE em.ref_id = o.id AND em.model = ?)"
+    + _NOT_TOMBSTONED + "{shard}"
+    " ORDER BY o.recorded_at LIMIT ?"
+)
+
+# Dossier candidacy (H-E2, D-044), incremental (R-9): only entities with a
+# row recorded since the mark — or holding a dossier lease, expired or not,
+# so a failed build is re-offered once its lease lapses — are evaluated.
+# Richness over volume: several predicates from several senders outrank a
+# one-predicate firehose, which gets no brief.
+_DOSSIER_SQL = (
+    "WITH touched AS ("
+    "  SELECT DISTINCT o.subject_id AS eid FROM observations o WHERE o.recorded_at >= ?"
+    "  UNION SELECT id FROM entities WHERE dossier_claimed_until IS NOT NULL)"
+    " SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
+    "        d.observation_count AS have,"
+    "        COUNT(DISTINCT o.predicate) AS preds, COUNT(DISTINCT o.source) AS srcs"
+    " FROM touched t JOIN entities e ON e.id = t.eid"
+    " JOIN observations o ON o.subject_id = e.id"
+    "   AND NOT EXISTS (SELECT 1 FROM tombstones t2 WHERE t2.observation_id = o.id)"
+    " LEFT JOIN dossiers d ON d.namespace = e.namespace AND d.entity_id = e.id"
+    " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
+    "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
+    " GROUP BY e.id"
+    " HAVING (have IS NULL AND fresh >= ? AND preds >= 2) OR (have IS NOT NULL AND fresh >= ?)"
+    " ORDER BY preds * srcs DESC, fresh DESC, e.created_at LIMIT ?"
+)
+
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
@@ -270,6 +308,7 @@ class SqliteStore(GraphStore):
         # on its own lock; `_tx` commits only at the outermost level.
         self._lock = threading.RLock()
         self._depth = 0
+        self._ticks: dict[str, int] = {}   # tick-scan calls per mark (R-9)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -655,6 +694,7 @@ class SqliteStore(GraphStore):
                 (namespace, src.id, dst.id),
             )
             self._conn.execute("DELETE FROM entities WHERE id = ?", (src.id,))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def _log_merge(self, namespace: str, src: Entity, dst: Entity) -> None:
@@ -737,6 +777,7 @@ class SqliteStore(GraphStore):
             # 5. the log rows: the merge no longer happened
             self._conn.execute("DELETE FROM merge_log_observations WHERE merge_id = ?", (m["id"],))
             self._conn.execute("DELETE FROM merge_log WHERE id = ?", (m["id"],))
+            self._hwm_reset(self._DOSSIER_HWM)
             return True
 
     def iter_merges(self, namespace: str | None = None) -> Iterator[dict]:
@@ -1115,16 +1156,62 @@ class SqliteStore(GraphStore):
         shard_sql, shard_args = "", ()
         if shard is not None and shard[1] > 1:
             shard_sql, shard_args = f" AND {self._SHARD_EXPR} % ? = ?", (shard[1], shard[0])
+        key = f"hwm:embed:{model}:{shard[0]}/{shard[1]}" if shard_sql else f"hwm:embed:{model}:0/1"
         with self._tx():
+            start = self._hwm_start(key)
             rows = self._conn.execute(
-                _OBS_SELECT
-                + " WHERE NOT EXISTS (SELECT 1 FROM embeddings em"
-                "   WHERE em.ref_id = o.id AND em.model = ?)"
-                + _NOT_TOMBSTONED + shard_sql
-                + " ORDER BY o.recorded_at LIMIT ?",
-                (model, *shard_args, limit),
+                _EMBED_BACKLOG_SQL.format(shard=shard_sql),
+                (start, model, *shard_args, limit),
             ).fetchall()
+            self._hwm_advance(key, "observations", rows[0]["recorded_at"] if rows else None)
             return [common.row_to_observation(r) for r in rows]
+
+    # ---------------------------------------- tick-scan high-water marks (R-9)
+    # A worker tick used to walk the whole table in recorded_at order with a
+    # per-row anti-join, so an idle fleet re-examined every embedded row every
+    # few seconds. The persisted mark (loom_meta, one per model and shard)
+    # bounds the walk to rows recorded since the previous tick. The mark is
+    # kept `_HWM_SLACK` rows below the oldest row a tick still needs — or the
+    # newest row when nothing is pending — so writers with skewed clocks and
+    # a batch that failed after it was fetched are re-examined; it never moves
+    # back (max on write, so two workers on one partition cannot regress it).
+    # Every `_RESCAN_EVERY`-th tick — and a process's first — walks from the
+    # beginning, which is how a backfilled row (an import with an old
+    # recorded_at) is found. `wipe()` forgets the marks.
+    _HWM_SLACK = 1000
+    _RESCAN_EVERY = 16
+
+    def _hwm_start(self, key: str) -> str:
+        """The recorded_at to scan from on this tick ('' = from the start)."""
+        n = self._ticks.get(key, 0)
+        self._ticks[key] = n + 1
+        if n % self._RESCAN_EVERY == 0:
+            return ""
+        row = self._conn.execute("SELECT value FROM loom_meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else ""
+
+    def _hwm_advance(self, key: str, table: str, top: str | None) -> None:
+        """Persist the mark `_HWM_SLACK` rows below `top` (the oldest row
+        this tick still needs; None = everything up to the newest row was
+        examined). Never moves back."""
+        if top is None:
+            top = self._conn.execute(f"SELECT MAX(recorded_at) AS m FROM {table}").fetchone()["m"]
+            if top is None:
+                return
+        row = self._conn.execute(
+            f"SELECT recorded_at FROM {table} WHERE recorded_at <= ?"
+            " ORDER BY recorded_at DESC LIMIT 1 OFFSET ?", (top, self._HWM_SLACK)).fetchone()
+        if row is None:
+            return
+        self._conn.execute(
+            "INSERT INTO loom_meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
+            (key, row["recorded_at"]))
+
+    def _hwm_reset(self, key: str) -> None:
+        """Forget a mark: the next tick scans from the beginning (a dropped
+        dossier must be rebuilt without waiting for the periodic rescan)."""
+        self._conn.execute("DELETE FROM loom_meta WHERE key = ?", (key,))
 
     def pending_artifacts(
         self, limit: int = 4, now: datetime | None = None,
@@ -1196,7 +1283,7 @@ class SqliteStore(GraphStore):
             ).rowcount > 0
 
     _NEEDS_CHUNKS = (
-        "a.text IS NOT NULL"
+        "a.recorded_at >= ? AND a.text IS NOT NULL"   # from the high-water mark (R-9)
         # blank docs would re-queue forever (H-D4); TRIM alone strips only
         # spaces, so name the whitespace set explicitly
         " AND TRIM(a.text, ' ' || char(9) || char(10) || char(13)) <> ''"
@@ -1207,11 +1294,13 @@ class SqliteStore(GraphStore):
     def artifacts_needing_chunks(
         self, model: str, limit: int = 4, lease: tuple[str, float] | None = None
     ) -> list[Artifact]:
+        key = f"hwm:chunks:{model}"
         with self._tx():
+            start = self._hwm_start(key)
             if lease is None:
                 rows = self._conn.execute(
                     f"SELECT * FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
-                    " ORDER BY a.recorded_at LIMIT ?", (model, limit)).fetchall()
+                    " ORDER BY a.recorded_at LIMIT ?", (start, model, limit)).fetchall()
             else:
                 moment = common.now()
                 until = common.iso(moment + timedelta(seconds=lease[1]))
@@ -1220,7 +1309,8 @@ class SqliteStore(GraphStore):
                     f" (SELECT a.id FROM artifacts a WHERE {self._NEEDS_CHUNKS}"
                     "   AND (a.chunk_claimed_until IS NULL OR a.chunk_claimed_until < ?)"
                     "   ORDER BY a.recorded_at LIMIT ?) RETURNING *",
-                    (until, lease[0], model, common.iso(moment), limit)).fetchall()
+                    (until, lease[0], start, model, common.iso(moment), limit)).fetchall()
+            self._hwm_advance(key, "artifacts", min((r["recorded_at"] for r in rows), default=None))
         return sorted((common.row_to_artifact(r) for r in rows), key=lambda a: a.recorded_at)
 
     def put_doc_chunks(
@@ -1318,36 +1408,24 @@ class SqliteStore(GraphStore):
                 "UPDATE entities SET dossier_claimed_until = NULL WHERE id = ?", (entity.id,))
             return True
 
+    _DOSSIER_HWM = "hwm:dossier"
+
     def dossier_candidates(
         self, min_new: int = 20, min_total: int = 5, limit: int = 4,
         lease: tuple[str, float] | None = None,
     ) -> list[tuple[str, EntityRef, int]]:
         moment = common.now()
         with self._tx():
-            # Only observations recorded AFTER the last brief count as
-            # "new", so the scan is bounded by fresh rows, not the whole
-            # table (H-E2). Total counts for the few winners come after.
+            # Candidates are evaluated among the entities touched since the
+            # mark (see _DOSSIER_SQL); total counts for the few winners come
+            # after. The mark advances only when the tick did not fill its
+            # limit — a backlog is re-evaluated in full until it drains.
+            start = self._hwm_start(self._DOSSIER_HWM)
             rows = self._conn.execute(
-                # Richness over volume (D-044): the first real run briefed
-                # the load generator's hosts because they had the most rows.
-                # A brief is for an entity with several kinds of fact from
-                # several senders; a one-predicate firehose gets none.
-                "SELECT e.namespace, e.type, e.key, e.id AS eid, COUNT(o.id) AS fresh,"
-                "       d.observation_count AS have,"
-                "       COUNT(DISTINCT o.predicate) AS preds, COUNT(DISTINCT o.source) AS srcs"
-                " FROM entities e"
-                " JOIN observations o ON o.subject_id = e.id"
-                "   AND NOT EXISTS (SELECT 1 FROM tombstones t"
-                "                   WHERE t.observation_id = o.id)"
-                " LEFT JOIN dossiers d ON d.namespace = e.namespace"
-                "   AND d.entity_id = e.id"
-                " WHERE (d.updated_at IS NULL OR o.recorded_at > d.updated_at)"
-                "   AND (e.dossier_claimed_until IS NULL OR e.dossier_claimed_until < ?)"
-                " GROUP BY e.id"
-                " HAVING (have IS NULL AND fresh >= ? AND preds >= 2) OR (have IS NOT NULL AND fresh >= ?)"
-                " ORDER BY preds * srcs DESC, fresh DESC, e.created_at LIMIT ?",
-                (common.iso(moment), min_total, min_new, limit),
+                _DOSSIER_SQL, (start, common.iso(moment), min_total, min_new, limit),
             ).fetchall()
+            if len(rows) < limit:
+                self._hwm_advance(self._DOSSIER_HWM, "observations", None)
             out = []
             for r in rows:
                 ref = EntityRef(type=r["type"], key=r["key"])
@@ -1382,6 +1460,7 @@ class SqliteStore(GraphStore):
                 "DELETE FROM dossiers WHERE namespace = ? AND observation_ids LIKE ?",
                 (namespace, f'%"{observation_id}"%'),
             )
+            self._hwm_reset(self._DOSSIER_HWM)   # a dropped brief is rebuilt next tick
             return True
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:
@@ -1580,6 +1659,8 @@ class SqliteStore(GraphStore):
                           "aliases", "artifacts", "entities", "schemas",
                           "resolution_declines", *self._vec_tables):
                 self._conn.execute(f"DELETE FROM {table}")
+            self._conn.execute("DELETE FROM loom_meta WHERE key LIKE 'hwm:%'")
+            self._ticks.clear()
 
     def close(self) -> None:
         with self._lock:

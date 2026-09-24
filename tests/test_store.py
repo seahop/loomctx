@@ -1483,3 +1483,133 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
             assert _exec(again, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_obs_supersedes'")
     finally:
         again.close()
+
+
+# ------------------------------------------- worker tick scans (R-9) #
+
+def _meta(store, key):
+    rows = _exec(store, "SELECT value FROM loom_meta WHERE key = ?", (key,))
+    return rows[0]["value"] if rows else None
+
+
+def _examined(store, table, mark):
+    """Rows a tick walks: the recorded_at range from the mark (the query's
+    only non-anti-join predicate, served by the recorded_at index)."""
+    return _exec(store, f"SELECT COUNT(*) AS n FROM {table} WHERE recorded_at >= ?", (mark,))[0]["n"]
+
+
+def test_embedding_backlog_scans_from_a_high_water_mark(store, tmp_path):
+    """A tick examines the rows recorded since the previous tick plus the
+    slack window — not the whole table — and a backfilled row below the
+    mark (an import with an old recorded_at) is found by the periodic
+    rescan within `_RESCAN_EVERY` ticks."""
+    _raw(store)
+    from loom.contracts import Observation
+    store._HWM_SLACK, store._RESCAN_EVERY = 2, 3
+    ids = [store.record_claim(login_claim().model_copy(
+        update={"object": EntityRef(type="user", key=f"u{i}")})).id for i in range(12)]
+
+    def tick(limit=5):
+        got = store.observations_without_embeddings("m", limit)
+        store.put_embeddings("default", "m", [(o.id, [1.0, 0.0]) for o in got])
+        return [o.id for o in got]
+
+    assert tick() == ids[:5]                    # the first tick of a process scans from the start
+    assert tick() == ids[5:10]                  # then from the mark
+    assert tick() == ids[10:]
+    mark = _meta(store, "hwm:embed:m:0/1")
+    assert mark is not None
+    assert 0 < _examined(store, "observations", mark) <= store._HWM_SLACK + 5 < len(ids)
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._EMBED_BACKLOG_SQL.format(shard=""), (mark, "m", 5))
+        assert any("idx_obs_recorded" in r["detail"] for r in plan), plan
+    assert tick() == []                         # tick 4: the periodic rescan, nothing pending
+    old = Observation(id=uuid_hex(), namespace="default", subject=EntityRef(type="host", key="web-01"),
+                      predicate="p", object="x", observed_at=OBSERVED, source="s", confidence=1.0,
+                      recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    store.restore_observation(old)              # a backfill lands far below the mark
+    assert old.recorded_at.isoformat() < _meta(store, "hwm:embed:m:0/1")
+    assert tick() == [] and tick() == []        # incremental ticks do not see it ...
+    assert tick() == [old.id]                   # ... the rescan does
+    store.wipe()
+    assert _meta(store, "hwm:embed:m:0/1") is None
+
+
+def uuid_hex():
+    import uuid
+    return uuid.uuid4().hex
+
+
+def test_chunk_backlog_scans_from_a_high_water_mark(store, tmp_path):
+    from loom.contracts import Artifact, DocumentIn
+    _raw(store)
+    store._HWM_SLACK, store._RESCAN_EVERY = 1, 3
+    ids = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED)).id
+           for i in range(6)]
+
+    def tick(limit=2, lease=None):
+        got = store.artifacts_needing_chunks("m", limit, lease=lease)
+        for a in got:
+            store.put_doc_chunks("default", a.id, "m", [(0, 0, 3, "doc", [1.0, 0.0])],
+                                 worker_id=lease[0] if lease else None)
+        return [a.id for a in got]
+
+    assert tick() == ids[:2]
+    assert tick(lease=("w", 60)) == ids[2:4]
+    assert tick() == ids[4:]
+    mark = _meta(store, "hwm:chunks:m")
+    assert 0 < _examined(store, "artifacts", mark) <= store._HWM_SLACK + 2 < len(ids)
+    assert tick() == []
+    old = Artifact(id=uuid_hex(), namespace="default", content_type="text/plain", text="late import",
+                   source="s", observed_at=OBSERVED, recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    store.restore_artifact(old)
+    assert tick() == [] and tick() == []
+    assert tick() == [old.id]
+
+
+def test_dossier_candidates_are_incremental(store, tmp_path):
+    """Only entities with a row since the mark — or holding a lease — are
+    evaluated; a failed build (lease lapses without put_dossier) is
+    re-offered, and a dropped brief (redact, merge) resets the mark so the
+    rebuild does not wait for the periodic rescan."""
+    _raw(store)
+    store._HWM_SLACK, store._RESCAN_EVERY = 0, 100
+    host, other = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="db-01")
+    for i in range(4):
+        store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"u{i}")}))
+    store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-44"}))
+    cands = store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60))
+    assert [(c[1], c[2]) for c in cands] == [(host, 5)]
+    store.put_dossier("default", host, "brief", 5, [], worker_id="w")
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60)) == []
+    mark = _meta(store, "hwm:dossier")
+    assert mark is not None and _examined(store, "observations", mark) == 1
+    if isinstance(store, SqliteStore):
+        from loom.store import sqlite as sq
+        plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._DOSSIER_SQL, (mark, "2099", 5, 3, 4))
+        assert any("idx_obs_subject_recorded" in r["detail"] for r in plan), plan
+    for i in range(3):                                   # three NEW rows: stale again
+        store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"n{i}")}))
+    cands = store.dossier_candidates(min_new=3, min_total=5, lease=("w", 0))   # a lease that lapses at once
+    assert [(c[1], c[2]) for c in cands] == [(host, 8)]
+    # the build fails (no put_dossier). Another entity's row, and a tick that
+    # offers host again through its newest row, move the mark past every row
+    # of host ...
+    store.record_claim(login_claim().model_copy(update={"subject": other, "object": "x", "predicate": "runs_os"}))
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 0)) == [("default", host, 8)]
+    mark = _meta(store, "hwm:dossier")
+    assert _examined(store, "observations", mark) == 1                       # only the other entity's row is at the mark
+    # ... yet it is re-offered: its lapsed lease keeps it in the touched set
+    assert store.dossier_candidates(min_new=3, min_total=5, lease=("w", 60)) == [("default", host, 8)]
+    store.put_dossier("default", host, "brief 2", 8, [], worker_id="w")
+    assert store.dossier_candidates(min_new=3, min_total=5) == []
+    assert _meta(store, "hwm:dossier") is not None
+    victim = store.observations_for("default", host, limit=1)[0]
+    store.redact("default", victim.id, "spill")           # drops no brief here, still resets the mark
+    assert _meta(store, "hwm:dossier") is None
+    store.dossier_candidates(min_new=3, min_total=5)
+    assert _meta(store, "hwm:dossier") is not None
+    assert store.merge_entities("default", other, host)
+    assert _meta(store, "hwm:dossier") is None            # both briefs dropped: rebuild next tick
+    assert [c[1] for c in store.dossier_candidates(min_new=3, min_total=5)] == [host]
