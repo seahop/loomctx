@@ -478,3 +478,159 @@ def test_nightly_epss_refresh_is_bounded_and_idempotent(tmp_path, monkeypatch, c
         fh.write(_epss("2026-09-12", [("CVE-2026-1337", 0.5, 0.9)]))
     vulns.main(args + ["--epss-ledger", "none"])
     assert len(epss_rows()) == 7
+
+
+# ------------------------------------------------ a changed KEV entry (S-29) #
+
+def _kev_cache(cache, released, **changes):
+    cache.mkdir(exist_ok=True)
+    entry = {**KEV_ENTRY, "knownRansomwareCampaignUse": "Unknown", **changes}
+    (cache / "kev.json").write_text(json.dumps({"catalogVersion": released[:10].replace("-", "."),
+                                                "dateReleased": released, "vulnerabilities": [entry]}))
+
+
+def _counts(db):
+    store = SqliteStore(db)
+    try:
+        return (sum(1 for _ in store.iter_observations("netsec")),
+                sum(1 for _ in store.iter_artifacts("netsec")))
+    finally:
+        store.close()
+
+
+def _kev_rows(db, predicate):
+    store = SqliteStore(db)
+    try:
+        rows = [o for o in store.observations_for("netsec", EntityRef(type="cve", key="CVE-2026-1337"), limit=100)
+                if o.predicate == predicate and o.source == "cisa-kev"]
+        return sorted(rows, key=lambda o: o.observed_at)
+    finally:
+        store.close()
+
+
+def test_a_kev_flip_is_recorded_as_a_superseding_version(tmp_path, capsys):
+    """KEV ids are keyed on dateAdded: an Unknown -> Known flip used to be
+    deduplicated as a replay and never recorded."""
+    cache, db = tmp_path / "feeds", str(tmp_path / "k.db")
+    args = ["load", "--cache", str(cache), "--offline", "--db", db, "--sources", "kev"]
+    _kev_cache(cache, "2026-03-05T17:00:26.6474Z")
+    vulns.main(args)
+    first = _counts(db)
+    vulns.main(args)                                               # the same file again: nothing
+    out = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert _counts(db) == first and out["envelopes"]["kev_unchanged"] == 2
+
+    _kev_cache(cache, "2026-04-01T12:00:00.000Z", knownRansomwareCampaignUse="Known")
+    vulns.main(args)
+    out = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert out["envelopes"]["kev_revised"] == 1
+    assert _counts(db) == (first[0] + 1, first[1] + 1)             # the new value, and its advisory
+    old, new = _kev_rows(db, "ransomware_campaign_use")
+    assert (old.object, new.object) == ("Unknown", "Known") and new.supersedes == old.id
+    assert old.event_id == "kev:CVE-2026-1337:2026-03-02:ransomware_campaign_use"
+    assert new.event_id == old.event_id + ":20260401T120000"
+    assert new.observed_at.isoformat() == "2026-04-01T12:00:00+00:00"
+    store = SqliteStore(db)
+    try:
+        doc = store.get_artifact("netsec", new.provenance.artifact_id)
+        assert "Known ransomware campaign use: Known" in doc.text
+        assert doc.event_id == "kev:CVE-2026-1337:2026-03-02:doc:20260401T120000"
+        # the reader: Known is current, Unknown is history
+        pack = build_pack(store, AskRequest(namespace="netsec", subject=EntityRef(type="cve", key="CVE-2026-1337"),
+                                           question="ransomware campaign use?", budget=1500))
+        rows = [i.text for i in pack.items if "ransomware_campaign_use" in i.text]
+        assert any("Known" in t and "Unknown" not in t and "[superseded by" not in t for t in rows)
+        assert all("[superseded by" in t for t in rows if "Unknown" in t)
+    finally:
+        store.close()
+    vulns.main(args)                                               # the flipped file again: nothing
+    assert _counts(db) == (first[0] + 1, first[1] + 1)
+
+    # a moved due date is a new exploited_in_wild version; a flip back is recorded too
+    _kev_cache(cache, "2026-05-01T00:00:00Z", dueDate="2026-06-01")
+    vulns.main(args)
+    capsys.readouterr()
+    rows = _kev_rows(db, "exploited_in_wild")
+    assert [r.attrs["due_date"] for r in rows] == ["2026-03-23", "2026-06-01"] and rows[1].supersedes == rows[0].id
+    rows = _kev_rows(db, "ransomware_campaign_use")
+    assert [r.object for r in rows] == ["Unknown", "Known", "Unknown"] and rows[2].supersedes == rows[1].id
+    assert _counts(db) == (first[0] + 3, first[1] + 2)
+
+
+def test_a_store_loaded_before_the_fix_keeps_its_ids(tmp_path, capsys):
+    """The old connector's store (stable KEV ids, no lookup): re-running the
+    new one over the same feed adds nothing, a changed feed only what changed."""
+    cache, db = tmp_path / "feeds", str(tmp_path / "old.db")
+    _kev_cache(cache, "2026-03-05T00:00:00Z")
+    load_direct(db, vulns.to_lines(vulns.envelopes(cache, "netsec", [], {"kev"})), size=100)   # the old path
+    before = _counts(db)
+    args = ["load", "--cache", str(cache), "--offline", "--db", db, "--sources", "kev"]
+    vulns.main(args)
+    assert _counts(db) == before
+    _kev_cache(cache, "2026-04-01T00:00:00Z", knownRansomwareCampaignUse="Known")
+    vulns.main(args)
+    capsys.readouterr()
+    assert _counts(db) == (before[0] + 1, before[1] + 1)
+    rows = _kev_rows(db, "ransomware_campaign_use")
+    assert [r.object for r in rows] == ["Unknown", "Known"] and rows[1].supersedes == rows[0].id
+    # emit has no store to ask: stable ids, as before
+    vulns.main(["emit", "--cache", str(cache), "--offline", "--sources", "kev"])
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert {"kev:CVE-2026-1337:2026-03-02:ransomware_campaign_use"} == {
+        line["event_id"] for line in lines if line.get("predicate") == "ransomware_campaign_use"}
+
+
+def test_a_kev_flip_through_the_batch_api(tmp_path, monkeypatch, capsys):
+    """Over --url the stored versions are read through the observations
+    route; the new version supersedes a row of an earlier batch."""
+    import io
+    import urllib.error
+    import urllib.parse
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "api.db"))
+    from loom.api.http import app
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    cache = tmp_path / "feeds"
+    args = ["load", "--cache", str(cache), "--offline", "--url", "http://loom", "--sources", "kev"]
+    with TestClient(app) as client:
+        def fake_urlopen(req, timeout=0):
+            url = urllib.parse.urlsplit(req.full_url)
+            r = client.request(req.get_method(), url.path + ("?" + url.query if url.query else ""),
+                               content=req.data, headers=dict(req.header_items()))
+            if r.status_code >= 400:
+                raise urllib.error.HTTPError(req.full_url, r.status_code, "error", r.headers, io.BytesIO(r.content))
+            return Resp(r.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        _kev_cache(cache, "2026-03-05T00:00:00Z")
+        vulns.main(args)
+        vulns.main(args)
+        _kev_cache(cache, "2026-04-01T00:00:00Z", knownRansomwareCampaignUse="Known")
+        vulns.main(args)
+        out = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert [o["rejected"] for o in out] == [0, 0, 0]
+    assert out[1]["envelopes"]["kev_unchanged"] == 2 and out[2]["envelopes"]["kev_revised"] == 1
+    rows = _kev_rows(str(tmp_path / "api.db"), "ransomware_campaign_use")
+    assert [r.object for r in rows] == ["Unknown", "Known"] and rows[1].supersedes == rows[0].id
+
+
+def test_kev_catalog_date_reads_the_release_stamp(tmp_path):
+    path = tmp_path / "kev.json"
+    path.write_text(json.dumps({"dateReleased": "2025-09-22T17:00:26.6474Z", "vulnerabilities": []}))
+    assert vulns.kev_catalog_date(path).isoformat().startswith("2025-09-22T17:00:26")
+    path.write_text(json.dumps({"vulnerabilities": []}))
+    os.utime(path, (1_750_000_000, 1_750_000_000))
+    assert vulns.kev_catalog_date(path).timestamp() == 1_750_000_000

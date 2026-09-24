@@ -47,6 +47,11 @@ own modification stamp: re-running is idempotent, and a *changed* record
 (NVD re-scores constantly) records a NEW observation — the corpus gains
 history over time instead of being overwritten. Run it on a schedule
 (deploy/k8s/jobs/vulns-refresh.yaml) and `as_of` questions become real.
+KEV entries carry no modification stamp (their ids are keyed on
+dateAdded), so `load` looks each KEV CVE's stored rows up and records a
+changed ransomware flag, due date or required action as a new version
+that supersedes the old one (KevRevisions); unchanged values keep their
+ids, so re-running over an existing store adds only what changed.
 """
 
 from __future__ import annotations
@@ -455,6 +460,109 @@ def kev_envelopes(entry: dict, namespace: str) -> Iterator[ClaimIn | DocumentIn]
             yield claim("has_weakness", EntityRef(type="cwe", key=cwe), tag=f":{cwe}")
 
 
+# KEV claims whose content can change while their event id stays the same
+# (the id is keyed on the entry's dateAdded, which never moves): the
+# predicate -> the attrs that are part of its content. `affects` and
+# `has_weakness` key their object into the id (a new product or CWE is a
+# new id already); NVD ids embed lastModified, so every NVD change is a new
+# id too. Everything KEV states only in its advisory text (the name, the
+# description, the notes) rides with the document.
+KEV_MUTABLE = {"ransomware_campaign_use": (), "exploited_in_wild": ("due_date", "required_action")}
+
+
+def kev_catalog_date(path: Path) -> datetime:
+    """When the KEV catalog in `path` was released (its `dateReleased`),
+    else the file's modification time (set to the server's Last-Modified
+    by `fetch`). A changed KEV value is observed at this instant."""
+    stamp = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stamp = json.load(fh).get("dateReleased")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if isinstance(stamp, str) and stamp:
+        for text in (stamp, stamp[:19], stamp[:10]):
+            try:
+                return min(_utc(text), datetime.now(timezone.utc))
+            except ValueError:
+                continue
+    return min(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0),
+               datetime.now(timezone.utc))
+
+
+class KevRevisions:
+    """Record a changed KEV value as a new observation (S-29).
+
+    A KEV claim's event id is keyed on the entry's dateAdded, so when CISA
+    flips `knownRansomwareCampaignUse` (Unknown -> Known) or moves a due
+    date, the store deduplicated the new value as a replay of the old one
+    and never recorded it. This pass looks up the CVE's KEV rows in the
+    target store (one lookup per KEV entry) and, per KEV_MUTABLE claim:
+
+      * no earlier version: the claim goes as is, under its stable id — so
+        a store loaded before this pass keeps every id it has;
+      * the newest version says the same: dropped (counted `kev_unchanged`);
+      * it changed: the claim is re-keyed `<stable id>:<catalog stamp>`,
+        observed at the catalog's release, and supersedes the newest
+        version (D-050). The advisory document is re-recorded under
+        `<doc id>:<catalog stamp>` and the changed claims cite it.
+
+    `lookup(namespace, ref)` reads the store, or chain.HttpSink.lookup; a
+    lookup that returns nothing (a write-only key) degrades to the stable
+    ids, i.e. the old behavior."""
+
+    def __init__(self, lookup, released: datetime):
+        self.lookup = lookup
+        self.released = released
+
+    @staticmethod
+    def _content(row, predicate: str) -> tuple:
+        attrs = row.attrs or {}
+        return (json.dumps(row.object, sort_keys=True, default=str),
+                *(attrs.get(k) for k in KEV_MUTABLE[predicate]))
+
+    def revise(self, envs: list, stats: dict[str, int]) -> list:
+        rows = None
+        out: list = []
+        changed: list[ClaimIn] = []
+        for env in envs:
+            if not (isinstance(env, ClaimIn) and env.predicate in KEV_MUTABLE
+                    and env.source == SOURCE_KEV and env.event_id):
+                out.append(env)
+                continue
+            if rows is None:
+                rows = self.lookup(env.namespace, env.subject)
+            chain = [r for r in rows if r.predicate == env.predicate and r.event_id
+                     and (r.event_id == env.event_id or r.event_id.startswith(env.event_id + ":"))]
+            if not chain:
+                out.append(env)                      # first seen: the stable id
+                continue
+            latest = max(chain, key=lambda r: (_aware(r.observed_at), _aware(r.recorded_at)))
+            if self._content(latest, env.predicate) == self._content(env, env.predicate):
+                stats["kev_unchanged"] = stats.get("kev_unchanged", 0) + 1
+                continue
+            at = max(self.released, _aware(latest.observed_at))
+            changed.append(env.model_copy(update={
+                "event_id": f"{env.event_id}:{_stamp(at)}"[:128], "observed_at": at,
+                "supersedes": latest.id}))
+        if not changed:
+            return out
+        stats["kev_revised"] = stats.get("kev_revised", 0) + len(changed)
+        doc = next((e for e in out if isinstance(e, DocumentIn)), None)
+        if doc is not None:
+            at = max(c.observed_at for c in changed)
+            revised_doc = doc.model_copy(update={"event_id": f"{doc.event_id}:{_stamp(at)}"[:128],
+                                                 "observed_at": at})
+            cites = Provenance(artifact_event_id=revised_doc.event_id)
+            changed = [c.model_copy(update={"provenance": cites}) for c in changed]
+            out.insert(out.index(doc) + 1, revised_doc)
+        return out + changed
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 # What counts as an EPSS change worth an observation (see the module doc).
 EPSS_MIN_ABS_CHANGE = 0.001       # probability points
 EPSS_MIN_REL_CHANGE = 0.05        # ... or 5 % of the last emitted score
@@ -584,9 +692,13 @@ def iter_epss_lines(path: Path) -> Iterator[str]:
 def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
               epss: str = "known", bridge: bool = False,
               stats: dict[str, int] | None = None,
-              epss_ledger: EpssLedger | None = None) -> Iterator[ClaimIn | DocumentIn]:
+              epss_ledger: EpssLedger | None = None,
+              kev_lookup=None) -> Iterator[ClaimIn | DocumentIn]:
     """Everything the cache holds, as envelopes, KEV first (small), then NVD,
-    then EPSS for the CVEs seen, then the seed bridge."""
+    then EPSS for the CVEs seen, then the seed bridge. With `kev_lookup`
+    (namespace, ref) -> the store's observations, a changed KEV value is
+    recorded as a new, superseding version (KevRevisions); without it (NDJSON
+    `emit`) KEV claims keep their stable ids."""
     stats = stats if stats is not None else {}
     paths = cache_paths(cache, years)
     known: set[str] = set()
@@ -607,12 +719,18 @@ def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
             return []
 
     if "kev" in sources and paths["kev"].exists():
+        revisions = KevRevisions(kev_lookup, kev_catalog_date(paths["kev"])) if kev_lookup else None
+
+        def kev(entry):
+            envs = list(kev_envelopes(entry, namespace))
+            return revisions.revise(envs, stats) if revisions is not None else envs
+
         for entry in iter_kev(paths["kev"]):
             if not isinstance(entry, dict) or not entry.get("cveID"):
                 stats["kev_invalid"] = stats.get("kev_invalid", 0) + 1
                 continue
             known.add(entry["cveID"])
-            for env in guarded("kev", entry["cveID"], lambda: kev_envelopes(entry, namespace)):
+            for env in guarded("kev", entry["cveID"], lambda: kev(entry)):
                 yield count("kev", env)
     if "nvd" in sources:
         for year in years:
@@ -713,9 +831,11 @@ def main(argv: list[str] | None = None) -> None:
                   f"env:{os.environ.get('LOOM_SHARDS') or os.environ.get('LOOM_DB', '')}")
         ledger = EpssLedger(ledger_path(cache, args.namespace, target) if args.epss_ledger == "auto"
                             else Path(args.epss_ledger))
-    envs = envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts, stats,
-                     epss_ledger=ledger)
     if args.command == "emit":
+        # no store to ask: KEV claims keep their stable ids (a changed value
+        # is recorded only by `load`, which can look the old one up)
+        envs = envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts, stats,
+                         epss_ledger=ledger)
         for line in to_lines(envs):
             sys.stdout.write(line)
         if ledger is not None:
@@ -727,13 +847,31 @@ def main(argv: list[str] | None = None) -> None:
     from ..ingest import load_direct, post_batches
     register(schema(args.namespace), args.url, args.db, args.key)
     t0 = time.monotonic()
-    lines = to_lines(envs)
-    totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
-              else load_direct(args.db, lines, args.batch))
+    reader = None
+    if "kev" in sources:
+        # the KEV rows already stored, so a changed value is recorded (S-29)
+        if args.url:
+            from .chain import HttpSink
+            kev_lookup = HttpSink(args.url, args.key).lookup
+        else:
+            from ..store.factory import store_from_env, store_from_url
+            from .chain import LOOKUP_LIMIT
+            reader = store_from_url(args.db) if args.db else store_from_env()
+            kev_lookup = lambda ns, ref: reader.observations_for(ns, ref, limit=LOOKUP_LIMIT)  # noqa: E731
+    else:
+        kev_lookup = None
+    try:
+        lines = to_lines(envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts,
+                                   stats, epss_ledger=ledger, kev_lookup=kev_lookup))
+        totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
+                  else load_direct(args.db, lines, args.batch))
+    finally:
+        if reader is not None:
+            reader.close()
     if ledger is not None:
         ledger.save()              # only after the load completed: a failed run re-offers its changes
     elapsed = time.monotonic() - t0
-    total = sum(v for k, v in stats.items() if k != "epss_unchanged" and not k.endswith("_invalid"))
+    total = sum(v for k, v in stats.items() if not k.endswith(("_unchanged", "_invalid", "_revised")))
     print(json.dumps({**totals, "envelopes": stats, "seconds": round(elapsed, 1),
                       "per_second": round(total / elapsed, 1) if elapsed else None}))
 

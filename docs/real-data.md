@@ -60,6 +60,29 @@ date-keyed). The stats line counts what was held back as
 a lost ledger costs one full night, nothing more. The first night after
 upgrading emits everything once (no ledger yet).
 
+**A changed KEV entry is a new version (S-29).** KEV records carry no
+modification stamp, so their event ids are keyed on `dateAdded` and never
+move — when CISA flipped `knownRansomwareCampaignUse` from `Unknown` to
+`Known` (or moved a `dueDate` / `requiredAction`) the store deduplicated
+the new value as a replay and kept the old one. `load` now looks each KEV
+CVE's stored rows up (one read per KEV entry: the store directly, or
+`GET /v1/entities/cve/<id>/observations` over `--url`, so the key needs
+`r` on the namespace) and, for `ransomware_campaign_use` and
+`exploited_in_wild` (whose attrs carry the due date and required action):
+an unchanged value is not re-sent (`kev_unchanged`); a changed one is
+recorded as `<stable id>:<catalog stamp>`, observed at the catalog's
+`dateReleased`, superseding the previous version (D-050), and the advisory
+is re-recorded as `<doc id>:<catalog stamp>` for the new version to cite
+(`kev_revised`). A value never seen before keeps the stable id, so a
+store loaded by an older connector keeps every id it has and a re-run
+adds only the facts that changed; the same feed loaded twice adds
+nothing. `emit` has no store to ask and writes the stable ids (a change
+there is still deduplicated); a write-only key over `--url` does the same,
+with a warning. Fields KEV states only in the advisory text (the name,
+description, notes) are re-recorded only with a changed claim. NVD needs
+none of this: its ids embed `lastModified`, so every re-score is already
+a new observation.
+
 Over `--url`, a batch the engine turns away for the moment (429 from the
 rate limiter, D-056; 5xx; a dropped connection) is retried with backoff
 that honors `Retry-After`, up to `LOOM_INGEST_ATTEMPTS` (default 6) tries —

@@ -3,7 +3,12 @@
 # NVD has re-scored since yesterday records a NEW observation, so the
 # namespace accumulates real history and `as_of` questions mean something.
 #
-#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # a write key pinned to sources nvd,cisa-kev,first-epss
+#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # an rw key pinned to sources nvd,cisa-kev,first-epss
+#
+# The key needs `r` as well as `w` on the namespace: a changed KEV entry (a
+# ransomware flag flipped, a due date moved) is found by reading the CVE's
+# stored KEV rows first (S-29). A write-only key still loads, with a warning,
+# but cannot record those changes.
 #   kubectl -n loom apply -f deploy/k8s/jobs/vulns-refresh.yaml
 #   kubectl -n loom create job --from=cronjob/loom-vulns-refresh vulns-now   # run once, now
 #
