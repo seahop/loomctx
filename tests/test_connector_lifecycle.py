@@ -335,3 +335,211 @@ def test_one_malformed_record_does_not_abort_an_import(tmp_path):
     stats = {}
     envs = list(vulns.envelopes(tmp_path, "netsec", [2026], {"nvd"}, stats=stats))
     assert stats["nvd_invalid"] == 2 and stats["nvd"] == 1 and envs[0].subject.key == "CVE-2026-0002"
+
+
+# ------------------------------------------ export expresses versions (S-30) #
+
+STIX_KEYS = ("type", "id", "created", "modified", "relationship_type", "start_time", "stop_time",
+             "confidence", "revoked")
+
+
+def _count(db, predicate=None):
+    store = SqliteStore(db)
+    try:
+        return sum(1 for o in store.iter_observations("netsec") if predicate in (None, o.predicate))
+    finally:
+        store.close()
+
+
+def _export_stix(tmp_path, db, name, *extra):
+    out = tmp_path / name
+    stix.main(["export", "--namespace", "netsec", "--db", db, "--out", str(out), *extra])
+    return json.loads(out.read_text())
+
+
+def _edges(bundle, kind="relationship"):
+    return [{k: o[k] for k in STIX_KEYS if k in o} for o in bundle["objects"] if o["type"] == kind]
+
+
+def test_stix_export_writes_versions_under_one_id(tmp_path, capsys):
+    """STIX 2.1 §3.6: versions of one object share its id and `created`
+    and differ in `modified`. The default export is the newest version
+    only; --history writes each. Import -> export -> import is stable."""
+    db = str(tmp_path / "a.db")
+    for i, rel in enumerate((REL_V1, REL_V2)):
+        stix.main(["import", _bundle(tmp_path / f"v{i}.json", ACTOR, MAL, rel), "--namespace", "netsec", "--db", db])
+    newest = _export_stix(tmp_path, db, "newest.json")
+    ids = [o["id"] for o in newest["objects"]]
+    assert len(ids) == len(set(ids))                                   # one object per id
+    assert _edges(newest) == [{"type": "relationship", "id": REL_ID, "created": "2026-01-02T00:00:00.000Z",
+                               "modified": "2026-03-01T00:00:00.000Z", "relationship_type": "uses",
+                               "start_time": "2026-01-01T00:00:00.000Z", "stop_time": "2026-02-15T00:00:00.000Z",
+                               "confidence": 100}]
+    history = _export_stix(tmp_path, db, "history.json", "--history")
+    assert [(e["id"], e["created"], e["modified"], "stop_time" in e) for e in _edges(history)] == [
+        (REL_ID, "2026-01-02T00:00:00.000Z", "2026-01-02T00:00:00.000Z", False),
+        (REL_ID, "2026-01-02T00:00:00.000Z", "2026-03-01T00:00:00.000Z", True)]
+
+    # back into the store it came from: nothing new, either form
+    before = _count(db)
+    for name in ("newest.json", "history.json"):
+        stix.main(["import", str(tmp_path / name), "--namespace", "netsec", "--db", db])
+    assert _count(db) == before
+
+    # into a fresh store: the same current version (history: the same chain),
+    # and exporting that store gives the same objects again
+    for name, versions in (("newest.json", 1), ("history.json", 2)):
+        fresh = str(tmp_path / f"fresh-{name}.db")
+        stix.main(["import", str(tmp_path / name), "--namespace", "netsec", "--db", fresh])
+        store = SqliteStore(fresh)
+        try:
+            rows = _uses(store)                        # the actor keeps its Loom type (x_loom_entity_type)
+            assert len(rows) == versions and all(r.supersedes == p.id for p, r in zip(rows, rows[1:]))
+        finally:
+            store.close()
+        assert _edges(_export_stix(tmp_path, fresh, "again.json")) == _edges(newest)
+    assert _edges(_export_stix(tmp_path, str(tmp_path / "fresh-history.json.db"), "again.json", "--history")) \
+        == _edges(history)
+
+    def facts(path):
+        store = SqliteStore(path)
+        try:
+            return sorted((o.subject.type, o.subject.key, o.predicate, json.dumps(o.object, default=str),
+                           o.observed_at.isoformat(), o.source, o.event_id) for o in store.iter_observations("netsec"))
+        finally:
+            store.close()
+
+    # the whole store came across as recorded: sources, times, event ids
+    assert facts(str(tmp_path / "fresh-history.json.db")) == facts(db)
+
+    # a revocation is the object's last version, `revoked: true`
+    stix.main(["import", _bundle(tmp_path / "rev.json", ACTOR, MAL, REL_REVOKED), "--namespace", "netsec", "--db", db])
+    revoked = _export_stix(tmp_path, db, "revoked.json")
+    (edge,) = _edges(revoked)
+    assert edge["id"] == REL_ID and edge["revoked"] is True and edge["modified"] == "2026-04-01T00:00:00.000Z"
+    before = _count(db)
+    stix.main(["import", str(tmp_path / "revoked.json"), "--namespace", "netsec", "--db", db])
+    capsys.readouterr()
+    assert _count(db) == before
+
+
+def test_stix_export_of_a_loom_native_chain():
+    """A recorded supersession (D-050) with no STIX origin: the versions
+    share an id derived from the first one; an edge corrected into
+    something that is not a version of it ends revoked."""
+    import uuid
+    from loom.contracts import Observation
+    t = [datetime(2026, 9, d, tzinfo=timezone.utc) for d in (1, 2, 3, 4)]
+    host, ip = EntityRef(type="host", key="web-01"), EntityRef(type="ip", key="10.0.4.7")
+
+    def obs(i, pred, obj, at, **kw):
+        return Observation(id=f"o{i}", namespace="netsec", subject=host, predicate=pred, object=obj,
+                           observed_at=at, recorded_at=at, source="inventory", confidence=1.0, **kw)
+
+    rows = [obs(1, "has_ip", ip, t[0]), obs(2, "has_ip", ip, t[1], supersedes="o1", valid_to=t[1]),
+            obs(3, "owned_by", EntityRef(type="user", key="jdoe"), t[0]),
+            obs(4, "owner_note", "jdoe left; no owner", t[2], supersedes="o3")]
+    bundle = stix.observations_to_bundle(rows, "netsec")
+    rels = {r["relationship_type"]: r for r in bundle["objects"] if r["type"] == "relationship"}
+    has_ip = rels["has-ip"]
+    assert has_ip["id"] == f"relationship--{uuid.uuid5(stix.LOOM_UUID_NS, 'o1')}"
+    assert has_ip["x_loom_observation_id"] == "o2" and has_ip["created"] < has_ip["modified"]
+    assert has_ip["stop_time"] == stix.stix_timestamp(t[1])
+    owned = rels["owned-by"]
+    assert owned["revoked"] is True and owned["x_loom_superseded_by"] == "o4"
+    assert owned["modified"] == stix.stix_timestamp(t[2])
+    history = stix.observations_to_bundle(rows, "netsec", history=True)
+    versions = [(r["relationship_type"], r["modified"], r.get("revoked", False))
+                for r in history["objects"] if r["type"] == "relationship"]
+    assert versions == [("has-ip", stix.stix_timestamp(t[0]), False), ("has-ip", stix.stix_timestamp(t[1]), False),
+                        ("owned-by", stix.stix_timestamp(t[0]), False), ("owned-by", stix.stix_timestamp(t[2]), True)]
+
+
+def _finding_state(findings):
+    return [(f["finding_info"]["uid"], f.get("device", {}).get("hostname"), f["activity_id"], f["status_id"],
+             f["time"], f["finding_info"].get("first_seen_time"), f["finding_info"].get("last_seen_time"))
+            for f in findings if "device" in f]
+
+
+def _export_ocsf(tmp_path, db, *extra):
+    out = tmp_path / "findings.ndjson"
+    ocsf.main(["export", "--namespace", "netsec", "--db", db, "--out", str(out), *extra])
+    return [json.loads(line) for line in out.read_text().splitlines()]
+
+
+def test_ocsf_export_writes_one_finding_per_chain(tmp_path, capsys):
+    """A finding's versions share finding_info.uid; the default export is
+    its newest state (resolved), not one open finding per version."""
+    events = tmp_path / "scan.ndjson"
+    events.write_text("".join(json.dumps(e) + "\n" for e in (OPEN, RESCAN, RESOLVED)))
+    db = str(tmp_path / "o.db")
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", db])
+    from loom.contracts import ClaimIn
+    from loom.ingest import load_direct
+    nvd = ClaimIn(namespace="netsec", event_id="nvd:CVE-2014-0160:cvss", subject=EntityRef(type="cve", key="CVE-2014-0160"),
+                  predicate="cvss_score", object=7.5, source="nvd:nvd@nist.gov", attrs={"version": "3.1"},
+                  observed_at=datetime(2025, 9, 2, tzinfo=timezone.utc))
+    load_direct(db, [nvd.model_dump_json() + "\n"], 10)
+    newest = _export_ocsf(tmp_path, db)
+    assert _finding_state(newest) == [("fnd-1001", "web-01", 3, 4, T0 + 2 * DAY, T0 - 3 * DAY, T0 + 2 * DAY)]
+    assert newest[0]["type_uid"] == 200203
+    history = _export_ocsf(tmp_path, db, "--history")
+    assert [(uid, act, status) for uid, _, act, status, *_ in _finding_state(history)] == [
+        ("fnd-1001", 1, 1), ("fnd-1001", 2, 2), ("fnd-1001", 3, 4)]
+
+    # back into the same store: no new finding versions, still closed
+    (tmp_path / "history.ndjson").write_text("".join(json.dumps(f) + "\n" for f in history))
+    before = _count(db)
+    ocsf.main(["import", str(tmp_path / "history.ndjson"), "--namespace", "netsec", "--db", db])
+    store = SqliteStore(db)
+    try:
+        assert _count(db) == before           # the CVE facts it restates are replays too, not "loom" copies
+        _check_closed_chain(_exposure(store))
+    finally:
+        store.close()
+    # into a fresh store: the same chain, and the same findings out again
+    fresh = str(tmp_path / "fresh.db")
+    ocsf.main(["import", str(tmp_path / "history.ndjson"), "--namespace", "netsec", "--db", fresh])
+    capsys.readouterr()
+    store = SqliteStore(fresh)
+    try:
+        _check_closed_chain(_exposure(store))
+        (score,) = [o for o in store.observations_for("netsec", EntityRef(type="cve", key="CVE-2014-0160"))
+                    if o.predicate == "cvss_score"]
+        assert (score.source, score.event_id, score.object, score.attrs) == (nvd.source, nvd.event_id, 7.5, nvd.attrs)
+        assert {o.source for o in _exposure(store)} == {"acme_scanner"}
+    finally:
+        store.close()
+    assert _finding_state(_export_ocsf(tmp_path, fresh, "--history")) == _finding_state(history)
+    assert _finding_state(_export_ocsf(tmp_path, fresh)) == _finding_state(newest)
+
+
+def test_ocsf_export_of_a_loom_native_chain():
+    """Recorded supersessions with no OCSF origin: a correction that moves
+    the finding to another host is its next version; one that names
+    another CVE closes the old finding as Superseded."""
+    from loom.contracts import Observation
+    t = [datetime(2026, 9, d, tzinfo=timezone.utc) for d in (1, 2, 3)]
+    heartbleed, other = EntityRef(type="cve", key="CVE-2014-0160"), EntityRef(type="cve", key="CVE-2026-1337")
+
+    def obs(i, host, at, cve=heartbleed, **kw):
+        return Observation(id=f"o{i}", namespace="netsec", subject=EntityRef(type="host", key=host),
+                           predicate="affected_by", object=cve, observed_at=at, recorded_at=at,
+                           source="inventory", confidence=1.0, **kw)
+
+    rows = [obs(1, "web-01", t[0]), obs(2, "web-01", t[1], supersedes="o1", valid_to=t[1]),     # resolved
+            obs(3, "web-02", t[0]), obs(4, "web-03", t[2], supersedes="o3"),                    # wrong host
+            obs(5, "web-04", t[0]), obs(6, "web-04", t[2], cve=other, supersedes="o5")]         # wrong CVE
+    findings = ocsf.observations_to_findings(rows, "netsec", now=t[2])
+    state = {(f["finding_info"]["uid"], f["device"]["hostname"]): f for f in findings}
+    assert set(state) == {("o1", "web-01"), ("o3", "web-03"), ("o5", "web-04"), ("o6", "web-04")}
+    assert state[("o1", "web-01")]["status_id"] == 4 and state[("o1", "web-01")]["activity_id"] == 3
+    assert state[("o1", "web-01")]["unmapped"]["loom_observation_ids"][0] == "o2"
+    assert state[("o3", "web-03")]["status_id"] == 1 and state[("o3", "web-03")]["activity_id"] == 2
+    gone = state[("o5", "web-04")]
+    assert (gone["status_id"], gone["status"], gone["activity_id"]) == (99, "Superseded", 3)
+    assert gone["unmapped"]["loom_superseded_by"] == "o6"
+    assert state[("o6", "web-04")]["vulnerabilities"][0]["cve"]["uid"] == "CVE-2026-1337"
+    history = ocsf.observations_to_findings(rows, "netsec", now=t[2], history=True)
+    assert [(f["finding_info"]["uid"], f["device"]["hostname"], f["status_id"]) for f in history
+            if f["finding_info"]["uid"] == "o3"] == [("o3", "web-02", 1), ("o3", "web-03", 1)]

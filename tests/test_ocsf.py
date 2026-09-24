@@ -175,7 +175,12 @@ def test_round_trip_through_a_store(tmp_path):
     back = _by_pred(ocsf.events_to_envelopes(findings, "netsec"))
     assert {(c.subject.key, c.object.key) for c in back["affected_by"]} == {("web-01", "CVE-2014-0160"), ("db-01", "CVE-2026-1337")}
     assert {c.object for c in back["cvss_score"]} == {7.5, 5.0}
-    assert back["affected_by"][0].source == "loom"
+    # ... as the observations it restates: their own sources and event ids,
+    # not re-asserted under "loom" (S-30: importing it back is a replay)
+    assert {c.source for c in back["affected_by"]} == {"acme_scanner"}
+    assert {c.source for c in back["cvss_score"]} == {o.source for o in observations if o.predicate == "cvss_score"}
+    assert {c.event_id for c in back["affected_by"]} <= {o.event_id for o in observations}
+    assert {c.event_id for c in back["exploited_in_wild"]} == {"kev:CVE-2014-0160"}
 
 
 def test_cve_facts_without_a_host_export_as_findings():

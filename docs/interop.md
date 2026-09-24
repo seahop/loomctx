@@ -19,13 +19,13 @@ batches to an engine or gateway, `emit` writes NDJSON envelopes for
 # STIX 2.1
 python -m loom.connectors.stix import bundle.json --namespace netsec                  # LOOM_DB store
 python -m loom.connectors.stix import bundle.json --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.stix export --namespace netsec --out bundle.json            # or --db /data/loom.db
+python -m loom.connectors.stix export --namespace netsec --out bundle.json            # or --db /data/loom.db; --history: every version
 python -m loom.connectors.stix emit bundle.json --namespace netsec > envelopes.jsonl
 python -m loom.connectors.stix schema --namespace netsec [--mapping map.json]
 
 # OCSF vulnerability_finding (class_uid 2002)
 python -m loom.connectors.ocsf import findings.ndjson --namespace netsec              # NDJSON or a JSON array
-python -m loom.connectors.ocsf export --namespace netsec --out findings.ndjson
+python -m loom.connectors.ocsf export --namespace netsec --out findings.ndjson       # --history: every version
 python -m loom.connectors.ocsf emit findings.ndjson --namespace netsec
 python -m loom.connectors.ocsf schema --namespace netsec
 ```
@@ -57,7 +57,10 @@ table; anything not listed keeps its name with hyphens as underscores
 
 A reference to an object that is not in the bundle keeps the edge, keyed
 by the STIX id (`ip:ipv4-addr--…`); the resolution worker (D-023) can
-merge it when the object arrives later.
+merge it when the object arrives later. An object that carries
+`x_loom_entity_type` and `x_loom_entity_key` (Loom's own export) lands on
+that entity — `x-loom-host` back on `host:<key>`, an `identity` exported
+from `organization` back on `organization`.
 
 ### Relationships and sightings → relational claims
 
@@ -76,7 +79,10 @@ merge it when the object arrives later.
 | `sighting.first_seen` / `last_seen` / `count` | `valid_from` / `valid_to` / `attrs.count` |
 
 Every claim carries `attrs.stix_id` and `attrs.stix_type`; the event id is
-`stix:<id>:<modified>:<predicate>[:tag]`.
+`stix:<id>:<modified>:<predicate>[:tag]` (`unversioned` in place of the
+stamp for an object with neither `modified` nor `created` — an SCO: STIX
+does not version them, and an id that embedded the import's clock
+recorded the SCO's facts again on every re-import).
 
 **Versions chain (import).** A revised relationship or sighting (a new
 `modified`: a `stop_time` appeared, the confidence changed) lands as a new
@@ -118,7 +124,8 @@ excerpt for those entities.
   `observed-data` (its SCOs are imported when they are bundle objects).
 - `x_` custom properties and non-CVE `external_references`: STIX-specific
   metadata, not facts about the entity. Add them to `mapping.properties`
-  if a namespace wants them.
+  if a namespace wants them. (Loom's own `x_loom_*` properties are read
+  back, see "Round trip" under Loom → STIX.)
 - `object_marking_refs` / `granular_markings`: Loom scopes data by
   namespace and grant (D-013a), not per-object marking. Import TLP:RED
   into its own namespace.
@@ -163,10 +170,49 @@ valid 2.1 bundle:
 | every relationship / sighting | `x_loom_observation_id`, `x_loom_predicate`, `x_loom_source` — the citation |
 | each `source` | one `identity` (`identity_class: unknown`, `x_loom_source`) |
 
-Ids are deterministic (UUIDv5 over namespace, type and key; over the
-observation id for relationships), so two exports of the same store diff
-cleanly and a consumer can upsert. Redacted observations (D-016) are
+Ids are deterministic (UUIDv5 over namespace, type and key; for
+relationships the imported STIX id, else UUIDv5 over the first
+observation of the edge's version chain), so two exports of the same store
+diff cleanly and a consumer can upsert. Redacted observations (D-016) are
 skipped.
+
+**Versions are STIX versions (S-30).** STIX 2.1 (§3.6) versions an object
+in place: every version keeps the object's `id` and `created` and carries
+a later `modified`; a consumer keeps the newest. Loom's versions of one
+edge — the versions the importer chained, and any recorded supersession
+(D-050, `supersedes`) between relational observations of the same kind —
+are written exactly that way:
+
+| Loom | STIX |
+| --- | --- |
+| the versions of one relationship / sighting | one `id` (the imported `stix_id`, else derived from the chain's first observation), `created` = the first version's (its imported `created` when it has one), `modified` = each version's `observed_at` |
+| `export` (default) | the **newest** version of each object only — a superseded version never appears as a second current edge |
+| `export --history` | every version, oldest first, all under the same `id` (bundles may carry several versions of one object; the spec's consumers keep the newest) |
+| a revoked version (imported `revoked: true`, `attrs.revoked`) | `revoked: true` |
+| an edge whose newest version was superseded by something that is not a version of it (a correction into a scalar, a relationship turned sighting) | a final `revoked: true` version at the superseding row's time, `x_loom_superseded_by` |
+| each version | `x_loom_observation_id` (the citation), `x_loom_event_id` (the observation's own event id; `x_loom_event_ids[]`, aligned with `where_sighted_refs`, on a sighting), `x_loom_supersedes` |
+| a superseded scalar | still listed in `x_loom_observations` (with `superseded_by`), never the object's property |
+
+A later version from a different `source` keeps the object's `id` with
+its own `created_by_ref`; STIX expects only the creator to version an
+object, Loom's supersession is recorded, not ownership-based — the
+deviation is deliberate (one edge, one id).
+
+**Round trip.** An export restates observations; importing it records
+them as they were, not as new assertions: an entity object that carries
+`x_loom_namespace` contributes the rows in its `x_loom_observations`
+(their predicate, value, time, source, confidence and `event_id`; a
+superseded one is skipped) instead of claims derived from its STIX
+properties, an edge version reuses its `x_loom_event_id`, and the
+per-source `identity` objects (`x_loom_source`) are not imported as
+entities. So import → export → import is stable: re-importing an export
+(either form) into the store it came from records nothing; importing it
+into an empty store reproduces the current versions (all of them with
+`--history`, chained by supersession) with their sources, times and
+event ids, and exporting that store gives the same objects again. A
+revocation exported without its earlier versions has nothing to close in
+an empty store and is dropped, like any revocation of an edge never
+imported.
 
 ## OCSF `vulnerability_finding` (class_uid 2002) → Loom
 
@@ -209,12 +255,12 @@ no CVE uid produce nothing (Loom's vulnerability entity is the CVE).
 ## Loom → OCSF
 
 `observations_to_findings` / `export` writes one `vulnerability_finding`
-per `(host, cve)` `affected_by` edge (or any host→cve relation), plus one
-per CVE that has facts but no host:
+per finding — the versions of a host→cve edge (`affected_by` or any
+host→cve relation) — plus one per CVE that has facts but no host:
 
 | Loom | OCSF |
 | --- | --- |
-| the edge | `resources[{name, type: host}]`, `device.hostname`, `finding_info.uid` = the observation id, `first_seen_time` / `last_seen_time` from the validity window, `status_id` 4 (Resolved) when the window is closed, else the recorded status (Suppressed and In Progress round-trip) |
+| the edge | `resources[{name, type: host}]`, `device.hostname`, `finding_info.uid` = the imported `finding_uid` (else the first observation of the edge's version chain), `first_seen_time` / `last_seen_time` from the validity window, `status_id` 4 (Resolved) when the window is closed, else the recorded status (Suppressed and In Progress round-trip) |
 | `cvss_score` (newest per source) with `attrs.version` / `vector` | `vulnerabilities[0].cve.cvss[]` |
 | `has_severity` (newest) | `severity_id` / `severity`, and `cvss[].severity` |
 | `epss_score` / `epss_percentile` | `cve.epss` |
@@ -222,9 +268,35 @@ per CVE that has facts but no host:
 | `exploited_in_wild` (KEV) or `exploit_available`, `fix_available` | `is_exploit_available`, `is_fix_available` |
 | `affects` → product | `affected_packages[]` |
 | every contributing observation | `unmapped.loom_observation_ids[]` (the citation), `unmapped.loom_sources[]`, `unmapped.loom_namespace` |
+| the CVE facts it restates | `unmapped.loom_observations[]`: each as recorded (`subject`, `predicate`, `value`, `observed_at`, `source`, `confidence`, validity, `attrs`, `event_id`) |
+| the edge's own source and event id | `unmapped.loom_source`, `unmapped.loom_event_id` |
 
-Constants: `class_uid 2002`, `category_uid 2`, `activity_id 1`,
-`type_uid 200201`, `metadata.version 1.3.0`, `metadata.product.name Loom`.
+The CVE block is built from current facts only: a superseded score,
+severity or package (D-050) is history and is not exported.
+
+**Versions are one finding (S-30).** OCSF identifies a finding by
+`finding_info.uid` and reports its lifecycle as successive events for
+that uid. The versions of one finding — sharing an imported `finding_uid`,
+or chained by `supersedes` (a supersession that moves the finding to
+another host is a version; one that names another CVE is not) — share
+the uid:
+
+| Loom | OCSF |
+| --- | --- |
+| `export` (default) | the **newest** version only, with its state and status — a resolved finding is one Resolved record, not an open one per earlier scan |
+| `export --history` | every version, oldest first: `activity_id` 1 (Create) for the first, 2 (Update) after, 3 (Close) for a version that closed the exposure |
+| a finding whose newest version was superseded by something that is not a version of it | a final Close with `status_id` 99 (Other), `status` "Superseded", `unmapped.loom_superseded_by` |
+
+`type_uid` follows the activity (`200201` / `200202` / `200203`).
+Importing a record Loom exported (it carries `unmapped.loom_observations`)
+records the edge under `unmapped.loom_event_id` / `loom_source` and the
+restated CVE facts as they were, instead of re-asserting the CVE block
+under the source `loom`: re-importing an export into the store it came
+from records nothing, and importing it into an empty store gives the
+same findings (and CVE facts, with their sources) on the next export.
+
+Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
+`metadata.product.name Loom`.
 
 ## Registering the names in the schema registry
 

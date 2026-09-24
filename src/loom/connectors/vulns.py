@@ -74,6 +74,7 @@ from typing import Iterable, Iterator
 
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef,
                          PredicateDef, Provenance, SchemaRegistration)
+from .chain import aware as _aware
 
 FEEDS = {
     "kev": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
@@ -557,10 +558,6 @@ class KevRevisions:
             changed = [c.model_copy(update={"provenance": cites}) for c in changed]
             out.insert(out.index(doc) + 1, revised_doc)
         return out + changed
-
-
-def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # What counts as an EPSS change worth an observation (see the module doc).

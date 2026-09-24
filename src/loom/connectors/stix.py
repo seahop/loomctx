@@ -47,7 +47,13 @@ time, confidence and `x_loom_observation_id` for citation, an `identity`
 per source. Scalar observations sit on their entity's object: the newest
 of each mapped predicate as the STIX property, all of them in
 `x_loom_observations`. Ids are deterministic (UUIDv5), so re-exports
-diff cleanly.
+diff cleanly. Version chains are STIX versions (§3.6): the versions of
+one relationship / sighting share its id (the imported STIX id, else one
+derived from the chain's first observation) and differ in `modified`;
+only the newest is written unless `export --history`, and a revoked
+version carries `revoked: true`. An exported entity object names its Loom
+entity (`x_loom_entity_type` / `x_loom_entity_key`), which `import`
+honors, so import -> export -> import lands on the same entities.
 
 A `mapping` dict (`--mapping map.json`) overrides the default tables:
 {"entity_types": {"identity": "org"}, "predicates": {"targets": "attacks"},
@@ -62,11 +68,12 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef, Observation,
                          PredicateDef, Provenance, SchemaRegistration)
+from .chain import aware, supersession, version_key
 
 SOURCE_DEFAULT = "stix"
 SPEC_VERSION = "2.1"
@@ -236,11 +243,19 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
         obj = index.get(stix_id)
         if obj is None:                      # dangling reference: keep the edge, keyed by the id
             return EntityRef(type=m.entity_type(stix_id.split("--", 1)[0]), key=stix_id)
+        loom_type, loom_key = obj.get("x_loom_entity_type"), obj.get("x_loom_entity_key")
+        if isinstance(loom_type, str) and loom_type and isinstance(loom_key, str) and loom_key:
+            return EntityRef(type=loom_type, key=loom_key)     # Loom's own export: back to the same entity
         return EntityRef(type=m.entity_type(obj["type"], obj), key=entity_key(obj))
 
     def when(obj: dict) -> tuple[datetime, str]:
-        observed = _utc(obj.get("modified")) or _utc(obj.get("created")) or now
-        return observed, _stamp(observed)
+        stamped = _utc(obj.get("modified")) or _utc(obj.get("created"))
+        if stamped is None:
+            # an SCO has no created/modified (STIX does not version them): it
+            # is observed now, but its event ids must not embed the clock, or
+            # every re-import would record it again
+            return now, "unversioned"
+        return stamped, _stamp(stamped)
 
     def source_of(obj: dict) -> str:
         return identities.get(obj.get("created_by_ref", ""), source)
@@ -299,8 +314,8 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
         mark = len(claims)
         try:
             stype = obj["type"]
-            if stype in SKIPPED_TYPES:
-                count("skipped")
+            if stype in SKIPPED_TYPES or (stype == "identity" and "x_loom_source" in obj):
+                count("skipped")        # (an identity Loom exported names a source, not an entity)
                 continue
             revoked = bool(obj.get("revoked"))
             if revoked and not (include_revoked and stype in ("relationship", "sighting")):
@@ -313,9 +328,11 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
             closing = {"revoked": True} if revoked else {}
 
             def claim(subject: EntityRef, pred: str, obj_value, tag: str = "", *,
-                      o=obj, observed=observed, stamp=stamp, **kw) -> ClaimIn:
+                      o=obj, observed=observed, stamp=stamp, event_id: Any = None, **kw) -> ClaimIn:
                 prov = Provenance(artifact_event_id=cites[o["id"]]) if o["id"] in cites else None
-                return ClaimIn(namespace=namespace, event_id=f"stix:{o['id']}:{stamp}:{pred}{tag}"[:128],
+                if not (isinstance(event_id, str) and event_id):
+                    event_id = f"stix:{o['id']}:{stamp}:{pred}{tag}"
+                return ClaimIn(namespace=namespace, event_id=event_id[:128],
                                subject=subject, predicate=pred, object=obj_value, observed_at=observed,
                                source=source_of(o), confidence=confidence(o), provenance=prov,
                                attrs={**base_attrs(o), **kw.pop("attrs", {})}, **kw)
@@ -327,9 +344,12 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
                 attrs = dict(closing)
                 if obj.get("description"):
                     attrs["description"] = obj["description"]
+                # Loom's own export names the observation it restates: the
+                # same event id, so importing it back is a replay
                 claims.append(claim(ref(obj["source_ref"]), m.predicate(obj["relationship_type"]),
                                     ref(obj["target_ref"]), valid_from=_utc(obj.get("start_time")),
-                                    valid_to=observed if revoked else _utc(obj.get("stop_time")), attrs=attrs))
+                                    valid_to=observed if revoked else _utc(obj.get("stop_time")), attrs=attrs,
+                                    event_id=obj.get("x_loom_event_id")))
                 count("revoked_edge" if revoked else "relationship")
                 continue
             if stype == "sighting":
@@ -343,8 +363,11 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
                 window = {"valid_from": _utc(obj.get("first_seen")),
                           "valid_to": observed if revoked else _utc(obj.get("last_seen"))}
                 wheres = obj.get("where_sighted_refs") or []
-                for where in wheres:
-                    claims.append(claim(subject, m.sighting, ref(where), f":{where}", attrs=attrs, **window))
+                loom_events = obj.get("x_loom_event_ids")
+                loom_events = loom_events if isinstance(loom_events, list) else [obj.get("x_loom_event_id")]
+                for i, where in enumerate(wheres):
+                    claims.append(claim(subject, m.sighting, ref(where), f":{where}", attrs=attrs,
+                                        event_id=loom_events[i] if i < len(loom_events) else None, **window))
                 if not wheres:
                     claims.append(claim(subject, SIGHTED_COUNT, int(obj.get("count") or 1), attrs=attrs, **window))
                 count("revoked_edge" if revoked else "sighting")
@@ -353,6 +376,24 @@ def bundle_to_envelopes(bundle: dict, namespace: str, mapping: dict | Mapping | 
             # an SDO or SCO: its properties become scalar claims on its entity
             subject = ref(obj["id"])
             emitted = 0
+            if isinstance(obj.get("x_loom_namespace"), str):
+                # an object Loom exported: its properties restate the
+                # observations listed in x_loom_observations — import those,
+                # as recorded (source, time, event id), not the restatement
+                for rec in obj.get("x_loom_observations") or []:
+                    if not isinstance(rec, dict) or rec.get("superseded_by") or not rec.get("predicate") \
+                            or not isinstance(rec.get("value"), (str, int, float, bool)):
+                        continue
+                    claims.append(ClaimIn(
+                        namespace=namespace, event_id=str(rec.get("event_id") or f"loom:{rec.get('id')}")[:128],
+                        subject=subject, predicate=str(rec["predicate"]), object=rec["value"],
+                        observed_at=_utc(rec.get("observed_at")) or observed,
+                        valid_from=_utc(rec.get("valid_from")), valid_to=_utc(rec.get("valid_to")),
+                        source=str(rec.get("source") or source_of(obj)),
+                        confidence=float(rec.get("confidence", 1.0)), attrs=base_attrs(obj)))
+                    emitted += 1
+                count("object" if emitted else "empty_object")
+                continue
             for prop, pred in m.properties.items():
                 value = obj.get(prop)
                 if value is None:
@@ -401,12 +442,25 @@ def stix_id_for(namespace: str, ref: EntityRef, m: Mapping) -> tuple[str, str]:
 
 
 def observations_to_bundle(observations: Iterable[Observation], namespace: str,
-                           mapping: dict | Mapping | None = None) -> dict:
-    """A STIX 2.1 bundle of everything in `observations` (all one namespace)."""
+                           mapping: dict | Mapping | None = None, history: bool = False) -> dict:
+    """A STIX 2.1 bundle of everything in `observations` (all one namespace).
+
+    Version chains — the versions the importer recorded, and any recorded
+    supersession (D-050) — are written the STIX way (2.1 §3.6): every
+    version of one relationship or sighting shares the object's `id` (the
+    imported object's own id when it came from STIX), keeps the first
+    version's `created` and carries its own `modified`. By default only the
+    newest version of each object is written, so a superseded version never
+    reads as a second current edge; `history=True` writes every version,
+    oldest first. A revoked version is `revoked: true`; an edge whose newest
+    version was superseded by something that is not a version of it (a
+    correction into a scalar) ends in a `revoked: true` version too."""
     m = mapping if isinstance(mapping, Mapping) else Mapping(mapping)
+    rows = [o for o in observations if not o.attrs.get("redacted")]
+    by_id = {o.id: o for o in rows}
+    superseded_by = supersession(rows)
     entities: dict[str, dict] = {}            # stix id -> object
     identities: dict[str, dict] = {}          # source -> identity object
-    relations: list[dict] = []
 
     def identity_for(source: str) -> str:
         ident = identities.get(source)
@@ -451,40 +505,92 @@ def observations_to_bundle(observations: Iterable[Observation], namespace: str,
             touch(obj, at)
         return obj
 
+    def edge_type(o: Observation) -> str | None:
+        if not isinstance(o.object, EntityRef):
+            return None
+        return "sighting" if o.predicate == m.sighting else "relationship"
+
+    edge_ids: dict[str, str] = {}
+
+    def edge_id(o: Observation) -> str:
+        """The id every version of o's relationship / sighting shares: the
+        STIX id it was imported under, else one derived from the first
+        version of its supersession chain."""
+        if o.id in edge_ids:
+            return edge_ids[o.id]
+        kind = edge_type(o)
+        root, seen = o, {o.id}
+        while root.supersedes in by_id and root.supersedes not in seen:
+            prev = by_id[root.supersedes]
+            if edge_type(prev) != kind:
+                break
+            seen.add(prev.id)
+            root = prev
+        sid = f"{kind}--{uuid.uuid5(LOOM_UUID_NS, root.id)}"
+        for row in (root, o):
+            imported = (row.attrs or {}).get("stix_id")
+            if isinstance(imported, str) and ID_RE.match(imported) and imported.startswith(f"{kind}--"):
+                sid = imported
+                break
+        edge_ids[o.id] = sid
+        return sid
+
+    def edge_object(sid: str, version: list[Observation], created: str, modified: str) -> dict:
+        o = version[-1]
+        subject = entity(o.subject, o.observed_at)
+        rel: dict[str, Any] = {
+            "type": edge_type(o), "spec_version": SPEC_VERSION, "id": sid, "created": created,
+            "modified": modified, "created_by_ref": identity_for(o.source),
+            "confidence": int(round(o.confidence * 100)), "x_loom_observation_id": o.id,
+            "x_loom_predicate": o.predicate, "x_loom_source": o.source}
+        if rel["type"] == "sighting":
+            targets: list[str] = []
+            events: list[str | None] = []
+            for r in version:
+                target = entity(r.object, r.observed_at)["id"]
+                if target not in targets:
+                    targets.append(target)
+                    events.append(r.event_id)
+            if any(events):
+                rel["x_loom_event_ids"] = events
+            rel.update({"sighting_of_ref": subject["id"], "where_sighted_refs": targets,
+                        "count": max(int(r.attrs.get("count", 1) or 1) for r in version)})
+            firsts = [r.valid_from for r in version if r.valid_from]
+            lasts = [r.valid_to for r in version if r.valid_to]
+            if firsts:
+                rel["first_seen"] = stix_timestamp(min(firsts, key=aware))
+            if lasts:
+                rel["last_seen"] = stix_timestamp(max(lasts, key=aware))
+            if len(version) > 1:
+                rel["x_loom_observation_ids"] = [r.id for r in version]
+        else:
+            rel.update({"relationship_type": m.relationship_type(o.predicate),
+                        "source_ref": subject["id"], "target_ref": entity(o.object, o.observed_at)["id"]})
+            if o.valid_from:
+                rel["start_time"] = stix_timestamp(o.valid_from)
+            if o.valid_to:
+                rel["stop_time"] = stix_timestamp(o.valid_to)
+            if o.attrs.get("description"):
+                rel["description"] = str(o.attrs["description"])
+        if rel["type"] == "relationship" and o.event_id:
+            rel["x_loom_event_id"] = o.event_id
+        if o.supersedes:
+            rel["x_loom_supersedes"] = o.supersedes
+        if any(r.attrs.get("revoked") for r in version):
+            rel["revoked"] = True
+        return rel
+
     newest_scalar: dict[tuple[str, str], datetime] = {}
-    for obs in observations:
-        if obs.attrs.get("redacted"):
-            continue
-        created_by = identity_for(obs.source)
+    edges: dict[str, list[Observation]] = {}
+    for obs in rows:
+        identity_for(obs.source)
         touch(identities[obs.source], obs.observed_at)
         subject = entity(obs.subject, obs.observed_at)
-        citation = {"x_loom_observation_id": obs.id, "x_loom_predicate": obs.predicate,
-                    "x_loom_source": obs.source}
         if isinstance(obs.object, EntityRef):
-            target = entity(obs.object, obs.observed_at)
-            common = {"spec_version": SPEC_VERSION, "created": stix_timestamp(obs.observed_at),
-                      "modified": stix_timestamp(obs.observed_at), "created_by_ref": created_by,
-                      "confidence": int(round(obs.confidence * 100)), **citation}
-            if obs.predicate == m.sighting:
-                rel = {"type": "sighting", "id": f"sighting--{uuid.uuid5(LOOM_UUID_NS, obs.id)}", **common,
-                       "sighting_of_ref": subject["id"], "where_sighted_refs": [target["id"]],
-                       "count": int(obs.attrs.get("count", 1) or 1)}
-                if obs.valid_from:
-                    rel["first_seen"] = stix_timestamp(obs.valid_from)
-                if obs.valid_to:
-                    rel["last_seen"] = stix_timestamp(obs.valid_to)
-            else:
-                rel = {"type": "relationship", "id": f"relationship--{uuid.uuid5(LOOM_UUID_NS, obs.id)}",
-                       **common, "relationship_type": m.relationship_type(obs.predicate),
-                       "source_ref": subject["id"], "target_ref": target["id"]}
-                if obs.valid_from:
-                    rel["start_time"] = stix_timestamp(obs.valid_from)
-                if obs.valid_to:
-                    rel["stop_time"] = stix_timestamp(obs.valid_to)
-                if obs.attrs.get("description"):
-                    rel["description"] = str(obs.attrs["description"])
-            relations.append(rel)
+            entity(obs.object, obs.observed_at)
+            edges.setdefault(edge_id(obs), []).append(obs)
             continue
+        later = superseded_by.get(obs.id)
         record = {"id": obs.id, "predicate": obs.predicate, "value": obs.object,
                   "observed_at": stix_timestamp(obs.observed_at), "source": obs.source,
                   "confidence": obs.confidence}
@@ -492,9 +598,13 @@ def observations_to_bundle(observations: Iterable[Observation], namespace: str,
             record["valid_from"] = stix_timestamp(obs.valid_from)
         if obs.valid_to:
             record["valid_to"] = stix_timestamp(obs.valid_to)
+        if obs.event_id:
+            record["event_id"] = obs.event_id
+        if later is not None:
+            record["superseded_by"] = later.id
         subject.setdefault("x_loom_observations", []).append(record)
         prop = m.property(obs.predicate)
-        if prop is None or prop == "name":
+        if prop is None or prop == "name" or later is not None:     # a superseded value is history
             continue
         key = (subject["id"], obs.predicate)
         list_valued = prop in ("aliases", "labels") or prop.endswith("_types") or prop in ("goals", "sectors", "roles")
@@ -517,6 +627,40 @@ def observations_to_bundle(observations: Iterable[Observation], namespace: str,
                     subject["valid_from"] = stix_timestamp(obs.valid_from)
                 if obs.valid_to:
                     subject["valid_until"] = stix_timestamp(obs.valid_to)
+
+    relations: list[dict] = []
+    for sid, group in edges.items():
+        versions: dict[str, list[Observation]] = {}
+        for o in sorted(group, key=version_key):
+            versions.setdefault(stix_timestamp(o.observed_at), []).append(o)
+        stamps = sorted(versions)
+        created = stamps[0]
+        try:
+            imported = _utc(versions[stamps[0]][0].attrs.get("created"))
+            if imported is not None:
+                created = min(stix_timestamp(imported), stamps[0])
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        def replaced_outside(o: Observation, sid=sid) -> bool:
+            later = superseded_by.get(o.id)
+            return later is not None and (edge_type(later) is None or edge_id(later) != sid)
+
+        def replaced_inside(o: Observation, sid=sid) -> bool:
+            return o.id in superseded_by and not replaced_outside(o, sid)
+
+        objs = [edge_object(sid, versions[s], created, s) for s in stamps]
+        # the current version: the newest one not superseded by a version of itself
+        current = max((i for i, s in enumerate(stamps) if not all(replaced_inside(o) for o in versions[s])),
+                      default=len(stamps) - 1)
+        if all(replaced_outside(o) for o in versions[stamps[current]]):
+            later = max((superseded_by[o.id] for o in versions[stamps[current]]), key=version_key)
+            at = max(aware(later.observed_at), _utc(objs[-1]["modified"]) + timedelta(milliseconds=1))
+            closing = {k: v for k, v in objs[current].items() if k not in ("x_loom_event_id", "x_loom_event_ids")}
+            objs.append({**closing, "modified": stix_timestamp(at), "revoked": True,
+                         "x_loom_superseded_by": later.id})
+            current = len(objs) - 1
+        relations.extend(objs if history else [objs[current]])
 
     for ident in identities.values():
         if ident["created"] is None:
@@ -583,6 +727,9 @@ def main(argv: list[str] | None = None) -> None:
     exp = sub.add_parser("export", parents=[common], help="write the namespace as a STIX bundle")
     exp.add_argument("--out", required=True, help="bundle path, or - for stdout")
     exp.add_argument("--db", help="read this explicit store URL/path (default: LOOM_DB / LOOM_SHARDS)")
+    exp.add_argument("--history", action="store_true",
+                     help="write every version of each relationship / sighting (same id, increasing "
+                          "modified), not just the newest")
     sub.add_parser("schema", parents=[common], help="print the schema registration")
     args = parser.parse_args(argv)
 
@@ -593,7 +740,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "export":
         store = _open_store(args.db)
         try:
-            bundle = observations_to_bundle(store.iter_observations(args.namespace), args.namespace, mapping)
+            bundle = observations_to_bundle(store.iter_observations(args.namespace), args.namespace, mapping,
+                                            history=args.history)
         finally:
             store.close()
         text = json.dumps(bundle, indent=2)

@@ -40,8 +40,28 @@ LOOKUP_LIMIT = 1000     # rows per subject a lookup reads (the HTTP route's maxi
 ChainKey = Callable[[object], Hashable | None]
 
 
-def _aware(dt: datetime) -> datetime:
+def aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+
+def version_key(obs: Observation) -> tuple:
+    """Order of versions: observed, then recorded, then id (a total order)."""
+    return (aware(obs.observed_at), aware(obs.recorded_at), obs.id)
+
+
+def supersession(rows: Iterable[Observation]) -> dict[str, Observation]:
+    """Observation id -> the newest row among `rows` that names it in
+    `supersedes` (D-050): what export uses to tell history from current."""
+    rows = list(rows)
+    present = {o.id for o in rows}
+    out: dict[str, Observation] = {}
+    for o in rows:
+        if o.supersedes and o.supersedes in present and o.supersedes != o.id:
+            seen = out.get(o.supersedes)
+            if seen is None or version_key(o) > version_key(seen):
+                out[o.supersedes] = o
+    return out
 
 
 def keyed_by(id_attr: str, predicates: set[str] | None = None,
@@ -194,8 +214,8 @@ def load_chained(envs: Iterable[ClaimIn | DocumentIn], sink, chain_key: ChainKey
             if k is None:
                 continue
             seen = latest.get(k)
-            if seen is None or _aware(obs.observed_at) > seen[0]:
-                latest[k] = [_aware(obs.observed_at), obs.id, obs.event_id]
+            if seen is None or aware(obs.observed_at) > seen[0]:
+                latest[k] = [aware(obs.observed_at), obs.id, obs.event_id]
 
     for env in envs:
         k = chain_key(env) if isinstance(env, ClaimIn) else None
@@ -205,7 +225,7 @@ def load_chained(envs: Iterable[ClaimIn | DocumentIn], sink, chain_key: ChainKey
             if prev is not None and prev[1] is None and prev[2] != env.event_id:
                 flush()                      # the previous version is in this batch: land it first
                 prev = latest.get(k)
-            at = _aware(env.observed_at)
+            at = aware(env.observed_at)
             if prev is not None and prev[2] != env.event_id and prev[0] <= at and prev[1] \
                     and not env.supersedes:
                 env = env.model_copy(update={"supersedes": prev[1]})

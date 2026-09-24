@@ -32,10 +32,14 @@ provider's, a SIEM's) becomes claims on the affected host and the CVE
 
 Export — `observations_to_findings` turns Loom's cve-shaped observations
 (the vulns connector's, the STIX importer's, a scanner's) back into
-`vulnerability_finding` records, one per (host, cve) pair — or per CVE
-with no host — with cvss/epss/severity/exploit flags gathered from the
-CVE's scalar facts and every contributing observation id listed under
-`unmapped.loom_observation_ids` for citation.
+`vulnerability_finding` records, one per finding on a (host, cve) pair —
+or per CVE with no host — with cvss/epss/severity/exploit flags gathered
+from the CVE's scalar facts and every contributing observation id listed
+under `unmapped.loom_observation_ids` for citation. A finding's versions
+(chained by `supersedes`, or sharing an imported `finding_uid`) share
+`finding_info.uid`; only the newest is written — its state and status —
+unless `export --history` (Create, Update..., Close), so re-importing an
+export into the store it came from adds no finding versions.
 """
 
 from __future__ import annotations
@@ -46,11 +50,12 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef, Observation,
                          PredicateDef, SchemaRegistration)
+from .chain import aware, supersession, version_key
 
 CLASS_UID = 2002
 CATEGORY_UID = 2
@@ -186,11 +191,20 @@ def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -
     last_seen = _epoch(info.get("last_seen_time"))
     closed = closes_exposure(event)
     base_attrs = {"finding_uid": uid, "ocsf_class_uid": CLASS_UID}
+    # a record Loom exported restates the observations it cites (their
+    # event ids, sources, times): those are imported as recorded — a replay
+    # in the store they came from — instead of re-asserted under "loom"
+    unmapped = event.get("unmapped") if isinstance(event.get("unmapped"), dict) else {}
+    restated = unmapped.get("loom_observations") if isinstance(unmapped.get("loom_observations"), list) else None
+    edge_event = unmapped.get("loom_event_id") if isinstance(unmapped.get("loom_event_id"), str) else None
+    edge_source = source or (unmapped.get("loom_source") if isinstance(unmapped.get("loom_source"), str) else None)
 
-    def claim(subject: EntityRef, pred: str, obj, tag: str = "", **kw) -> ClaimIn:
+    def claim(subject: EntityRef, pred: str, obj, tag: str = "", event_id: str | None = None,
+              **kw) -> ClaimIn:
         attrs = {**base_attrs, **kw.pop("attrs", {})}
-        return ClaimIn(namespace=namespace, event_id=f"{prefix}:{pred}{tag}"[:128], subject=subject,
-                       predicate=pred, object=obj, observed_at=observed, source=src, attrs=attrs, **kw)
+        return ClaimIn(namespace=namespace, event_id=(event_id or f"{prefix}:{pred}{tag}")[:128], subject=subject,
+                       predicate=pred, object=obj, observed_at=observed, source=kw.pop("source", src),
+                       attrs=attrs, **kw)
 
     for vuln in event.get("vulnerabilities") or []:
         if not isinstance(vuln, dict):
@@ -213,7 +227,10 @@ def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -
                 if vuln.get(flag) is not None:
                     attrs[flag] = bool(vuln[flag])
             yield claim(EntityRef(type="host", key=host), PRED_AFFECTED, ref, tag, attrs=attrs,
-                        valid_from=v_first, valid_to=(v_last or observed) if closed else None)
+                        valid_from=v_first, valid_to=(v_last or observed) if closed else None,
+                        event_id=edge_event, source=edge_source or src)
+        if restated is not None:
+            continue
         for i, metric in enumerate(cve.get("cvss") or []):
             if not isinstance(metric, dict):
                 continue
@@ -249,6 +266,27 @@ def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -
             key = f"{vendor}:{normalize_key(str(pkg['name']))}"
             yield claim(ref, "affects", EntityRef(type="product", key=key), f"{tag}:{j}",
                         attrs={"version": pkg.get("version"), "fixed_in": pkg.get("fixed_in_version")})
+    for rec in restated or []:
+        if isinstance(rec, dict) and (env := _restated_claim(rec, namespace)) is not None:
+            yield env
+
+
+def _restated_claim(rec: dict, namespace: str) -> ClaimIn | None:
+    """One `unmapped.loom_observations` entry of a Loom export, as recorded."""
+    subject, value = rec.get("subject"), rec.get("value")
+    observed = _epoch(rec.get("observed_at"))
+    if not isinstance(subject, dict) or not rec.get("predicate") or observed is None:
+        return None
+    if isinstance(value, dict):
+        value = EntityRef(type=str(value.get("type")), key=str(value.get("key")))
+    elif not isinstance(value, (str, int, float, bool)):
+        return None
+    return ClaimIn(namespace=namespace, event_id=str(rec.get("event_id") or f"loom:{rec.get('id')}")[:128],
+                   subject=EntityRef(type=str(subject.get("type")), key=str(subject.get("key"))),
+                   predicate=str(rec["predicate"]), object=value, observed_at=observed,
+                   valid_from=_epoch(rec.get("valid_from")), valid_to=_epoch(rec.get("valid_to")),
+                   source=str(rec.get("source") or SOURCE_DEFAULT), confidence=float(rec.get("confidence", 1.0)),
+                   attrs=rec["attrs"] if isinstance(rec.get("attrs"), dict) else {})
 
 
 def events_to_envelopes(events: Iterable[dict], namespace: str, source: str | None = None,
@@ -299,24 +337,78 @@ def iter_events(path: str) -> Iterator[dict]:
 
 # ------------------------------------------------------------------- export #
 
+def _restate(o: Observation) -> dict:
+    """An observation an exported finding cites, as recorded — what
+    `import` records instead of re-asserting the finding's CVE block."""
+    value = {"type": o.object.type, "key": o.object.key} if isinstance(o.object, EntityRef) else o.object
+    rec: dict[str, Any] = {"id": o.id, "subject": {"type": o.subject.type, "key": o.subject.key},
+                           "predicate": o.predicate, "value": value, "observed_at": _ms(o.observed_at),
+                           "source": o.source, "confidence": o.confidence}
+    if o.event_id:
+        rec["event_id"] = o.event_id
+    if o.valid_from:
+        rec["valid_from"] = _ms(o.valid_from)
+    if o.valid_to:
+        rec["valid_to"] = _ms(o.valid_to)
+    if o.attrs:
+        rec["attrs"] = o.attrs
+    return rec
+
+
 def observations_to_findings(observations: Iterable[Observation], namespace: str,
-                             now: datetime | None = None) -> list[dict]:
-    """vulnerability_finding records: one per (host, cve) `affected_by`
-    edge, plus one per CVE that has facts but no host."""
+                             now: datetime | None = None, history: bool = False) -> list[dict]:
+    """vulnerability_finding records: one per finding — the versions of a
+    (host, cve) edge chained by recorded supersession (D-050) or sharing an
+    imported `finding_uid` — plus one per CVE that has facts but no host.
+
+    A finding's versions share `finding_info.uid` (the imported finding
+    uid, else the chain's first observation id). By default only the
+    newest version is written, carrying the newest state and status, so a
+    superseded version never reads as a second open finding; `history=True`
+    writes every version, oldest first (activity Create, then Update; Close
+    when it closed the exposure). A finding whose newest version was
+    superseded by something that is not a version of it ends in a Close
+    with status Other / "Superseded"."""
     now = now or datetime.now(timezone.utc)
+    rows = [o for o in observations if not o.attrs.get("redacted")]
+    by_id = {o.id: o for o in rows}
+    superseded_by = supersession(rows)
     facts: dict[str, list[Observation]] = {}        # cve id -> scalar/relational facts about it
-    edges: dict[tuple[str, str], list[Observation]] = {}
-    for obs in observations:
-        if obs.attrs.get("redacted"):
-            continue
+    edges: dict[tuple[str, str], list[Observation]] = {}     # (finding uid, cve) -> its versions
+
+    def is_edge(o: Observation) -> bool:
+        return isinstance(o.object, EntityRef) and o.object.type == "cve" and o.subject.type != "cve"
+
+    def finding_id(o: Observation) -> str:
+        """What every version of o's finding shares: the imported finding
+        uid, else the first observation of its chain (a supersession that
+        moves the finding to another host is a version; one that names
+        another CVE is not)."""
+        root, seen = o, {o.id}
+        while root.supersedes in by_id and root.supersedes not in seen:
+            prev = by_id[root.supersedes]
+            if not is_edge(prev) or prev.object != o.object:
+                break
+            root = prev
+            seen.add(root.id)
+        for row in (root, o):
+            uid = (row.attrs or {}).get("finding_uid")
+            if isinstance(uid, str) and uid:
+                return uid
+        return root.id
+
+    for obs in rows:
         if obs.subject.type == "cve":
             facts.setdefault(obs.subject.key, []).append(obs)
-        if isinstance(obs.object, EntityRef) and obs.object.type == "cve" and obs.subject.type != "cve":
-            edges.setdefault((obs.subject.key, obs.object.key), []).append(obs)
+        if is_edge(obs):
+            edges.setdefault((finding_id(obs), obs.object.key), []).append(obs)
             facts.setdefault(obs.object.key, [])
 
+    def current_facts(cid: str) -> list[Observation]:
+        return [o for o in facts.get(cid, []) if o.id not in superseded_by]      # superseded: history
+
     def newest(cid: str, predicate: str) -> Observation | None:
-        rows = [o for o in facts.get(cid, []) if o.predicate == predicate and not isinstance(o.object, EntityRef)]
+        rows = [o for o in current_facts(cid) if o.predicate == predicate and not isinstance(o.object, EntityRef)]
         return max(rows, key=lambda o: o.observed_at) if rows else None
 
     def cve_block(cid: str) -> tuple[dict, int, list[str]]:
@@ -324,7 +416,7 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
         cve: dict[str, Any] = {"uid": cid}
         cvss = []
         per_source: dict[str, Observation] = {}
-        for o in facts.get(cid, []):
+        for o in current_facts(cid):
             if o.predicate == "cvss_score" and isinstance(o.object, (int, float)):
                 prev = per_source.get(o.source)
                 if prev is None or o.observed_at >= prev.observed_at:
@@ -366,7 +458,7 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
                 vuln[flag] = o.object
                 cited.append(o.id)
         packages = []
-        for o in facts.get(cid, []):
+        for o in current_facts(cid):
             if o.predicate == "affects" and isinstance(o.object, EntityRef) and o.object.type == "product":
                 vendor, _, name = o.object.key.partition(":")
                 packages.append({"name": name or vendor, "vendor_name": vendor if name else None})
@@ -375,7 +467,8 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
             vuln["affected_packages"] = packages
         return vuln, severity_id, cited
 
-    def finding(host: str | None, cid: str, edge: Observation | None) -> dict:
+    def finding(host: str | None, cid: str, edge: Observation | None, uid: str | None = None,
+                first: bool = True, superseded_at: datetime | None = None) -> dict:
         vuln, severity_id, cited = cve_block(cid)
         at = edge.observed_at if edge else max((o.observed_at for o in facts.get(cid, [])), default=now)
         status_id = 1
@@ -391,20 +484,26 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
             for flag in ("is_exploit_available", "is_fix_available"):
                 if edge.attrs.get(flag) is not None and flag not in vuln:
                     vuln[flag] = bool(edge.attrs[flag])
-        info: dict[str, Any] = {"uid": edge.id if edge else f"loom:{namespace}:cve:{cid}",
+        info: dict[str, Any] = {"uid": uid or (edge.id if edge else f"loom:{namespace}:cve:{cid}"),
                                 "title": f"{cid} on {host}" if host else cid}
         if edge is not None:
             if edge.valid_from:
                 info["first_seen_time"] = _ms(edge.valid_from)
             if edge.valid_to:
                 info["last_seen_time"] = _ms(edge.valid_to)
+        status = STATUS[status_id].capitalize()
+        if superseded_at is not None:          # replaced by something that is not a version of it
+            status_id, status, at = 99, "Superseded", superseded_at
+        activity_id = (ACTIVITY_CLOSE if superseded_at is not None or status_id == 4
+                       else 1 if first else 2)
         record = {
-            "activity_id": 1, "activity_name": ACTIVITY[1],
+            "activity_id": activity_id, "activity_name": ACTIVITY[activity_id].capitalize(),
             "category_uid": CATEGORY_UID, "category_name": CATEGORY_NAME,
             "class_uid": CLASS_UID, "class_name": CLASS_NAME,
-            "type_uid": CLASS_UID * 100 + 1, "type_name": f"{CLASS_NAME}: Create",
+            "type_uid": CLASS_UID * 100 + activity_id,
+            "type_name": f"{CLASS_NAME}: {ACTIVITY[activity_id].capitalize()}",
             "severity_id": severity_id, "severity": SEVERITY[severity_id].capitalize(),
-            "status_id": status_id, "status": STATUS[status_id].capitalize(),
+            "status_id": status_id, "status": status,
             "time": _ms(at),
             "metadata": {"version": OCSF_VERSION, "product": {"name": PRODUCT_NAME, "vendor_name": PRODUCT_NAME},
                          "logged_time": _ms(now)},
@@ -413,6 +512,12 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
             "unmapped": {"loom_namespace": namespace, "loom_observation_ids": cited,
                          "loom_sources": sorted({o.source for o in facts.get(cid, [])} | ({edge.source} if edge else set()))},
         }
+        record["unmapped"]["loom_observations"] = [_restate(by_id[i]) for i in cited
+                                                   if i in by_id and (edge is None or i != edge.id)]
+        if edge is not None:
+            record["unmapped"]["loom_source"] = edge.source
+            if edge.event_id:
+                record["unmapped"]["loom_event_id"] = edge.event_id
         if host:
             record["resources"] = [{"name": host, "type": "host"}]
             record["device"] = {"hostname": host, "type_id": 0}
@@ -420,10 +525,27 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
 
     findings = []
     hosted: set[str] = set()
-    for (host, cid), rows in sorted(edges.items()):
-        edge = max(rows, key=lambda o: o.observed_at)
+    chains = [(sorted(group, key=version_key), uid, cid) for (uid, cid), group in edges.items()]
+    for versions, uid, cid in sorted(chains, key=lambda c: (c[0][-1].subject.key, c[2], c[1])):
         hosted.add(cid)
-        findings.append(finding(host, cid, edge))
+        members = {o.id for o in versions}
+
+        def replaced_outside(o: Observation, members=members) -> bool:
+            later = superseded_by.get(o.id)
+            return later is not None and later.id not in members
+
+        # the current version: the newest one not superseded by a version of itself
+        current = max((i for i, o in enumerate(versions)
+                       if o.id not in superseded_by or replaced_outside(o)), default=len(versions) - 1)
+        records = [finding(o.subject.key, cid, o, uid, first=i == 0) for i, o in enumerate(versions)]
+        if replaced_outside(versions[current]):
+            last = versions[current]
+            later = superseded_by[last.id]
+            at = max(aware(later.observed_at), aware(last.observed_at) + timedelta(milliseconds=1))
+            records.append(finding(last.subject.key, cid, last, uid, first=False, superseded_at=at))
+            records[-1]["unmapped"]["loom_superseded_by"] = later.id
+            current = len(records) - 1
+        findings.extend(records if history else [records[current]])
     for cid in sorted(facts):
         if cid not in hosted and facts[cid]:
             findings.append(finding(None, cid, None))
@@ -489,6 +611,8 @@ def main(argv: list[str] | None = None) -> None:
     exp = sub.add_parser("export", parents=[common], help="write the namespace's CVE facts as findings")
     exp.add_argument("--out", required=True, help="NDJSON path, or - for stdout")
     exp.add_argument("--db", help="read this explicit store URL/path (default: LOOM_DB / LOOM_SHARDS)")
+    exp.add_argument("--history", action="store_true",
+                     help="write every version of each finding (same finding_info.uid), not just the newest")
     sub.add_parser("schema", parents=[common], help="print the schema registration")
     args = parser.parse_args(argv)
 
@@ -498,7 +622,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "export":
         store = _open_store(args.db)
         try:
-            findings = observations_to_findings(store.iter_observations(args.namespace), args.namespace)
+            findings = observations_to_findings(store.iter_observations(args.namespace), args.namespace,
+                                                history=args.history)
         finally:
             store.close()
         text = "".join(json.dumps(record) + "\n" for record in findings)
