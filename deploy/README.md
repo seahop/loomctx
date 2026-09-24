@@ -123,11 +123,13 @@ Deployment behind the `loom-db` Secret.
 CI publishes the image to `ghcr.io/seahop/loom` (`latest` + per-commit SHA tags)
 on every push to `main`; a `vX.Y.Z` tag push re-tags that commit's
 already-published image as `:vX.Y.Z` rather than rebuilding it (D-045).
-The repository is public, and the packages are public too — but GHCR
-package visibility is a **separate** setting from the repository's: after
-the first publish an owner must open the package on GitHub (Packages →
-loom → Package settings → Change visibility) once, or the first pull
-fails with `denied`. A private fork's nodes need a pull secret — a GitHub
+The repository is meant to be public; **as of 2026-09-24 it is still
+private on GitHub, and so are the packages** (anonymous `docker manifest
+inspect ghcr.io/seahop/loom:latest` is refused). GHCR package visibility is
+a **separate** setting from the repository's: after flipping the repo, an
+owner must open each package on GitHub (Packages → loom → Package settings
+→ Change visibility) once, or the first pull fails with `denied`. Until
+then — and for any private fork — the nodes need a pull secret: a GitHub
 token with `read:packages`, attached to the namespace's default
 ServiceAccount so no manifest changes:
 

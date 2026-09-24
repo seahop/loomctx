@@ -3,7 +3,7 @@
 Status legend: ✅ done · 🔨 partial · ⬜ not started
 
 **Fixed date: conference demo + presentation mid-October 2026 (about 2026-10-13 — moved up from "end of October" on 2026-09-23).**
-The repo is public on GitHub; everything merged to `main` should be
+The repo will be public on GitHub (private as of 2026-09-24); everything merged to `main` should be
 presentable.
 
 ## Milestones to the conference
