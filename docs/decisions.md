@@ -2081,6 +2081,15 @@ condition to the same bar, and a row nobody answered is never a score.
   claim whose document has not arrived is redelivered with a growing delay
   instead of dropped. `python -m loom.ingest` retries 429 / 5xx honouring
   `Retry-After`.
+- **Declined groups never starve a tier; a decline can be taken back.**
+  Tier-2 (fuzzy) candidates skip settled groups — every pair of differing
+  raw keys declined — as tier 1 does, grouped first by normalized key
+  (41 ms on a 49.5k-entity SQLite store with 3.5k settled groups).
+  `GraphStore.forget_decline` and `python -m loom.enrich undistinct a b
+  --namespace ns` forget one pair, whoever declined it; nothing merges at
+  that step — the next tick may merge or ask again. In a scope pack a fact
+  pointing into a reached entity from outside the pack carries that
+  entity's path, like one whose subject is the reached entity.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

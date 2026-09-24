@@ -57,6 +57,8 @@ Full list with statuses: `docs/hardening.md` §S.
   `supersedes`; Suppressed is not Resolved
 - Consumer settles per message and redelivers claims awaiting their
   document; `loom.ingest` retries 429 / 5xx with `Retry-After`
+- Fuzzy (tier-2) candidates skip settled groups; `python -m loom.enrich
+  undistinct` / `GraphStore.forget_decline` take a decline back
 
 #### Release
 - Every engine-image compose service builds (a fresh clone's
