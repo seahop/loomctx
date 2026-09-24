@@ -167,6 +167,16 @@ table to age — five of these model ids did not exist three months ago.
 Re-run before quoting a number in a talk; the eighteen-model, three-run
 table cost about twelve dollars and two hours.
 
+## Retrieval, not models: the other scorecard
+
+This page asks which models can drive Loom's tools. `docs/evaluation.md`
+asks the prior question with `python -m loom.retrieval_eval`: on the same
+store and the same generated questions, does a budgeted context pack beat
+handing the model everything, a vector top-k, or the newest facts — in
+accuracy, tokens, citation support and hallucination on questions that
+have no answer. Run it with the model chosen here before quoting either
+table.
+
 ## Re-running it
 
 ```bash

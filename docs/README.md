@@ -22,6 +22,11 @@ Read in this order depending on why you're here.
 - **[models.md](models.md)** — which LLMs drive Loom well as agents: a
   measured scorecard (pass rate, faithfulness, cost) and the command to
   re-run it.
+- **[evaluation.md](evaluation.md)** — the retrieval scorecard: context
+  packs against full-context, vector top-k and recency baselines on
+  store-derived questions (lease at T, conflicts, multi-hop, abstention,
+  numeric, ordering), rule-scored, with the command that reproduces the
+  talk table.
 - **[demo.md](demo.md)** — the conference walkthrough: three acts, every
   command, expected output, fallbacks, rehearsal checklist.
 - **[contracts.md](contracts.md)** — the wire shapes (the real API); JSON
