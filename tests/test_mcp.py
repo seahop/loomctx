@@ -202,8 +202,8 @@ def test_find_related_by_meaning(store, monkeypatch):
     try:
         embed_pending(store, HashingEmbedder())
         out = mcp_server.find_related("who logged in with the jdoe account?")
-        assert out["matches"] and out["matches"][0]["entity"]["key"] in ("web-01", "jdoe")
-        assert out["matches"][0]["evidence"]["citations"]
+        assert out.matches and out.matches[0].entity.key in ("web-01", "jdoe")
+        assert out.matches[0].evidence.citations
     finally:
         mcp_server._embedder_loaded = False
 
@@ -363,3 +363,145 @@ def test_namespace_summary_is_cached_briefly(store, monkeypatch):
     mcp_server._summary_cache = None
     mcp_server.list_namespaces()
     assert len(calls) == 2
+
+
+# ------------------------------------------------- MCP 2026-07-28 alignment (R-7) #
+
+def test_every_tool_publishes_an_output_schema_title_and_annotations(store):
+    """R-7: structured content with a schema derived from the contracts,
+    a title, and honest hints — read tools read-only, nothing destructive
+    (observations are append-only), nothing open-world."""
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    assert set(tools) == set(mcp_server.TOOL_META)
+    for name, tool in tools.items():
+        assert tool.output_schema and tool.output_schema.get("type", "object") == "object", name
+        assert tool.title == mcp_server.TOOL_META[name][0], name
+        ann = tool.annotations
+        assert ann.read_only_hint is mcp_server.TOOL_META[name][1], name
+        assert ann.destructive_hint is False and ann.open_world_hint is False, name
+        assert ann.idempotent_hint is mcp_server.TOOL_META[name][2], name
+    # the pack schema is the agent view of ContextPack: items, cite tokens,
+    # the contract's own handle/subject shapes, and the format knob
+    pack = tools["ask"].output_schema
+    props = pack["properties"]
+    assert {"items", "handles", "subjects", "subjects_total", "format", "omitted_handles"} <= set(props)
+    assert "cite" in pack["$defs"]["AgentCitation"]["properties"]
+    assert "ExpansionHandle" in pack["$defs"] and "EntityRef" in pack["$defs"]
+    assert props["format"]["enum"] == ["concise", "detailed"]
+    assert "subjects_note" not in pack.get("required", [])
+    assert tools["record_claim"].output_schema["required"] == ["status", "observation_id", "event_id"]
+    assert "Observation" in tools["get_observations"].output_schema["$defs"]
+    assert "anyOf" in tools["expand"].output_schema                # a pack, or one observation
+    assert "matches" in tools["find_related"].output_schema["properties"]
+    for name in ("ask", "ask_scope", "expand"):
+        assert tools[name].input_schema["properties"]["format"]["default"] == "concise", name
+    assert "supersedes" in tools["record_claim"].input_schema["properties"]
+    assert "event_id" in tools["record_claim"].input_schema["properties"]
+
+
+def test_tool_calls_return_structured_content_matching_the_schema(store):
+    """The SDK validates the return value against the published schema and
+    ships it as structuredContent next to the text mirror."""
+    async def call(name, args):
+        return await mcp_server.mcp._tool_manager.call_tool(name, args, context=None, convert_result=True)
+
+    res = asyncio.run(call("ask", {"subject": "host:web-01", "question": "who logged in?", "budget": 2000}))
+    assert not res.is_error and res.structured_content["items"] and res.structured_content["format"] == "concise"
+    assert res.content and res.content[0].type == "text" and '"items"' in res.content[0].text
+    res = asyncio.run(call("find_entity", {"query": "web-01"}))
+    assert res.structured_content["result"][0]["handle"] == "host:web-01"     # a list is wrapped
+    res = asyncio.run(call("list_namespaces", {}))
+    assert res.structured_content["result"][0]["namespace"] == "default"
+    obs = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
+    res = asyncio.run(call("expand", {"handle": obs.id[:12]}))
+    assert res.structured_content["count"] == 1 and res.structured_content["observations"][0]["id"] == obs.id
+    res = asyncio.run(call("record_claim", {"subject": "host:web-01", "predicate": "p", "object_value": "v",
+                                             "observed_at": "2026-09-03T12:00:00Z", "source": "s"}))
+    assert res.structured_content["status"] == "recorded" and res.structured_content["event_id"].startswith("mcp:")
+
+
+def test_detailed_format_keeps_ids_and_lists_every_subject(store):
+    concise = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
+    detailed = mcp_server.ask("host:web-01", "who logged in?", budget=2000, format="detailed")
+    assert concise["format"] == "concise" and detailed["format"] == "detailed"
+    c_cites = [c for i in concise["items"] for c in i["citations"]]
+    d_cites = [c for i in detailed["items"] for c in i["citations"]]
+    assert c_cites and all("observation_id" not in c for c in c_cites)
+    assert d_cites and all(len(c["observation_id"]) == 32 and c["observation_id"].startswith(c["cite"])
+                           for c in d_cites)
+    mcp_server._SUBJECTS_SHOWN, saved = 1, mcp_server._SUBJECTS_SHOWN
+    try:
+        short = mcp_server.ask_scope(["domain:corp.local"], "who?", expand_predicates=["member_of"])
+        full = mcp_server.ask_scope(["domain:corp.local"], "who?", expand_predicates=["member_of"],
+                                    format="detailed")
+        assert len(short["subjects"]) == 1 and "subjects_note" in short
+        assert len(full["subjects"]) == full["subjects_total"] == 3 and "subjects_note" not in full
+    finally:
+        mcp_server._SUBJECTS_SHOWN = saved
+    if concise["handles"]:
+        assert mcp_server.expand(concise["handles"][0]["id"], format="detailed")["format"] == "detailed"
+    with pytest.raises(ValueError, match="concise"):
+        mcp_server.ask("host:web-01", "?", format="verbose")
+
+
+def test_record_claim_is_idempotent_by_content_and_accepts_an_event_id(store):
+    kw = dict(subject="host:web-01", predicate="runs_os", observed_at="2026-09-03T12:00:00Z",
+              source="agent-writeback", object_value="fedora-44")
+    first = mcp_server.record_claim(**kw)
+    again = mcp_server.record_claim(**kw)
+    assert first == again and first["event_id"].startswith("mcp:")
+    other = mcp_server.record_claim(**{**kw, "observed_at": "2026-09-04T12:00:00Z"})
+    assert other["observation_id"] != first["observation_id"]
+    explicit = mcp_server.record_claim(**{**kw, "event_id": "agent:42"})
+    assert explicit["event_id"] == "agent:42"
+    assert mcp_server.record_claim(**{**kw, "event_id": "agent:42", "object_value": "x"})["observation_id"] \
+        == explicit["observation_id"]                                     # redelivery: same event, nothing new
+    n = sum(1 for o in store.observations_for("default", EntityRef(type="host", key="web-01"))
+            if o.source == "agent-writeback")
+    assert n == 3
+
+
+def test_record_claim_supersedes_resolves_a_cite_token(store):
+    """A recorded correction: the new claim names the observation it
+    replaces by its cite token (or full id) and ClaimIn.supersedes carries
+    the resolved 32-hex id. Never inferred — an unknown token is an error."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    old = mcp_server.record_claim(subject="host:web-01", predicate="runs_os", object_value="fedora-43",
+                                  observed_at="2026-09-01T12:00:00Z", source="inventory")
+    recorded = []
+    real = store.record_claim
+
+    def spy(claim):
+        recorded.append(claim)
+        return real(claim)
+
+    store.record_claim = spy
+    try:
+        fixed = mcp_server.record_claim(subject="host:web-01", predicate="runs_os", object_value="fedora-44",
+                                        observed_at="2026-09-02T12:00:00Z", source="inventory",
+                                        supersedes=old["observation_id"][:12])
+        assert fixed["supersedes"] == old["observation_id"] and fixed["observation_id"] != old["observation_id"]
+        assert recorded[-1].supersedes == old["observation_id"]
+        by_id = mcp_server.record_claim(subject="host:web-01", predicate="runs_os", object_value="fedora-45",
+                                        observed_at="2026-09-03T12:00:00Z", source="inventory",
+                                        supersedes=old["observation_id"])
+        assert by_id["supersedes"] == old["observation_id"]
+    finally:
+        store.record_claim = real
+    with pytest.raises(ToolError, match="no observation"):
+        mcp_server.record_claim(subject="host:web-01", predicate="runs_os", object_value="x",
+                                observed_at="2026-09-03T12:00:00Z", source="inventory", supersedes="0" * 12)
+    with pytest.raises(ValueError, match="cite"):
+        mcp_server.record_claim(subject="host:web-01", predicate="runs_os", object_value="x",
+                                observed_at="2026-09-03T12:00:00Z", source="inventory", supersedes="host:web-01")
+
+
+def test_instructions_and_descriptions_carry_the_agent_guidance(store):
+    text = mcp_server.INSTRUCTIONS
+    for word in ("cite", "format", "truncated", "supersedes", "1500", "ask_scope"):
+        assert word in text, word
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    assert "ONE entity" in tools["ask"].description and "SEVERAL" in tools["ask_scope"].description
+    for word in ("stateless", "signed", "never expire", "TTL", "rotation", "budget"):
+        assert word in tools["expand"].description, word
+    assert "never inferred" in tools["record_claim"].description
