@@ -27,7 +27,16 @@ so the facts join the seed hosts):
     text) so excerpt retrieval has something real to cite.
   * FIRST EPSS: `epss_score` / `epss_percentile` for the CVEs already
     present (300k orphan CVE rows would drown the namespace; `--epss all`
-    if you want them).
+    if you want them) — and only when the value MOVED: EPSS republishes
+    every CVE every day and most scores drift in the fourth decimal, so
+    emitting each day's row added ~110k observations a night (each one
+    embedded, i.e. paid for) with nothing new in them. A ledger in the
+    cache (`epss-ledger-<namespace>-<target>.json.gz`, the last value
+    emitted per CVE) lets a row through when the score moved by at least
+    EPSS_MIN_ABS_CHANGE or EPSS_MIN_REL_CHANGE of itself, or the
+    percentile by PERCENTILE_MIN_CHANGE; it is written only after a load
+    (or an emit) completes, so a failed run re-offers its changes.
+    `--epss-ledger none` emits every row, the old behavior.
 
 `--bridge-seed-hosts` adds `runs_software` claims from the seed hosts to
 common products (kernel, nginx, openssh, postgresql, chrome, ...) so the
@@ -46,6 +55,7 @@ import argparse
 import csv
 import email.utils
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -446,9 +456,71 @@ def kev_envelopes(entry: dict, namespace: str) -> Iterator[ClaimIn | DocumentIn]
             yield claim("has_weakness", EntityRef(type="cwe", key=cwe), tag=f":{cwe}")
 
 
+# What counts as an EPSS change worth an observation (see the module doc).
+EPSS_MIN_ABS_CHANGE = 0.001       # probability points
+EPSS_MIN_REL_CHANGE = 0.05        # ... or 5 % of the last emitted score
+PERCENTILE_MIN_CHANGE = 0.01      # percentile, on EPSS's 0-1 scale
+
+
+class EpssLedger:
+    """The last EPSS value emitted per (CVE, predicate) for one namespace
+    and target, so a nightly refresh records movement instead of
+    re-recording every CVE (hardening, 2026-09-24). `path` None keeps it
+    in memory only (tests, `--epss-ledger none` passes no ledger at all)."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path
+        self.values: dict[str, list[float | None]] = {}
+        if path is not None and path.exists():
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as fh:
+                    self.values = json.load(fh).get("values", {})
+            except (OSError, EOFError, ValueError) as exc:
+                # a damaged ledger costs one full re-emit (event ids are
+                # date-keyed, so nothing duplicates), never a failed run
+                print(f"epss ledger {path} unreadable ({exc}); starting afresh", file=sys.stderr)
+                self.values = {}
+
+    _SLOT = {"epss_score": 0, "epss_percentile": 1}
+
+    def changed(self, cid: str, predicate: str, value: float) -> bool:
+        """True when `value` should be emitted; records it as emitted."""
+        slot = self._SLOT[predicate]
+        row = self.values.setdefault(cid, [None, None])
+        last = row[slot]
+        if last is not None:
+            if predicate == "epss_score":
+                moved = abs(value - last) >= max(EPSS_MIN_ABS_CHANGE, EPSS_MIN_REL_CHANGE * last)
+            else:
+                moved = abs(value - last) >= PERCENTILE_MIN_CHANGE
+            if not moved:
+                return False
+        row[slot] = value
+        return True
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".part")
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            json.dump({"version": 1, "values": self.values}, fh, separators=(",", ":"))
+        os.replace(tmp, self.path)
+
+
+def ledger_path(cache: Path, namespace: str, target: str) -> Path:
+    """One ledger per (namespace, where the envelopes go): what was emitted
+    into one store says nothing about another."""
+    digest = hashlib.sha256(target.encode()).hexdigest()[:10]
+    return cache / f"epss-ledger-{re.sub(r'[^A-Za-z0-9_.-]+', '_', namespace)}-{digest}.json.gz"
+
+
 def epss_envelopes(lines: Iterable[str], namespace: str,
-                   known: set[str] | None) -> Iterator[ClaimIn]:
-    """`known` limits output to those CVE ids; None means every row."""
+                   known: set[str] | None, ledger: EpssLedger | None = None,
+                   stats: dict[str, int] | None = None) -> Iterator[ClaimIn]:
+    """`known` limits output to those CVE ids; None means every row. With a
+    `ledger`, a value that has not moved since the last one emitted is
+    skipped (counted as stats['epss_unchanged'])."""
     score_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     rows: list[str] = []
     for line in lines:
@@ -468,6 +540,10 @@ def epss_envelopes(lines: Iterable[str], namespace: str,
             try:
                 value = float(row[col])
             except (KeyError, TypeError, ValueError):
+                continue
+            if ledger is not None and not ledger.changed(cid, pred, value):
+                if stats is not None:
+                    stats["epss_unchanged"] = stats.get("epss_unchanged", 0) + 1
                 continue
             yield ClaimIn(namespace=namespace, event_id=f"epss:{cid}:{stamp}:{pred}", subject=ref,
                           predicate=pred, object=value, observed_at=score_date, source=SOURCE_EPSS,
@@ -508,7 +584,8 @@ def iter_epss_lines(path: Path) -> Iterator[str]:
 
 def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
               epss: str = "known", bridge: bool = False,
-              stats: dict[str, int] | None = None) -> Iterator[ClaimIn | DocumentIn]:
+              stats: dict[str, int] | None = None,
+              epss_ledger: EpssLedger | None = None) -> Iterator[ClaimIn | DocumentIn]:
     """Everything the cache holds, as envelopes, KEV first (small), then NVD,
     then EPSS for the CVEs seen, then the seed bridge."""
     stats = stats if stats is not None else {}
@@ -535,7 +612,7 @@ def envelopes(cache: Path, namespace: str, years: list[int], sources: set[str],
                     yield count("nvd", env)
     if "epss" in sources and epss != "none" and paths["epss"].exists():
         for env in epss_envelopes(iter_epss_lines(paths["epss"]), namespace,
-                                  None if epss == "all" else known):
+                                  None if epss == "all" else known, epss_ledger, stats):
             yield count("epss", env)
     if bridge:
         for env in bridge_envelopes(namespace):
@@ -560,16 +637,13 @@ def register(reg: SchemaRegistration, url: str | None, db: str | None, key: str 
         finally:
             store.close()
         return
+    from ..ingest import request_json
     headers = {"content-type": "application/json"}
     if key:
         headers["X-Loom-Key"] = key
-    req = urllib.request.Request(url.rstrip("/") + "/v1/schemas", data=reg.model_dump_json().encode(),
-                                 headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30):
-            pass
-    except urllib.error.HTTPError as exc:
-        raise SystemExit(f"schema registration: HTTP {exc.code}: {exc.read()[:300].decode(errors='replace')}")
+    # retried on 429/5xx like the batches that follow it (D-056)
+    request_json(url.rstrip("/") + "/v1/schemas", reg.model_dump_json().encode(), headers,
+                 timeout=30, what="schema registration")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -586,6 +660,10 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--bridge-seed-hosts", action="store_true",
                         help="add runs_software claims from the seed hosts to common products")
     common.add_argument("--offline", action="store_true", help="never download; use the cache as is")
+    common.add_argument("--epss-ledger", default="auto",
+                        help="auto: emit an EPSS value only when it moved since the last one emitted "
+                             "to this namespace+target (ledger kept in the cache); none: every row "
+                             "every day; or a ledger file path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("pull", parents=[common], help="download / refresh the feeds into the cache")
     sub.add_parser("emit", parents=[common], help="write NDJSON envelopes to stdout")
@@ -610,10 +688,21 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "pull":
         return
     stats: dict[str, int] = {}
-    envs = envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts, stats)
+    ledger = None
+    if args.epss_ledger != "none" and "epss" in sources and args.epss != "none":
+        target = ("emit" if args.command == "emit" else
+                  f"url:{args.url.rstrip('/')}" if getattr(args, "url", None) else
+                  f"db:{args.db}" if getattr(args, "db", None) else
+                  f"env:{os.environ.get('LOOM_SHARDS') or os.environ.get('LOOM_DB', '')}")
+        ledger = EpssLedger(ledger_path(cache, args.namespace, target) if args.epss_ledger == "auto"
+                            else Path(args.epss_ledger))
+    envs = envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts, stats,
+                     epss_ledger=ledger)
     if args.command == "emit":
         for line in to_lines(envs):
             sys.stdout.write(line)
+        if ledger is not None:
+            ledger.save()          # everything was written; the reader owns loading it
         print(json.dumps({"envelopes": stats}), file=sys.stderr)
         return
     if args.url and args.db:
@@ -624,8 +713,10 @@ def main(argv: list[str] | None = None) -> None:
     lines = to_lines(envs)
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
+    if ledger is not None:
+        ledger.save()              # only after the load completed: a failed run re-offers its changes
     elapsed = time.monotonic() - t0
-    total = sum(stats.values())
+    total = sum(v for k, v in stats.items() if k != "epss_unchanged")
     print(json.dumps({**totals, "envelopes": stats, "seconds": round(elapsed, 1),
                       "per_second": round(total / elapsed, 1) if elapsed else None}))
 

@@ -97,12 +97,26 @@ async def write_with_retry(store: GraphStore, producer, payloads: list[bytes],
             return counts
         except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
             if attempt >= MAX_DELIVER:
-                headers = [(k, v.encode()) for k, v in error_headers(exc).items()]
+                # last attempt: one envelope at a time, so only the ones
+                # that fail on their own are dead-lettered — not every
+                # batch-mate of a poison envelope
+                counts = dict(empty)
                 for p in payloads:
-                    await producer.send_and_wait(DEADLETTER, p, headers=headers)
-                log.error("batch of %d dead-lettered after %d attempts: %s: %s",
-                          len(payloads), attempt, type(exc).__name__, exc)
-                return {**empty, "deadlettered": len(payloads)}
+                    try:
+                        if len(payloads) == 1:
+                            raise exc          # it already failed on its own
+                        one = handle_batch(store, [p], registry)
+                    except Exception as one_exc:  # noqa: BLE001
+                        headers = [(k, v.encode()) for k, v in error_headers(one_exc).items()]
+                        await producer.send_and_wait(DEADLETTER, p, headers=headers)
+                        counts["deadlettered"] += 1
+                        continue
+                    for k, v in one.items():
+                        counts[k] += v
+                log.error("batch of %d failed %d times (%s: %s); %d envelope(s) dead-lettered, "
+                          "the rest written one at a time", len(payloads), attempt,
+                          type(exc).__name__, exc, counts["deadlettered"])
+                return counts
             delay = min(30.0, 2.0 ** attempt)
             log.warning("batch failed (attempt %d/%d), retrying in %.0fs: %s", attempt, MAX_DELIVER, delay, exc)
             await sleep(delay)

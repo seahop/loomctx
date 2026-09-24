@@ -150,3 +150,108 @@ def test_queue_path_skips_a_claim_citing_an_unknown_document(tmp_path):
     assert counts == {"recorded": 1, "accepted": 1, "skipped": 1, "rejected": 0}
     assert store.observations_for("default", EntityRef(type="host", key="h"))[0].provenance.artifact_id
     store.close()
+
+
+# ------------------------------------------- per-message settlement (2026-09-24) #
+
+class _JS:
+    def __init__(self):
+        self.published = []
+
+    async def publish(self, subject, data, headers=None):
+        self.published.append((subject, data, headers))
+
+
+class _Msg:
+    def __init__(self, payload, delivered=1):
+        from types import SimpleNamespace
+        self.subject = "loom.ingest.claim"
+        self.data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        self.headers = {}
+        self.metadata = SimpleNamespace(num_delivered=delivered)
+        self.acked = False
+        self.naks = []
+
+    async def ack(self):
+        self.acked = True
+
+    async def nak(self, delay=None):
+        self.naks.append(delay)
+
+
+def _row(event_id, **extra):
+    return {"kind": "claim", "event_id": event_id, "subject": {"type": "host", "key": "h"},
+            "predicate": "p", "object": event_id, "observed_at": "2026-09-01T00:00:00Z",
+            "source": "s", **extra}
+
+
+def test_one_bad_envelope_no_longer_sinks_its_batch_mates(tmp_path, monkeypatch):
+    """A batch the store rejected was nak'd whole: batch-mates shared the
+    poison message's delivery count and were dead-lettered with it after
+    MAX_DELIVER. Now the batch is re-written one message at a time."""
+    import asyncio
+    from loom.consumer import write_batch
+    store = SqliteStore(tmp_path / "iso.db")
+    real = store.record_claims
+
+    def picky(claims):
+        if any(c.event_id == "poison" for c in claims):
+            raise RuntimeError("constraint failed")
+        return real(claims)
+
+    monkeypatch.setattr(store, "record_claims", picky)
+    js = _JS()
+    msgs = [_Msg(_row("g1")), _Msg(_row("poison")), _Msg(_row("g2"))]
+    counts = asyncio.run(write_batch(js, store, msgs, max_deliver=5))
+    assert counts["recorded"] == 2 and counts["deadlettered"] == 0
+    assert msgs[0].acked and msgs[2].acked                      # the good ones land and are acked
+    assert not msgs[1].acked and msgs[1].naks == [2]            # only the bad one comes back
+    assert {o.event_id for o in store.observations_for("default", EntityRef(type="host", key="h"))} == {"g1", "g2"}
+    # its last delivery parks it alone
+    last = [_Msg(_row("g3"), delivered=5), _Msg(_row("poison"), delivered=5)]
+    counts = asyncio.run(write_batch(js, store, last, max_deliver=5))
+    assert counts["recorded"] == 1 and counts["deadlettered"] == 1
+    assert last[0].acked and last[1].acked
+    assert [json.loads(p[1])["event_id"] for p in js.published] == ["poison"]
+    store.close()
+
+
+def test_claim_whose_document_is_elsewhere_is_redelivered_not_dropped(tmp_path):
+    """With two consumer replicas a claim can arrive before the document it
+    cites (in the other replica's batch); it was dropped and acked. It is
+    now nak'd with a delay, lands once the document does, and is
+    dead-lettered (not lost silently) if it never does."""
+    import asyncio
+    from loom.consumer import write_batch
+    store = SqliteStore(tmp_path / "prov.db")
+    js = _JS()
+    claim = _row("c1", provenance={"artifact_event_id": "d1"})
+    first = _Msg(claim)
+    counts = asyncio.run(write_batch(js, store, [first, _Msg(_row("other"))], max_deliver=5))
+    assert counts["recorded"] == 1 and counts["skipped"] == 0
+    assert not first.acked and first.naks == [5.0]
+    doc = {"kind": "document", "event_id": "d1", "text": "t", "source": "s",
+           "observed_at": "2026-09-01T00:00:00Z"}
+    asyncio.run(write_batch(js, store, [_Msg(doc)], max_deliver=5))    # the other replica lands it
+    again = _Msg(claim, delivered=2)
+    counts = asyncio.run(write_batch(js, store, [again], max_deliver=5))
+    assert counts["recorded"] == 1 and again.acked
+    obs = [o for o in store.observations_for("default", EntityRef(type="host", key="h")) if o.event_id == "c1"]
+    assert obs[0].provenance.artifact_id
+    # never resolvable: parked with a code on its last delivery
+    orphan = _Msg(_row("c2", provenance={"artifact_event_id": "nope"}), delivered=5)
+    counts = asyncio.run(write_batch(js, store, [orphan], max_deliver=5))
+    assert counts["deadlettered"] == 1 and orphan.acked
+    assert js.published[-1][2]["Loom-Error-Code"] == "provenance_unresolved"
+    store.close()
+
+
+def test_claim_may_cite_a_document_later_in_its_batch(tmp_path):
+    from loom.consumer import handle_batch
+    store = SqliteStore(tmp_path / "order.db")
+    doc = {"kind": "document", "event_id": "d9", "text": "t", "source": "s",
+           "observed_at": "2026-09-01T00:00:00Z"}
+    counts = handle_batch(store, [json.dumps(_row("c9", provenance={"artifact_event_id": "d9"})).encode(),
+                                  json.dumps(doc).encode()])
+    assert counts == {"recorded": 1, "accepted": 1, "skipped": 0, "rejected": 0}
+    store.close()

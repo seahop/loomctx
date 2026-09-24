@@ -50,6 +50,12 @@ STREAM_REPLICAS = int(os.environ.get("LOOM_STREAM_REPLICAS", "") or 1)
 ERROR_HEADER = "Loom-Error"
 ERROR_CODE_HEADER = "Loom-Error-Code"
 ERROR_CODE_STORE = "store_rejected"
+ERROR_CODE_PROVENANCE = "provenance_unresolved"
+# A claim citing a document the store does not have yet (the document is in
+# another replica's in-flight batch, or later in the stream) is nak'd with
+# this delay times its delivery count, and dead-lettered on its last allowed
+# delivery — never silently dropped and acked.
+PROVENANCE_RETRY_SECONDS = float(os.environ.get("LOOM_PROVENANCE_RETRY", "") or 5)
 
 
 def error_headers(exc: BaseException, code: str = ERROR_CODE_STORE) -> dict[str, str]:
@@ -73,7 +79,8 @@ def resolve_provenance(store: GraphStore, claim: ClaimIn) -> str | None:
 
 
 def handle_batch(store: GraphStore, payloads: list[bytes],
-                 registry: RegistryCache | None = None) -> dict[str, int]:
+                 registry: RegistryCache | None = None,
+                 retry: list[int] | None = None) -> dict[str, int]:
     """Write one fetched batch: claims land in a single transaction.
 
     Gateways validated against the same contract, so a parse failure here
@@ -82,11 +89,18 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
     applied here too: the gateway knows the contract shape but not the
     registry, so a claim that violates a registered predicate or a strict
     namespace is dropped with its reason and counted under `rejected`.
+
+    Documents are stored before any claim's provenance is resolved, so a
+    claim may cite a document later in the same batch. A claim whose
+    document is still unknown is dropped (counted `skipped`) — unless the
+    caller passes `retry`: then its payload index is appended there and
+    nothing is counted, for the caller to redeliver (the queue consumer:
+    with two replicas the document may be in the other one's batch).
     """
     registry = registry or RegistryCache(store)
     counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
-    claims: list[ClaimIn] = []
-    for data in payloads:
+    parsed: list[tuple[int, ClaimIn]] = []
+    for index, data in enumerate(payloads):
         try:
             envelope = _ENVELOPE.validate_json(data)
         except ValidationError as exc:
@@ -97,20 +111,26 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
             counts["skipped"] += 1
             continue
         if isinstance(envelope, ClaimIn):
-            problem = validate_claim(registry.get(envelope.namespace), envelope)
-            if problem is not None:
-                log.warning("rejecting claim %s: %s", envelope.event_id, problem)
-                counts["rejected"] += 1
-                continue
-            problem = resolve_provenance(store, envelope)
-            if problem is not None:
-                log.warning("dropping claim %s: %s", envelope.event_id, problem)
-                counts["skipped"] += 1
-                continue
-            claims.append(envelope)
+            parsed.append((index, envelope))
         else:
             store.store_artifact(envelope)
             counts["accepted"] += 1
+    claims: list[ClaimIn] = []
+    for index, envelope in parsed:
+        problem = validate_claim(registry.get(envelope.namespace), envelope)
+        if problem is not None:
+            log.warning("rejecting claim %s: %s", envelope.event_id, problem)
+            counts["rejected"] += 1
+            continue
+        problem = resolve_provenance(store, envelope)
+        if problem is not None:
+            if retry is not None:
+                retry.append(index)
+                continue
+            log.warning("dropping claim %s: %s", envelope.event_id, problem)
+            counts["skipped"] += 1
+            continue
+        claims.append(envelope)
     if claims:
         store.record_claims(claims)
         counts["recorded"] = len(claims)
@@ -134,8 +154,7 @@ async def settle_failed_batch(js, msgs, exc: Exception,
     headers = error_headers(exc)
     parked = 0
     for m in msgs:
-        delivered = getattr(getattr(m, "metadata", None), "num_delivered", 1) or 1
-        if delivered >= limit:
+        if _delivered(m) >= limit:
             await js.publish(m.subject.replace("loom.ingest.", "loom.deadletter.", 1),
                              m.data, headers={**(m.headers or {}), **headers})
             await m.ack()
@@ -146,6 +165,83 @@ async def settle_failed_batch(js, msgs, exc: Exception,
         log.error("%d message(s) dead-lettered after %d deliveries: %s: %s",
                   parked, limit, type(exc).__name__, exc)
     return parked
+
+
+def _delivered(msg) -> int:
+    return getattr(getattr(msg, "metadata", None), "num_delivered", 1) or 1
+
+
+async def defer_unresolved(js, msgs, max_deliver: int | None = None) -> int:
+    """Claims whose cited document is not in the store yet: nak with a
+    growing delay so the document (in another replica's batch, or later in
+    the stream) can land first; on the last allowed delivery, park on the
+    dead-letter stream (code `provenance_unresolved`) and ack. Returns how
+    many were parked."""
+    limit = max_deliver or MAX_DELIVER
+    parked = 0
+    for m in msgs:
+        delivered = _delivered(m)
+        if delivered >= limit:
+            headers = {ERROR_HEADER: "ProvenanceUnresolved", ERROR_CODE_HEADER: ERROR_CODE_PROVENANCE}
+            await js.publish(m.subject.replace("loom.ingest.", "loom.deadletter.", 1),
+                             m.data, headers={**(m.headers or {}), **headers})
+            await m.ack()
+            parked += 1
+        else:
+            await m.nak(delay=PROVENANCE_RETRY_SECONDS * delivered)
+    if parked:
+        log.error("%d claim(s) dead-lettered: cited document still unknown after %d deliveries",
+                  parked, limit)
+    return parked
+
+
+async def write_batch(js, store: GraphStore, msgs, registry: RegistryCache | None = None,
+                      max_deliver: int | None = None) -> dict[str, int]:
+    """Write one fetched batch and settle every message. The fast path is
+    one transaction for the batch. When the store rejects it (it rolled
+    back, D-022), each message is written alone: the good ones land and
+    are acked, and only a message that fails by itself is nak'd — or
+    dead-lettered on its last delivery. Batch-mates used to share the bad
+    one's fate and its delivery count, so one poison envelope parked up to
+    BATCH-1 good ones after MAX_DELIVER. Claims citing a document not yet
+    stored are redelivered (defer_unresolved). Returns the counts plus
+    `deadlettered`."""
+    counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0, "deadlettered": 0}
+    retry: list[int] = []
+    try:
+        batch_counts = handle_batch(store, [m.data for m in msgs], registry, retry)
+    except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
+        if len(msgs) == 1:
+            counts["deadlettered"] += await settle_failed_batch(js, msgs, exc, max_deliver)
+            log.warning("message failed (%s: %s); redelivered or dead-lettered",
+                        type(exc).__name__, exc)
+            return counts
+        log.warning("batch of %d failed (%s: %s); writing its messages one at a time",
+                    len(msgs), type(exc).__name__, exc)
+        unresolved = []
+        for m in msgs:
+            mine: list[int] = []
+            try:
+                one = handle_batch(store, [m.data], registry, mine)
+            except Exception as one_exc:  # noqa: BLE001 — this message, on its own
+                counts["deadlettered"] += await settle_failed_batch(js, [m], one_exc, max_deliver)
+                continue
+            if mine:
+                unresolved.append(m)
+                continue
+            await m.ack()
+            for key, val in one.items():
+                counts[key] += val
+        counts["deadlettered"] += await defer_unresolved(js, unresolved, max_deliver)
+        return counts
+    waiting = set(retry)
+    for i, msg in enumerate(msgs):  # ack only after the batch is durably written
+        if i not in waiting:
+            await msg.ack()
+    counts["deadlettered"] += await defer_unresolved(js, [msgs[i] for i in retry], max_deliver)
+    for key, val in batch_counts.items():
+        counts[key] += val
+    return counts
 
 
 async def run() -> None:
@@ -197,16 +293,7 @@ async def run() -> None:
         for m in msgs:
             who = (m.headers or {}).get("Loom-Principal", "-")
             principals[who] = principals.get(who, 0) + 1
-        try:
-            batch_counts = handle_batch(store, [m.data for m in msgs], registry)
-        except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
-            parked = await settle_failed_batch(js, msgs, exc)
-            totals["deadlettered"] += parked
-            log.exception("batch of %d failed (%d dead-lettered); rest redelivered",
-                          len(msgs), parked)
-            continue
-        for msg in msgs:  # ack only after the batch is durably written
-            await msg.ack()
+        batch_counts = await write_batch(js, store, msgs, registry)
         for key, val in batch_counts.items():
             totals[key] += val
         log.info("progress: %s (principals: %s)", totals, principals)

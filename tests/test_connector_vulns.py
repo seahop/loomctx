@@ -398,3 +398,83 @@ def test_kev_advisory_ranks_as_an_excerpt_for_its_cve(tmp_path):
     excerpts = [i for i in pack.items if i.kind == "doc_excerpt"]
     assert excerpts and "Required action" in excerpts[0].text and excerpts[0].citations[0].artifact_id
     store.close()
+
+
+def _epss(day, rows):
+    return (f"#model_version:v2025.03.14,score_date:{day}T00:00:00+0000\ncve,epss,percentile\n"
+            + "".join(f"{c},{e},{p}\n" for c, e, p in rows))
+
+
+def test_epss_ledger_emits_movement_not_every_day():
+    """The nightly refresh keyed EPSS on the score date: ~110k new
+    observations a night, each embedded, though almost none had moved."""
+    ledger = vulns.EpssLedger()
+    stats = {}
+    day1 = list(vulns.epss_envelopes(_epss("2026-09-08", [("CVE-1", 0.01, 0.50), ("CVE-2", 0.4, 0.97)]).splitlines(),
+                                     "ns", None, ledger, stats))
+    assert len(day1) == 4
+    # fourth-decimal drift: nothing; a real jump in one CVE's score: that one value
+    day2 = list(vulns.epss_envelopes(_epss("2026-09-09", [("CVE-1", 0.0104, 0.503), ("CVE-2", 0.52, 0.974)]).splitlines(),
+                                     "ns", None, ledger, stats))
+    assert [(c.subject.key, c.predicate, c.object) for c in day2] == [("CVE-2", "epss_score", 0.52)]
+    assert day2[0].event_id == "epss:CVE-2:2026-09-09:epss_score"
+    assert stats["epss_unchanged"] == 3
+    # slow drift accumulates against the last EMITTED value, so it surfaces eventually
+    day3 = list(vulns.epss_envelopes(_epss("2026-09-10", [("CVE-1", 0.0112, 0.515)]).splitlines(), "ns", None, ledger))
+    assert [(c.predicate, c.object) for c in day3] == [("epss_score", 0.0112), ("epss_percentile", 0.515)]
+
+
+def test_nightly_epss_refresh_is_bounded_and_idempotent(tmp_path, monkeypatch, capsys):
+    """End to end through the CLI: the same feed twice adds nothing, a new
+    day that moved nothing adds nothing, and the ledger is written only
+    after the load completed."""
+    cache = tmp_path / "feeds"
+    _write_cache(cache)
+    db = str(tmp_path / "n.db")
+    args = ["load", "--cache", str(cache), "--offline", "--db", db, "--sources", "kev,epss"]
+    cve = EntityRef(type="cve", key="CVE-2026-1337")
+
+    def epss_rows():
+        store = SqliteStore(db)
+        try:
+            return [o for o in store.observations_for("netsec", cve, limit=500) if o.source == "first-epss"]
+        finally:
+            store.close()
+
+    vulns.main(args)
+    assert len(epss_rows()) == 2
+    ledgers = list(cache.glob("epss-ledger-netsec-*.json.gz"))
+    assert len(ledgers) == 1
+    vulns.main(args)                                            # same file again
+    assert len(epss_rows()) == 2
+    with gzip.open(cache / "epss.csv.gz", "wt") as fh:          # tomorrow: drift only
+        fh.write(_epss("2026-09-09", [("CVE-2026-1337", 0.91301, 0.99877)]))
+    vulns.main(args)
+    assert len(epss_rows()) == 2
+    with gzip.open(cache / "epss.csv.gz", "wt") as fh:          # the day after: it moved
+        fh.write(_epss("2026-09-10", [("CVE-2026-1337", 0.97, 0.9999)]))
+    capsys.readouterr()
+    vulns.main(args)
+    assert len(epss_rows()) == 3                                # the score moved; the percentile did not
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["envelopes"]["epss_unchanged"] == 1
+    # a failed load leaves the ledger as it was, so the next run re-offers the change
+    with gzip.open(cache / "epss.csv.gz", "wt") as fh:
+        fh.write(_epss("2026-09-11", [("CVE-2026-1337", 0.5, 0.9)]))
+    before = ledgers[0].read_bytes()
+    import loom.ingest as ingest_mod
+
+    def boom(*a, **k):
+        raise SystemExit("store down")
+
+    monkeypatch.setattr(ingest_mod, "load_direct", boom)
+    with pytest.raises(SystemExit):
+        vulns.main(args)
+    assert ledgers[0].read_bytes() == before
+    monkeypatch.undo()
+    vulns.main(args)
+    assert len(epss_rows()) == 5
+    # --epss-ledger none: every row, every day (the old behavior)
+    with gzip.open(cache / "epss.csv.gz", "wt") as fh:
+        fh.write(_epss("2026-09-12", [("CVE-2026-1337", 0.5, 0.9)]))
+    vulns.main(args + ["--epss-ledger", "none"])
+    assert len(epss_rows()) == 7
