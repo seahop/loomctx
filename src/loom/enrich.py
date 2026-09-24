@@ -22,6 +22,7 @@ Run once (cron/k8s Job) or as a loop (compose profile `enrich`):
     python -m loom.enrich run --interval 30
     python -m loom.enrich resolve [--dry-run]                  # entity resolution only
     python -m loom.enrich distinct host:web-01 host:web01 --namespace ns   # never merge these
+    python -m loom.enrich undistinct host:web-01 host:web01 --namespace ns # take that back
 
 Embeddings need LOOM_EMBED_*; extraction and dossiers need LOOM_LLM_*.
 Whatever isn't configured is skipped with a log line — never an error. A
@@ -819,6 +820,14 @@ def _decline(store: GraphStore, namespace: str, a: str, b: str, reason: str) -> 
         cache.add(tuple(sorted((a, b))))
 
 
+def _undecline(store: GraphStore, namespace: str, a: str, b: str) -> bool:
+    removed = store.forget_decline(namespace, a, b)
+    cache = _declined_cache.get(namespace)
+    if cache is not None:
+        cache.discard(tuple(sorted((a, b))))
+    return removed
+
+
 def _refresh_declines() -> None:
     """Each resolution job re-reads the store's declines when it starts: an
     operator's unmerge or `distinct` lands from another process, and a
@@ -1018,6 +1027,17 @@ def mark_distinct(store: GraphStore, namespace: str, a: EntityRef, b: EntityRef,
     _decline(store, namespace, f"{a.type}:{a.key}", f"{b.type}:{b.key}", reason)
     return {"namespace": namespace, "a": f"{a.type}:{a.key}", "b": f"{b.type}:{b.key}",
             "declined": True, "unmerged": unmerged}
+
+
+def forget_distinct(store: GraphStore, namespace: str, a: EntityRef, b: EntityRef) -> dict:
+    """Take back a decline of a / b — an operator's `distinct`, an unmerge's
+    remembered pair, or an adjudicator's no: the pair becomes a candidate
+    again, so a later resolution tick may merge it (or ask about it) anew.
+    Nothing is merged here, and a split made by `distinct` stays split
+    until a tier folds the pair again."""
+    ha, hb = f"{a.type}:{a.key}", f"{b.type}:{b.key}"
+    return {"namespace": namespace, "a": ha, "b": hb,
+            "forgotten": _undecline(store, namespace, ha, hb)}
 
 
 # ------------------------------------------------ tier 3: structured aliases (D-042)
@@ -1373,7 +1393,24 @@ def main(argv: list[str] | None = None) -> None:
     p_dis.add_argument("b", help="type:key")
     p_dis.add_argument("--namespace", required=True)
     p_dis.add_argument("--reason", default=OPERATOR_DISTINCT)
+    p_und = sub.add_parser("undistinct", help="forget a decline (distinct, unmerge or an adjudicator's "
+                                              "no): resolution may merge or ask about the pair again")
+    p_und.add_argument("a", help="type:key")
+    p_und.add_argument("b", help="type:key")
+    p_und.add_argument("--namespace", required=True)
     args = parser.parse_args(argv)
+    if args.command == "undistinct":
+        from .lifecycle import parse_ref
+        store = _open_store()
+        try:
+            out = forget_distinct(store, args.namespace, parse_ref(args.a), parse_ref(args.b))
+            print(json.dumps(out))
+        finally:
+            store.close()
+        if not out["forgotten"]:
+            raise SystemExit(f"undistinct: no decline on record for {out['a']} / {out['b']}"
+                             f" in namespace {out['namespace']}")
+        return
     if args.command == "distinct":
         from .lifecycle import parse_ref
         store = _open_store()

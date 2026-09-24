@@ -261,13 +261,26 @@ declines, so an unmerge from another process is seen at once).
 python -m loom.lifecycle unmerge --namespace netsec --alias ip_address:10.0.4.7   # split + remember
 python -m loom.lifecycle unmerge --namespace netsec --alias ... --allow-remerge   # split only
 python -m loom.enrich distinct host:web-01 host:web01 --namespace netsec          # never merge these
+python -m loom.enrich undistinct host:web-01 host:web01 --namespace netsec        # take that back
 ```
 
 `distinct` is the operator's ruling that two entities are different
 things: it splits them first if one is folded into the other, and neither
 tier will merge or ask about them again. Declines travel in `export` /
-`import`. There is no "un-decline" command yet; a wrongly declined pair
-stays apart (the safe direction) until one exists.
+`import`. A settled group — every pair in it declined — also stops
+occupying the resolver's candidate lists (type drift and spelling drift
+alike), so declined groups never crowd out new collisions.
+
+`undistinct` forgets the decline of one pair, whoever recorded it: a
+`distinct`, an `unmerge`, or an adjudicator's no (an `export` lists them
+as `decline` records). It merges nothing itself: the pair is a candidate
+again, and the next resolution tick folds it if a tier would (type or
+spelling drift) or asks the adjudicator anew. The worker re-reads declines
+at the start of each job, so a running worker sees the change on its next
+tick. It prints `{"forgotten": true, ...}`, or exits non-zero when no
+decline of that pair was on record (handles are `type:key`, in either
+order). An unmerge that recorded declines against both the merge target
+and its current canonical needs one `undistinct` per pair.
 
 Adjudication spend is bounded: at most 8 model calls per resolution job
 per tick, whatever the replies say. A reply that cannot be read (verdicts

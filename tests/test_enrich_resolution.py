@@ -171,6 +171,62 @@ def test_distinct_cli_unmerges_and_declines(tmp_path, monkeypatch, capsys):
         s.close()
 
 
+def test_undistinct_cli_forgets_the_decline(tmp_path, monkeypatch, capsys):
+    """S-28: `python -m loom.enrich undistinct a b` takes a ruling back.
+    It merges nothing itself; the next resolution tick may fold the pair
+    again. A worker's loaded decline cache drops the pair too."""
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "u.db"))
+    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    monkeypatch.delenv("LOOM_BLOB_THRESHOLD", raising=False)
+    s = SqliteStore(tmp_path / "u.db")
+    web, drift = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="web01")
+    for i in range(3):
+        s.record_claim(_claim(web, "runs_os", f"os{i}"))
+    s.record_claim(_claim(drift, "runs_os", "fedora"))
+    assert enrich.resolve_entities(s) == 1
+    s.close()
+    enrich.main(["distinct", "host:web-01", "host:web01", "--namespace", "default"])
+    capsys.readouterr()
+    s = SqliteStore(tmp_path / "u.db")
+    try:
+        assert enrich.resolve_entities(s) == 0                         # the ruling holds
+        assert enrich._is_declined(s, "default", "host:web-01", "host:web01")
+        # in-process (a worker with its cache loaded) and via the CLI
+        assert enrich.forget_distinct(s, "default", drift, web)["forgotten"] is True
+        assert not enrich._is_declined(s, "default", "host:web-01", "host:web01")
+        assert s.get_entity("default", drift).key == "web01"           # nothing merged by forgetting
+        s.remember_decline("default", "host:web01", "host:web-01", "again")
+    finally:
+        s.close()
+    enrich.main(["undistinct", "host:web01", "host:web-01", "--namespace", "default"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"namespace": "default", "a": "host:web01", "b": "host:web-01", "forgotten": True}
+    with pytest.raises(SystemExit) as exc:                              # nothing on record now
+        enrich.main(["undistinct", "host:web01", "host:web-01", "--namespace", "default"])
+    assert "no decline on record" in str(exc.value)
+    assert json.loads(capsys.readouterr().out)["forgotten"] is False
+    s = SqliteStore(tmp_path / "u.db")
+    try:
+        assert s.declined_pairs("default") == set()
+        assert enrich.resolve_entities(s) == 1                         # a candidate again: folded
+        assert s.get_entity("default", drift).key == "web-01"
+    finally:
+        s.close()
+
+
+def test_declined_fuzzy_groups_do_not_starve_adjudication(tmp_path):
+    """S-26 at the worker: with the candidate limit filled by settled groups
+    the adjudicator never saw a new collision again."""
+    store = _cross_type_store(tmp_path, 3)
+    for i in (0, 1):
+        store.remember_decline("default", f"host:srv-{i:02d}", f"asset:SRV_{i:02d}", "no")
+    judge = Scripted(lambda p: '{"same": false, "confidence": 0.9, "reason": "no"}')
+    enrich.adjudicate_entities(store, judge, limit=1)
+    assert len(judge.prompts) == 1 and "srv-02" in judge.prompts[0]
+    assert store.fuzzy_merge_candidates(limit=1) == []
+    store.close()
+
+
 # ----------------------------------------------------------- spend is capped #
 
 def _cross_type_store(tmp_path, n):
