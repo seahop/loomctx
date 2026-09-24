@@ -156,6 +156,8 @@ def main(argv: list[str] | None = None) -> None:
     p_unmerge = sub.add_parser("unmerge", help="reverse the merge that folded an entity away (D-019)")
     p_unmerge.add_argument("--namespace", required=True)
     p_unmerge.add_argument("--alias", required=True, help="the merged-away ref, as type:key")
+    p_unmerge.add_argument("--allow-remerge", action="store_true",
+                           help="do not record the pair as declined: entity resolution may merge it again")
 
     args = parser.parse_args(argv)
     store = store_from_url(args.db) if args.db else store_from_env()
@@ -183,7 +185,11 @@ def main(argv: list[str] | None = None) -> None:
             if not ok:
                 sys.exit(1)
         elif args.command == "unmerge":
-            ok = store.unmerge(args.namespace, parse_ref(args.alias))
+            # the reversal sticks: the pair is recorded as declined, which
+            # every resolution tier honors (else the worker re-merges it)
+            from .enrich import unmerge_and_decline
+            ok = unmerge_and_decline(store, args.namespace, parse_ref(args.alias),
+                                     remember=not args.allow_remerge)
             print("unmerged" if ok else "no merge on record for that alias")
             if not ok:
                 sys.exit(1)
