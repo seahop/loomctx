@@ -9,6 +9,8 @@ Deliberately planted demo moments (same seed -> same data, always):
     laptop-17 — "which host had this IP during the incident?" (bitemporal)
   * Two sources disagree about web-01's OS, and about vendor Initech's
     contract owner — conflict surfacing
+  * The contract DB corrects its own earlier record of Hooli's contract
+    owner — a recorded supersession (D-050), not a conflict
   * An incident report document ties web-01 / jdoe / 10.0.4.7 together
 
 Usage (inside Docker; see README):
@@ -31,6 +33,10 @@ from .store.factory import store_from_env, store_from_url
 # Fixed epoch: the dataset describes July-September 2026 regardless of when
 # it is generated, so demos and tests are perfectly reproducible.
 BASE = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+# attrs key on a seed claim that corrects an earlier one: the event_id of
+# the observation it supersedes (resolved to its id at load time)
+SUPERSEDES_EVENT = "seed_supersedes_event"
 
 HOSTS = ["web-01", "web-02", "web-03", "db-01", "db-02", "vpn-01", "laptop-17"]
 USERS = ["jdoe", "asmith", "mchen", "rlee", "svc-backup"]
@@ -160,6 +166,16 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
     # Planted conflict: email trawl disagrees about initech's contract owner.
     claims.append(_claim(ns, ("vendor", "initech"), "contract_owner", "rlee",
                          50, 15, "email-extraction", confidence=0.6))
+    # Planted correction (D-050): the contract DB later corrects its OWN
+    # earlier hooli owner record. Not a conflict — one source, a recorded
+    # supersession: the old row stays for audit and as_of reads, the new one
+    # is current. `cmd_load` resolves the target's observation id (ids are
+    # minted at load time) into ClaimIn.supersedes.
+    hooli_owner_index = next(i for i, c in enumerate(claims)
+                             if c.subject.key == "hooli" and c.predicate == "contract_owner")
+    claims.append(_claim(ns, ("vendor", "hooli"), "contract_owner", "rlee", 58, 10, "contract-db",
+                         attrs={SUPERSEDES_EVENT: f"seed:{seed}:c{hooli_owner_index}",
+                                "note": "correction: owner field was stale"}))
 
     # ------------------------------------------------------------- documents
     docs = [
@@ -242,14 +258,35 @@ def redact_dsn(url: str) -> str:
     return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
 
 
+def resolve_supersessions(claims: list[ClaimIn], recorded) -> list[ClaimIn]:
+    """The correction claims with `supersedes` set to the id of the
+    observation their SUPERSEDES_EVENT attr names, from the observations
+    just recorded (by event_id). A target that did not land is an error:
+    a supersession is recorded, never guessed."""
+    by_event = {o.event_id: o.id for o in recorded if o.event_id}
+    out = []
+    for c in claims:
+        target = c.attrs.get(SUPERSEDES_EVENT)
+        if not target:
+            continue
+        if target not in by_event:
+            raise ValueError(f"seed correction {c.event_id} supersedes unknown event {target!r}")
+        attrs = {k: v for k, v in c.attrs.items() if k != SUPERSEDES_EVENT}
+        out.append(c.model_copy(update={"supersedes": by_event[target], "attrs": attrs}))
+    return out
+
+
 def cmd_load(db_path: str | None, seed: int) -> None:
     """An explicit db_path opens that store alone; None opens whatever
     LOOM_DB / LOOM_SHARDS / LOOM_BLOB_* configure, exactly as the engine
     does — so the seed lands where the engine will look for it."""
     claims, docs = generate(seed)
+    plain = [c for c in claims if SUPERSEDES_EVENT not in c.attrs]
     store = store_from_url(db_path) if db_path else store_from_env()
     try:
-        store.record_claims(claims)
+        recorded = store.record_claims(plain)
+        # corrections go last, pointing at the observation ids just minted
+        store.record_claims(resolve_supersessions(claims, recorded))
         for doc in docs:
             store.store_artifact(doc)
     finally:
