@@ -20,25 +20,39 @@ when LOOM_AUTH_FILE / LOOM_API_KEYS is set (an ASGI gate rejects the rest
 before MCP sees them), and every tool call applies the key's namespace,
 perms, entity-type and source gates exactly as the HTTP routes do.
 
+MCP 2026-07-28 alignment (R-7): every tool publishes an `outputSchema`
+derived from the contract models and returns `structuredContent` next to
+the text mirror; every tool carries a title and annotations (read-only /
+idempotent / closed-world hints); the pack tools take `format`.
+
 Requires the `mcp` extra (installed in the image).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import RootModel
+
+try:  # the SDK moved the wire types into their own package in 2.x
+    from mcp_types import ToolAnnotations
+except ImportError:  # pragma: no cover - older SDK layout
+    from mcp.types import ToolAnnotations
 
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
 from .context import build_pack, decode_handle, expand_pack, semantic_search
-from .contracts import AnswerRequest, AskRequest, ClaimIn, EntityRef, ScopeSpec
+from .contracts import (AnswerRequest, AskRequest, ClaimIn, EntityRef, ExpansionHandle,
+                        Observation, PredicateDef, ScopeSpec, ScopeTruncation,
+                        SemanticSearchResponse)
 from .llm import LLMError, embedder_from_env, llm_from_env
 from .registry import validate_claim
 from .store.base import GraphStore
@@ -54,6 +68,8 @@ _transport = "stdio"
 # dropped the argument after two calls and spent twelve steps querying an
 # empty 'default'; a deployment that serves one team sets this once.
 _DEFAULT_NS = os.environ.get("LOOM_MCP_NAMESPACE", "").strip() or "default"
+
+Format = Literal["concise", "detailed"]
 
 
 def _get_embedder():
@@ -147,23 +163,37 @@ class KeyGate:
                                 (b"content-length", str(len(body)).encode())]})
         await send({"type": "http.response.body", "body": body})
 
-mcp = MCPServer(
-    "loom",
-    instructions=(
-        "Loom is a provenance-tracked context engine. Start with "
-        "list_namespaces and describe_namespace to learn what data exists "
-        "(entity types, predicates, and which relations to expand). Use "
-        "find_entity to turn names into 'type:key' handles (find_related when "
-        "you only know what you're looking for, not its name), ask/ask_scope "
-        "for budgeted cited context (start small — expand pulls threads deeper "
-        "via handles; multi-hop questions are ask_scope with "
-        "expand_predicates), record_claim to write back facts you learn, and "
-        "answer for a server-side LLM synthesis when one is configured. Pass "
-        "the same namespace on every call. Cite facts by the `cite` token on "
-        "their citations. Conflict items mean sources disagree — never "
-        "resolve them silently."
-    ),
+
+# Guidance for the budget of a scope ask: the after-alias rehearsal's
+# two-hop ask_scope at the default overflowed Claude Code's inline
+# tool-result limit; 1500 fits and leaves handles to expand.
+SCOPE_BUDGET_HINT = 1500
+
+INSTRUCTIONS = (
+    "Loom is a provenance-tracked context engine. Start with "
+    "list_namespaces and describe_namespace to learn what data exists "
+    "(entity types, predicates, and which relations to expand). Use "
+    "find_entity to turn names into 'type:key' handles (find_related when "
+    "you only know what you're looking for, not its name). ask = budgeted, "
+    "cited context about ONE entity; ask_scope = several entities and/or "
+    "relation hops (multi-hop questions are ask_scope with "
+    "expand_predicates). Start small: expand pulls a thread deeper via the "
+    f"handles a pack returns. Keep ask_scope at budget<={SCOPE_BUDGET_HINT} "
+    "and expand what matters — a bigger scope pack overflows client "
+    "tool-result limits. Every pack tool takes format='concise' (default: "
+    "12-hex `cite` tokens, subjects summarized) or 'detailed' (full 32-hex "
+    "observation ids next to each cite, every reached subject listed). "
+    "Cite facts by the `cite` token on their citations. A pack's "
+    "`truncated` list names entities whose observations were only partly "
+    "examined — never conclude absence about those. Conflict items mean "
+    "sources disagree — never resolve them silently; record_claim writes "
+    "back facts you learn, and record_claim(supersedes=<cite>) records a "
+    "correction of an earlier observation (recorded, never inferred). "
+    "answer gives a server-side LLM synthesis when one is configured. Pass "
+    "the same namespace on every call."
 )
+
+mcp = MCPServer("loom", instructions=INSTRUCTIONS)
 
 _store: GraphStore | None = None
 
@@ -230,37 +260,156 @@ def _observation_by_cite(namespace: str, token: str):
     return found[0]
 
 
-def _agent_view(pack) -> dict:
+# ----------------------------------------------------------- output shapes #
+# Each tool's return annotation is what the SDK derives its `outputSchema`
+# from and validates `structuredContent` against. Pack tools return the
+# *agent view* — a presentation of the ContextPack contract (D-036/D-041),
+# not a second contract: the HTTP surface still serializes ContextPack.
+# TypedDicts keep the runtime values plain dicts (direct callers and tests
+# index them) while the SDK gets a schema; nested contract models
+# (EntityRef, ExpansionHandle, ScopeTruncation, Observation, PredicateDef)
+# are the contract's own.
+
+class AgentCitation(TypedDict):
+    """A compact citation: `cite` (12 hex) stands for the observation or
+    artifact; format='detailed' adds the full observation_id."""
+    cite: str
+    source: str
+    observed_at: datetime
+    observation_id: NotRequired[str]
+    artifact_id: NotRequired[str]
+    span_start: NotRequired[int]
+    span_end: NotRequired[int]
+
+
+class AgentItem(TypedDict):
+    kind: Literal["brief", "fact", "relation", "doc_excerpt", "conflict"]
+    text: str
+    score: float
+    citations: list[AgentCitation]
+
+
+class AgentPack(TypedDict):
+    """A ContextPack as an agent reads it (items first, compact citations,
+    reached subjects summarized unless format='detailed')."""
+    namespace: str
+    question: str | None
+    budget: int
+    format: Format
+    items: list[AgentItem]
+    handles: list[ExpansionHandle]
+    omitted_handles: int
+    subjects_total: int
+    subjects: list[EntityRef]
+    subjects_note: NotRequired[str]
+    subject: NotRequired[EntityRef]
+    as_of: NotRequired[datetime]
+    valid_at: NotRequired[datetime]
+    truncated: NotRequired[list[ScopeTruncation]]
+    coverage_warning: NotRequired[str]
+
+
+class ObservationList(TypedDict):
+    """Raw observations (audit view), or the single observation a cite
+    token / observation id names."""
+    subject: NotRequired[str]
+    namespace: NotRequired[str]
+    count: int
+    observations: list[Observation]
+
+
+class ExpandResult(RootModel[AgentPack | ObservationList]):
+    """expand returns a pack for an expansion handle, or the one
+    observation a cite token / observation id names."""
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        # an outputSchema must be an object schema at the top level; both
+        # arms are objects, so saying so next to the anyOf is exact
+        schema = handler(core_schema)
+        handler.resolve_ref_schema(schema)["type"] = "object"
+        return schema
+
+
+class NamespaceInfo(TypedDict):
+    namespace: str
+    entities: dict[str, int]
+    total: int
+
+
+class EntityTypeCount(TypedDict):
+    name: str
+    count: int
+    description: str
+
+
+class NamespaceDescription(TypedDict):
+    namespace: str
+    entity_types: list[EntityTypeCount]
+    predicates: list[PredicateDef]
+    strict: bool
+    hint: str
+
+
+class EntityMatch(TypedDict):
+    handle: str
+    type: str
+    key: str
+    provisional: bool
+
+
+class RecordClaimResult(TypedDict):
+    status: Literal["recorded"]
+    observation_id: str
+    event_id: str
+    supersedes: NotRequired[str]
+
+
+class AnswerResult(TypedDict):
+    answer: str
+    model: str
+    pack: AgentPack
+
+
+def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
     """A ContextPack as an agent should read it: items first, no null
     citation fields, and the reached-subject list summarized. The HTTP
     contract is unchanged; this is presentation. On a 1,077-entity scope
     the full pack was 69k chars of which 3.7k was fact text, and the subject
-    list came before the items (D-036)."""
+    list came before the items (D-036). format='detailed' keeps the 32-hex
+    observation ids next to the cite tokens and lists every reached
+    subject (auditing); 'concise' is what an agent carries in context."""
+    if fmt not in ("concise", "detailed"):
+        raise ValueError(f"format must be 'concise' or 'detailed', got {fmt!r}")
+    detailed = fmt == "detailed"
     d = pack.model_dump(mode="json", exclude_none=True)
     # a 12-hex `cite` token per citation: two of 216 scorecard task-runs
     # mangled a hand-copied 32-hex id by one character (D-041); the
     # answer route already cites by this prefix. The 32-hex observation_id
     # is dropped once the token stands for it (compact citations: agents
-    # carry every pack in context); artifact citations keep their id, which
-    # excerpt handles and get_artifact take.
+    # carry every pack in context) unless the caller asked for detail;
+    # artifact citations keep their id, which excerpt handles and
+    # get_artifact take.
     for item in d.get("items", []):
         for c in item.get("citations", []):
             ref = c.get("observation_id") or c.get("artifact_id") or ""
             if ref:
                 c["cite"] = ref[:12]
-            if c.get("observation_id"):
+            if c.get("observation_id") and not detailed:
                 del c["observation_id"]
     subjects = d.get("subjects", [])
-    view = {
+    shown = len(subjects) if detailed else _SUBJECTS_SHOWN
+    view: dict[str, Any] = {
         "namespace": d.get("namespace"), "question": d.get("question"),
-        "budget": d.get("budget"), "items": d.get("items", []),
+        "budget": d.get("budget"), "format": fmt, "items": d.get("items", []),
         "handles": d.get("handles", []), "omitted_handles": d.get("omitted_handles", 0),
         "subjects_total": len(subjects),
-        "subjects": subjects[:_SUBJECTS_SHOWN],
+        "subjects": subjects[:shown],
     }
-    if len(subjects) > _SUBJECTS_SHOWN:
-        view["subjects_note"] = (f"{len(subjects) - _SUBJECTS_SHOWN} more reached entities not listed; "
-                                 "the items above already cover the ones relevant to the question")
+    if len(subjects) > shown:
+        view["subjects_note"] = (f"{len(subjects) - shown} more reached entities not listed; "
+                                 "the items above already cover the ones relevant to the question"
+                                 " (format='detailed' lists them all)")
     for key in ("subject", "as_of", "valid_at"):
         if d.get(key) is not None:
             view[key] = d[key]
@@ -271,7 +420,7 @@ def _agent_view(pack) -> dict:
             f"{t['total']:,} observations were examined"
             for t in d["truncated"]
         ) + " — do not conclude that something is absent for these entities; ask about them directly, narrow with valid_at, or expand a handle"
-    return view
+    return view  # type: ignore[return-value]
 
 
 def _parse_ref(handle: str) -> EntityRef:
@@ -306,7 +455,7 @@ def _known_namespace(namespace: str, grant: Grant | None = None) -> None:
 
 # ------------------------------------------------------------------- tools #
 
-def list_namespaces(ctx: Context = None) -> list[dict]:
+def list_namespaces(ctx: Context = None) -> list[NamespaceInfo]:
     """The namespaces this Loom holds, with entity counts by type — call this
     first when you don't know where the data lives."""
     grant = _caller(ctx)
@@ -315,7 +464,7 @@ def list_namespaces(ctx: Context = None) -> list[dict]:
             for ns in _visible(grant, summary)]
 
 
-def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> dict:
+def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> NamespaceDescription:
     """What a namespace contains and how it is connected: entity types with
     counts, and the registered predicates (description, allowed object types,
     whether scopes follow it by default). Read this before choosing
@@ -341,7 +490,7 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> dic
 
 
 def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
-                ctx: Context = None) -> list[dict]:
+                ctx: Context = None) -> list[EntityMatch]:
     """Resolve a name or key fragment to entity handles. Returns matches as
     'type:key' handles usable with the other tools (exact match first)."""
     grant = _grant(ctx, namespace, "r")
@@ -359,7 +508,7 @@ def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
 
 
 def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
-                 ctx: Context = None) -> dict:
+                 ctx: Context = None) -> SemanticSearchResponse:
     """Entities related to a question by MEANING rather than by name
     ("what looks exploitable?", "which campaigns hit web servers?") — use
     when you don't know an entity's key. Searches both facts and the
@@ -373,7 +522,7 @@ def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
                         " use find_entity with a key fragment instead")
     _known_namespace(namespace, grant)
     return semantic_search(_get_store(), namespace, embedder, question,
-                           limit=limit, allowed_types=_allowed(grant)).model_dump(mode="json")
+                           limit=limit, allowed_types=_allowed(grant))
 
 
 def ask(
@@ -383,13 +532,17 @@ def ask(
     namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
+    format: Format = "concise",
     ctx: Context = None,
-) -> dict:
-    """Question-scoped, token-budgeted, cited context about one entity.
-    subject is a 'type:key' handle. Conflicting facts are flagged explicitly;
-    'handles' in the result feed the expand tool for more detail. as_of
-    (ISO timestamp) = what was KNOWN at that moment; valid_at = what was
-    TRUE at that moment (e.g. which host held an IP during an incident)."""
+) -> AgentPack:
+    """Question-scoped, token-budgeted, cited context about ONE entity
+    (for several entities, or relations to follow, use ask_scope instead).
+    subject is a 'type:key' handle. Conflicting facts are flagged
+    explicitly; 'handles' in the result feed the expand tool for more
+    detail. as_of (ISO timestamp) = what was KNOWN at that moment;
+    valid_at = what was TRUE at that moment (e.g. which host held an IP
+    during an incident). format='concise' (default) gives 12-hex `cite`
+    tokens; 'detailed' adds full observation ids for auditing."""
     grant = _grant(ctx, namespace, "r")
     ref = _parse_ref(subject)
     _gate_type(grant, ref.type)
@@ -403,7 +556,7 @@ def ask(
         valid_at=_parse_time(valid_at),
     )
     return _agent_view(build_pack(
-        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)))
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)), format)
 
 
 def ask_scope(
@@ -415,13 +568,19 @@ def ask_scope(
     namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
+    format: Format = "concise",
     ctx: Context = None,
-) -> dict:
-    """Context about SEVERAL entities at once — a set of hosts, or an anchor
-    plus its contents ('domain:corp.local' expanded over ['member_of'] covers
-    every member). subjects are 'type:key' handles; expand_predicates names
-    the relations to follow outward (omit it to follow the namespace's
-    registered containment predicates); depth bounds the traversal."""
+) -> AgentPack:
+    """Context about SEVERAL entities at once and/or across RELATION HOPS
+    (one entity, no hops: use ask). A set of hosts, or an anchor plus its
+    contents ('domain:corp.local' expanded over ['member_of'] covers every
+    member; host -runs_software-> product <-affects- cve is a two-hop
+    exposure question). subjects are 'type:key' handles; expand_predicates
+    names the relations to follow outward (omit it to follow the
+    namespace's registered containment predicates); depth bounds the
+    traversal. Keep budget at or under 1500 and expand handles for depth —
+    a large scope pack overflows client tool-result limits. format as in
+    ask; 'detailed' also lists every reached subject."""
     grant = _grant(ctx, namespace, "r")
     refs = [_parse_ref(s) for s in subjects]
     for ref in refs:
@@ -436,10 +595,10 @@ def ask_scope(
         valid_at=_parse_time(valid_at),
     )
     return _agent_view(build_pack(
-        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)))
+        _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)), format)
 
 
-def _observation_view(namespace: str, grant: Grant | None, obs) -> dict:
+def _observation_view(namespace: str, grant: Grant | None, obs) -> ObservationList:
     """One raw observation, gated like get_observations."""
     if grant is not None and not (
             grant.allows_entity_type(obs.subject.type)
@@ -449,12 +608,17 @@ def _observation_view(namespace: str, grant: Grant | None, obs) -> dict:
 
 
 def expand(handle: str, budget: int = 800, namespace: str = _DEFAULT_NS,
-           ctx: Context = None) -> dict:
+           format: Format = "concise", ctx: Context = None) -> ExpandResult:
     """Pull one thread deeper: pass an expansion handle id from a previous
     ask/ask_scope result (the `id` of an entry in its `handles` list) to
-    fetch the observations it stands for. A citation's `cite` token (or a
-    full observation id) returns that one observation instead, from
-    `namespace`."""
+    fetch the observations it stands for. Handles are stateless (the
+    server keeps nothing per handle), signed when the deployment sets
+    LOOM_HANDLE_SECRET, and never expire on their own — there is no TTL;
+    only a rotation of that secret invalidates the ones issued before it.
+    Size is controlled by `budget`: pass a smaller one for a tighter
+    result, a larger one to drain the thread. A citation's `cite` token
+    (or a full observation id) returns that one observation instead, from
+    `namespace`. format as in ask."""
     if _CITE.match(handle) or _OBS_ID.match(handle):
         grant = _grant(ctx, namespace, "r")
         return _observation_view(namespace, grant, _observation_by_cite(namespace, handle))
@@ -467,7 +631,20 @@ def expand(handle: str, budget: int = 800, namespace: str = _DEFAULT_NS,
                          "records use get_observations") from exc
     grant = _grant(ctx, meta["ns"], "r")
     _gate_type(grant, str(meta["subject"].get("type", "")))
-    return _agent_view(expand_pack(_get_store(), handle, budget, allowed_types=_allowed(grant)))
+    return _agent_view(expand_pack(_get_store(), handle, budget, allowed_types=_allowed(grant)), format)
+
+
+def _claim_event_id(namespace: str, subject: EntityRef, predicate: str, obj: Any,
+                    observed_at: datetime, source: str, valid_from: datetime | None,
+                    valid_to: datetime | None, supersedes: str | None) -> str:
+    """Content-addressed idempotency key for a write-back: the same fact
+    recorded twice by an agent that retried is one observation (D-014),
+    so record_claim is idempotent without the caller managing ids."""
+    obj_key = f"{obj.type}:{obj.key}" if isinstance(obj, EntityRef) else f"={type(obj).__name__}:{obj}"
+    parts = (namespace, subject.type, subject.key, predicate, obj_key, observed_at.isoformat(),
+             source, valid_from.isoformat() if valid_from else "",
+             valid_to.isoformat() if valid_to else "", supersedes or "")
+    return "mcp:" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
 def record_claim(
@@ -481,12 +658,23 @@ def record_claim(
     namespace: str = _DEFAULT_NS,
     valid_from: str | None = None,
     valid_to: str | None = None,
+    supersedes: str | None = None,
+    event_id: str | None = None,
     ctx: Context = None,
-) -> dict:
+) -> RecordClaimResult:
     """Write back a fact you learned. subject is 'type:key'; provide exactly
     one of object_ref (another 'type:key' entity — creates a graph edge) or
     object_value (a scalar like an OS name or port number). observed_at /
-    valid_from / valid_to are ISO timestamps."""
+    valid_from / valid_to are ISO timestamps. Idempotent: event_id is the
+    dedupe key (redelivery of the same event_id records nothing new);
+    omit it and one is derived from the claim's content, so repeating the
+    same call is one observation. supersedes = the `cite` token (or full
+    id) of an earlier observation this claim CORRECTS or replaces — a
+    recorded correction, never inferred: the old observation stays for
+    audit and for as_of reads before this one, but is no longer current
+    and no longer counts as a conflict. Use it when you have established
+    that a source's earlier statement was wrong; never to pick a side of a
+    conflict you have not resolved."""
     if (object_ref is None) == (object_value is None):
         raise ValueError("provide exactly one of object_ref or object_value")
     grant = _grant(ctx, namespace, "w")
@@ -497,27 +685,43 @@ def record_claim(
     obj: Any = _parse_ref(object_ref) if object_ref else object_value
     if isinstance(obj, EntityRef):
         _gate_type(grant, obj.type)
+    superseded_id: str | None = None
+    if supersedes:
+        old = _observation_by_cite(namespace, supersedes)
+        if old is None:
+            raise ValueError(f"supersedes must be a citation's 12-hex `cite` token or a full "
+                             f"32-hex observation id, got {supersedes!r}")
+        superseded_id = old.id
+    when = datetime.fromisoformat(observed_at)
+    vf, vt = _parse_time(valid_from), _parse_time(valid_to)
+    if not event_id:
+        event_id = _claim_event_id(namespace, subj, predicate, obj, when, source, vf, vt, superseded_id)
     claim = ClaimIn(
         namespace=namespace,
+        event_id=event_id,
         subject=subj,
         predicate=predicate,
         object=obj,
-        observed_at=datetime.fromisoformat(observed_at),
-        valid_from=_parse_time(valid_from),
-        valid_to=_parse_time(valid_to),
+        observed_at=when,
+        valid_from=vf,
+        valid_to=vt,
         source=source,
         confidence=confidence,
+        supersedes=superseded_id,
     )
     problem = validate_claim(_get_store().get_schema(namespace), claim)
     if problem is not None:
         raise ValueError(problem)
     obs = _get_store().record_claim(claim)
-    return {"status": "recorded", "observation_id": obs.id}
+    out: RecordClaimResult = {"status": "recorded", "observation_id": obs.id, "event_id": event_id}
+    if superseded_id:
+        out["supersedes"] = superseded_id
+    return out
 
 
 def get_observations(
     subject: str, namespace: str = _DEFAULT_NS, limit: int = 50, ctx: Context = None
-) -> dict:
+) -> ObservationList:
     """Raw observations touching an entity (audit/debug — prefer ask for
     focused context). subject may also be a citation's `cite` token or a
     full observation id, which returns that single record."""
@@ -547,7 +751,7 @@ def answer(
     namespace: str = _DEFAULT_NS,
     valid_at: str | None = None,
     ctx: Context = None,
-) -> dict:
+) -> AnswerResult:
     """Retrieval-grounded LLM answer with citations. Entities named verbatim
     in the question are auto-resolved when subject is omitted. Requires the
     server to have LOOM_LLM_* configured; use ask when it isn't."""
@@ -580,6 +784,22 @@ def answer(
     }
 
 
+# tool -> (title, read-only?, idempotent?). Every tool is closed-world (it
+# touches this Loom's store and nothing else) and none is destructive
+# (observations are append-only; record_claim only adds).
+TOOL_META: dict[str, tuple[str, bool, bool]] = {
+    "list_namespaces": ("List namespaces", True, True),
+    "describe_namespace": ("Describe a namespace", True, True),
+    "find_entity": ("Find entities by name", True, True),
+    "find_related": ("Find entities by meaning", True, True),
+    "ask": ("Ask about one entity", True, True),
+    "ask_scope": ("Ask about a scope", True, True),
+    "expand": ("Expand a handle", True, True),
+    "record_claim": ("Record a claim", False, True),
+    "get_observations": ("Get raw observations", True, True),
+    "answer": ("LLM answer with citations", True, False),
+}
+
 TOOLS = (
     list_namespaces,
     describe_namespace,
@@ -592,6 +812,14 @@ TOOLS = (
     get_observations,
     answer,
 )
+
+
+def _annotations(name: str) -> ToolAnnotations:
+    title, read_only, idempotent = TOOL_META[name]
+    return ToolAnnotations(title=title, read_only_hint=read_only, destructive_hint=False,
+                           idempotent_hint=idempotent, open_world_hint=False)
+
+
 def _surface_errors(fn):
     """The SDK reports unexpected exceptions as an opaque 'Error executing
     tool'; an agent needs the actual reason (bad handle, scope refusal,
@@ -611,7 +839,8 @@ def _surface_errors(fn):
 
 
 for _fn in TOOLS:
-    mcp.tool(name=_fn.__name__)(_surface_errors(_fn))
+    mcp.tool(name=_fn.__name__, title=TOOL_META[_fn.__name__][0],
+             annotations=_annotations(_fn.__name__))(_surface_errors(_fn))
 
 
 def main() -> None:

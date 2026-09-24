@@ -51,15 +51,30 @@ def test_agent_loop_over_stdio(seeded_db):
         assert {"find_entity", "find_related", "ask", "ask_scope", "expand",
                 "record_claim", "get_observations", "answer"} <= set(tools)
         assert "ctx" not in tools["ask"].input_schema.get("properties", {})
+        # R-7: tools/list carries outputSchema, titles and annotations
+        for t in tools.values():
+            assert t.output_schema and t.title and t.annotations is not None, t.name
+        assert tools["ask"].annotations.read_only_hint is True
+        assert tools["record_claim"].annotations.read_only_hint is False
+        assert "cite" in json.dumps(tools["ask"].output_schema)
 
-        found = _payload(await session.call_tool(
-            "find_entity", {"query": "web-01", "namespace": "netsec"}))
+        res = await session.call_tool("find_entity", {"query": "web-01", "namespace": "netsec"})
+        assert res.structured_content and res.structured_content["result"][0]["handle"] == "host:web-01"
+        found = _payload(res)
         assert found[0]["handle"] == "host:web-01"
 
-        pack = _payload(await session.call_tool("ask", {
+        res = await session.call_tool("ask", {
             "subject": "host:web-01", "question": "what operating system does it run?",
-            "budget": 300, "namespace": "netsec"}))
+            "budget": 300, "namespace": "netsec"})
+        # tools/call returns structuredContent plus the text mirror
+        assert res.structured_content["format"] == "concise"
+        assert json.loads(res.content[0].text)["items"] == res.structured_content["items"]
+        pack = _payload(res)
         assert pack["items"][0]["kind"] == "conflict"          # the planted OS conflict
+        detailed = _payload(await session.call_tool("ask", {
+            "subject": "host:web-01", "question": "what operating system does it run?",
+            "budget": 300, "namespace": "netsec", "format": "detailed"}))
+        assert all(len(c["observation_id"]) == 32 for i in detailed["items"] for c in i["citations"])
         assert all(i["citations"] for i in pack["items"])
         assert pack["handles"], "a small budget leaves threads to expand"
 
@@ -81,6 +96,13 @@ def test_agent_loop_over_stdio(seeded_db):
         raw = _payload(await session.call_tool(
             "get_observations", {"subject": "host:web-01", "namespace": "netsec", "limit": 5}))
         assert any(o["source"] == "agent-writeback" for o in raw["observations"])
+        # a recorded correction names what it supersedes by cite token
+        cite = next(c["cite"] for i in pack["items"] for c in i["citations"])
+        fixed = _payload(await session.call_tool("record_claim", {
+            "subject": "host:web-01", "predicate": "runs_os", "object_value": "fedora-44",
+            "observed_at": "2026-09-08T12:00:00Z", "source": "agent-writeback",
+            "namespace": "netsec", "supersedes": cite}))
+        assert len(fixed["supersedes"]) == 32 and fixed["supersedes"].startswith(cite)
         return True
 
     assert asyncio.run(_session(seeded_db, run))

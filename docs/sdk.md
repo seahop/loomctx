@@ -16,11 +16,11 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `describe_namespace(namespace)` | How it connects: entity types with counts, registered predicates (descriptions, object types, containment) and a hint for multi-hop `ask_scope` |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
 | `find_related(question)` | Entities related by meaning — over facts *and* the passages of documents that claims cite — each with the fact or passage that matched, cited (needs `LOOM_EMBED_*`; D-040) |
-| `ask(subject, question, budget, as_of?, valid_at?)` | Budgeted, cited context on one entity (`as_of` = known at T, `valid_at` = true at T) |
-| `ask_scope(subjects, question, expand_predicates?, depth?)` | Several entities, or an anchor + contents ("domain:corp.local" over `member_of`) |
-| `expand(handle, budget)` | Progressive disclosure — pull one thread deeper |
-| `record_claim(subject, predicate, ..., object_ref \| object_value)` | Agents write back facts they learn |
-| `get_observations(subject)` | Raw audit view |
+| `ask(subject, question, budget, as_of?, valid_at?, format?)` | Budgeted, cited context on **one** entity (`as_of` = known at T, `valid_at` = true at T) |
+| `ask_scope(subjects, question, expand_predicates?, depth?, format?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve |
+| `expand(handle, budget, format?)` | Progressive disclosure — pull one thread deeper; a `cite` token returns that one observation |
+| `record_claim(subject, predicate, ..., object_ref \| object_value, supersedes?, event_id?)` | Agents write back facts they learn; `supersedes` records a correction of an earlier observation |
+| `get_observations(subject)` | Raw audit view (an entity, or a `cite` token / observation id) |
 | `answer(question, subject?)` | Server-side LLM synthesis (guides to `ask` when no LLM is configured) |
 
 Every tool takes a `namespace`; a call against a namespace that holds no
@@ -29,6 +29,39 @@ live agent run dropped the argument after two calls and spent twelve steps
 querying an empty `default` (D-036). A deployment that serves one team
 sets `LOOM_MCP_NAMESPACE=netsec` on the server and the argument becomes
 optional.
+
+**MCP 2026-07-28 alignment (R-7).** Every tool publishes an `outputSchema`
+derived from the contract models and returns `structuredContent` next to
+the text mirror; every tool has a title and annotations (`readOnlyHint`
+on every read tool, `destructiveHint: false` everywhere — observations are
+append-only — `idempotentHint` where a repeat is a no-op, `openWorldHint:
+false`). The pack tools' schema is the *agent view* of `ContextPack`
+(items first, compact citations, reached subjects summarized); the HTTP
+surface still serializes the contract itself.
+
+- `format: "concise" | "detailed"` on `ask`, `ask_scope`, `expand`.
+  Concise (default) is what an agent carries in context: a 12-hex `cite`
+  token per citation, the first 20 reached subjects plus a total. Detailed
+  keeps the full 32-hex `observation_id` next to each `cite` and lists
+  every reached subject — for auditing, not for the loop.
+- `expand` handles are stateless (the server keeps nothing per handle),
+  HMAC-signed when `LOOM_HANDLE_SECRET` is set, and never expire on their
+  own — there is no TTL; rotating the secret is what invalidates the ones
+  issued before it. `budget` is how the caller controls the size.
+- `record_claim` is idempotent: `event_id` is the dedupe key (D-014); when
+  omitted, one is derived from the claim's content, so a retried call
+  records nothing new. `supersedes` takes a `cite` token or a full
+  observation id and lands as `ClaimIn.supersedes` — a **recorded**
+  correction of an earlier observation, never inferred: the old row stays
+  for audit and for `as_of` reads before it, but is no longer current and
+  no longer counts as a conflict.
+- `ask` and `ask_scope` stay two tools with disjoint descriptions: one
+  entity vs. several entities and/or relation hops. The server
+  instructions tell agents to keep `ask_scope` at `budget<=1500` and
+  expand handles from there — the after-alias rehearsal's two-hop scope
+  at the default overflowed Claude Code's inline tool-result limit — and
+  that a pack's `truncated` list names entities whose observations were
+  only partly examined (never conclude absence about those).
 
 **Measuring an agent against Loom** (D-036): `python -m loom.agent_eval
 --db /data/loom.db` runs a real model as an agent over the real MCP

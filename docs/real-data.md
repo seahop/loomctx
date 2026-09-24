@@ -7,7 +7,7 @@ the seed hosts so the demo can ask a real question about them.
 
 | Feed | What it contributes | Source tag |
 | --- | --- | --- |
-| [NVD 2.0 yearly feeds](https://nvd.nist.gov/vuln/data-feeds) | per CVE: `status`, trimmed `summary`, one `cvss_score` + `has_severity` **per scorer**, `has_weakness` → cwe, `affects` → product (from vulnerable CPEs), product `made_by` vendor | `nvd`, `nvd:<scorer>` |
+| [NVD 2.0 yearly feeds](https://nvd.nist.gov/vuln/data-feeds) | per CVE: `status`, trimmed `summary`, one `cvss_score` + `has_severity` **per scorer** (NIST, the CNA, CISA's ADP), SSVC points when the ADP container is present, `has_weakness` → cwe, `affects` → product (from vulnerable CPEs), product `made_by` vendor | `nvd`, `nvd:<scorer>`, `cisa-adp` |
 | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | `exploited_in_wild`, `ransomware_campaign_use`, `affects` (freehand vendor/product), `has_weakness`, and the advisory text as a **document** per entry | `cisa-kev` |
 | [FIRST EPSS](https://www.first.org/epss/) | `epss_score`, `epss_percentile` for the CVEs already present | `first-epss` |
 
@@ -66,6 +66,22 @@ curl -s localhost:8000/v1/answer -H 'content-type: application/json' -d '{
   "question":"Is web-01 exposed to anything actively exploited in the wild? Which CVE, which software, and cite.",
   "budget":3000}'
 ```
+
+### The third scorer: CISA ADP (Vulnrichment)
+
+Since 2024 CISA's Authorized Data Publisher enriches CVE records with its
+own CVSS assessment and SSVC decision points. NVD 2.0 carries the CVSS
+under the ADP's org id (`134c704f-9b21-4f2e-91b3-4a467353bcc0`) as one
+more entry in the metrics list; the connector maps that entry to the
+source `cisa-adp` (NIST and the CNAs keep `nvd:<address>`), so a
+CNA-vs-CISA disagreement is a real cross-source conflict with a readable
+name on each side — three scorers, three sources, one conflict item. When
+a record carries the CVE 5.1 ADP container (a cvelistV5 / Vulnrichment
+record; the NVD 2.0 feeds do not), the SSVC points land as scalar claims
+from the same source: `ssvc_exploitation` (none / poc / active),
+`ssvc_automatable` (yes / no), `ssvc_technical_impact` (partial / total),
+`attrs.framework = "SSVC"`. The predicates are in the connector's schema
+registration.
 
 ## What the first run measured (2026-09-08, laptop, SQLite, one container)
 

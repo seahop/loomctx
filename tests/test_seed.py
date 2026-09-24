@@ -1,3 +1,5 @@
+import pytest
+
 from loom.context import build_pack
 from loom.contracts import AskRequest, EntityRef
 from loom.seed import generate, cmd_load
@@ -70,6 +72,42 @@ def test_load_then_ask_the_demo_questions(tmp_path):
     ))
     assert any(i.kind == "conflict" and "contract_owner" in i.text
                for i in pack.items)
+    store.close()
+
+
+def test_seed_plants_a_recorded_correction_not_a_conflict(tmp_path):
+    """D-050 demo moment: the contract DB corrects its own earlier hooli
+    owner record. `generate` marks the correction with the target's
+    event_id; `seed load` resolves it to the observation id (minted at
+    load time) and records ClaimIn.supersedes. One source, so no conflict
+    item — the initech conflict (two sources) stays the conflict demo."""
+    from loom.seed import SUPERSEDES_EVENT, resolve_supersessions
+    claims, _ = generate(seed=42)
+    corrections = [c for c in claims if SUPERSEDES_EVENT in c.attrs]
+    assert len(corrections) == 1 and len(claims) == 592
+    fix = corrections[0]
+    target = next(c for c in claims if c.event_id == fix.attrs[SUPERSEDES_EVENT])
+    assert (fix.subject, fix.predicate, fix.source) == (target.subject, target.predicate, target.source)
+    assert fix.subject.key == "hooli" and fix.object == "rlee" and target.object == "mchen"
+    assert fix.observed_at > target.observed_at and fix.supersedes is None
+
+    db = tmp_path / "seed.db"
+    cmd_load(str(db), seed=42)
+    store = SqliteStore(db)
+    obs = {o.event_id: o for o in store.observations_for("procurement", EntityRef(type="vendor", key="hooli"))}
+    assert target.event_id in obs and fix.event_id in obs
+    assert SUPERSEDES_EVENT not in obs[fix.event_id].attrs and obs[fix.event_id].attrs["note"]
+    resolved = resolve_supersessions(claims, list(obs.values()))
+    assert [c.supersedes for c in resolved] == [obs[target.event_id].id]
+    # whether the store persists the field is the store's business (D-050
+    # follow-up); when it does, it is exactly this id
+    assert obs[fix.event_id].supersedes in (None, obs[target.event_id].id)
+    with pytest.raises(ValueError, match="unknown event"):
+        resolve_supersessions(claims, [])
+    pack = build_pack(store, AskRequest(namespace="procurement", subject=EntityRef(type="vendor", key="hooli"),
+                                       question="who owns this contract?", budget=1200))
+    assert not any(i.kind == "conflict" for i in pack.items)          # one source: a correction, not a conflict
+    assert any("rlee" in i.text for i in pack.items)
     store.close()
 
 
