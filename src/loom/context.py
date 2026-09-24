@@ -965,7 +965,7 @@ def resolve_scope_paths(
             carriers: Reach = {}
             if topic and (hubs or crowded):
                 carriers, read = _hub_carriers(store, namespace, hubs, expand, topic, seen, as_of,
-                                               valid_at, allowed_types, walkable)
+                                               valid_at, allowed_types, walkable, window, truncated)
                 held += read
                 if crowded:   # the rest of the window, by probe
                     hub_keys = {(h.type, h.key) for h in hubs}
@@ -995,7 +995,7 @@ Reach = dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]]  # far e
 def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expand: set[str],
                   topic: frozenset[str], seen: set[tuple[str, str]], as_of: datetime | None,
                   valid_at: datetime | None, allowed_types: tuple[str, ...] | None,
-                  walkable) -> tuple[Reach, int]:
+                  walkable, window: Reach, truncated: Truncations) -> tuple[Reach, int]:
     """The far ends of hubs the gather limit cut that carry the question's
     topic, whatever their age (D-061): the walk saw each hub's newest
     `_GATHER_LIMIT` rows, and the KEV entries behind a 2,785-edge product
@@ -1004,6 +1004,11 @@ def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expa
     the hub's expand edges) returns only the matching (edge, attribute)
     pairs; the edges then pass the walk's own rules (visible, as of, valid
     at, not extracted, not superseded) and the attributes the reader's.
+
+    Completion is for an attribute that singles out a few of a hub's far
+    ends. When most of them carry it (a CVSS score on every CVE), the
+    recency window already holds carriers aplenty and reaching the rest
+    would only fill the scope to its cap: such a hub keeps its window.
     Returns the far ends not yet reached, newest edge first, and the rows
     read."""
     if not hubs:
@@ -1030,6 +1035,13 @@ def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expa
         end = attr.subject
         if (end.type, end.key) not in seen:
             far.setdefault((end.type, end.key), (hub, end, edge))
+    for key, hub in by_key.items():
+        mine = [k for k, (h, _, _) in far.items() if h is hub]
+        t = truncated.get(key)
+        if t is not None and 2 * len(mine) > t.total:   # not selective: the window stands
+            for k in mine:
+                if k not in window:
+                    del far[k]
     return far, len(rows)
 
 

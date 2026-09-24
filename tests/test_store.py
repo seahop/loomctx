@@ -2124,6 +2124,10 @@ def test_scope_walk_completes_a_truncated_hub_for_the_question(store, monkeypatc
     assert truncated[("product", "kernel")].reason == "gather_limit"   # the window is still reported
     other, _ = resolve_scope_paths(store, "v", scope, question="what software does host:h1 run?")
     assert {r.key for r in other} == {r.key for r in plain}
+    # an attribute every far end carries singles nothing out: the window stands
+    common, _ = resolve_scope_paths(store, "v", scope,
+                                    question="Which CVEs affecting software host:h1 runs have the top CVSS score?")
+    assert {r.key for r in common} == {r.key for r in plain}
 
 
 def test_hub_completion_learns_the_attribute_from_the_registry(store, monkeypatch):

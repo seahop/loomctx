@@ -732,7 +732,11 @@ class SqliteStore(GraphStore):
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 rows = self._conn.execute(
-                    _OBS_SELECT + f" WHERE o.namespace = ? AND o.id IN ({','.join('?' * len(chunk))})"
+                    # `+o.namespace`: a bare namespace term let the planner
+                    # walk the namespace's idx_obs_prov_artifact range instead
+                    # of the primary key — 255 ms vs 4 ms per 500 ids on the
+                    # 542k-row vulns corpus (D-061)
+                    _OBS_SELECT + f" WHERE +o.namespace = ? AND o.id IN ({','.join('?' * len(chunk))})"
                     + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
                 out.extend(common.row_to_observation(r) for r in rows)
         return out
