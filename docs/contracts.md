@@ -124,17 +124,57 @@ what it reaches over the named predicates); `as_of` is knowledge time
     }
   ],
   "handles": [
-    {"id": "h1_…", "hint": "67 more 'logged_in_by' observations for host:web-01",
-     "est_tokens": 1725, "kind": "more"},
+    {"id": "h1_…", "hint": "74 more 'logged_in_by' observations for host:web-01",
+     "est_tokens": 2664, "kind": "more"},
     {"id": "h1_…", "hint": "CONFLICT on host:web-01 runs_os did not fit the budget",
-     "est_tokens": 60, "kind": "conflict"}
+     "est_tokens": 71, "kind": "conflict"},
+    {"id": "h1_…", "hint": "1,740 older observations about product:linux:linux_kernel were not examined (observed at or before 2026-03-02)",
+     "est_tokens": 36000, "kind": "more"}
   ],
-  "omitted_handles": 0,
+  "omitted_handles": 3,
   "truncated": [
     {"entity": {"type": "product", "key": "linux:linux_kernel"}, "gathered": 1000, "total": 2740}
-  ]
+  ],
+  "charged_tokens": 781
 }
 ```
+
+**The budget is honest (D-051).** `budget` is the request (clamped to
+`LOOM_MAX_BUDGET`); `charged_tokens` is what the pack charged against it,
+in the compact form an agent actually receives — the answer prompt's
+lines and the MCP agent view: every item's text *plus its citations*
+(one `cite` token, source and date each), and every handle's hint *plus
+its id*. Estimated at 3 characters per token plus a small per-line
+framing cost (a real tokenizer measured 2.7 on rendered facts; the
+scorecard checks the rendered prompt with `cl100k_base` against the
+request). `charged_tokens ≤ budget`, with one carve-out: a pack too small
+to hold a handle beside an item still ships its first handle, so that what
+was cut is always reachable. Handles take at most 15 % of the budget
+(`omitted_handles` counts the rest); conflict items take at most half.
+
+**Ranking (D-051).** A question is matched lexically by BM25 over the
+gathered candidates — the document is what the pack renders: the
+predicate name split on its separators (`runs_os` → *runs*, *os*), the
+object and the subject key — so a rare term outweighs a common one and
+"which port" finds `listens_on_port`. When the serving engine has an
+embedder and vectors exist for the gathered rows, cosine is a second leg
+and the two are fused by reciprocal rank (k = 60); a fact with no vector
+yet earns nothing from that leg and nothing else. Recency (30-day
+half-life, relative to the newest gathered fact) and source confidence
+adjust the fused relevance multiplicatively; document-extracted claims
+rank a notch below sender-asserted ones (D-023) and superseded
+observations at half (D-050). Packing is value per charged token with a
+diversity term: once a predicate holds three items, further items of it
+compete at half their value, so twenty near-identical logins no longer
+crowd out a relevant fact of another kind.
+
+**Pages past the gather cap (D-051).** An entity in `truncated` also gets
+a `more` handle whose payload carries the edge of the examined window;
+expanding it returns the next window — the rows observed at or before
+that instant, ranked for the same question — with its own next-page
+handle, until the count says the window was the last. The boundary
+instant is re-read rather than risk losing rows that share it. Thread
+handles minted inside a page stay in that page's window.
 
 Item `kind` ∈ `brief | fact | relation | doc_excerpt | conflict`. A
 `relation` is an edge a scope was expanded through, shipped right before
@@ -145,11 +185,20 @@ observations, briefs cite the observations they were synthesized from,
 excerpts cite an artifact span. A `Citation` therefore names either an
 `observation_id` or an `artifact_id` (+ span). Conflicts are items, not
 merged away — and one that doesn't fit the budget becomes a `conflict`
-handle rather than disappearing. Handles feed `POST /v1/expand`; with
-`LOOM_HANDLE_SECRET` set they are signed (`h2_` prefix, D-021). At most 32
-handles ship, in priority order (conflicts, excerpts, then the most
-skipped threads); `omitted_handles` counts the rest, so a scope over a hub
-entity says "and 8,000 more threads" instead of shipping them (D-035).
+handle rather than disappearing. A conflict is two or more sources
+asserting different values for one predicate over a shared instant of
+validity; values are compared normalized (`Ubuntu`/`ubuntu`, `true`/`"true"`,
+`9.8`/`"9.8"` are one value), and entity-valued predicates count too when
+every source asserts a single current object (D-051: `dhcp` says the ip
+is web-01's, `arp-scan` says laptop-17's) — an edge one source itself
+gives several objects (logins, the products a CVE affects) is a set, and
+another source's different object is an addition. Handles feed
+`POST /v1/expand`; with `LOOM_HANDLE_SECRET` set they are signed (`h2_`
+prefix, D-021). At most 32 handles ship, within their budget share, in
+priority order (conflicts, pages past the gather cap, excerpts, then the
+most skipped threads); `omitted_handles` counts the rest, so a scope over
+a hub entity says "and 8,000 more threads" instead of shipping them
+(D-035).
 `truncated` lists entities whose observations exceeded the gather limit:
 only the newest `gathered` of `total` were examined, at that subject, at
 a hop of a scope, or under an expanded handle. Partial coverage is a fact

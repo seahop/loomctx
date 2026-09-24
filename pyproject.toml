@@ -37,6 +37,7 @@ Issues = "https://github.com/seahop/Loom/issues"
 test = [
     "pytest>=8",
     "httpx>=0.27",
+    "tiktoken>=0.9",     # real-tokenizer check of the budget accounting (R-1); the test skips offline
 ]
 scale = [
     "nats-py>=2.7",

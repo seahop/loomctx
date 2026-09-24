@@ -431,6 +431,13 @@
             "title": "Budget",
             "type": "integer"
           },
+          "charged_tokens": {
+            "default": 0,
+            "description": "what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, except that a pack too small to hold one handle beside an item still ships its first handle (D-051)",
+            "minimum": 0.0,
+            "title": "Charged Tokens",
+            "type": "integer"
+          },
           "handles": {
             "items": {
               "$ref": "#/components/schemas/ExpansionHandle"

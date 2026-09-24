@@ -95,12 +95,18 @@ the whole system.
 
 A **mandatory** parameter on every read. The caller declares how much context it can
 afford; the engine guarantees the pack fits. Budgets are first-class, not advisory.
+"Fits" means the pack as an agent receives it: items *with* their citations and
+handles *with* their ids are all charged, and `charged_tokens` on the pack says
+what was spent (D-051).
 
 ### Expansion handle
 
 An opaque ID attached to a context-pack item meaning "there is more here." The agent
 passes it back (`expand(handle)`) to pull the underlying document chunk, neighbor
-subgraph, or time window. The mechanism behind progressive disclosure.
+subgraph, or time window. The mechanism behind progressive disclosure. A **page
+handle** is the time-window kind: when an entity has more observations than one
+read examines, it carries the edge of the examined window, and expanding it
+returns the next window with its own next-page handle (D-051).
 
 ### Progressive disclosure
 
@@ -112,7 +118,10 @@ everything that might be relevant.
 
 When sources disagree, the context pack shows the disagreement explicitly with both
 citations ("auth-log says X on Mar 3; IR-4432 says Y on May 1"). Contradictions are
-never silently merged or resolved by recency alone.
+never silently merged or resolved by recency alone. Disagreement means different
+values (compared normalized) from different sources over a shared instant of
+validity, for a scalar or for an entity-valued predicate that each source treats
+as single-valued (D-051).
 
 ### Idempotency key (event_id)
 

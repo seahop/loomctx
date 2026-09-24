@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
 
-from loom.context import build_pack, decode_handle, est_tokens, expand_pack
-from loom.contracts import AskRequest, ClaimIn, EntityRef
+import pytest
+
+from loom.context import (
+    build_pack, decode_handle, est_tokens, expand_pack, handle_tokens, item_tokens,
+)
+from loom.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
 from loom.store.sqlite import SqliteStore
 
 
@@ -40,6 +44,10 @@ def test_pack_fits_budget_and_cites(tmp_path):
     pack = build_pack(store, AskRequest(subject=web01, question="who logged in?",
                                         budget=200))
     assert sum(est_tokens(i.text) for i in pack.items) <= pack.budget == 200
+    # D-051: citations and handles are charged too, and the sum is reported
+    charged = sum(item_tokens(i) for i in pack.items) + sum(handle_tokens(h) for h in pack.handles)
+    assert pack.charged_tokens == charged <= 200
+    assert pack.handles, "what was cut is still reachable"
     assert pack.items, "budget of 200 should fit something"
     assert all(i.citations for i in pack.items)
 
@@ -246,11 +254,15 @@ def test_scores_stay_comparable_when_some_vectors_are_missing(tmp_path):
                                         budget=3000), embedder=embedder)
     scores = [i.score for i in pack.items if i.kind == "fact"]
     assert max(scores) <= 1.0 and min(scores) >= 0.0
-    # the fresh, un-embedded login is scored with the set's median cosine
-    # (D-046), so it sits among its embedded peers rather than below all
+    # D-051: the fresh, un-embedded login has no cosine rank, so it earns
+    # only the lexical leg's share of the fused score — but that leg ranks
+    # it first for this question, so it sits above every embedded fact that
+    # does not answer it, and below the embedded login that both legs rank
     fresh = next(i for i in pack.items if "fresh" in i.text)
     jdoe = next(i for i in pack.items if "jdoe" in i.text)   # embedded login
-    assert abs(fresh.score - jdoe.score) < 0.25
+    others = [i.score for i in pack.items if i.kind == "fact" and "logged_in_by" not in i.text]
+    assert fresh.score <= jdoe.score
+    assert fresh.score > max(others)
 
 
 def test_numpy_and_python_cosines_agree():
@@ -264,9 +276,10 @@ def test_numpy_and_python_cosines_agree():
         assert abs(got[k] - _cosine(q, vecs[k])) < 1e-9, k
 
 
-def test_handles_are_capped_and_the_rest_counted(tmp_path):
+def test_handles_are_capped_and_the_rest_counted(tmp_path, monkeypatch):
     """D-035: a scope over a hub entity produced 8,234 handles. Handles stay
     in priority order, stop at the cap, and the pack says how many were left."""
+    import loom.context as ctx
     from loom.context import _MAX_HANDLES
     store = SqliteStore(tmp_path / "cap.db")
     subj = EntityRef(type="host", key="busy")
@@ -275,12 +288,30 @@ def test_handles_are_capped_and_the_rest_counted(tmp_path):
                 observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
         for i in range(_MAX_HANDLES + 20)
     ])
+    # D-051: handles are charged too, so at a budget that holds nothing the
+    # pack still ships exactly one (the promise that what was cut is
+    # reachable) and counts the rest
     pack = build_pack(store, AskRequest(namespace="ns", subject=subj, question="x", budget=1))
     assert pack.items == []
-    assert len(pack.handles) == _MAX_HANDLES and pack.omitted_handles == 20
+    assert len(pack.handles) == 1 and pack.omitted_handles == _MAX_HANDLES + 19
+    assert pack.charged_tokens == handle_tokens(pack.handles[0])
+    # with the handle share lifted, the cap is what bounds them: facts of
+    # ~700 tokens each fit nowhere in 1,000, so every thread is a handle
+    long = SqliteStore(tmp_path / "cap-long.db")
+    long.record_claims([
+        ClaimIn(namespace="ns", subject=subj, predicate=f"pred_{i}", object="x" * 2000, source="s",
+                observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        for i in range(_MAX_HANDLES + 20)
+    ])
+    monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
+    monkeypatch.setattr(ctx, "_MAX_HANDLES", 8)
+    pack = build_pack(long, AskRequest(namespace="ns", subject=subj, question="x", budget=1000))
+    assert pack.items == [] and len(pack.handles) == 8 and pack.omitted_handles == _MAX_HANDLES + 12
+    assert pack.charged_tokens <= 1000
     roomy = build_pack(store, AskRequest(namespace="ns", subject=subj, question="x", budget=5000))
     assert roomy.omitted_handles == 0 and roomy.handles == []
     store.close()
+    long.close()
 
 
 def test_inbound_edges_on_a_hub_collapse_into_one_handle(tmp_path):
@@ -430,9 +461,13 @@ def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
     pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="exploited", budget=3000))
     assert [x.entity.key for x in pack.truncated] == ["linux:linux_kernel"]
     assert len(pack.subjects) <= 1 + 1 + 5                    # the cap really did cut the expansion
-    # expanding a handle on the hub carries the note too
-    small = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=1))
-    more = expand_pack(store, small.handles[0].id, budget=3000)
+    # expanding a thread handle on the hub carries the note too (the page
+    # handle for the unexamined window comes first, D-051; lift the handle
+    # share so both ship at a budget that fits nothing)
+    monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
+    small = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=200))
+    thread = next(h for h in small.handles if "'affects'" in h.hint)
+    more = expand_pack(store, thread.id, budget=3000)
     assert more.truncated and more.truncated[0].total == 9
     # an ordinary entity reports nothing
     assert build_pack(store, AskRequest(namespace="ns", subject=host, question="x", budget=500)).truncated == []
@@ -502,11 +537,18 @@ def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
     pack = build_pack(store, AskRequest(subject=host, question="", budget=4000, as_of=_at(7, 31)))
     assert [(x.gathered, x.total) for x in pack.truncated] == [(5, 7)]
     assert all("old" in i.text for i in pack.items)
-    # the expanded handle inherits the bound
-    tiny = build_pack(store, AskRequest(subject=host, question="", budget=1, as_of=_at(7, 31)))
-    more = expand_pack(store, tiny.handles[0].id, budget=4000)
+    # the expanded thread handle inherits the bound
+    monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
+    tiny = build_pack(store, AskRequest(subject=host, question="", budget=200, as_of=_at(7, 31)))
+    thread = next(h for h in tiny.handles if "'old'" in h.hint)
+    more = expand_pack(store, thread.id, budget=4000)
     assert more.truncated and more.truncated[0].total == 7
     assert all("old" in i.text for i in more.items)
+    # so does the page handle for the two rows the window missed (D-051)
+    page = next(h for h in tiny.handles if "not examined" in h.hint)
+    assert decode_handle(page.id)["as_of"].startswith("2026-07-31")
+    rest = expand_pack(store, page.id, budget=4000)
+    assert all("old" in i.text for i in rest.items) and rest.truncated == []
     store.close()
 
 
@@ -543,8 +585,8 @@ def test_expanding_a_conflict_handle_with_its_estimate_yields_the_conflict(tmp_p
     expanded = expand_pack(store, handle.id, budget=handle.est_tokens)
     conflicts = [i for i in expanded.items if i.kind == "conflict"]
     assert len(conflicts) == 1 and "runs_os" in conflicts[0].text
-    assert est_tokens(conflicts[0].text) == handle.est_tokens   # the estimate is the real cost
-    assert sum(est_tokens(i.text) for i in expanded.items) <= expanded.budget
+    assert item_tokens(conflicts[0]) == handle.est_tokens   # the estimate is the real charge
+    assert expanded.charged_tokens <= expanded.budget
 
 
 def test_no_vectors_at_all_means_keyword_ranking(tmp_path):
@@ -561,11 +603,13 @@ def test_no_vectors_at_all_means_keyword_ranking(tmp_path):
     assert all("runs_os" in f.text for f in facts[:2]), [f.text for f in facts[:3]]
 
 
-def test_unembedded_facts_take_the_median_cosine(tmp_path, monkeypatch):
-    """D-046: inside a partially embedded set, a fact with no vector gets
-    the set's median cosine, not 0."""
+def test_unembedded_facts_rank_by_the_lexical_leg_alone(tmp_path, monkeypatch):
+    """D-051: inside a partially embedded set, a fact with no vector is
+    absent from the cosine leg and reciprocal rank fusion simply gives it
+    nothing from that leg — no fill-in value. With no lexical match either
+    it takes the relevance floor and still ships; with one it earns that
+    leg's full share."""
     import loom.context as ctx
-    from loom.contracts import Observation
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))
     host = EntityRef(type="host", key="h")
 
@@ -576,8 +620,12 @@ def test_unembedded_facts_take_the_median_cosine(tmp_path, monkeypatch):
     pack = ctx._pack(namespace="d", subjects=[host], question="anything", as_of=None, budget=5000,
                      observations=rows, cos_map={"o1": 0.9, "o2": 0.1, "o3": 0.5}, semantic=True)
     score = {i.text.split()[2]: i.score for i in pack.items if i.kind == "fact"}
-    assert score["v4"] == score["v3"]                       # median of {0.9, 0.1, 0.5} is 0.5
-    assert score["v2"] < score["v4"] < score["v1"]
+    assert score["v1"] > score["v3"] > score["v2"] >= score["v4"] > 0   # cosine order, then the floor
+    # ranked first by the lexical leg, the un-embedded fact ties the cosine leader
+    pack = ctx._pack(namespace="d", subjects=[host], question="v4", as_of=None, budget=5000,
+                     observations=rows, cos_map={"o1": 0.9, "o2": 0.1, "o3": 0.5}, semantic=True)
+    score = {i.text.split()[2]: i.score for i in pack.items if i.kind == "fact"}
+    assert score["v4"] == score["v1"] > score["v3"]
 
 
 def test_query_cache_eviction_is_safe_across_threads():
@@ -608,3 +656,216 @@ def test_attrs_cannot_buy_keyword_rank(tmp_path):
     assert "logged_in_by" in facts[0].text and "jdoe" in facts[0].text
     stuffed = next(i for i in facts if "db-99" in i.text)
     assert stuffed.score < facts[0].score
+
+
+# ------------------------------------------------------------ D-051 packing #
+
+def test_packing_prefers_diversity_over_twenty_identical_logins(tmp_path, monkeypatch):
+    """D-051: greedy trim by score filled a pack with the newest logins
+    and nothing else. Once a predicate holds three items, further items of
+    it compete at half their value per token, so relevant facts of other
+    kinds get in while the logins stay well represented."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))
+    store = SqliteStore(tmp_path / "diverse.db")
+    host = EntityRef(type="host", key="web-01")
+    claims = [ClaimIn(subject=host, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                      source="auth-log", observed_at=_at(9, 1, hour=i % 24)) for i in range(40)]
+    claims += [ClaimIn(subject=host, predicate="communicated_with", object=EntityRef(type="host", key=f"db-{i}"),
+                       source="netflow", confidence=0.9, observed_at=_at(8, 22)) for i in range(5)]
+    claims += [ClaimIn(subject=host, predicate="listens_on_port", object=port, source="nmap-scan",
+                       observed_at=_at(7, 22)) for port in (80, 443)]
+    store.record_claims(claims)
+    pack = build_pack(store, AskRequest(subject=host, question="what is going on with this host?", budget=500))
+    kinds = [i.text.split()[1] for i in pack.items if i.kind == "fact"]
+    assert len(kinds) >= 10
+    assert kinds[:3] == ["logged_in_by"] * 3                     # the best-scoring thread still leads
+    assert "communicated_with" in kinds and "listens_on_port" in kinds
+    assert kinds.count("logged_in_by") <= len(kinds) - 4
+    assert pack.charged_tokens <= 500
+    # the cut logins are still one thread
+    assert any("'logged_in_by'" in h.hint for h in pack.handles)
+    store.close()
+
+
+def test_long_facts_are_charged_by_their_length(tmp_path):
+    """D-051: value per token — a 900-character value costs what it costs,
+    and a budget that holds either it or a dozen short facts takes the
+    short ones when they score alike."""
+    store = SqliteStore(tmp_path / "long.db")
+    host = EntityRef(type="host", key="web-01")
+    t = _at(9, 1)
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="note", object="x" * 900, source="wiki", observed_at=t)]
+        + [ClaimIn(subject=host, predicate=f"fact_{i}", object=i, source="s", observed_at=t) for i in range(12)])
+    pack = build_pack(store, AskRequest(subject=host, question="", budget=400))
+    assert not any(i.text.split()[1] == "note" for i in pack.items)
+    assert sum(1 for i in pack.items if i.kind == "fact") >= 8
+    assert any("'note'" in h.hint for h in pack.handles)
+    store.close()
+
+
+# ---------------------------------------------------------- D-051 conflicts #
+
+def test_entity_valued_conflict_between_sources(tmp_path):
+    """D-051: dhcp says the ip belongs to web-01, arp-scan says laptop-17,
+    both current — a disagreement, cited on both sides. Scored a notch
+    below a scalar one: as often a resolution gap as a contradiction."""
+    store = SqliteStore(tmp_path / "entity-conflict.db")
+    ip = EntityRef(type="ip", key="10.0.4.7")
+    store.record_claims([
+        ClaimIn(subject=ip, predicate="assigned_to", object=EntityRef(type="host", key="web-01"),
+                observed_at=_at(8, 1), valid_from=_at(8, 1), source="dhcp"),
+        ClaimIn(subject=ip, predicate="assigned_to", object=EntityRef(type="host", key="laptop-17"),
+                observed_at=_at(8, 20), source="arp-scan"),
+    ])
+    pack = build_pack(store, AskRequest(subject=ip, question="which host?", budget=2000))
+    conflicts = [i for i in pack.items if i.kind == "conflict"]
+    assert len(conflicts) == 1 and "assigned_to" in conflicts[0].text
+    assert {c.source for c in conflicts[0].citations} == {"dhcp", "arp-scan"}
+    assert "host:web-01" in conflicts[0].text and "host:laptop-17" in conflicts[0].text
+    assert conflicts[0].score == 0.95
+    store.close()
+    # a window that closed before the other opened is a history, not a conflict
+    store, ip = _lease_store(tmp_path)
+    pack = build_pack(store, AskRequest(subject=ip, question="which host?", budget=2000))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    store.close()
+
+
+def test_single_source_lease_reassignment_is_a_time_series(tmp_path):
+    """The seed's planted moment: one source (dhcp-log) hands the ip from
+    web-01 to laptop-17 with adjoining windows — two facts, no conflict."""
+    from loom.seed import cmd_load
+    db = tmp_path / "seed.db"
+    cmd_load(str(db), seed=42)
+    store = SqliteStore(db)
+    pack = build_pack(store, AskRequest(namespace="netsec", subject=EntityRef(type="ip", key="10.0.4.7"),
+                                        question="which host was assigned this ip?", budget=800))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    text = " | ".join(i.text for i in pack.items)
+    assert "web-01" in text and "laptop-17" in text and "[valid" in text
+    store.close()
+
+
+def test_multi_valued_edges_from_one_source_are_not_contested(tmp_path):
+    """D-051: auth-log records three logins and vpn-log a fourth — a set,
+    not four answers to one question. Only when every source asserts one
+    current object is a differing object a disagreement."""
+    store = SqliteStore(tmp_path / "multi.db")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims(
+        [ClaimIn(subject=host, predicate="logged_in_by", object=EntityRef(type="user", key=u),
+                 observed_at=_at(9, 1), source="auth-log") for u in ("jdoe", "asmith", "rlee")]
+        + [ClaimIn(subject=host, predicate="logged_in_by", object=EntityRef(type="user", key="mchen"),
+                   observed_at=_at(9, 1), source="vpn-log")])
+    pack = build_pack(store, AskRequest(subject=host, question="who?", budget=2000))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    store.close()
+
+
+def test_scalar_values_are_compared_normalized(tmp_path):
+    """D-051: `Ubuntu` vs `ubuntu`, `True` vs `"true"`, `9.8` vs `"9.8"` are
+    one value from two sources, not a conflict; `Ubuntu` vs `Fedora` is."""
+    store = SqliteStore(tmp_path / "norm.db")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims([
+        ClaimIn(subject=host, predicate="runs_os", object="Ubuntu", observed_at=_at(8, 1), source="inv"),
+        ClaimIn(subject=host, predicate="runs_os", object="ubuntu ", observed_at=_at(8, 2), source="scan"),
+        ClaimIn(subject=host, predicate="exploited", object=True, observed_at=_at(8, 1), source="kev"),
+        ClaimIn(subject=host, predicate="exploited", object="true", observed_at=_at(8, 2), source="feed"),
+        ClaimIn(subject=host, predicate="cvss", object=9.8, observed_at=_at(8, 1), source="nist"),
+        ClaimIn(subject=host, predicate="cvss", object="9.8", observed_at=_at(8, 2), source="cna"),
+        ClaimIn(subject=host, predicate="cvss", object=9, observed_at=_at(8, 3), source="third"),
+        ClaimIn(subject=host, predicate="cvss", object="9.0", observed_at=_at(8, 4), source="fourth"),
+    ])
+    pack = build_pack(store, AskRequest(subject=host, question="?", budget=3000))
+    conflicts = [i for i in pack.items if i.kind == "conflict"]
+    assert len(conflicts) == 1 and "cvss" in conflicts[0].text        # 9.8 vs 9, not 9 vs 9.0
+    assert "runs_os" not in conflicts[0].text
+    store.record_claim(ClaimIn(subject=host, predicate="runs_os", object="Fedora",
+                               observed_at=_at(8, 3), source="agent"))
+    pack = build_pack(store, AskRequest(subject=host, question="?", budget=3000))
+    assert any(i.kind == "conflict" and "runs_os" in i.text for i in pack.items)
+    store.close()
+
+
+def test_sequential_scalar_windows_are_not_a_conflict(tmp_path):
+    """D-051: two sources whose validity windows never share an instant
+    describe a succession, not a disagreement — even when both windows are
+    still open as of the horizon."""
+    store = SqliteStore(tmp_path / "seq.db")
+    host = EntityRef(type="host", key="db-01")
+    store.record_claims([
+        ClaimIn(subject=host, predicate="role", object="primary", observed_at=_at(7, 1),
+                valid_from=_at(9, 1), valid_to=_at(9, 10), source="plan-a"),
+        ClaimIn(subject=host, predicate="role", object="replica", observed_at=_at(7, 2),
+                valid_from=_at(9, 10), source="plan-b"),
+    ])
+    pack = build_pack(store, AskRequest(subject=host, question="role?", budget=2000, as_of=_at(8, 1)))
+    assert not [i for i in pack.items if i.kind == "conflict"]
+    store.close()
+
+
+# --------------------------------------------------------- D-051 pagination #
+
+def test_page_handles_reach_past_the_gather_cap(tmp_path, monkeypatch):
+    """D-051: the 1,740 kernel CVEs beyond the gather window were reported
+    but unreachable. A truncated entity now gets a `more` handle whose
+    payload carries the window's edge; expanding it gathers the next
+    window, with its own next-page handle, until the last one."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "pages.db")
+    hub = EntityRef(type="product", key="linux:linux_kernel")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=EntityRef(type="cve", key=f"CVE-2026-{i}"), predicate="affects",
+                object=hub, source="nvd", observed_at=t.replace(hour=i)) for i in range(12)
+    ])
+    seen: set[str] = set()
+    pack = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=3000))
+    assert pack.truncated and (pack.truncated[0].gathered, pack.truncated[0].total) == (5, 12)
+    pages = 0
+    while True:
+        seen |= {c.observation_id for i in pack.items for c in i.citations}
+        page = [h for h in pack.handles if "not examined" in h.hint]
+        if not page:
+            break
+        meta = decode_handle(page[0].id)
+        assert meta["question"] == "exploited" and meta["before"] and meta["predicate"] == ""
+        assert page[0].kind == "more"
+        pages += 1
+        pack = expand_pack(store, page[0].id, budget=3000)
+        assert pack.question == "exploited"
+    assert pages == 2 and len(seen) == 12
+    # with a secret set the page handle is signed like any other
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "s3")
+    pack = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=3000))
+    page = next(h for h in pack.handles if "not examined" in h.hint)
+    assert page.id.startswith("h2_") and expand_pack(store, page.id, budget=3000).items
+    store.close()
+
+
+def test_a_page_keeps_its_window_for_the_threads_it_cuts(tmp_path, monkeypatch):
+    """A thread handle minted inside a page carries the page's edge, so
+    expanding it stays in that window instead of jumping back to the
+    newest rows."""
+    import loom.context as ctx
+    monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
+    store = SqliteStore(tmp_path / "page-threads.db")
+    host = EntityRef(type="host", key="web-01")
+    store.record_claims([
+        ClaimIn(subject=host, predicate="logged_in_by", object=EntityRef(type="user", key=f"u{i}"),
+                source="auth", observed_at=_at(8, 1 + i)) for i in range(12)
+    ])
+    first = build_pack(store, AskRequest(subject=host, question="who", budget=3000))
+    page = next(h for h in first.handles if "not examined" in h.hint)
+    monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)   # room for the page's own next page AND a thread
+    tiny = expand_pack(store, page.id, budget=200)
+    thread = next(h for h in tiny.handles if "'logged_in_by'" in h.hint)
+    assert decode_handle(thread.id)["before"] == decode_handle(page.id)["before"]
+    more = expand_pack(store, thread.id, budget=3000)
+    users = {i.text.split()[2] for i in more.items}
+    assert users <= {f"user:u{i}" for i in range(8)} and "user:u11" not in users
+    store.close()

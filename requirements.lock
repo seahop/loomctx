@@ -29,8 +29,11 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+    #   requests
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
+charset-normalizer==3.5.1
+    # via requests
 click==8.5.0
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -61,6 +64,7 @@ idna==3.20
     #   anyio
     #   httpx
     #   httpx2
+    #   requests
 ijson==3.5.1
     # via loom-ctx (pyproject.toml)
 iniconfig==2.3.0
@@ -127,6 +131,10 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+regex==2026.9.10
+    # via tiktoken
+requests==2.34.2
+    # via tiktoken
 rpds-py==2026.6.3
     # via
     #   jsonschema
@@ -144,6 +152,8 @@ starlette==1.7.0
     #   fastapi
     #   mcp
     #   sse-starlette
+tiktoken==0.14.0
+    # via loom-ctx (pyproject.toml)
 truststore==0.10.4 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
@@ -172,7 +182,9 @@ typing-inspection==0.4.4
 tzdata==2026.4 ; sys_platform == 'win32'
     # via psycopg
 urllib3==2.8.0
-    # via botocore
+    # via
+    #   botocore
+    #   requests
 uvicorn==0.53.0
     # via
     #   loom-ctx (pyproject.toml)

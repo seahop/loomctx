@@ -1,10 +1,17 @@
 """The context pack builder — the read path (docs/architecture.md).
 
 Given (subject, question, budget, as_of?, valid_at?) this module gathers
-observations, ranks them, surfaces conflicts, trims to the token budget, and
-attaches citations + expansion handles. Ranking is LLM-free: cosine
-similarity when vectors exist (D-018), keyword overlap otherwise, plus
-time-decayed recency and source confidence (D-024).
+observations, ranks them, surfaces conflicts, fills the token budget, and
+attaches citations + expansion handles. Ranking is LLM-free (D-051): a
+lexical leg (BM25 over the gathered candidates, predicate names split into
+words) and, when vectors exist (D-018), a cosine leg, fused by reciprocal
+rank; recency (time-decayed) and source confidence adjust the fused
+relevance. Packing is value per charged token with a diversity term, and
+the charge is the compact rendering an agent receives — item text with
+citations, handle hint with id — so the budget is honest on the wire.
+Conflicts cover scalar and entity-valued predicates alike; entities past
+the gather cap are reachable through page handles; a recorded supersession
+(D-050) retires the corrected fact from conflicts and ranks it as history.
 
 Two time axes (architecture.md): `as_of` hides what was observed after T
 ("what did we know"); `valid_at` keeps only facts whose validity window
@@ -35,10 +42,12 @@ import logging
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import threading
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 from .config import max_budget
 
@@ -57,14 +66,37 @@ from .contracts import (
 from .contracts import ExpansionHandle
 from .store.base import GraphStore
 
-_CHARS_PER_TOKEN = 4
-_ITEM_OVERHEAD_TOKENS = 8  # rough JSON/citation framing cost per item
+# Token accounting (D-051). The charged form is the compact rendering an agent
+# actually receives — `render_user_prompt` in answer.py and the MCP agent
+# view: the item text, one `cite` (12 hex) + source + date per citation, and
+# for a handle its hint plus id. cl100k measured 2.7 chars/token on rendered
+# seed facts (identifiers and dates tokenize badly), hence len/3 + 4 rather
+# than the len/4 + 8 that charged item text only and let citations and up to
+# 32 handles ride free (an "800-token" pack was ~2,500 on the wire).
+_CHARS_PER_TOKEN = 3
+_ITEM_OVERHEAD_TOKENS = 4       # list framing per rendered line
+_CITE_FIXED_CHARS = 12 + 10     # the cite token and a date; the source name is added
+_CITE_OVERHEAD_TOKENS = 2
+_FACT_TOKENS_ESTIMATE = 36      # one rendered fact with its citation (handle estimates)
+_HANDLE_BUDGET_SHARE = 0.15     # handles are a menu, not a second payload
 _GATHER_LIMIT = 1000
 _MAX_EXCERPT_CANDIDATES = 64   # passages considered per pack, after ranking
 _MAX_HANDLES = 32              # a scope over a hub produced 8,234 handles (D-035)
 _CONFLICT_BUDGET_SHARE = 0.5   # conflicts ship first, but never as the whole pack (D-035)
 _QUERY_CACHE_SIZE = 256
 _RECENCY_HALF_LIFE_DAYS = 30.0  # recency = 1 / (1 + age / half-life)
+# Ranking (D-051): BM25 over the gathered candidates, fused with cosine by
+# reciprocal rank; recency and confidence adjust the fused relevance.
+_RRF_K = 60
+_BM25_K1 = 1.2                 # term-frequency saturation; no length normalization (b = 0):
+                               # documents are one-line renderings of near-equal length
+_RELEVANCE_FLOOR = 0.2         # a fact no leg matched still ranks by recency, never at 0
+_SUPERSEDED_DISCOUNT = 0.5     # a corrected fact is history (D-050)
+# Packing (D-051): value per token with an MMR-style diversity term — once a
+# predicate holds _DIVERSITY_AFTER items, further items of it compete at
+# _DIVERSITY_LAMBDA times their value.
+_DIVERSITY_AFTER = 3
+_DIVERSITY_LAMBDA = 0.5
 
 from .store.common import cosine as _cosine, cosines  # noqa: E402  (re-exported)
 
@@ -115,7 +147,28 @@ _WORD = re.compile(r"[a-z0-9][a-z0-9_.:-]*")
 
 
 def est_tokens(text: str) -> int:
+    """Tokens of one rendered line of text (no citations)."""
     return max(1, len(text) // _CHARS_PER_TOKEN) + _ITEM_OVERHEAD_TOKENS
+
+
+def cite_tokens(cite: Citation) -> int:
+    """One citation in its compact form: `cite` token, source, date."""
+    return (_CITE_FIXED_CHARS + len(cite.source)) // _CHARS_PER_TOKEN + _CITE_OVERHEAD_TOKENS
+
+
+def item_tokens(item: ContextItem) -> int:
+    """What a pack charges for an item: its text plus every citation (D-051)."""
+    return _charge(item.text, item.citations)
+
+
+def handle_tokens(handle: ExpansionHandle) -> int:
+    """What a pack charges for a handle: its hint plus the opaque id, which an
+    agent carries in context like any other text."""
+    return est_tokens(handle.hint) + est_tokens(handle.id)
+
+
+def _charge(text: str, citations: list[Citation]) -> int:
+    return est_tokens(text) + sum(cite_tokens(c) for c in citations)
 
 
 def _tokens(text: str) -> set[str]:
@@ -147,7 +200,7 @@ def _object_text(obs: Observation) -> str:
     return str(obs.object)
 
 
-def _render_fact(obs: Observation) -> str:
+def _render_fact(obs: Observation, superseded_by: Observation | None = None) -> str:
     text = (
         f"{obs.subject.type}:{obs.subject.key} {obs.predicate} "
         f"{_object_text(obs)} ({obs.observed_at.date().isoformat()}, "
@@ -157,7 +210,26 @@ def _render_fact(obs: Observation) -> str:
         frm = obs.valid_from.date().isoformat() if obs.valid_from else "?"
         to = obs.valid_to.date().isoformat() if obs.valid_to else "present"
         text += f" [valid {frm} to {to}]"
+    if superseded_by is not None:
+        text += f" [superseded by {superseded_by.id[:12]}]"
     return text
+
+
+def _supersession(observations: list[Observation]) -> dict[str, Observation]:
+    """Recorded supersession (D-050): X -> the visible, later observation Y
+    that names X in `supersedes`. Both must be in the set — a correction the
+    reader cannot see (redacted, after `as_of`, out of scope) does not act,
+    so for an `as_of` before Y was observed, X is current again. Never
+    inferred from values or recency."""
+    ids = {o.id for o in observations}
+    out: dict[str, Observation] = {}
+    for obs in observations:
+        old = obs.supersedes
+        if old and old in ids and old != obs.id:
+            prior = out.get(old)
+            if prior is None or _aware(obs.observed_at) > _aware(prior.observed_at):
+                out[old] = obs
+    return out
 
 
 def _citation(obs: Observation) -> Citation:
@@ -186,78 +258,236 @@ def _recency(obs: Observation, newest: datetime) -> float:
     return 1.0 / (1.0 + age_days / _RECENCY_HALF_LIFE_DAYS)
 
 
-def _median(values: list[float]) -> float:
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+_SEPARATORS = re.compile(r"[_:./-]")
+
+
+def _stem(word: str) -> str:
+    """The one suffix rule worth having: `runs` matches `run`, `ports`
+    matches `port`. Applied to both sides of the lexical match only."""
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _bag(obs: Observation) -> list[str]:
+    """The BM25 document for a fact: exactly what the pack renders — the
+    predicate name split on its separators (`runs_os` -> runs, os), the
+    object text and the subject key — plus the compound identifiers whole
+    (`web-01`). attrs never reach the reader, so they are never scored: a
+    sender stuffing them with question words bought rank once (D-046)."""
+    lowered = f"{obs.predicate} {_object_text(obs)} {obs.subject.key}".lower()
+    words = [_stem(w) for w in _WORD.findall(_SEPARATORS.sub(" ", lowered))]
+    words += [w for w in _WORD.findall(lowered) if _SEPARATORS.search(w)]
+    return words
+
+
+def _competition_ranks(scores: dict[str, float]) -> dict[str, int]:
+    """1 = best; equal scores share a rank ("1, 1, 3"), so twenty facts
+    that match the question identically fuse identically and recency,
+    not id order, decides between them."""
+    ranks: dict[str, int] = {}
+    rank, prev = 0, None
+    for i, (oid, s) in enumerate(sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))):
+        if s != prev:
+            rank, prev = i + 1, s
+        ranks[oid] = rank
+    return ranks
+
+
+def _bm25(observations: list[Observation], question_tokens: set[str]) -> dict[str, float]:
+    """The lexical leg (D-051): BM25 computed in Python over the gathered
+    candidates (at most _GATHER_LIMIT per entity, so no index is needed and
+    both store backends rank identically). IDF is what the old
+    overlap-count could not express: a term that names one fact among a
+    thousand outweighs one that names half of them. Only facts with a
+    positive score are in the leg; the rest are absent from it."""
+    if not question_tokens or not observations:
+        return {}
+    bags = [(o.id, _bag(o)) for o in observations]
+    n = len(bags)
+    df: Counter[str] = Counter()
+    for _, bag in bags:
+        df.update(set(bag))
+    query = {_stem(t) for t in question_tokens}
+    idf = {t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in query if t in df}
+    if not idf:
+        return {}
+    scores: dict[str, float] = {}
+    for oid, bag in bags:
+        tf = Counter(bag)
+        s = 0.0
+        for term, weight in idf.items():
+            f = tf.get(term)
+            if f:
+                s += weight * f * (_BM25_K1 + 1) / (f + _BM25_K1)
+        if s > 0:
+            scores[oid] = s
+    return scores
+
+
+def _normalized(scores: dict[str, float], floor: float | None = None) -> dict[str, float]:
+    """A leg's scores on [0, 1] within the gathered set. `floor` is the
+    value that means "no match" (0 for BM25); with none given the set's
+    minimum is the floor — real embedders compress cosine into ~0.27–0.40
+    across a set, which as a raw value is nearly a constant."""
+    if not scores:
+        return {}
+    lo = min(scores.values()) if floor is None else floor
+    hi = max(scores.values())
+    if hi <= lo:
+        return {oid: 1.0 for oid in scores}
+    return {oid: (v - lo) / (hi - lo) for oid, v in scores.items()}
+
+
+def _fuse(legs: list[dict[str, float]]) -> dict[str, float]:
+    """Relevance in [0, 1] from the legs that have an opinion. One leg has
+    nothing to reconcile and keeps its resolution: BM25 normalized by the
+    best match (so IDF's 20x gap between a rare term and a common one
+    survives), cosine min-max within the set. Two legs are fused by
+    reciprocal rank (k = 60) on competition ranks, normalized so a fact
+    ranked first by both scores 1.0 — the scales are incomparable and RRF
+    is the reconciliation every serious hybrid retriever uses; it does
+    compress the top ranks (1/61 vs 1/62), so among near-ties recency and
+    confidence decide, by design. A fact absent from a leg (no vector yet,
+    no lexical match) simply earns nothing from it — a partially embedded
+    set needs no fill-in value."""
+    present = [leg for leg in legs if leg]
+    if not present:
+        return {}
+    if len(present) == 1:
+        return present[0]
+    top = len(present) / (_RRF_K + 1)
+    fused: dict[str, float] = {}
+    for leg in present:
+        for oid, r in _competition_ranks(leg).items():
+            fused[oid] = fused.get(oid, 0.0) + 1.0 / (_RRF_K + r)
+    return {oid: v / top for oid, v in fused.items()}
 
 
 def _score(
     obs: Observation,
-    question_tokens: set[str],
+    relevance: float | None,
     recency: float,
-    cos: float | None = None,
-    semantic: bool = False,
+    superseded: bool = False,
 ) -> float:
-    """`semantic` means an embedder is serving this pack AND vectors exist
-    for the gathered set: observations that have no vector yet (freshly
-    ingested) are scored on the SAME formula with the set's median cosine
-    filled in by the caller, so the two populations stay comparable
-    (H-C7). With no vectors at all the keyword formula ranks instead: a
-    neutral cos=0 for everything silently shrank keyword weight to 0.15
-    and let recency decide (D-046)."""
-    if not question_tokens and not semantic:
+    """`relevance` is the fused rank score in [0, 1], or None when no leg had
+    an opinion (no question, or nothing matched and no vectors): the pack
+    is then the recency overview. Recency and confidence are post-fusion
+    multiplicative adjustments — a year-old fact halves, a 0.7-confidence
+    fact loses a tenth — rather than terms a strong recency could swamp.
+    Extracted claims rank a notch below sender-asserted ones (D-023) and a
+    superseded fact ranks as history (D-050). Always in [0, 1]."""
+    if relevance is None:
         score = 0.6 * recency + 0.4 * obs.confidence
     else:
-        # Only what the pack renders is scored: attrs never reach the
-        # reader, so a sender stuffing them with question words could buy
-        # rank for a fact whose visible text says nothing relevant (D-046).
-        haystack = _tokens(f"{obs.predicate} {_object_text(obs)} {obs.subject.key}")
-        sim = (
-            len(question_tokens & haystack) / len(question_tokens)
-            if question_tokens else 0.0
-        )
-        if semantic:
-            # semantic similarity leads once embeddings exist (D-018);
-            # keyword overlap stays as a tie-breaking signal
-            c = cos if cos is not None else 0.0
-            score = (0.5 * (c + 1) / 2 + 0.15 * sim
-                     + 0.25 * recency + 0.1 * obs.confidence)
-        else:
-            score = 0.5 * sim + 0.3 * recency + 0.2 * obs.confidence
-    return score * _EXTRACTED_DISCOUNT if _is_extracted(obs) else score
+        rel = _RELEVANCE_FLOOR + (1 - _RELEVANCE_FLOOR) * relevance
+        score = rel * (0.5 + 0.5 * recency) * (0.7 + 0.3 * obs.confidence)
+    if _is_extracted(obs):
+        score *= _EXTRACTED_DISCOUNT
+    if superseded:
+        score *= _SUPERSEDED_DISCOUNT
+    return min(max(score, 0.0), 1.0)
+
+
+def _norm_number(value: float) -> str:
+    return str(int(value)) if value.is_integer() else repr(value)
+
+
+def _norm_value(obj) -> str:
+    """The comparison form of an object (D-051): `Ubuntu` and `ubuntu`,
+    `True` and `"true"`, `9.8` and `"9.8"` are one value, not a
+    disagreement. An entity is its `type:key`."""
+    if isinstance(obj, EntityRef):
+        return f"{obj.type}:{obj.key}".casefold()
+    if isinstance(obj, bool):
+        return "true" if obj else "false"
+    if isinstance(obj, (int, float)):
+        return _norm_number(float(obj))
+    text = str(obj).strip().casefold()
+    if text in ("true", "false"):
+        return text
+    try:
+        return _norm_number(float(text))
+    except ValueError:
+        return text
+
+
+def _windows_overlap(a: Observation, b: Observation) -> bool:
+    """Two validity windows share an instant; a missing bound is open."""
+    starts = [_aware(o.valid_from) for o in (a, b) if o.valid_from is not None]
+    ends = [_aware(o.valid_to) for o in (a, b) if o.valid_to is not None]
+    if not starts or not ends:
+        return True
+    return max(starts) < min(ends)
+
+
+_ENTITY_CONFLICT_SCORE = 0.95   # as often a resolution gap (two spellings of one product) as a contradiction
 
 
 def _find_conflicts(
-    subject: EntityRef, observations: list[Observation], as_of: datetime | None
+    subject: EntityRef, observations: list[Observation], as_of: datetime | None,
+    exclude: set[str] | frozenset[str] = frozenset(),
 ) -> list[tuple[str, ContextItem]]:
-    """Scalar facts about the subject where sources disagree on the value.
+    """Facts about the subject where sources disagree on the value, with
+    overlapping validity windows (an open bound overlaps everything).
     Returns (predicate, item) pairs so a conflict that doesn't fit the
-    budget can still be handed back as an expansion handle (H-C4)."""
+    budget can still be handed back as an expansion handle (H-C4).
+
+    Scalar values are compared normalized. Entity-valued predicates count
+    too (D-051: dhcp says ip -> web-01, arp-scan says ip -> laptop-17, both
+    current) — but an edge predicate is usually multi-valued (logins,
+    flows, the products a CVE affects), so when any one source itself
+    asserts several current objects the predicate is a set on this
+    subject and another source's different object is an addition, not a
+    contradiction. Scalars keep the older rule: several values from one
+    source are a time series and only the newest per value competes.
+    `exclude` holds superseded observations (D-050): a corrected fact is
+    history, not a side."""
     horizon = as_of or _now()
-    by_predicate: dict[str, dict[str, Observation]] = {}
+    by_predicate: dict[str, list[Observation]] = {}
     for obs in observations:
-        if obs.subject != subject or isinstance(obs.object, EntityRef):
+        if obs.subject != subject or obs.id in exclude:
             continue
         # a fact whose validity window has closed is history, not a
         # competing claim about the present (H-C3)
         if obs.valid_to is not None and _aware(obs.valid_to) <= horizon:
             continue
-        # keep the newest observation per distinct value (list is newest-first)
-        by_predicate.setdefault(obs.predicate, {}).setdefault(
-            str(obs.object), obs
-        )
+        by_predicate.setdefault(obs.predicate, []).append(obs)
     items: list[tuple[str, ContextItem]] = []
-    for predicate, by_value in sorted(by_predicate.items()):
-        if len(by_value) < 2:
-            continue
+    for predicate, rows in sorted(by_predicate.items()):
+        rows.sort(key=lambda o: _aware(o.observed_at), reverse=True)
+        entity_valued = any(isinstance(o.object, EntityRef) for o in rows)
+        # newest observation per (source, normalized value)
+        per_source: dict[str, dict[str, Observation]] = {}
+        for o in rows:
+            per_source.setdefault(o.source, {}).setdefault(_norm_value(o.object), o)
         # Differing values from ONE source are a time series or legitimate
         # update (invoice amounts, an OS upgrade), not a conflict. Only
         # cross-source disagreement gets flagged.
-        if len({o.source for o in by_value.values()}) < 2:
+        if len(per_source) < 2:
+            continue
+        if entity_valued and any(len(values) > 1 for values in per_source.values()):
+            continue  # a set-valued edge on this subject, not a single truth
+        by_value: dict[str, Observation] = {}
+        for values in per_source.values():
+            for norm, o in values.items():
+                prior = by_value.get(norm)
+                if prior is None or _aware(o.observed_at) > _aware(prior.observed_at):
+                    by_value[norm] = o
+        if len(by_value) < 2:
+            continue
+        # only values that clash with a differing value from another source
+        # over a shared instant are sides; sequential windows are a history
+        contested: set[str] = set()
+        candidates = list(by_value.items())
+        for i, (norm_a, a) in enumerate(candidates):
+            for norm_b, b in candidates[i + 1:]:
+                if a.source != b.source and _windows_overlap(a, b):
+                    contested.update((norm_a, norm_b))
+        if len(contested) < 2:
             continue
         sides = sorted(
-            by_value.values(), key=lambda o: o.observed_at, reverse=True
+            (by_value[n] for n in contested), key=lambda o: o.observed_at, reverse=True
         )[:3]
         clauses = "; ".join(
             f"{o.source} says {_object_text(o)!r}"
@@ -270,6 +500,8 @@ def _find_conflicts(
         # latter, never the former (H-C5).
         structured_sides = sum(not _is_extracted(o) for o in sides)
         score = 1.0 if structured_sides >= 2 else 0.9
+        if entity_valued:
+            score = min(score, _ENTITY_CONFLICT_SCORE)
         items.append((predicate, ContextItem(
             kind="conflict",
             text=f"CONFLICT on {subject.type}:{subject.key} "
@@ -300,9 +532,14 @@ def _sign(raw: str, secret: bytes) -> str:
 def encode_handle(
     namespace: str, subject: EntityRef, predicate: str, as_of: datetime | None,
     valid_at: datetime | None = None, excerpt: dict | None = None,
+    before: datetime | None = None, question: str | None = None,
 ) -> str:
     """`excerpt` = {"artifact_id", "seq", "model"} makes an excerpt handle:
-    expanding it returns the cited passage with its neighbours."""
+    expanding it returns the cited passage with its neighbours. `before`
+    makes a page handle (D-051): expanding it gathers the subject's rows
+    observed at or before that instant — the window past the gather cap —
+    ranked for `question`, and pages on until exhausted. An empty
+    predicate on a page handle means every predicate."""
     # Compact keys and no nulls: agents carry every handle of every pack in
     # their context, and the long form averaged 131 chars per id (D-036).
     payload: dict = {"n": namespace, "s": [subject.type, subject.key], "p": predicate}
@@ -312,6 +549,10 @@ def encode_handle(
         payload["v"] = valid_at.isoformat()
     if excerpt is not None:
         payload["x"] = excerpt
+    if before is not None:
+        payload["b"] = _aware(before).isoformat()
+    if question:
+        payload["q"] = question
     raw = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     ).decode().rstrip("=")
@@ -355,7 +596,8 @@ def decode_handle(handle: str) -> dict:
         if not (isinstance(s, list) and len(s) == 2):
             raise ValueError("malformed handle payload")
         out = {"ns": payload["n"], "subject": {"type": s[0], "key": s[1]}, "predicate": payload["p"]}
-        for short, long in (("a", "as_of"), ("v", "valid_at"), ("x", "excerpt")):
+        for short, long in (("a", "as_of"), ("v", "valid_at"), ("x", "excerpt"),
+                            ("b", "before"), ("q", "question")):
             if short in payload:
                 out[long] = payload[short]
     elif {"ns", "subject", "predicate"} <= payload.keys():  # long form (pre-D-036 handles)
@@ -378,7 +620,7 @@ def _validated_handle(meta: dict) -> dict:
         raise ValueError("malformed handle payload: namespace")
     if not isinstance(meta.get("predicate"), str):
         raise ValueError("malformed handle payload: predicate")
-    for axis in ("as_of", "valid_at"):
+    for axis in ("as_of", "valid_at", "before"):
         value = meta.get(axis)
         if value is None:
             meta.pop(axis, None)
@@ -389,6 +631,11 @@ def _validated_handle(meta: dict) -> dict:
             datetime.fromisoformat(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"malformed handle payload: {axis}") from exc
+    question = meta.get("question")
+    if question is None:
+        meta.pop("question", None)
+    elif not isinstance(question, str) or len(question) > 2000:
+        raise ValueError("malformed handle payload: question")
     if "excerpt" in meta:
         ex = meta["excerpt"]
         seq = ex.get("seq", 0) if isinstance(ex, dict) else None
@@ -640,6 +887,7 @@ def build_pack(
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
         roots=list(req.scope.subjects) if req.scope is not None else [req.subject],
         truncated=list(truncated.values()),
+        page_cursors=_oldest(gathered),
     )
 
 
@@ -709,30 +957,54 @@ def expand_pack(
     as_of = datetime.fromisoformat(meta["as_of"]) if meta.get("as_of") else None
     valid_at = (datetime.fromisoformat(meta["valid_at"])
                 if meta.get("valid_at") else None)
+    before = datetime.fromisoformat(meta["before"]) if meta.get("before") else None
     budget = min(budget, max_budget())
     if isinstance(meta.get("excerpt"), dict):
         return _expand_excerpt(store, meta, subject, budget, allowed_types)
     truncated: Truncations = {}
+    # A page handle (D-051) carries the window's edge: gather at or before
+    # it, which is also at or before `as_of` when both are set.
+    bound = as_of
+    if before is not None:
+        bound = before if as_of is None else min(_aware(before), _aware(as_of))
+    gathered = _gather(store, meta["ns"], subject, truncated, bound)
+    predicate = meta["predicate"]
     observations = [
-        o
-        for o in _gather(store, meta["ns"], subject, truncated, as_of)
-        if o.predicate == meta["predicate"] and _in_scope(o, allowed_types)
+        o for o in gathered
+        if (not predicate or o.predicate == predicate) and _in_scope(o, allowed_types)
     ]
     return _pack(
         namespace=meta["ns"],
         subjects=[subject],
-        question=None,
+        question=meta.get("question") or None,
         as_of=as_of,
         valid_at=valid_at,
         budget=budget,
         observations=observations,
-        with_handles=False,
+        # a thread handle spends the budget on the thread; a page is a pack
+        # over a window and its cut threads are expandable within it
+        with_handles=before is not None,
         # The caller asked for this thread — a conflict handle in particular
         # — so the whole budget is theirs to spend on it; the share cap is
         # for packs that must also carry facts (D-046).
-        conflict_share=1.0,
+        conflict_share=1.0 if before is None else _CONFLICT_BUDGET_SHARE,
         truncated=list(truncated.values()),
+        # a correction outside this thread still acts on it (D-050)
+        superseded_by=_supersession(gathered),
+        page_cursors=_oldest(gathered, subject),
+        page_before=before,
+        page_predicate=predicate,
     )
+
+
+def _oldest(gathered: list[Observation] | dict[tuple[str, str], list[Observation]],
+            subject: EntityRef | None = None) -> dict[tuple[str, str], datetime]:
+    """The edge of each gathered window: the oldest observed_at per entity,
+    which is where the next page starts (D-051)."""
+    if isinstance(gathered, list):
+        assert subject is not None
+        gathered = {(subject.type, subject.key): gathered}
+    return {key: min(_aware(o.observed_at) for o in rows) for key, rows in gathered.items() if rows}
 
 
 _EXCERPT_NEIGHBOURS = 1  # passages on each side of the cited one
@@ -789,7 +1061,20 @@ def _pack(
     roots: list[EntityRef] | None = None,
     truncated: list[ScopeTruncation] | None = None,
     conflict_share: float = _CONFLICT_BUDGET_SHARE,
+    superseded_by: dict[str, Observation] | None = None,
+    page_cursors: dict[tuple[str, str], datetime] | None = None,
+    page_before: datetime | None = None,
+    page_predicate: str = "",
 ) -> ContextPack:
+    """Rank, then fill the budget (D-051). Order of business: conflicts
+    (never silently dropped, capped at `conflict_share` of the budget),
+    briefs, document excerpts (half of what is left), then facts by value
+    per charged token with the diversity term, then handles within their
+    share. Every item and handle is charged in its compact rendered form
+    and `charged_tokens` reports the sum. `superseded_by` (D-050) is
+    computed here from the visible set unless the caller gathered a wider
+    one; `page_cursors` are the gathered windows' oldest instants, from
+    which page handles are minted for entities the gather cap truncated."""
     cos_map = cos_map or {}
     if as_of is not None:
         # observation time: nothing a source asserted after T. The gather
@@ -799,6 +1084,10 @@ def _pack(
         # hiding it is valid_at's job (D-046).
         as_of = _aware(as_of)
         observations = [o for o in observations if _aware(o.observed_at) <= as_of]
+    if superseded_by is None:
+        # after the as_of cut: a correction observed after T has not
+        # happened yet as of T, so the corrected fact is current again
+        superseded_by = _supersession(observations)
     if valid_at is not None:
         valid_at = _aware(valid_at)
         observations = [o for o in observations if covers_valid_at(o, valid_at)]
@@ -819,14 +1108,18 @@ def _pack(
     newest = max((_aware(o.observed_at) for o in observations), default=None)
     if newest is not None:
         newest = min(newest, _now())
-    # An un-embedded fact inside a partially embedded set takes the set's
-    # median cosine: neutral relative to its peers, rather than a 0 that
-    # ranks every fresh fact below every stale one (D-046).
-    fill = _median(list(cos_map.values())) if semantic and cos_map else None
+    # Two legs, fused by reciprocal rank: BM25 over what the pack renders,
+    # and cosine where vectors exist for the gathered rows. With neither
+    # (no question, or nothing matched and no vectors) the pack is the
+    # recency overview rather than a ranking by a neutral constant (D-046).
+    legs = [_normalized(_bm25(observations, question_tokens), floor=0.0)]
+    if semantic and cos_map:
+        legs.append(_normalized({o.id: cos_map[o.id] for o in observations if o.id in cos_map}))
+    relevance = _fuse(legs)
     scored = sorted(
         (
-            (_score(obs, question_tokens, _recency(obs, newest),
-                    cos_map.get(obs.id, fill), semantic), obs)
+            (_score(obs, relevance.get(obs.id, 0.0) if relevance else None,
+                    _recency(obs, newest), obs.id in superseded_by), obs)
             for obs in observations
         ),
         key=lambda pair: pair[0],
@@ -834,7 +1127,8 @@ def _pack(
     )
 
     items: list[ContextItem] = []
-    handles: list[ExpansionHandle] = []
+    conflict_handles: list[ExpansionHandle] = []
+    excerpt_handles: list[ExpansionHandle] = []
     remaining = budget
 
     # Conflicts ship first: an agent must not act on a contested fact
@@ -853,18 +1147,19 @@ def _pack(
     conflict_remaining = int(budget * conflict_share)
     for subj in subjects:
         mine = by_subject.get((subj.type, subj.key), [])
-        for predicate, item in _find_conflicts(subj, mine, valid_at or as_of):
-            cost = est_tokens(item.text)
+        for predicate, item in _find_conflicts(subj, mine, valid_at or as_of,
+                                               exclude=superseded_by.keys()):
+            cost = item_tokens(item)
             if cost <= remaining and cost <= conflict_remaining:
                 items.append(item)
                 remaining -= cost
                 conflict_remaining -= cost
             elif with_handles:
                 # est_tokens is the exact cost the expansion charges (text
-                # plus item framing), so a caller passing it as the
-                # expansion budget is guaranteed the conflict (D-046).
-                handles.append(ExpansionHandle(
-                    id=encode_handle(namespace, subj, predicate, as_of, valid_at),
+                # plus citations), so a caller passing it as the expansion
+                # budget is guaranteed the conflict (D-046).
+                conflict_handles.append(ExpansionHandle(
+                    id=encode_handle(namespace, subj, predicate, as_of, valid_at, before=page_before),
                     hint=f"CONFLICT on {subj.type}:{subj.key} {predicate} "
                     f"did not fit the budget",
                     est_tokens=cost, kind="conflict",
@@ -873,7 +1168,7 @@ def _pack(
     # Then dossier briefs — the orientation layer (phase 4).
     for ref, brief, cites in briefs or []:
         text = f"{ref.type}:{ref.key} — {brief}"
-        cost = est_tokens(text)
+        cost = _charge(text, cites)
         if cost <= remaining:
             items.append(ContextItem(kind="brief", text=text, score=0.99,
                                      citations=cites))
@@ -895,7 +1190,7 @@ def _pack(
             about += "] "
         rendered = (f'{about}"{text}" [doc:{cite.artifact_id[:8]} '
                     f'@{cite.span_start}-{cite.span_end}]')
-        cost = est_tokens(rendered)
+        cost = _charge(rendered, [cite])
         if cost <= excerpt_budget:
             items.append(ContextItem(
                 kind="doc_excerpt", text=rendered,
@@ -904,7 +1199,7 @@ def _pack(
             remaining -= cost
             excerpt_budget -= cost
             if with_handles:  # "read around this hit" (roadmap phase 4)
-                handles.append(ExpansionHandle(
+                excerpt_handles.append(ExpansionHandle(
                     id=encode_handle(namespace, subjects[0], "", as_of, valid_at,
                                      excerpt={"artifact_id": cite.artifact_id,
                                               "seq": seq, "model": model}),
@@ -913,78 +1208,57 @@ def _pack(
                     est_tokens=cost * (2 * _EXCERPT_NEIGHBOURS + 1), kind="excerpt",
                 ))
 
-    included: set[str] = set()
-    skipped: dict[tuple[str, str, str], int] = {}  # (owner type, key, predicate)
-    inbound: set[tuple[str, str, str]] = set()
+    # Facts: value per token with the diversity term, against what the
+    # fixed items left. Handles are a bounded share of the budget; when the
+    # threads they stand for need that share, the facts are re-selected
+    # against the rest so the pack — items AND handles — fits the request.
+    fixed_remaining = remaining
     subject_keys = {(s.type, s.key) for s in subjects}
     by_id = {o.id: o for o in observations} if paths else {}
-    for score, obs in scored:
-        if obs.id in included:
-            continue  # already shipped as part of another fact's path
-        text = _render_fact(obs)
-        cost = est_tokens(text)
-        # A fact about an entity the scope reached travels with the edges it
-        # was reached through, as `relation` items just before it; if the
-        # chain doesn't fit, neither does the fact (D-035). Without the
-        # chain an answering model correctly refuses to connect the dots.
-        path = (paths or {}).get((obs.subject.type, obs.subject.key), [])
-        if any(pid not in by_id and pid not in included for pid in path):
-            continue  # an edge of the chain is not visible in this view: neither is the fact
-        chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
-        chain_cost = sum(est_tokens(_render_fact(p)) for p in chain)
-        if cost + chain_cost <= remaining:
-            for edge in chain:
-                items.append(ContextItem(
-                    kind="relation", text=_render_fact(edge),
-                    score=round(min(score, 1.0), 4), citations=[_citation(edge)],
-                ))
-                included.add(edge.id)
-            remaining -= chain_cost
-            items.append(
-                ContextItem(
-                    kind="fact",
-                    text=text,
-                    score=round(min(score, 1.0), 4),
-                    citations=[_citation(obs)],
-                )
-            )
-            remaining -= cost
-            included.add(obs.id)
-        else:
-            # An edge pointing INTO a pack subject from outside the pack
-            # (cve X affects product P, asked about P) is one thread on P,
-            # not a thread per X: a hub with 2,700 inbound edges made 965
-            # one-observation handles (D-035). Expanding the aggregate
-            # replays observations_for(P) filtered by predicate, which
-            # includes inbound edges.
-            owner = obs.subject
-            if ((obs.subject.type, obs.subject.key) not in subject_keys
-                    and isinstance(obs.object, EntityRef)
-                    and (obs.object.type, obs.object.key) in subject_keys):
-                owner = obs.object
-                inbound.add((owner.type, owner.key, obs.predicate))
-            key = (owner.type, owner.key, obs.predicate)
-            skipped[key] = skipped.get(key, 0) + 1
+    page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
+                                 page_before, page_predicate, question)
 
-    if with_handles:
-        for (stype, skey, predicate), count in sorted(
-            skipped.items(), key=lambda kv: kv[1], reverse=True
-        ):
-            subj = EntityRef(type=stype, key=skey)
-            direction = "pointing at" if (stype, skey, predicate) in inbound else "for"
-            handles.append(
-                ExpansionHandle(
-                    id=encode_handle(namespace, subj, predicate, as_of, valid_at),
-                    hint=f"{count} more '{predicate}' observations {direction} "
-                    f"{stype}:{skey}",
-                    est_tokens=count * 25,
-                )
-            )
+    def select(item_budget: int) -> tuple[list[ContextItem], list[ExpansionHandle], int]:
+        facts, skipped, inbound, left = _select_facts(
+            scored, item_budget, paths or {}, by_id, superseded_by, subject_keys)
+        threads = _thread_handles(namespace, skipped, inbound, as_of, valid_at, page_before) \
+            if with_handles else []
+        return facts, conflict_handles + page_handles + excerpt_handles + threads, left
 
-    # Handles are in priority order (conflicts, excerpts, then the most
-    # skipped threads first). Past the cap they stop being a menu and become
-    # a second payload; the count says how much was left out.
-    omitted = max(0, len(handles) - _MAX_HANDLES)
+    share = int(budget * _HANDLE_BUDGET_SHARE)
+    item_budget = fixed_remaining
+    facts: list[ContextItem] = []
+    handles: list[ExpansionHandle] = []
+    allowance = fixed_remaining
+    for _ in range(3):  # cutting facts can add threads; the item budget only shrinks
+        facts, handles, left = select(item_budget)
+        allowance = fixed_remaining - (item_budget - left)   # what the whole budget has left
+        costs = [handle_tokens(h) for h in handles[:_MAX_HANDLES]]
+        if not costs:
+            break
+        room = min(sum(costs), max(share, costs[0]))
+        # Below twice a handle's cost the budget cannot hold a handle and an
+        # item, so the first handle rides outside it (charged_tokens says so)
+        if room <= allowance or budget < 2 * costs[0] or item_budget == max(0, fixed_remaining - room):
+            break
+        item_budget = max(0, fixed_remaining - room)
+    shipped: list[ExpansionHandle] = []
+    spent = 0
+    for handle in handles[:_MAX_HANDLES]:
+        cost = handle_tokens(handle)
+        # the first handle always ships: a pack that cut something must be
+        # able to say so
+        if shipped and spent + cost > allowance:
+            break
+        shipped.append(handle)
+        spent += cost
+    omitted = len(handles) - len(shipped)
+    items.extend(facts)
+
+    # Handles are in priority order (conflicts, pages past the gather cap,
+    # excerpts, then the most skipped threads first). Past the cap they
+    # stop being a menu and become a second payload; the count says how
+    # much was left out.
     return ContextPack(
         namespace=namespace,
         subject=subjects[0] if len(subjects) == 1 else None,
@@ -994,7 +1268,161 @@ def _pack(
         valid_at=valid_at,
         budget=budget,
         items=items,
-        handles=handles[:_MAX_HANDLES],
+        handles=shipped,
         omitted_handles=omitted,
         truncated=truncated or [],
+        charged_tokens=sum(item_tokens(i) for i in items) + sum(handle_tokens(h) for h in shipped),
     )
+
+
+def _select_facts(
+    scored: list[tuple[float, Observation]],
+    budget: int,
+    paths: dict[tuple[str, str], list[str]],
+    by_id: dict[str, Observation],
+    superseded_by: dict[str, Observation],
+    subject_keys: set[tuple[str, str]],
+) -> tuple[list[ContextItem], dict[tuple[str, str, str], int], set[tuple[str, str, str]], int]:
+    """Value-per-token selection with an MMR-style diversity term (D-051).
+    Candidates are ordered by score per charged token; each round takes
+    the affordable candidate with the highest value, where one whose
+    predicate already holds _DIVERSITY_AFTER items competes at
+    _DIVERSITY_LAMBDA times its value — twenty near-identical logins no
+    longer crowd out a relevant fact of another kind. Greedy trim by score
+    did (and a long fact cost the same as a short one).
+
+    A fact about an entity the scope reached travels with the edges it was
+    reached through, as `relation` items just before it; if the chain
+    doesn't fit, neither does the fact (D-035). Density is the fact's own
+    score per token — the chain is context the reader needs, not a
+    discount on the fact — while affordability counts the chain. A fact
+    that cannot be afforded is skipped for good (the budget only shrinks)
+    and counted toward its thread's handle.
+
+    Returns (items, skipped thread counts, inbound thread keys, budget left).
+    """
+    remaining = budget
+    items: list[ContextItem] = []
+    included: set[str] = set()
+    skipped: dict[tuple[str, str, str], int] = {}  # (owner type, key, predicate)
+    inbound: set[tuple[str, str, str]] = set()
+    per_predicate: Counter[str] = Counter()
+
+    def skip(obs: Observation) -> None:
+        # An edge pointing INTO a pack subject from outside the pack
+        # (cve X affects product P, asked about P) is one thread on P,
+        # not a thread per X: a hub with 2,700 inbound edges made 965
+        # one-observation handles (D-035). Expanding the aggregate
+        # replays observations_for(P) filtered by predicate, which
+        # includes inbound edges.
+        owner = obs.subject
+        if ((obs.subject.type, obs.subject.key) not in subject_keys
+                and isinstance(obs.object, EntityRef)
+                and (obs.object.type, obs.object.key) in subject_keys):
+            owner = obs.object
+            inbound.add((owner.type, owner.key, obs.predicate))
+        key = (owner.type, owner.key, obs.predicate)
+        skipped[key] = skipped.get(key, 0) + 1
+
+    pool: list[tuple[float, float, int, Observation, str, list[str]]] = []
+    for score, obs in scored:
+        path = paths.get((obs.subject.type, obs.subject.key), [])
+        if any(pid not in by_id for pid in path):
+            continue  # an edge of the chain is not visible in this view: neither is the fact
+        text = _render_fact(obs, superseded_by.get(obs.id))
+        cost = _charge(text, [_citation(obs)])
+        pool.append((score / cost, score, cost, obs, text, path))
+    pool.sort(key=lambda e: e[0], reverse=True)
+    dead: set[str] = set()  # chosen, shipped as an edge, or unaffordable for good
+    while True:
+        best = None
+        best_val = -1.0
+        for density, score, cost, obs, text, path in pool:
+            if obs.id in dead:
+                continue
+            if best is not None and density <= best_val:
+                break  # sorted by density: nothing further can beat the pick
+            if obs.id in included:
+                dead.add(obs.id)
+                continue  # already shipped as part of another fact's path
+            chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
+            chain_cost = sum(_charge(_render_fact(p), [_citation(p)]) for p in chain)
+            if cost + chain_cost > remaining:
+                dead.add(obs.id)
+                skip(obs)
+                continue
+            value = density * (_DIVERSITY_LAMBDA
+                               if per_predicate[obs.predicate] >= _DIVERSITY_AFTER else 1.0)
+            if value > best_val:
+                best, best_val = (score, cost, obs, text, chain, chain_cost), value
+        if best is None:
+            break
+        score, cost, obs, text, chain, chain_cost = best
+        for edge in chain:
+            items.append(ContextItem(
+                kind="relation", text=_render_fact(edge),
+                score=round(min(score, 1.0), 4), citations=[_citation(edge)],
+            ))
+            included.add(edge.id)
+            per_predicate[edge.predicate] += 1
+        remaining -= chain_cost
+        items.append(ContextItem(kind="fact", text=text, score=round(min(score, 1.0), 4),
+                                 citations=[_citation(obs)]))
+        remaining -= cost
+        included.add(obs.id)
+        dead.add(obs.id)
+        per_predicate[obs.predicate] += 1
+    for _, _, _, obs, _, _ in pool:  # affordable but never picked (a zero score): still a thread
+        if obs.id not in dead and obs.id not in included:
+            skip(obs)
+    return items, skipped, inbound, remaining
+
+
+def _thread_handles(
+    namespace: str, skipped: dict[tuple[str, str, str], int], inbound: set[tuple[str, str, str]],
+    as_of: datetime | None, valid_at: datetime | None, page_before: datetime | None,
+) -> list[ExpansionHandle]:
+    handles = []
+    for (stype, skey, predicate), count in sorted(
+        skipped.items(), key=lambda kv: kv[1], reverse=True
+    ):
+        subj = EntityRef(type=stype, key=skey)
+        direction = "pointing at" if (stype, skey, predicate) in inbound else "for"
+        handles.append(ExpansionHandle(
+            id=encode_handle(namespace, subj, predicate, as_of, valid_at, before=page_before),
+            hint=f"{count} more '{predicate}' observations {direction} {stype}:{skey}",
+            est_tokens=count * _FACT_TOKENS_ESTIMATE,
+        ))
+    return handles
+
+
+def _page_handles(
+    namespace: str, truncated: list[ScopeTruncation] | None,
+    page_cursors: dict[tuple[str, str], datetime] | None,
+    as_of: datetime | None, valid_at: datetime | None, page_before: datetime | None,
+    page_predicate: str, question: str | None,
+) -> list[ExpansionHandle]:
+    """One `more` handle per entity the gather cap truncated (D-051): its
+    payload carries the window's oldest instant, so expanding it gathers
+    the next window (rows observed at or before it — the boundary instant
+    is re-read rather than risk losing rows that share it) and pages on
+    until the count says the window was the last. A window that is one
+    instant wide steps past it instead of repeating."""
+    if not truncated or not page_cursors:
+        return []
+    handles = []
+    for t in truncated:
+        cursor = page_cursors.get((t.entity.type, t.entity.key))
+        if cursor is None:
+            continue
+        if page_before is not None and cursor >= _aware(page_before):
+            cursor = _aware(page_before) - timedelta(microseconds=1)
+        left = max(0, t.total - t.gathered)
+        handles.append(ExpansionHandle(
+            id=encode_handle(namespace, t.entity, page_predicate, as_of, valid_at,
+                             before=cursor, question=question),
+            hint=f"{left:,} older observations about {t.entity.type}:{t.entity.key} "
+            f"were not examined (observed at or before {cursor.date().isoformat()})",
+            est_tokens=min(left, _GATHER_LIMIT) * _FACT_TOKENS_ESTIMATE,
+        ))
+    return handles
