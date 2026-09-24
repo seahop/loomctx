@@ -21,7 +21,7 @@ presentable.
 | 2026-09-11 | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
 | 2026-09-23 | Review-fix batch: dependency lock consumed by the Dockerfile (the boto3 drift D-045 found), base images by digest, SHA-pinned actions + Trivy + build-once CI, pod security posture + NetworkPolicies + PDBs, registry validation on the queue paths, Kafka SASL/TLS, compose env passthroughs, demo script made honest (night-before prep, frozen volume), docs numbers reconciled |
 | 2026-09-24 | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23, D-050…D-056): recorded supersession + PROV-O export, honest budget (`charged_tokens`) + BM25/rank fusion + value-per-token packing, retrieval scorecard with baselines (`docs/evaluation.md`), schema v6 store work, MCP 2026-07-28 alignment, engine-side rate limiting, STIX/OCSF connectors; GKE re-validation including an in-place v5→v6 migration (D-052) |
-| 2026-09-24 | Whole-project review (`docs/hardening.md` §S, D-057…D-061): eval harness validity (equal-token baselines, graded answers, unsent rows excluded), read-path conflict/brief/alias/scope fixes and a wire-honest MCP budget, browser-facing guards and write-side citation gates, sticky resolution and bounded adjudication, multihop over hub entities in one ask (D-061), release fixes (fresh-clone test run, Go SDK CI); scorecards re-run on this build |
+| 2026-09-24 | Whole-project review (`docs/hardening.md` §S, D-057…D-062): eval harness validity (equal-token baselines, graded answers, unsent rows excluded), read-path conflict/brief/alias/scope fixes and a wire-honest MCP budget, browser-facing guards and write-side citation gates, sticky resolution and bounded adjudication, multihop over hub entities in one ask (D-061), small-budget packing (D-062), release fixes (fresh-clone test run, Go SDK CI); scorecards re-run on this build |
 | early Oct | Freeze features; night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist); presentation materials |
 | ~2026-10-13 | **Conference** (moved up from end of October) |
 
@@ -271,6 +271,6 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
 `src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
-Verify from clean checkout: `docker compose run --rm test` (about 380 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
+Verify from clean checkout: `docker compose run --rm test` (about 480 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
 Demo rehearsal: `docker compose up -d loom && docker compose exec loom
 python -m loom.seed load`, then hit `/v1/ask`.

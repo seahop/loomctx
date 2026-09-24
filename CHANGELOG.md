@@ -8,7 +8,7 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
-### The 2026-09-24 review batch (D-057…D-061)
+### The 2026-09-24 review batch (D-057…D-062)
 
 Full list with statuses: `docs/hardening.md` §S.
 
@@ -48,6 +48,14 @@ Full list with statuses: `docs/hardening.md` §S.
   cited); a reached entity's off-topic conflict becomes a handle
 - `observations_for_many(predicates=)` (additive); `observations_by_ids`
   uses the primary key on SQLite
+
+#### Small budgets (D-062)
+- The attribute a question names ships first: it orders equal-standing
+  conflicts, is picked before briefs and excerpts, and is exempt from the
+  diversity term
+- Handle ids are plain text (`ns~type~key~predicate…`, percent-escaped):
+  ~55–65 tokens instead of ~128; old handles still decode, signing
+  unchanged. Seed demo: web-01 `charged_tokens` 380 → 351
 
 #### Security (D-059)
 - Host / Origin allowlist and JSON-only `/v1` bodies on the engine, MCP

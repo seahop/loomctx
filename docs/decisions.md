@@ -2142,6 +2142,38 @@ vector baseline got 5/6 at 3,200 tokens; Loom got 0/6 at every budget.
   fit. The retrieval harness's rule-based reader learned to read grouped
   items; scoring is unchanged (D-057).
 
+## D-062 · The asked attribute ships first; handle ids are plain text (2026-09-24)
+
+At 400 tokens Loom trailed a token-matched vector baseline (scripted 62 % vs
+72 % on the real corpus; live DeepSeek 68 % vs 74 %). Three packing faults
+and one cost fault, each with a concrete question behind it:
+
+- **Conflict order was alphabetical.** Asked for a CVE's `has_severity`,
+  the pack shipped the `cvss_score` conflict and made the asked one a
+  handle. Equal-standing conflicts now order by H-C5 score, then the
+  attribute the question names, then relevance; conflicts still ship
+  first and one that does not fit is still a handle.
+- **An excerpt could crowd out every fact** (a KEV advisory excerpt plus
+  its handle filled a pack asked for an EPSS score), and the diversity term
+  cut the invoice holding the maximum asked for. The attribute a subject
+  question names (`subject_attribute`: the predicates it names, minus those
+  whose value it also names, so ordering questions keep their lexical
+  match) is picked before briefs and excerpts, like D-061's scope topic,
+  and is exempt from the diversity term. The first pass holds back room for
+  one thread handle, so the handle no longer rides over the budget.
+- **Handles cost ~128 tokens** — base64 JSON tokenizes at ~1.45 chars per
+  token, and the first handle always ships: a third of a 400 pack. Handle
+  ids are now `ns~type~key~predicate` plus tagged fields, percent-escaped,
+  times in ISO basic form: 55–65 tokens. Prefixes, HMAC signing and
+  decoding of old handles are unchanged (base64 never hid anything).
+- **Measured** (scripted, a rebuilt corpus of the same shape — the review
+  sandbox blocked copying the live scorecard volume): loom@400 68 % → 79 %
+  (vector 77 %), conflict 9/9, numeric 12/12; 800 and above unchanged; no
+  pack over budget (six multihop@400 packs had been charged 594–633).
+  Live DeepSeek on lease/conflict/numeric at 400: 81 % → 100 %. Latency
+  flat. Demo: web-01's `charged_tokens` 380 → 351 (the handle is 57 tokens,
+  not 86), re-verified on a live engine.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
