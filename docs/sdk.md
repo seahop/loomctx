@@ -141,6 +141,7 @@ operations.
 Generate real keys (hashed at rest, plaintext printed once):
 
 ```bash
+mkdir -p secrets   # yours, not root's: docker would create a missing mount source as root
 docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom \
   python -m loom.keys --file /secrets/keys.json generate \
   --id netsec-shipper --namespace netsec --perms w \

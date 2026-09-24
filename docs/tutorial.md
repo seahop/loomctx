@@ -23,14 +23,17 @@ beside the demo data without colliding.
 ## 1. A clean engine
 
 ```bash
-docker compose up -d loom
+docker compose up -d --wait loom
 ```
 
 ## 2. Send structured claims (scanner findings)
 
 A scanner emits entity-addressed events; these map straight to observations.
 This script uses only the standard library (the shape a real pipeline device
-would send). Save as `feed.py` or use [`examples/vuln_feed.py`](../examples/vuln_feed.py):
+would send). Save as `feed.py`, or use [`examples/vuln_feed.py`](../examples/vuln_feed.py)
+instead — one or the other, not both (these claims carry no `event_id`, so a
+second run records them twice), and note the example also sends the step-3
+pentest report for you:
 
 ```python
 import json, urllib.request
@@ -196,6 +199,7 @@ agent can only *read* the slice they're cleared for — see
 **[administration.md](administration.md)**:
 
 ```bash
+mkdir -p secrets   # yours, not root's: docker would create a missing mount source as root
 docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom \
   python -m loom.keys --file /secrets/keys.json generate \
   --id nessus-feed --namespace vuln --perms w \

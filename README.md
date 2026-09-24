@@ -89,7 +89,7 @@ scratch. Full index: **[docs/README.md](docs/README.md)**.
 docker compose run --rm test
 
 # Start the engine (HTTP API on :8000) and load the demo dataset
-docker compose up -d loom
+docker compose up -d --wait loom
 docker compose exec loom python -m loom.seed load   # 592 claims + 5 documents
 # Optional: real data next to it — CISA KEV + NVD + EPSS (docs/real-data.md)
 docker compose exec loom python -m loom.connectors.vulns load --db /data/loom.db --bridge-seed-hosts
