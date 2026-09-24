@@ -69,13 +69,34 @@ SQLite trade documented in D-008.
   node drain never takes a whole tier.
 
 - **Upgrading:** the engine migrates its store in place on first open
-  (schema version in `schema_meta`; a current schema takes a no-DDL fast
+  (schema version in `loom_meta`; a current schema takes a no-DDL fast
   path). Every schema bump is proven on a populated database before it is
   tagged, not just on a fresh one (D-045): seed Postgres with the image
   from the previous schema's last commit, open the same database with the
   new image, check counts, the new tables, an `ask`, and that the second
   open is fast. Roll the engine first; workers and gateways tolerate both
-  versions during the roll.
+  versions during the roll. An *older* image opening a *newer* database
+  warns (`schema version N is newer than this build's M`), runs no DDL,
+  never writes the version down, and serves what it understands — so a
+  rollback is safe, it just ignores what it does not know.
+
+  - **v5 → v6** (D-050, R-9): one column, `observations.supersedes`
+    (recorded supersession; an older image ignores it), and five indexes —
+    `observations (namespace, supersedes)`, `observations (subject_id,
+    recorded_at)`, `artifacts (recorded_at)`, `entities (namespace,
+    created_at)` and a partial one on `entities (dossier_claimed_until)`.
+    `norm_key` is recomputed for entity keys carrying `:` (IPv6 and MAC
+    addresses keep their separators). On Postgres the `CREATE INDEX`
+    statements take the usual lock on a populated `observations` table
+    for the duration of the build — open the new image once during a
+    quiet window, or accept that the first engine pod to start does it.
+    The enrichment workers now scan their backlogs from persisted
+    high-water marks (`loom_meta` rows named `hwm:*`, forgotten by
+    `wipe()`); a worker's first tick after the upgrade — and every 16th
+    tick — is the old full scan, so nothing is missed and the marks take
+    over from there. On SQLite, reads now use a small pool of WAL read
+    connections beside the single writer (`LOOM_DB_READERS`, default 4;
+    `0` restores the single connection).
 
 **HPA prerequisite:** the cluster must run metrics-server (managed clusters
 usually do; on kind/minikube enable it). Resource *requests* are set on every
