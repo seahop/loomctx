@@ -145,7 +145,10 @@ in the compact form an agent actually receives, sized to the costlier of
 its two surfaces — the MCP concise view (compact JSON) over the answer
 prompt's lines: every item's text *plus its citations* (one
 `"<cite> <source> <date>"` string each) and its JSON framing, and every
-handle's hint *plus its id* (base64, ~1.5 characters a token) and
+handle's hint *plus its id* (charged at 1.5 characters a token, the rate
+of the base64 ids before D-062; today's plain-text ids —
+`h1_netsec~host~web-01~logged_in_by`, time bounds as `a20260924T0418Z` —
+tokenize at 1.9–2.4, and 1.47 for a UUID key, as the base64 ones did) and
 framing (D-058). The scorecard checks both the rendered prompt and the
 MCP view's items and handles with `cl100k_base` against the request
 (within 15 %; the view's envelope — namespace, question echo, subject

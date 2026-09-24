@@ -566,7 +566,7 @@ def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
     assert all("old" in i.text for i in pack.items)
     # the expanded thread handle inherits the bound
     monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)
-    tiny = build_pack(store, AskRequest(subject=host, question="", budget=300, as_of=_at(7, 31)))
+    tiny = build_pack(store, AskRequest(subject=host, question="", budget=200, as_of=_at(7, 31)))
     thread = next(h for h in tiny.handles if "'old'" in h.hint)
     more = expand_pack(store, thread.id, budget=4000)
     assert more.truncated and more.truncated[0].total == 7
@@ -889,7 +889,7 @@ def test_a_page_keeps_its_window_for_the_threads_it_cuts(tmp_path, monkeypatch):
     first = build_pack(store, AskRequest(subject=host, question="who", budget=3000))
     page = next(h for h in first.handles if "not examined" in h.hint)
     monkeypatch.setattr(ctx, "_HANDLE_BUDGET_SHARE", 1.0)   # room for the page's own next page AND a thread
-    tiny = expand_pack(store, page.id, budget=300)
+    tiny = expand_pack(store, page.id, budget=200)
     thread = next(h for h in tiny.handles if "'logged_in_by'" in h.hint)
     assert decode_handle(thread.id)["before"] == decode_handle(page.id)["before"]
     more = expand_pack(store, thread.id, budget=3000)
@@ -1281,3 +1281,148 @@ def test_a_question_ending_in_punctuation_still_names_its_entity(tmp_path):
     assert auto_subjects(store, "default", "Summarize web-01.") == [web01]
     assert "web-01" in _question_tokens("is it web-01?") and "web-01." not in _question_tokens("web-01.")
     store.close()
+
+
+def _cve_with_two_conflicts(tmp_path):
+    """A CVE the way NVD records it: two scorers disagree on the score AND
+    on the severity, and a daily feed is newer than both."""
+    store = SqliteStore(tmp_path / "cve.db")
+    cve = EntityRef(type="cve", key="CVE-2026-27524")
+    rows = []
+    for scorer, score, severity in (("nvd:nvd@nist.gov", 4.3, "medium"),
+                                    ("nvd:disclosure@vulncheck.com", 2.3, "low")):
+        rows += [dict(subject=cve, predicate="cvss_score", object=score, source=scorer,
+                      observed_at=_at(6, 17), valid_from=_at(3, 18)),
+                 dict(subject=cve, predicate="has_severity", object=severity, source=scorer,
+                      observed_at=_at(6, 17), valid_from=_at(3, 18))]
+    rows += [dict(subject=cve, predicate="epss_score", object=0.004 + i / 10000, source="first-epss",
+                  observed_at=_at(9, 1 + i)) for i in range(6)]
+    rows.append(dict(subject=cve, predicate="status", object="Modified", source="nvd",
+                     observed_at=_at(6, 17)))
+    store.record_claims([ClaimIn(**r) for r in rows])
+    return store, cve
+
+
+def test_the_conflict_on_the_asked_attribute_ships_first(tmp_path):
+    """D-062: conflicts shipped in predicate-name order, so asked for the
+    has_severity of a CVE a 400-token pack carried the cvss_score conflict
+    and handed the asked one back as a handle. The named attribute's
+    conflict comes first; the other is still there, as an item or a handle."""
+    store, cve = _cve_with_two_conflicts(tmp_path)
+    q = f"As of 2026-09-24, what is the has_severity of cve:{cve.key}? If sources disagree, say so."
+    pack = build_pack(store, AskRequest(subject=cve, question=q, budget=250, as_of=_at(9, 24)))
+    conflicts = [i for i in pack.items if i.kind == "conflict"]
+    assert conflicts and "has_severity" in conflicts[0].text
+    assert pack.items[0].kind == "conflict"                     # conflicts still ship first
+    assert any("cvss_score" in i.text for i in conflicts) or any(
+        h.kind == "conflict" and "cvss_score" in h.hint for h in pack.handles)
+    assert pack.charged_tokens <= 250
+    store.close()
+
+
+def test_the_asked_attribute_is_not_thinned_by_the_diversity_term(tmp_path):
+    """D-062: "the largest invoiced_amount ever recorded" needs every
+    invoice; after three, the diversity term let a contract owner and a
+    renewal date in ahead of the one that held the maximum."""
+    store = SqliteStore(tmp_path / "inv.db")
+    vendor = EntityRef(type="vendor", key="globex")
+    amounts = [14773.89, 24903.71, 10999.5, 8963.48, 32202.95, 31365.47, 13761.09]
+    store.record_claims(
+        [ClaimIn(subject=vendor, predicate="invoiced_amount", object=a, source="erp-export",
+                 observed_at=_at(8, 16 - 2 * i)) for i, a in enumerate(amounts)]
+        + [ClaimIn(subject=vendor, predicate=p, object=v, source="contract-db", observed_at=_at(8, 20))
+           for p, v in (("contract_owner", "asmith"), ("renewal_date", "2027-06-01"))])
+    q = "What is the largest invoiced_amount ever recorded for vendor:globex? Answer with the number."
+    pack = build_pack(store, AskRequest(subject=vendor, question=q, budget=450))
+    shipped = " | ".join(i.text for i in pack.items)
+    assert all(str(a) in shipped for a in amounts), shipped
+    assert pack.charged_tokens <= 450
+    store.close()
+
+
+def test_the_asked_attribute_ships_before_a_document_excerpt(tmp_path):
+    """D-062: an advisory excerpt (half the budget) and its handle filled
+    a 400-token pack asked for a KEV CVE's epss_score; no fact shipped."""
+    from loom.contracts import DocumentIn, Provenance
+    from loom.llm import HashingEmbedder
+    store = SqliteStore(tmp_path / "kev.db")
+    cve = EntityRef(type="cve", key="CVE-2022-27924")
+    advisory = ("CVE-2022-27924: Synacor Zimbra Collaboration Suite (ZCS) Command Injection "
+                "Vulnerability. Synacor Zimbra Collaboration Suite (ZCS) allows an attacker to inject "
+                "memcache commands into a targeted instance which causes an overwrite of arbitrary "
+                "cached entries. Required action: apply updates per vendor instructions.")
+    art = store.store_artifact(DocumentIn(text=advisory, source="cisa-kev", observed_at=_at(8, 1)))
+    embedder = HashingEmbedder()
+    store.put_doc_chunks("default", art.id, embedder.model,
+                         [(0, 0, len(advisory), advisory, embedder.embed([advisory])[0])])
+    rows = [ClaimIn(subject=cve, predicate="exploited_in_wild", object=True, source="cisa-kev",
+                    observed_at=_at(8, 1), provenance=Provenance(artifact_id=art.id))]
+    rows += [ClaimIn(subject=cve, predicate=p, object=v, source="first-epss", observed_at=_at(9, 20))
+             for p, v in (("epss_score", 0.85398), ("epss_percentile", 0.99714))]
+    rows += [ClaimIn(subject=cve, predicate="affects", object=EntityRef(type="product", key=f"zimbra:p{i}"),
+                     source="nvd", observed_at=_at(9, 1)) for i in range(8)]
+    store.record_claims(rows)
+    q = f"What is the epss_score of cve:{cve.key}? Answer with the number."
+    pack = build_pack(store, AskRequest(subject=cve, question=q, budget=400), embedder=embedder)
+    assert pack.items[0].kind == "fact" and "epss_score 0.85398" in pack.items[0].text, \
+        [i.text[:60] for i in pack.items]
+    assert pack.charged_tokens <= 400
+    store.close()
+
+
+def test_a_question_naming_values_is_about_those_facts_not_the_attribute():
+    """An ordering question names two facts by their values; taking every
+    flow as the topic buried the one it names under the newest flows."""
+    from loom.context import subject_attribute
+    host = EntityRef(type="host", key="db-01")
+    common = dict(namespace="default", recorded_at=_at(9, 1), confidence=1.0)
+    rows = [
+        Observation(id="a" * 32, subject=host, predicate="communicated_with",
+                    object=EntityRef(type="host", key="vpn-01"), observed_at=_at(8, 15), source="netflow",
+                    **common),
+        Observation(id="b" * 32, subject=host, predicate="runs_os", object="rhel-9",
+                    observed_at=_at(7, 2), source="asset-inventory", **common),
+        Observation(id="c" * 32, subject=EntityRef(type="ip", key="10.0.4.12"), predicate="assigned_to",
+                    object=host, observed_at=_at(7, 2), source="dhcp-log", **common),
+    ]
+    ordering = ("About host:db-01: which of these was observed first — (A) host:db-01 communicated_with "
+                "host:vpn-01, per netflow; or (B) host:db-01 runs_os rhel-9, per asset-inventory?")
+    assert subject_attribute(ordering, rows, set(), [host]) == frozenset()
+    assert subject_attribute("what is the runs_os of host:db-01?", rows, set(), [host]) == {"runs_os"}
+    # the root at an edge's far end is the frame, not a named value
+    assert subject_attribute("which ip is assigned to host:db-01?", rows, set(), [host]) == {"assigned_to"}
+
+
+def test_text_handles_round_trip_awkward_keys(monkeypatch):
+    """D-062: handles are plain text (a base64 id tokenized at ~1.45
+    characters a token: 128 tokens for a time-scoped handle, a third of a
+    400-token pack). Keys holding the separator, the escape, dots, spaces
+    and non-ASCII survive, signed or not, and decode as they always did."""
+    from loom.context import encode_handle
+    at = datetime(2026, 9, 24, 4, 18, 4, 790000, tzinfo=timezone.utc)
+    excerpt = {"artifact_id": "a,b", "seq": 3, "model": "openai/text-embedding-3-small"}
+    for key in ("linux:linux_kernel", "a~b%7Ec", "10.0.4.7", "c\\+\\+ driver", "zürich/ü", "x.y.z"):
+        ref = EntityRef(type="product", key=key)
+        for secret in ("", "s3"):
+            monkeypatch.setenv("LOOM_HANDLE_SECRET", secret)
+            h = encode_handle("net~sec", ref, "affects", at, at, before=at, question="why? 100% ~sure",
+                              excerpt=excerpt)
+            assert h.startswith("h2_" if secret else "h1_")
+            meta = decode_handle(h)
+            assert meta["ns"] == "net~sec" and meta["subject"] == {"type": "product", "key": key}
+            assert meta["as_of"] == meta["valid_at"] == meta["before"] == at.isoformat()
+            assert meta["question"] == "why? 100% ~sure" and meta["excerpt"] == excerpt
+    monkeypatch.setenv("LOOM_HANDLE_SECRET", "")
+    short = encode_handle("netsec", EntityRef(type="cve", key="CVE-2026-21068"), "has_severity", at)
+    assert short == "h1_netsec~cve~CVE-2026-21068~has_severity~a20260924T041804.79Z"
+    assert decode_handle(short)["as_of"] == at.isoformat()
+    midnight = encode_handle("netsec", EntityRef(type="ip", key="10.0.4.7"), "", None,
+                             datetime(2026, 8, 20, tzinfo=timezone.utc))
+    assert midnight.endswith("~v20260820T00Z")
+    for bad in ("h1_ns~host~web-01", "h1_ns~host~web-01~p~zjunk", "h1_ns~host~web-01~p~anever",
+                "h1_ns~host~web-01~p~x1,notint,m", "h1_ns~~web-01~p"):
+        try:
+            decode_handle(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
