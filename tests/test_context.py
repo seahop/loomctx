@@ -390,6 +390,34 @@ def test_scope_facts_arrive_with_their_path(tmp_path):
     store.close()
 
 
+def test_inbound_facts_on_a_reached_subject_carry_its_path(tmp_path):
+    """S-27: a fact gathered on a reached entity as an INBOUND edge (CVE-Y
+    affects nginx, 'affects' not walked) was keyed on its subject — outside
+    the pack — and shipped without 'web-01 runs nginx', the edge that
+    says why nginx is in the pack at all."""
+    from loom.contracts import ScopeSpec
+    store = SqliteStore(tmp_path / "inpath.db")
+    t = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    host, prod = EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx")
+    store.record_claims([
+        ClaimIn(namespace="ns", subject=host, predicate="runs_software", object=prod, source="inv", observed_at=t),
+        ClaimIn(namespace="ns", subject=EntityRef(type="cve", key="CVE-2026-9"), predicate="affects",
+                object=prod, source="nvd", observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)),
+    ])
+    scope = ScopeSpec(subjects=[host], expand=["runs_software"], depth=1)
+    pack = build_pack(store, AskRequest(namespace="ns", scope=scope, question="which cve affects it", budget=400))
+    texts = [(i.kind, i.text) for i in pack.items]
+    at = {p: n for n, (_, txt) in enumerate(texts) for p in ("runs_software", "affects") if p in txt}
+    assert set(at) == {"runs_software", "affects"} and at["runs_software"] < at["affects"]
+    assert texts[at["runs_software"]][0] == "relation" and texts[at["affects"]][0] == "fact"
+    # when the chain does not fit, neither does the fact (D-035): it is a thread on nginx
+    fact_only = next(i for i in pack.items if "affects" in i.text)
+    tight = build_pack(store, AskRequest(namespace="ns", scope=scope, question="which cve affects it",
+                                         budget=item_tokens(fact_only) + 1))
+    assert not any("affects" in i.text for i in tight.items)
+    store.close()
+
+
 def test_naming_the_subject_does_not_boost_its_own_facts(tmp_path):
     """D-036: 'is web-01 exposed to anything exploited in the wild?' — every
     recent login *about web-01* matched as many question words as the KEV

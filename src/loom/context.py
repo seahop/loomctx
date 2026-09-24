@@ -1417,7 +1417,7 @@ def _pack(
     page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
                                  page_before, page_predicate, question)
 
-    pool = _fact_pool(scored, paths or {}, by_id, superseded_by)
+    pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys)
     edge_costs: dict[str, int] = {}
     unminted = 0   # threads past the handle cap: counted, never encoded
 
@@ -1493,12 +1493,23 @@ def _fact_pool(
     paths: dict[tuple[str, str], list[str]],
     by_id: dict[str, Observation],
     superseded_by: dict[str, Observation],
+    subject_keys: set[tuple[str, str]],
 ) -> Pool:
     """Every candidate fact rendered and priced once per pack, densest
-    first: (score per token, score, cost, obs, text, path)."""
+    first: (score per token, score, cost, obs, text, path).
+
+    The path is the chain of the pack subject the fact was gathered on:
+    its subject's, or — for an edge pointing INTO a reached entity from
+    outside the pack (CVE-Y affects nginx, nginx reached through web-01) —
+    its object's. Keyed on the subject alone, such a fact shipped without
+    the edges that tie nginx to the root (S-27)."""
     pool: Pool = []
     for score, obs in scored:
-        path = paths.get((obs.subject.type, obs.subject.key), [])
+        owner = (obs.subject.type, obs.subject.key)
+        if (owner not in paths and owner not in subject_keys
+                and isinstance(obs.object, EntityRef)):
+            owner = (obs.object.type, obs.object.key)
+        path = paths.get(owner, [])
         if any(pid not in by_id for pid in path):
             continue  # an edge of the chain is not visible in this view: neither is the fact
         text = _render_fact(obs, superseded_by.get(obs.id))
