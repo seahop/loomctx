@@ -276,7 +276,7 @@ def test_calls_run_at_temperature_zero_unless_the_model_refuses_it(monkeypatch):
 
 def test_results_are_handed_over_as_each_task_finishes(seeded_db, tmp_path):
     def cite(messages):
-        return "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["cite"] + "]"
+        return "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["cites"][0].split()[0] + "]"
     model = Scripted([
         [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec",
                   "valid_at": "2026-08-20T00:00:00Z"})], cite,
