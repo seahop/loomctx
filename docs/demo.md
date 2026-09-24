@@ -94,7 +94,7 @@ curl -s localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 Point at: item 0 is `kind: conflict`, two sources, two citations; the
 `handles` list at the bottom (`76 more 'logged_in_by' observations`, with
 `omitted_handles: 4` — web-01 has 77 logins in the seed, and at budget 400
-`charged_tokens` is 380; recomputed 2026-09-24 on the seed after D-058). Say:
+`charged_tokens` is 351; recomputed 2026-09-24 on the seed after D-062, whose plain-text handle id makes that handle 57 tokens instead of 86). Say:
 *Loom never picks a side
 silently. The agent sees the disagreement before it sees anything else,
 and gets handles for what did not fit.*
@@ -220,7 +220,7 @@ new pod posture) means each must be re-run on the current build before
 the talk.
 
 - [x] Fresh clone, uncached build, seed, first cited answer, connector: 142 s total (2026-09-09, laptop)
-- [x] Both Act 1 `curl` commands return what the script says — laptop-17 + charged_tokens 60, conflict first + charged_tokens 380, "76 more 'logged_in_by'" handle with omitted_handles 4 (verified against a live engine on the post-D-058 build, 2026-09-24)
+- [x] Both Act 1 `curl` commands return what the script says — laptop-17 + charged_tokens 60, conflict first + charged_tokens 351, "76 more 'logged_in_by'" handle with omitted_handles 4 (verified against a live engine on the post-D-062 build, 2026-09-24)
 - [x] Both Act 2 `curl` commands return what the script says (2026-09-09 corpus) — **re-run on the frozen volume**
 - [x] Act 3 run with Claude Code (2026-09-10 before aliases, 2026-09-11 after); transcripts saved in `demo/`
 - [ ] Night-before load on the current build, alias pass with the pinned judge, `demo-frozen.jsonl` exported and copied off

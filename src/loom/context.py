@@ -46,6 +46,7 @@ import math
 import os
 import re
 import threading
+import urllib.parse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -570,27 +571,90 @@ def encode_handle(
     makes a page handle (D-051): expanding it gathers the subject's rows
     observed at or before that instant — the window past the gather cap —
     ranked for `question`, and pages on until exhausted. An empty
-    predicate on a page handle means every predicate."""
-    # Compact keys and no nulls: agents carry every handle of every pack in
-    # their context, and the long form averaged 131 chars per id (D-036).
-    payload: dict = {"n": namespace, "s": [subject.type, subject.key], "p": predicate}
+    predicate on a page handle means every predicate.
+
+    The payload is plain text (D-062): `ns~type~key~predicate`, then
+    tagged fields (`a` as_of, `v` valid_at, `b` before, `q` question, `x`
+    excerpt), percent-escaped. Agents carry every handle of every pack in
+    their context and the pack is charged for it: base64 of compact JSON
+    (D-036) tokenizes at ~1.45 characters a token, so a time-scoped
+    handle cost ~128 tokens — a third of a 400-token pack, spent to say
+    "two more facts exist". Legacy base64 payloads still decode."""
+    fields = [_handle_field(namespace), _handle_field(subject.type),
+              _handle_field(subject.key), _handle_field(predicate)]
     if as_of is not None:
-        payload["a"] = as_of.isoformat()
+        fields.append("a" + _handle_time(as_of))
     if valid_at is not None:
-        payload["v"] = valid_at.isoformat()
-    if excerpt is not None:
-        payload["x"] = excerpt
+        fields.append("v" + _handle_time(valid_at))
     if before is not None:
-        payload["b"] = _aware(before).isoformat()
+        fields.append("b" + _handle_time(_aware(before)))
     if question:
-        payload["q"] = question
-    raw = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    ).decode().rstrip("=")
+        fields.append("q" + _handle_field(question))
+    if excerpt is not None:
+        inner = _HANDLE_SAFE.replace(",", "")
+        fields.append("x" + ",".join((_handle_field(str(excerpt["artifact_id"]), inner),
+                                      str(excerpt["seq"]),
+                                      _handle_field(str(excerpt["model"]), inner))))
+    raw = "~".join(fields)
     secret = _handle_secret()
     if secret is None:
         return _HANDLE_PREFIX + raw
     return f"{_SIGNED_HANDLE_PREFIX}{raw}.{_sign(raw, secret)}"
+
+
+def _handle_time(dt: datetime) -> str:
+    """An instant in ISO 8601 basic form, in UTC when aware, trailing zeros
+    trimmed — `20260924T041804.79Z`, `20260820T00Z`; fromisoformat reads
+    both. The extended form with its offset was a third of a handle."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    clock = dt.strftime("%H%M%S")
+    if dt.microsecond:
+        clock += f".{dt.microsecond:06d}".rstrip("0")
+    else:
+        while len(clock) > 2 and clock.endswith("00"):
+            clock = clock[:-2]
+    return f"{dt.strftime('%Y%m%d')}T{clock}{'Z' if dt.tzinfo is not None else ''}"
+
+
+# `~` separates a handle's fields and `%` escapes; whatever else a key, a
+# model name or a question holds is percent-encoded (`,` too inside an
+# excerpt's sub-fields).
+_HANDLE_SAFE = ":/@!$'()*+,;="
+_HANDLE_TAGS = {"a": "as_of", "v": "valid_at", "b": "before", "q": "question", "x": "excerpt"}
+
+
+def _handle_field(value: str, safe: str = _HANDLE_SAFE) -> str:
+    return urllib.parse.quote(value, safe=safe).replace("~", "%7E")
+
+
+def _decode_text_handle(raw: str) -> dict:
+    """The plain-text payload (D-062) in the decoded shape, instants back
+    in extended ISO form, so a decoded handle reads as it always did."""
+    parts = raw.split("~")
+    if len(parts) < 4:
+        raise ValueError("malformed handle payload")
+    unq = urllib.parse.unquote
+    out: dict = {"ns": unq(parts[0]), "subject": {"type": unq(parts[1]), "key": unq(parts[2])},
+                 "predicate": unq(parts[3])}
+    for part in parts[4:]:
+        name = _HANDLE_TAGS.get(part[:1])
+        if name is None or name in out:
+            raise ValueError("malformed handle payload")
+        value = part[1:]
+        if name == "excerpt":
+            bits = value.split(",")
+            if len(bits) != 3 or not bits[1].isdigit():
+                raise ValueError("malformed handle payload: excerpt")
+            out[name] = {"artifact_id": unq(bits[0]), "seq": int(bits[1]), "model": unq(bits[2])}
+        elif name == "question":
+            out[name] = unq(value)
+        else:
+            try:
+                out[name] = datetime.fromisoformat(value).isoformat()
+            except ValueError as exc:
+                raise ValueError(f"malformed handle payload: {name}") from exc
+    return out
 
 
 def decode_handle(handle: str) -> dict:
@@ -606,7 +670,8 @@ def decode_handle(handle: str) -> dict:
     if handle.startswith(_SIGNED_HANDLE_PREFIX):
         if secret is None:
             raise ValueError("signed handle presented but no handle secret configured")
-        raw, sep, sig = handle[len(_SIGNED_HANDLE_PREFIX):].partition(".")
+        # the signature is base64url, never a dot; a text payload may hold dots
+        raw, sep, sig = handle[len(_SIGNED_HANDLE_PREFIX):].rpartition(".")
         if not sep or not hmac.compare_digest(_sign(raw, secret), sig):
             raise ValueError("handle signature invalid")
     elif handle.startswith(_HANDLE_PREFIX):
@@ -615,6 +680,8 @@ def decode_handle(handle: str) -> dict:
         raw = handle[len(_HANDLE_PREFIX):]
     else:
         raise ValueError("unrecognized handle format")
+    if "~" in raw:   # base64url never holds a tilde: the plain-text form (D-062)
+        return _validated_handle(_decode_text_handle(raw))
     raw += "=" * (-len(raw) % 4)
     try:
         payload = json.loads(base64.urlsafe_b64decode(raw))
@@ -810,6 +877,32 @@ def named_predicates(question: str | None, vocabulary, roots: list[EntityRef] | 
         return frozenset()
     asked = _asked_words(question, roots)
     return frozenset(p for p in vocabulary if (w := _predicate_words(p)) and w <= asked)
+
+
+def subject_attribute(question: str | None, observations: list[Observation],
+                      registry: set[str], roots: list[EntityRef]) -> frozenset[str]:
+    """The attribute a subject question asks for (D-062): the predicates it
+    names (`named_predicates`, over the registry and the gathered rows) —
+    except one whose value it names too. "Which was observed first: web-01
+    communicated_with host:vpn-01, or web-01 runs_os rhel-9?" is about two
+    particular facts, which the lexical leg finds by those values; taking
+    every flow as the topic buried them under recency."""
+    named = named_predicates(question, registry | {o.predicate for o in observations}, roots)
+    if not named:
+        return named
+    frame: set[str] = set()
+    for r in roots:
+        frame |= _tokens(f"{r.type} {r.key}")
+    words = _tokens(question or "") - frame
+    rooted = {f"{r.type}:{r.key}".lower() for r in roots}
+    valued = set()
+    for obs in observations:
+        if obs.predicate not in named or obs.predicate in valued:
+            continue
+        ends = {_object_text(obs).lower(), f"{obs.subject.type}:{obs.subject.key}".lower()} - rooted
+        if ends & words:
+            valued.add(obs.predicate)
+    return named - valued
 
 
 def _registry_predicates(store: GraphStore, namespace: str) -> set[str]:
@@ -1141,6 +1234,13 @@ def build_pack(
     topic = (scope_topic(store, req.namespace, req.scope, req.question,
                          {o.predicate for o in observations})
              if req.scope is not None else frozenset())
+    # A subject question's named attribute ("what is the has_severity of
+    # CVE-X", "the largest invoiced_amount ever recorded") orders its
+    # conflicts and ships before the orientation layers, exempt from the
+    # diversity term (D-062) — as a scope's topic does (D-061).
+    attribute = (subject_attribute(req.question, observations,
+                                   _registry_predicates(store, req.namespace), asked)
+                 if req.scope is None else frozenset())
 
     # Semantic ranking (D-018) + document excerpts (D-020): embed the question
     # once, reuse it to score observation vectors AND rank passages from the
@@ -1237,6 +1337,7 @@ def build_pack(
         # walk's own edges it names are (D-058)
         focus=topic or _focus(req.scope, req.question),
         topic=topic,
+        attribute=attribute,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
         # both spellings are the frame, not the topic: the name asked and
@@ -1434,6 +1535,7 @@ def _pack(
     withheld_briefs: int = 0,
     focus: frozenset[str] = frozenset(),
     topic: frozenset[str] = frozenset(),
+    attribute: frozenset[str] = frozenset(),
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -1533,11 +1635,25 @@ def _pack(
     reached = set(paths or {}) if question else set()
     aside_handles: list[ExpansionHandle] = []
     aside_unminted = 0
+    # Among conflicts of equal standing (a document-introduced one still
+    # ranks below two structured sources, H-C5), which ships first is the
+    # question's call (D-062): the one on the attribute it names, then by
+    # how relevant the contested predicate's facts ranked — name order put
+    # a CVE's cvss_score conflict ahead of the has_severity one asked
+    # about, and the asked one became a handle at 400 tokens.
+    on_topic = attribute | focus
+    predicate_relevance: dict[str, float] = {}
+    for obs in observations:
+        r = relevance.get(obs.id, 0.0)
+        if r > predicate_relevance.get(obs.predicate, -1.0):
+            predicate_relevance[obs.predicate] = r
     for subj in subjects:
         mine = by_subject.get((subj.type, subj.key), [])
         aside = (subj.type, subj.key) in reached
-        for predicate, item in _find_conflicts(subj, mine, valid_at or as_of,
-                                               exclude=superseded_by.keys()):
+        found = _find_conflicts(subj, mine, valid_at or as_of, exclude=superseded_by.keys())
+        found.sort(key=lambda pair: (-pair[1].score, pair[0] not in on_topic,
+                                     -predicate_relevance.get(pair[0], 0.0)))
+        for predicate, item in found:
             cost = item_tokens(item)
             if aside and predicate not in focus:
                 if len(aside_handles) < _MAX_HANDLES:
@@ -1571,7 +1687,10 @@ def _pack(
     # sixteen CVSS conflicts and four document excerpts and not one
     # `exploited_in_wild`. Siblings reached through one edge that share the
     # attribute's value render as one item per four (`_group_key`); the
-    # handles' share is held back so the menu still fits.
+    # handles' share is held back so the menu still fits. A subject
+    # question's named attribute takes the same place (D-062): a KEV CVE's
+    # advisory excerpt and its handle filled a 400-token pack asked for
+    # the CVE's epss_percentile, and not one fact shipped.
     subject_keys = {(s.type, s.key) for s in subjects}
     by_id = {o.id: o for o in observations} if paths else {}
     pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys)
@@ -1583,14 +1702,24 @@ def _pack(
     topic_skipped: dict[tuple[str, str, str], int] = {}
     topic_inbound: set[tuple[str, str, str]] = set()
     held_back = 0
-    if topic:
-        topic_pool = [e for e in pool if e[3].predicate in topic]
+    first = topic | attribute
+    if first:
+        topic_pool = [e for e in pool if e[3].predicate in first]
         if topic_pool:
-            pool = [e for e in pool if e[3].predicate not in topic]
+            pool = [e for e in pool if e[3].predicate not in first]
             groups = {e[3].id: g for e in topic_pool
                       if (g := _group_key(e[3], e[5], by_id, superseded_by, subject_keys)) is not None}
             topic_pool = _grouped_density(topic_pool, groups)
             known = conflict_handles + page_handles + aside_handles if with_handles else []
+            if with_handles and pool:
+                # the rest of the facts may be cut to a thread too, and the
+                # topic's items cannot be trimmed to make room for its
+                # handle later: hold back the room of the biggest one
+                # (D-062; a 200-token pack rode over by the handle's cost)
+                _, rest_skipped, rest_inbound, _ = _select_facts(
+                    pool, 0, by_id, subject_keys, on_topic, edge_costs)
+                known = known + _thread_handles(namespace, rest_skipped, rest_inbound, as_of,
+                                                valid_at, page_before, limit=1)[0]
             reserve = _handle_room(known, budget, share)
             for _ in range(2):
                 # the handles' room is held back from the topic: what the
@@ -1600,7 +1729,7 @@ def _pack(
                 done = set(included)
                 room = max(0, remaining - reserve)
                 got, topic_skipped, topic_inbound, left = _select_facts(
-                    topic_pool, room, by_id, subject_keys, focus, edge_costs,
+                    topic_pool, room, by_id, subject_keys, on_topic, edge_costs,
                     included=done, groups=groups)
                 threads = (_thread_handles(namespace, topic_skipped, topic_inbound, as_of, valid_at,
                                            page_before, limit=_MAX_HANDLES)[0] if with_handles else [])
@@ -1686,7 +1815,7 @@ def _pack(
     def select(item_budget: int) -> tuple[list[ContextItem], list[ExpansionHandle], int]:
         nonlocal unminted
         facts, skipped, inbound, left = _select_facts(
-            pool, item_budget, by_id, subject_keys, focus, edge_costs, included=set(included))
+            pool, item_budget, by_id, subject_keys, on_topic, edge_costs, included=set(included))
         for key, n in topic_skipped.items():
             skipped[key] = skipped.get(key, 0) + n
         inbound |= topic_inbound
