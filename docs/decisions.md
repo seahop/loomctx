@@ -1710,6 +1710,59 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   `subjects_citing` is bounded in SQL. `wipe()` sweeps declines and the
   merge log. The SQLite lock is re-entrant with outermost-only commit.
 
+## D-052 · GKE re-validation of the posture changes (2026-09-24)
+
+D-048 changed what every pod is allowed to do (read-only root, no
+capabilities, no service-account token), what may talk to what
+(default-deny NetworkPolicies with one allowance per tier, including the
+CloudNativePG operator's path to the instance manager), and what a node
+drain may take (PodDisruptionBudgets) — all kustomize-validated only. A
+fresh cluster with NetworkPolicy enforcement on (Dataplane V2) ran the
+D-043 recipe against images built from the batch: rollout clean, an
+unlabeled pod refused by NATS and Postgres and answered by the gateway and
+engine, ingest 174/s and asks 284/s at zero errors (D-043's numbers),
+primary promoted in 13 s with **zero** failed writes across a 2/s probe
+(D-045 had three: the pool's `connect_timeout` and keepalives now cover
+the gap), and a drain that evicted one queue node and one replica at a
+time while reads stayed ready. Two recipe additions: the project had lost
+its `default` VPC, and `kubectl` needs `gke-gcloud-auth-plugin`. The
+first gated publish failed on Trivy — pip's vendored `msgpack` and the
+base image's `setuptools`, both HIGH with fixes — and the answer was to
+remove the package manager from the runtime image rather than pin it
+(nothing imports either at run time); both images scan clean now. Table
+in `deploy/README.md`.
+
+## D-053 · Retrieval scorecard: packs against the obvious baselines, rule-scored, no judge (2026-09-24)
+
+`python -m loom.retrieval_eval` compares `loom@{400,800,1600,3200}`,
+`full` (everything about the question's entities; its token cost is the
+point, and it is not sent past a cap), `vector` top-k and `recency` top-k
+on the same store, the same generated questions, and the same prompt
+rendering `/v1/answer` uses. Six question families with store-derived
+truth (never hand-written): lease-at-T in both `valid_at` and `as_of`
+forms, cross-source conflict, multi-hop, abstention (an entity or
+predicate that does not exist — a confident answer is a hallucination),
+numeric lookup, and temporal order. Answers use a fixed two-line format so
+scoring is rule-based; there is no LLM judge, because a second model's
+errors are indistinguishable from the first's and drift with its version.
+Citation support is measured at the id level — support@pack (the truth
+ids are among the context's citations) and support@answer (the model
+cited them) — rather than by NLI, because every Loom item carries an
+observation id and the ground truth *is* a set of ids. A rule-based
+scripted reader that answers only from the rendered context isolates
+retrieval recall from reading; `--runs` reports variance; live runs carry
+provider-reported cost under a `--max-cost` ceiling. Baselines get no time
+axis on purpose: the question states the date, and reading the windows is
+what a model without Loom has to do. Seed-corpus result with the hashing
+embedder: `loom@1600` matches `full` at about 60 % of its mean tokens and
+18 % of its maximum; recency loses half the conflicts and chains,
+cosine-only half the orderings; the scripted reader abstains correctly
+everywhere, so the abstention row only discriminates live models. R-6 is
+addressed except MRR/nDCG, which accuracy at graded budgets plus
+support@pack replaces for these answer shapes. `docs/evaluation.md` has
+the talk command; the real-corpus table with the chosen model is a
+rehearsal-week task. Local output lives in `eval/` (gitignored).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
