@@ -249,6 +249,29 @@ every worker stage at 49 MiB resident under the 512 MiB limit with no
 restarts, and survived two primary deletions with 16 s write gaps. Numbers
 and the failover finding are in `docs/decisions.md`.
 
+### Re-validated on GKE after the 2026-09-23 batch (2026-09-24, D-052)
+
+The posture changes of D-048 (container securityContext with a read-only
+root filesystem, no service-account token, default-deny NetworkPolicies,
+PodDisruptionBudgets, non-root NATS, the bounded JetStream) had only been
+kustomize-validated. Same recipe as D-043 — project `loom1-508221`, a fresh
+zonal cluster (`3 × e2-standard-4`, `us-central1-a`, **Dataplane V2** so
+NetworkPolicy is enforced), CloudNativePG 1.26, images built from `dda1051`
+and pushed to Artifact Registry, the `scale-pg-ha` overlay rendered with
+the images pinned by digest. The project had no `default` VPC any more
+(`gcloud compute networks create default --subnet-mode=auto` first) and
+`kubectl` needed `gke-gcloud-auth-plugin`; both are now in the recipe.
+
+| Check | Result |
+| --- | --- |
+| Rollout | every pod Running with the new securityContext; NATS unprivileged on its PVC; engines restarted twice while the primary was still initializing (the documented pool-timeout case), nothing else restarted |
+| NetworkPolicy | an unlabeled pod: `nats:4222` blocked, `loom-pg-rw:5432` blocked, `loom-gateway:80` open, `loom:80` open; gateways publish, consumers pull, the operator reaches the instance manager (the failover below completed) |
+| Ingest through lb → 2 gateways → JetStream ×3 → 2 consumers → Postgres | 5,000 single envelopes at concurrency 32: **174/s, p50 128 ms, p99 802 ms, 0 errors**, 5,000/5,000 rows present (D-043: 175/s) |
+| Asks, 2 engine replicas, reads on replicas | 3,000 at concurrency 16: **284/s, p50 55 ms, p99 78 ms, 0 errors**; the engine HPA scaled 2 → 6 during the run (D-043: 287/s) |
+| Primary deleted under a 2/s write probe through the engine | promoted in **13.3 s**; **0 of 240 writes failed** (D-045: 3 of 617 — the pool's `connect_timeout` and keepalives now ride the gap); 240/240 rows present |
+| Node drain (a node without the primary) | 33 s; PDBs allowed one NATS pod and one Postgres replica at a time; `/readyz` stayed `ready` throughout; every pod rescheduled; `loom-pg-primary` shows 0 allowed disruptions — draining the primary's node needs a switchover first (`kubectl cnpg promote`), by design |
+| Enrichment workers without provider keys | idle with two log lines ("no embedder", "no LLM"), 0 restarts |
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash
