@@ -52,6 +52,18 @@ SQLite trade documented in D-008.
   same on every engine replica) alongside it so expansion handles are signed
   (D-021).
 
+- **Host allowlist (D-059):** engine, MCP server and gateway answer 400 to
+  a `Host` they don't recognise (DNS-rebinding defence). Pod IPs (probes),
+  `localhost` (port-forward), Service names (`loom`, `loom-gateway`) and
+  `*.svc` / `*.svc.cluster.local` pass by default. Behind an Ingress or a
+  load balancer with a DNS name, add that name as `LOOM_ALLOWED_HOSTS` on
+  the engine and gateway Deployments (`loom.example.com,*.corp.example.com`).
+
+- **Rate limits (R-10, D-059):** `LOOM_RATE_*` and the keys file's per-key
+  fields are enforced **per process** — the ceiling for one key is the
+  dial × `LOOM_WORKERS` × replicas (HPA scale-out raises it). Size the
+  dials for your replica count, or enforce an exact bound at the ingress.
+
 - **Pod posture:** every pod runs as uid 10001 with a read-only root
   filesystem, no capabilities, no privilege escalation, and no
   ServiceAccount token mounted (nothing here talks to the Kubernetes API);

@@ -120,6 +120,51 @@ grant found *server-side* is the only authority. Consequences:
   TLS at your ingress/LB in any deployment that leaves localhost (no
   plaintext HTTP across networks).
 
+## Documents and type-scoped keys (D-059)
+
+A document has no entity type of its own; a type-scoped reader may fetch
+it (`GET /v1/artifacts/{id}`, excerpt handles) once it backs a fact about
+an entity in their world. So *citing* a document is a privilege too: a
+key with `entity_types` may put `provenance` on a claim only for
+
+- a document **it ingested itself** — the engine records the uploading
+  grant on the artifact as `attrs["loom.uploader"]` (`{"grant": id,
+  "entity_types": [...]}`; senders may not set it, the key is reserved), or
+- a document that **already backs a fact inside its entity types** — one
+  its holder could read anyway.
+
+Anything else is a 403 (a rejected item in a batch). Keys without
+`entity_types` cite freely, as before. A type-scoped key may likewise
+`supersedes` only an observation whose entities are all inside its types.
+Type-scoped readers also see a scoped registry (`GET /v1/schemas`, MCP
+`describe_namespace`) and scoped entity counts (MCP `list_namespaces`).
+
+## Browser exposure: Host and Origin (D-059)
+
+A Loom in open dev mode on your laptop or LAN is reachable from every web
+page your browser opens. The engine, the MCP http transport and the
+gateway therefore refuse:
+
+- a `Host` header outside the allowlist (400) — the tell of a DNS-rebinding
+  page. Always allowed: `localhost`, IP addresses (kubelet probes use the
+  pod IP), single-label service names (`loom`, `mcp`, `loom-gateway`) and
+  `*.svc`, `*.svc.cluster.local`, `*.cluster.local`, `*.internal`.
+  **Serving Loom under a real DNS name (an ingress, a reverse proxy)?**
+  Add it: `LOOM_ALLOWED_HOSTS=loom.example.com,*.corp.example.com`
+  (engine, `mcp` and gateway read the same variable). A cross-namespace
+  client in Kubernetes should use `loom.<ns>.svc`, not `loom.<ns>`. `*`
+  turns the check off — only behind a proxy that validates Host itself.
+- a foreign `Origin` (403). Loopback origins (local tools such as the MCP
+  Inspector) and same-origin requests pass; list others in
+  `LOOM_ALLOWED_ORIGINS`. Agents, SDKs and shippers send no Origin.
+- a body-carrying `/v1` request whose `Content-Type` is not JSON (415):
+  `application/json`, `application/*+json` or an NDJSON spelling
+  (`application/x-ndjson`). `text/plain` and form encodings are exactly
+  what a cross-site page can send without a CORS preflight.
+
+With auth on, a request with no key (401) or an unknown key (403) is
+refused before its body is read or validated.
+
 ## Rate limits (R-10)
 
 A valid reader can otherwise burn LLM spend on `/v1/answer` without
@@ -131,14 +176,31 @@ Unset = unlimited, so a dev checkout is unchanged.
 
 | Dial | Where | Meaning |
 | --- | --- | --- |
-| `LOOM_RATE_PER_SEC` | engine + gateway | requests per second per key on every `/v1` route (the gateway: per ingest request; a batch of *n* envelopes costs *n*) |
-| `LOOM_RATE_BURST` | engine | bucket size (default: the rate, rounded up; the gateway uses the rate) |
-| `LOOM_RATE_LLM_PER_SEC` | engine | a second, stricter bucket per key for the routes that spend LLM/embedder budget: `/v1/answer` and `/v1/entities/semantic` |
-| `LOOM_RATE_LLM_BURST` | engine | its bucket size (default: the rate, rounded up) |
+| `LOOM_RATE_PER_SEC` | engine, MCP http, gateway | requests per second per key: every `/v1` route on the engine, every tool call on the MCP http transport, every ingest request on the gateway. A batch of *n* envelopes costs *n* on both the engine and the gateway. Fractions are fine (`0.5` = one every 2 s); a value that does not parse stops the engine, the MCP server and the gateway at start-up — never a silent "unlimited" |
+| `LOOM_RATE_BURST` | engine, MCP http, gateway | bucket size (default: the rate — rounded up on the engine, down on the gateway, at least 1) |
+| `LOOM_RATE_LLM_PER_SEC` | engine, MCP http | a second, stricter bucket per key for what spends LLM/embedder budget: `/v1/answer`, `/v1/entities/semantic`, and the MCP `answer` / `find_related` tools |
+| `LOOM_RATE_LLM_BURST` | engine, MCP http | its bucket size (default: the rate, rounded up) |
+
+Compose passes all four through from `.env` to the engine, the `mcp`
+service and the gateway. The stdio MCP server is local trust and is not
+limited.
+
+**Buckets live in each process.** The effective ceiling for one key is
+the dial × `LOOM_WORKERS` × engine replicas (and, separately, × gateway
+replicas; the MCP server is its own process). With `LOOM_WORKERS=4` and 3
+engine pods, `LOOM_RATE_LLM_PER_SEC=0.2` lets one key make up to 2.4
+answers/s. Divide the dials by that product when you size them, or enforce
+an exact global bound at a shared ingress / API gateway in front of Loom.
+
+**A batch larger than the key's burst is refused with 413** (it could
+never pass, so a 429 would only make a shipper retry forever). Size
+`LOOM_RATE_BURST` (or the shipper key's `rate_burst`) at or above your
+shippers' batch size — Vector's `max_events`, Fluent Bit's flush volume,
+`loom.ingest --batch`.
 
 **Per-key overrides** live in the keys file beside the grant, so one file
-serves both tiers (`rate_llm_per_sec` is engine-only; the gateway has no
-LLM routes):
+serves every tier (`rate_llm_per_sec` is ignored by the gateway, which has
+no LLM routes):
 
 ```bash
 python -m loom.keys generate --id dashboard --namespace netsec --perms r \
@@ -166,6 +228,10 @@ client IP; `/healthz`, `/readyz` and `/metrics` are never limited.
   budget; its own bucket protects everyone else. A steady climb on one
   reader's `/v1/answer` calls is the LLM-spend guard doing its job — raise
   that key's `rate_llm_per_sec` deliberately, not the global dial.
+- `loom_requests_rejected_total{reason="host"|"origin"|"content_type"}`
+  (engine) = browser-shaped requests refused (D-059). A burst of `host`
+  right after you put Loom behind a new DNS name means
+  `LOOM_ALLOWED_HOSTS` is missing that name.
 - Auth denials name the key **id** (never the key) in error details, so a
   400-level spike traces to a principal.
 

@@ -48,12 +48,14 @@ from ..contracts import (
     SchemaRegistration,
     SemanticSearchResponse,
 )
+from ..gates import check_citation, check_supersedes, scope_schema, stamp_uploader
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
-from ..ratelimit import RateLimitMiddleware
+from ..ratelimit import SCOPE_KEY as RATE_LIMITER, RateLimitMiddleware, RateLimitSettings
 from ..consumer import resolve_provenance
 from ..store.factory import store_from_env
+from ..webguard import BrowserGuard
 
 
 @asynccontextmanager
@@ -63,6 +65,7 @@ async def _lifespan(app: FastAPI):
     app.state.llm = llm_from_env()
     app.state.embedder = embedder_from_env()
     app.state.auth = AuthConfig.from_env()
+    RateLimitSettings.from_env()   # a malformed LOOM_RATE_* stops start-up, never 500s later (D-059)
     if not app.state.auth.enabled:
         logging.getLogger("loom.auth").warning(
             "LOOM_API_KEYS and LOOM_AUTH_FILE unset — auth is DISABLED (open dev mode)"
@@ -163,9 +166,39 @@ class _ResponseHygiene:
         await self.app(scope, receive, hygienic_send)
 
 
+class _AuthGate:
+    """Pure ASGI. With auth on, a /v1 request with no key (401) or a key
+    that matches no live grant (403) is refused here — before its body is
+    read, parsed or validated (D-059). Routes still apply the namespace,
+    perms and scoping gates; this only makes the unauthenticated path
+    cheap. Probes, /metrics and the OpenAPI docs are not under /v1."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+            return await self.app(scope, receive, send)
+        auth = getattr(getattr(scope.get("app"), "state", None), "auth", None)
+        if auth is not None and auth.enabled:
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                       for k, v in scope.get("headers") or []}
+            key = extract_key(headers)
+            if key is None:
+                metrics.REJECTED.labels(reason="auth").inc()
+                return await _send_json(send, 401, {
+                    "detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+            if auth.grant_for(key) is None:
+                metrics.REJECTED.labels(reason="auth").inc()
+                return await _send_json(send, 403, {"detail": "unknown, expired, or disabled API key"})
+        await self.app(scope, receive, send)
+
+
 app.add_middleware(_RequestSizeCap)
 app.add_middleware(RateLimitMiddleware)   # per-grant buckets (D-056); rejects before a body is read
-app.add_middleware(_ResponseHygiene)      # outermost: covers the cap's own 413 and the 429 too
+app.add_middleware(_AuthGate)             # no key / unknown key: refused before any body work (D-059)
+app.add_middleware(BrowserGuard, metric=metrics.REJECTED)  # Host / Origin / JSON-only bodies (D-059)
+app.add_middleware(_ResponseHygiene)      # outermost: covers every rejection above too
 
 
 def _authorize(request: Request, namespace: str, action: str) -> Grant | None:
@@ -211,26 +244,6 @@ def _gate_source(grant: Grant | None, source: str) -> None:
         )
 
 
-def _check_supersedes(store, claim: ClaimIn) -> str | None:
-    """A recorded supersession (D-050) must name a visible observation in
-    the claim's namespace about the claim's subject — a correction stays
-    on its subject, and a dangling or cross-tenant reference is a sender
-    bug the read path would otherwise silently ignore. Returns the
-    problem, or None."""
-    if not claim.supersedes:
-        return None
-    found = store.observations_by_ids(claim.namespace, [claim.supersedes])
-    if not found:
-        return (f"supersedes {claim.supersedes!r} does not name a visible observation in "
-                f"namespace {claim.namespace!r}")
-    old = found[0]
-    if old.subject != claim.subject:
-        return (f"supersedes {claim.supersedes!r} names an observation about "
-                f"{old.subject.type}:{old.subject.key}, not {claim.subject.type}:"
-                f"{claim.subject.key}; a correction stays on its subject")
-    return None
-
-
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
@@ -267,10 +280,15 @@ def ingest(envelope: IngestEnvelope, request: Request):
         if problem is not None:
             metrics.REJECTED.labels(reason="schema").inc()
             raise HTTPException(status_code=422, detail=problem)
-        problem = _check_supersedes(request.app.state.store, envelope)
+        problem = check_supersedes(request.app.state.store, envelope, grant)
         if problem is not None:
             metrics.REJECTED.labels(reason="supersedes").inc()
             raise HTTPException(status_code=422, detail=problem)
+        # a type-gated key cites only documents in its world (D-059)
+        problem = check_citation(request.app.state.store, envelope, grant)
+        if problem is not None:
+            metrics.REJECTED.labels(reason="scope").inc()
+            raise HTTPException(status_code=403, detail=problem)
         metrics.INGEST.labels(kind=envelope.kind).inc()
         try:
             obs = request.app.state.store.record_claim(envelope)
@@ -278,8 +296,12 @@ def ingest(envelope: IngestEnvelope, request: Request):
             metrics.REJECTED.labels(reason="provenance").inc()
             raise HTTPException(status_code=422, detail=str(exc))
         return {"status": "recorded", "observation_id": obs.id}
+    stamped = stamp_uploader(envelope, grant)
+    if isinstance(stamped, str):
+        metrics.REJECTED.labels(reason="schema").inc()
+        raise HTTPException(status_code=422, detail=stamped)
     metrics.INGEST.labels(kind=envelope.kind).inc()
-    artifact = request.app.state.store.store_artifact(envelope)
+    artifact = request.app.state.store.store_artifact(stamped)
     return JSONResponse(
         status_code=202,
         content={
@@ -324,10 +346,27 @@ async def ingest_batch(request: Request) -> IngestBatchResponse:
         items = _parse_batch(raw, request.headers.get("content-type", ""))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"invalid batch: {exc}")
-    limit = int(os.environ.get("LOOM_MAX_BATCH", "") or MAX_BATCH_ITEMS)
+    limit = _max_batch()
     if len(items) > limit:
         raise HTTPException(status_code=413, detail=f"batch of {len(items)} exceeds {limit} items")
+    # n envelopes cost n rate tokens, as on the gateway (D-059); the
+    # middleware took the first one at the door
+    limiter = request.scope.get(RATE_LIMITER)
+    refusal = limiter.charge_batch(request.scope, len(items)) if limiter is not None else None
+    if refusal is not None:
+        status, detail, retry = refusal
+        metrics.REJECTED.labels(reason="rate").inc()
+        raise HTTPException(status_code=status, detail=detail,
+                            headers={"Retry-After": str(retry)} if retry else None)
     return await run_in_threadpool(_ingest_batch_sync, request, items)
+
+
+def _max_batch() -> int:
+    raw = os.environ.get("LOOM_MAX_BATCH", "").strip()
+    try:
+        return int(raw) if raw else MAX_BATCH_ITEMS
+    except ValueError:
+        return MAX_BATCH_ITEMS
 
 
 def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
@@ -358,12 +397,15 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
                 problem = validate_claim(registry.get(ns), envelope)
                 if problem is not None:
                     return problem
+                problem = check_citation(store, envelope, grant)
+                if problem is not None:
+                    return problem
                 problem = resolve_provenance(store, envelope)
                 if problem is not None:
                     return problem
                 # validated against the store: an earlier item of the same
                 # batch is not visible yet, so it cannot be superseded here
-                problem = _check_supersedes(store, envelope)
+                problem = check_supersedes(store, envelope, grant)
                 if problem is not None:
                     return problem
         except HTTPException as exc:
@@ -386,7 +428,11 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
         if isinstance(envelope, ClaimIn):
             claims.append((i, envelope))
         else:
-            artifact = store.store_artifact(envelope)
+            stamped = stamp_uploader(envelope, grants[envelope.namespace])
+            if isinstance(stamped, str):
+                results.append(IngestItemResult(index=i, status="rejected", detail=stamped))
+                continue
+            artifact = store.store_artifact(stamped)
             metrics.INGEST.labels(kind="document").inc()
             results.append(IngestItemResult(index=i, status="accepted", artifact_id=artifact.id))
     if claims:
@@ -521,11 +567,12 @@ def get_schema(
     namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
 ) -> SchemaRegistration:
     namespace = namespace_q or namespace  # query param wins over the header (D-039)
-    _authorize(request, namespace, "r")
+    grant = _authorize(request, namespace, "r")
     schema = request.app.state.store.get_schema(namespace)
     if schema is None:
         raise HTTPException(status_code=404, detail="no registry for this namespace")
-    return schema
+    # a type-scoped reader sees the registry of its own world (D-059)
+    return scope_schema(schema, grant)
 
 
 @app.post("/v1/ask", response_model=ContextPack)

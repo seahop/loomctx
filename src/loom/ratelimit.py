@@ -33,6 +33,16 @@ never limited (probes and scrapes).
 A rejection is a 429 with `Retry-After` (whole seconds, at least 1) and
 counts on `loom_requests_rejected_total{reason="rate"}`.
 
+A batch of *n* envelopes costs *n* tokens, as on the gateway: the door
+takes one before the body is read, and `/v1/ingest/batch` takes the other
+n-1 once it has counted the items (`charge_batch`, reached through
+`scope[SCOPE_KEY]`). A batch larger than the bucket can never pass and is
+refused with 413 — retrying cannot help; split it or raise the burst.
+
+Buckets live in the process. The effective ceiling for one key is the rate
+× uvicorn workers (LOOM_WORKERS) × engine replicas; size the dials for
+that, or rate-limit at a shared ingress when the bound must be exact.
+
 Wired as a pure-ASGI middleware: `app.add_middleware(RateLimitMiddleware)`.
 """
 
@@ -56,6 +66,7 @@ ENV_LLM_RATE = "LOOM_RATE_LLM_PER_SEC"
 ENV_LLM_BURST = "LOOM_RATE_LLM_BURST"
 
 MAX_BUCKETS = 10_000                    # same bound as the gateway's pool
+SCOPE_KEY = "loom.ratelimit"            # the middleware, for routes that charge extra
 LLM_PATHS = frozenset({"/v1/answer", "/v1/entities/semantic"})
 _EXEMPT = ("/healthz", "/readyz", "/metrics")
 
@@ -68,6 +79,8 @@ def _env_float(name: str) -> float | None:
         value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
     return value if value > 0 else None
 
 
@@ -259,12 +272,28 @@ class RateLimitMiddleware:
                     return retry
         return None
 
+    def charge_batch(self, scope, n: int) -> tuple[int, str, int] | None:
+        """Charge the rest of a batch's cost (the door took one token).
+        None = allowed; else (status, detail, retry_after)."""
+        key, grant = self._principal(scope)
+        limit = self.settings.general(grant) if key is not None else None
+        if limit is None:
+            return None
+        if n > limit.burst:
+            return (413, f"batch of {n} items exceeds this key's rate burst of {limit.burst}; "
+                    "send smaller batches or raise rate_burst / LOOM_RATE_BURST", 0)
+        if n <= 1:
+            return None
+        allowed, retry = self.general.allow(key, limit, n - 1)
+        return None if allowed else (429, "rate limit exceeded", retry)
+
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "") if scope["type"] == "http" else ""
         if scope["type"] != "http" or not path.startswith("/v1/") or path.startswith(_EXEMPT):
             return await self.app(scope, receive, send)
         retry = self.decide(scope)
         if retry is None:
+            scope[SCOPE_KEY] = self
             return await self.app(scope, receive, send)
         REJECTED.labels(reason="rate").inc()
         body = json.dumps({"detail": "rate limit exceeded"}).encode()
