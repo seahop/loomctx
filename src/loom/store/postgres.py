@@ -899,11 +899,24 @@ class PostgresStore(GraphStore):
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
         with self._tx():
+            # a group every differing pair of which was declined is settled
+            # and must not occupy the limit (S-26; see sqlite.py). Grouped
+            # first, then the pair/decline test inside each group only.
+            side = "(e{n}.type || ':' || e{n}.key) COLLATE \"C\""
+            s1, s2 = side.format(n=1), side.format(n=2)
             rows = self._q(
-                "SELECT namespace, norm_key FROM entities WHERE norm_key <> ''"
-                + (" AND namespace = %s" if namespace else "")
-                + " GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1"
-                " ORDER BY namespace, norm_key LIMIT %s",
+                "WITH multi AS (SELECT namespace, norm_key FROM entities"
+                " WHERE norm_key <> ''" + (" AND namespace = %s" if namespace else "")
+                + " GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1)"
+                " SELECT m.namespace, m.norm_key FROM multi m WHERE EXISTS ("
+                "  SELECT 1 FROM entities e1 JOIN entities e2"
+                "   ON e2.namespace = e1.namespace AND e2.norm_key = e1.norm_key"
+                "   AND e2.key <> e1.key"
+                "  WHERE e1.namespace = m.namespace AND e1.norm_key = m.norm_key"
+                "  AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
+                "   WHERE d.namespace = e1.namespace"
+                f"    AND d.a = LEAST({s1}, {s2}) AND d.b = GREATEST({s1}, {s2})))"
+                " ORDER BY m.namespace, m.norm_key LIMIT %s",
                 ((namespace, limit) if namespace else (limit,)),
             )
             groups = []
@@ -1676,6 +1689,13 @@ class PostgresStore(GraphStore):
                 " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (namespace, a, b) DO UPDATE SET"
                 " reason = EXCLUDED.reason, decided_at = EXCLUDED.decided_at",
                 (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def forget_decline(self, namespace: str, a: str, b: str) -> bool:
+        a, b = sorted((a, b))
+        with self._tx():
+            return self._x(
+                "DELETE FROM resolution_declines WHERE namespace = %s AND a = %s AND b = %s",
+                (namespace, a, b)) > 0
 
     def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
         with self._tx(read=True):

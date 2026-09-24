@@ -456,6 +456,13 @@ class GraphStore(ABC):
         passes the exported instant."""
 
     @abstractmethod
+    def forget_decline(self, namespace: str, a: str, b: str) -> bool:
+        """Drop the remembered decline of the pair a / b (type:key, either
+        order) — an operator taking back a `distinct` or an adjudicator's
+        no, so resolution may consider the pair again. True when a decline
+        was on record."""
+
+    @abstractmethod
     def declined_pairs(self, namespace: str) -> set[tuple[str, str]]:
         """Every (a, b) pair declined in this namespace, in canonical order
         (a < b)."""

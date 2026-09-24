@@ -341,6 +341,25 @@ _MERGE_CANDIDATES_SQL = (
     " ORDER BY m.namespace, m.key LIMIT ?"
 )
 
+# Tier-2 (fuzzy, D-024) candidates in the same shape: normalized keys that
+# several raw keys share, less the groups whose every pair of differing raw
+# keys has a remembered decline (S-26). Same-key pairs inside a group are
+# tier 1's business (above), so they neither keep a group open nor settle it.
+_FUZZY_CANDIDATES_SQL = (
+    "WITH multi AS (SELECT namespace, norm_key FROM entities e1"
+    "  WHERE norm_key <> '' {ns}"
+    "  GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1)"
+    " SELECT m.namespace, m.norm_key FROM multi m WHERE EXISTS ("
+    "  SELECT 1 FROM entities e1 INDEXED BY idx_entity_norm JOIN entities e2 INDEXED BY idx_entity_norm"
+    "   ON e2.namespace = e1.namespace AND e2.norm_key = e1.norm_key AND e2.key <> e1.key"
+    "  WHERE e1.namespace = m.namespace AND e1.norm_key = m.norm_key"
+    "  AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
+    "   WHERE d.namespace = e1.namespace"
+    f"    AND d.a = min({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)})"
+    f"    AND d.b = max({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)})))"
+    " ORDER BY m.namespace, m.norm_key LIMIT ?"
+)
+
 _ON_EVENT_CONFLICT = (
     " ON CONFLICT (namespace, event_id) WHERE event_id IS NOT NULL DO NOTHING"
 )
@@ -997,11 +1016,10 @@ class SqliteStore(GraphStore):
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
         with self._tx(read=True):
+            # a settled group (every differing pair declined) must not
+            # occupy the limit, as in merge_candidates (S-26)
             rows = self._conn.execute(
-                "SELECT namespace, norm_key FROM entities WHERE norm_key <> ''"
-                + (" AND namespace = ?" if namespace else "")
-                + " GROUP BY namespace, norm_key HAVING COUNT(DISTINCT key) > 1"
-                " ORDER BY namespace, norm_key LIMIT ?",
+                _FUZZY_CANDIDATES_SQL.format(ns="AND e1.namespace = ?" if namespace else ""),
                 ((namespace, limit) if namespace else (limit,)),
             ).fetchall()
             groups = []
@@ -1810,6 +1828,14 @@ class SqliteStore(GraphStore):
                 "INSERT OR REPLACE INTO resolution_declines (namespace, a, b, reason, decided_at)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (namespace, a, b, reason[:500], common.iso(decided_at or common.now())))
+
+    def forget_decline(self, namespace: str, a: str, b: str) -> bool:
+        a, b = sorted((a, b))
+        with self._tx():
+            cur = self._conn.execute(
+                "DELETE FROM resolution_declines WHERE namespace = ? AND a = ? AND b = ?",
+                (namespace, a, b))
+            return cur.rowcount > 0
 
     def iter_declines(self, namespace: str | None = None) -> Iterator[dict]:
         with self._tx(read=True):

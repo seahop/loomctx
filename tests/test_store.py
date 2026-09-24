@@ -1306,6 +1306,48 @@ def test_settled_groups_do_not_starve_merge_candidates(store):
     assert store.merge_candidates("ns") == []
 
 
+def test_settled_groups_do_not_starve_fuzzy_merge_candidates(store):
+    """S-26: the same starvation in tier 2 — a normalized-key group whose
+    every pair of differing raw keys was declined filled
+    fuzzy_merge_candidates' limit for good."""
+    for t, k in [("host", "WEB_01"), ("host", "web-01"),                    # settled below
+                 ("host", "app-1"), ("asset", "app-1"), ("host", "app1"),   # settled below
+                 ("host", "db-01"), ("host", "DB_01"), ("asset", "db01")]:  # one pair stays open
+        store.upsert_entity("ns", EntityRef(type=t, key=k))
+    # upper case sorts first by code point: the backend must compare the
+    # stored pair the way Python sorted it (COLLATE "C" on Postgres)
+    store.remember_decline("ns", "host:web-01", "host:WEB_01", "different boxes")
+    # same-key pairs are tier 1's (host:app-1 / asset:app-1): they neither
+    # keep a tier-2 group open nor are needed to settle it
+    store.remember_decline("ns", "host:app1", "host:app-1", "no")
+    store.remember_decline("ns", "asset:app-1", "host:app1", "no")
+    store.remember_decline("ns", "host:db-01", "host:DB_01", "no")
+    store.remember_decline("ns", "asset:db01", "host:db-01", "no")          # asset:db01 / host:DB_01 open
+    assert [{e.key for e in g} for g in store.fuzzy_merge_candidates("ns", limit=1)] == [
+        {"db-01", "DB_01", "db01"}]
+    assert len(store.fuzzy_merge_candidates(limit=5)) == 1
+    store.remember_decline("ns", "host:DB_01", "asset:db01", "no")
+    assert store.fuzzy_merge_candidates("ns") == []
+    # forgetting a decline reopens its group (S-28)
+    assert store.forget_decline("ns", "host:WEB_01", "host:web-01") is True
+    assert [{e.key for e in g} for g in store.fuzzy_merge_candidates("ns")] == [{"WEB_01", "web-01"}]
+
+
+def test_forget_decline_is_symmetric_and_scoped(store):
+    """S-28: an operator can take a decline back; either order names the
+    pair, other namespaces keep theirs, and a pair never declined is a
+    no-op reported as False."""
+    store.remember_decline("ns", "product:b", "product:a", "different vendors")
+    store.remember_decline("other", "product:a", "product:b", "different vendors")
+    store.remember_decline("ns", "user:x", "group:x", "no")
+    assert store.forget_decline("ns", "product:b", "product:a") is True
+    assert store.declined_pairs("ns") == {("group:x", "user:x")}
+    assert store.declined_pairs("other") == {("product:a", "product:b")}
+    assert store.forget_decline("ns", "product:a", "product:b") is False    # already gone
+    assert store.forget_decline("ns", "nope:1", "nope:2") is False
+    assert [d["b"] for d in store.iter_declines("ns")] == ["user:x"]
+
+
 def test_declines_are_stored_symmetrically(store):
     store.remember_decline("ns", "product:b", "product:a", "different vendors")
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
