@@ -15,3 +15,6 @@ keys.json
 
 # Claude Code session worktrees (harness-managed)
 .claude/worktrees/
+
+# local retrieval scorecards (python -m loom.retrieval_eval); talk tables go under docs/
+eval/
