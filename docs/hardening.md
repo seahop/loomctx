@@ -1,4 +1,4 @@
-# Hardening roadmap (reviews of 2026-09-08 and 2026-09-23)
+# Hardening roadmap (reviews of 2026-09-08, 2026-09-23 and 2026-09-24)
 
 Findings from a full-codebase review after phase 4 / D-020. Every item here
 was verified against the code at commit `a2aa1a5`; nothing speculative.
@@ -219,3 +219,44 @@ which change measured numbers and wait for the frozen-volume rehearsal.
 | R-8 | ✅ | (all four landed: supersession + PROV-O in D-050; STIX/OCSF + Vulnrichment in D-055/D-056) Explicit, cited supersession edge (recorded, never inferred); PROV-O JSON-LD export; STIX 2.1 / OCSF predicate mapping in the registry; CISA Vulnrichment as a third vuln source. |
 | R-9 | ✅ | (D-054) Worker tick scans (`observations_without_embeddings`, `dossier_candidates`) walk from the beginning each tick — high-water marks; `observations_for_many` has no per-entity pre-limit (a hub materializes every row). |
 | R-10 | ✅ | (D-056) Engine-side per-grant rate limiting (a valid reader can burn LLM spend on `/v1/answer` without bound in the default shape). |
+
+## S. Whole-project review (2026-09-24, D-057…D-060)
+
+Four independent reviewers (security, store/read path, enrichment/eval,
+release readiness) over `main` at `679bc83`; every item below was verified
+against the code before it was fixed. Landed on branch `release-hardening`.
+
+| ID | P | Status | Item |
+| --- | --- | --- | --- |
+| S-1 | P1 | ✅ | (D-057) agent_eval exposure passed on naming 1 of ~29 KEV CVEs; no task required a citation. |
+| S-2 | P1 | ✅ | (D-057) retrieval conflict grading passed any reply containing the word "conflict" ("no conflict, 7.5"), favouring Loom's condition. |
+| S-3 | P1 | ✅ | (D-057) An empty or length-truncated reply scored as a correct abstention. |
+| S-4 | P1 | ✅ | `docker compose run --rm test` (README's first command) tried to pull `loom-engine:local` on a fresh clone — every engine-image service now has `build: .`; verified from a clean export. |
+| S-5 | P1 | ✅ | The Go SDK CI step piped `go test` into `grep` and could never fail; `go.sum` uncommitted and `go mod tidy … \|\| true`. |
+| S-6 | P2 | ✅ | (D-057) Baselines not token-matched (vector top-20 ≈ 320 tokens vs packs to 3,200); `full` capped at 1,000 observations per entity like Loom; never-sent rows scored as FAIL; EPSS tolerance 0.005 absolute; one embedder hiccup lost the whole paid run; question pool from the first 400 keys; EPSS-guessable orderings; conflict set drifting with the clock; dates read as citations; agent-eval lease check failing answers that mention history. |
+| S-7 | P2 | ✅ | (D-057) agent scorecard counted provider outages as the model's failures. |
+| S-8 | P2 | ✅ | (D-058) False scalar conflict when a source updates its own value and another source agrees with the new one. |
+| S-9 | P2 | ✅ | (D-058) Briefs bypassed the entity-type gate, ignored `valid_at`, and could take ~85 % of a 1,600-token pack. |
+| S-10 | P2 | ✅ | (D-058) A merged-away name lost its conflicts (and re-appeared as a second scope subject). |
+| S-11 | P2 | ✅ | (D-058) Unbounded scope walk: 500 roots × depth 3 × 1,000 observations each could OOM a 512Mi pod on the vulns corpus. |
+| S-12 | P2 | ✅ | (D-058) Budget honesty held only for the answer prompt; the MCP wire was 2.2–3.6× the budget. |
+| S-13 | P2 | ✅ | (D-058) Excerpt KNN ran namespace-wide then filtered, so most asks decoded every chunk vector of every cited artifact. |
+| S-14 | P2 | ✅ | (D-059) Open dev mode writable cross-site (`text/plain` batch POST) and reachable via DNS rebinding (engine had no Host check; MCP on 0.0.0.0 turned the SDK's protection off). |
+| S-15 | P2 | ✅ | (D-059) A type-scoped rw key could cite any document into its world and then read it (H-A6 gate trusted writer-chosen citations); the NATS path had no citation check. |
+| S-16 | P2 | ✅ | (D-059) LLM spend limits had holes: MCP `answer` unlimited; compose never passed `LOOM_RATE_*`; gateway parsed `0.5` as unlimited; engine charged a batch 1 token. |
+| S-17 | P2 | ✅ | (D-060) An unmerge was re-merged within one worker tick; no way to mark two entities distinct. |
+| S-18 | P2 | ✅ | (D-060) An unparseable adjudication verdict was re-asked and re-billed every tick without limit. |
+| S-19 | P2 | ✅ | (D-060) Nightly EPSS refresh added ~109k unchanged observations (and embeddings) per night. |
+| S-20 | P2 | ✅ | (D-060) OCSF: a resolved finding never closed the host's exposure; Suppressed treated as closed. |
+| S-21 | P2 | ✅ | (D-060) Consumer: one bad envelope dead-lettered its whole batch; a claim whose document was in another replica's batch was dropped. `loom.ingest` died on the first 429. |
+| S-22 | P2 | ✅ | (D-058) The decline-aware `merge_candidates` self-join compared 74k × 74k entities on SQLite each worker tick (found while embedding the vulns corpus; ~0.1 s now). |
+| S-23 | P3 | ✅ | (D-058) Expand-path P3s: silent conflict drop in thread expansion, excerpt expansion charged 0, first-handle overrun unstated, supersession from unfiltered rows, import un-redaction window, trailing punctuation, `truncated` counting hidden rows, SQLite migration race. |
+| S-24 | P3 | ✅ | (D-059) MCP `record_claim` skipped the subject check on `supersedes`; uploads bypassed the key's entity types for extraction; gateway HTTP-forward batch reported rejected items as recorded; bodies parsed before auth; scoped keys saw all-type counts. |
+| S-25 | P3 | ✅ | Release hygiene: CHANGELOG stopped at D-049; `docs/interop.md` and `docs/evaluation.md` unlinked; GCP project id in docs; `AGENTS.md` an untracked copy of CLAUDE.md (now a symlink); `.env.*` not ignored; undocumented env vars; `govulncheck@latest` and openapi-generator by tag; no CI concurrency group or lint beyond hard errors (now the full pyflakes set); no TS lockfile; quickstart raced the engine's start-up and the keys recipe failed without `secrets/`. |
+| S-26 | P3 | ⬜ | `fuzzy_merge_candidates` can still fill its limit with permanently declined groups (same shape as S-22's fix). |
+| S-27 | P3 | ⬜ | Scope facts gathered as inbound edges on a reached subject do not carry their path. |
+| S-28 | P3 | ⬜ | No command to undo a decline (needs a store method). |
+| S-29 | P3 | ⬜ | A KEV `knownRansomwareCampaignUse` flip keeps its event id and is never recorded (fixing it changes KEV event ids). |
+| S-30 | P3 | ⬜ | OCSF/STIX `emit` (export) does not chain versions — it has no store to look earlier versions up in. |
+| S-31 | P3 | ➖ | A shared rate limiter across processes/replicas: buckets stay per process, the effective ceiling (rate × workers × replicas) is documented instead. |
+| S-32 | P3 | ⬜ | The GCP project id remains in git history (not a secret; scrubbed from the tree). Rewriting history is not planned. |

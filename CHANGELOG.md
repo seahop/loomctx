@@ -8,8 +8,61 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
-<!-- COORDINATOR: add the 2026-09-24 review batch here, as
-     "### The 2026-09-24 review batch (D-0xx…)", above the D-050…D-056 section. -->
+### The 2026-09-24 review batch (D-057…D-060)
+
+Full list with statuses: `docs/hardening.md` §S.
+
+#### Evaluation validity (D-057)
+- Baselines fill the same token budget as the pack (`vector@B`,
+  `recency@B`); `full` gathers everything; questions record whether their
+  truth is inside Loom's gather
+- Rows never answered (over `--full-cap`, past `--max-cost`, provider
+  errors, empty or truncated replies) are excluded from denominators and
+  shown per condition; a tripped cost cap marks the table INCOMPLETE and
+  exits 3; rows stream to JSONL
+- Stricter grading: conflicts need every value, numbers within half a unit
+  of the recorded precision, whole-token entity matches, real citations
+- agent_eval: exposure needs recall ≥ 50 % with precision 1 and the
+  software named; every factual task needs a seen citation; provider
+  outages are retried, then "not run" — never the model's failure
+- Temperature 0 on live calls; seeded, whole-population question sampling
+
+#### Read path (D-058)
+- Scalar conflicts compare each source's newest value only
+- Briefs: type-gate aware, withheld for `as_of` / `valid_at`, ≤ 25 % of
+  the budget; `ContextPack.withheld_briefs` (additive)
+- Merged-away names resolve to their canonical entity
+- Scope walks capped (`LOOM_MAX_SCOPE_ENTITIES`, `LOOM_MAX_SCOPE_OBSERVATIONS`)
+  and reported (`ScopeTruncation.reason`, additive); superseded edges skipped
+- MCP wire within ~2 % of the charged budget (was up to 3.6×): compact
+  JSON, string citations, `charged_tokens` in the agent view
+- Excerpt KNN filters inside the index; SQLite `merge_candidates` no
+  longer scans entities quadratically
+
+#### Security (D-059)
+- Host / Origin allowlist and JSON-only `/v1` bodies on the engine, MCP
+  http and gateway (`LOOM_ALLOWED_HOSTS`, `LOOM_ALLOWED_ORIGINS`); MCP
+  binds 127.0.0.1 by default
+- Type-gated keys cite only documents they uploaded or ones already in
+  their world — HTTP, batch and the NATS writer; extraction stays inside
+  the uploader's entity types
+- Rate limits on MCP tools including the LLM bucket; a batch of n costs n
+  on both engine and gateway; gateway rate dials parse as floats
+- Auth before body parsing; scoped schema and counts for type-scoped keys
+
+#### Enrichment and connectors (D-060)
+- Unmerges stick; `python -m loom.enrich distinct`; adjudication calls all
+  count against the cap, unreadable verdicts back off and give up
+- EPSS emits changes only; OCSF / STIX imports chain versions via
+  `supersedes`; Suppressed is not Resolved
+- Consumer settles per message and redelivers claims awaiting their
+  document; `loom.ingest` retries 429 / 5xx with `Retry-After`
+
+#### Release
+- Every engine-image compose service builds (a fresh clone's
+  `docker compose run --rm test` works); Go SDK CI can fail; `go.sum` and
+  the TS `package-lock.json` committed; CI lint runs pyflakes; pinned
+  govulncheck / openapi-generator; CI concurrency group
 
 ### Design follow-ups to the 2026-09-23 review (D-050…D-056)
 

@@ -1932,6 +1932,156 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
   `observed-data`, custom properties. Exports carry per-item Loom
   citations (`x_loom_observation_id`, `unmapped.loom_observation_ids`).
 
+## D-057 · Evaluation validity: equal-token baselines, graded answers, unsent rows excluded (2026-09-24)
+
+A whole-project review (`docs/hardening.md` §S) found the scorecards on the
+talk slides could be wrong in Loom's favour. The harnesses now hold every
+condition to the same bar, and a row nobody answered is never a score.
+
+- **Equal tokens.** `vector@B` and `recency@B` fill the same budget B as
+  `loom@B` with the pack builder's own item accounting (was a fixed top-20,
+  ~320 tokens, against packs up to 3,200). `--k` is gone.
+- **`full` is everything.** It walks the scope and gathers with no
+  per-entity cap; `--full-cap` then applies by tokens. Loom keeps its
+  1,000-per-entity gather, and each question records whether its truth is
+  inside it (`in_loom_gather`); misses are listed with the table, never
+  filtered out (filtering would flatter Loom).
+- **Unanswered rows** — over `--full-cap`, past `--max-cost`, provider
+  errors, empty or `finish_reason=length` replies, failed context builds —
+  are counted per condition in a *Not sent / errored* column and excluded
+  from every denominator; the table shows n. A tripped `--max-cost` marks
+  the scorecard **INCOMPLETE** and exits 3. Rows stream to `<out>.jsonl`.
+- **Grading.** Conflicts need every value named (the word "conflict" alone
+  passed); numbers within half a unit of the recorded last decimal (EPSS
+  < 0.005 made "0" pass under the old absolute 0.005); orderings exactly A
+  or B; entities as whole tokens (web-01 no longer matches web-010);
+  history in asides is not graded; citations are hex with an a-f letter or
+  a full 32-hex id (dates were read as citations).
+- **Generation.** Seeded sampling over the whole population; snapshot-feed
+  predicates (EPSS) excluded from ordering questions; conflicts asked
+  `as_of` a store-derived instant (`--reference-time`) so the set does not
+  drift with the wall clock.
+- **Live calls** run at temperature 0 (dropped once for a model that
+  rejects it), `--max-tokens` 2048, `--reasoning-effort` optional.
+- **agent_eval.** Exposure passes on recall ≥ 50 % of the KEV set (all of
+  it when ≤ 4), precision 1 (no invented or non-KEV CVE) and the software
+  named per CVE — naming one of 29 was a pass. Every factual task needs at
+  least one citation the agent saw and none it did not. A provider outage
+  (`LLMError.transient`: rate limit, 5xx, unreachable, an OpenRouter
+  200-with-error-body) is retried once per task, then shown as *Not run* —
+  out of the pass rate, cost kept — never scored as the model's failure.
+  `--out` is rewritten atomically after each task.
+- **Consequence.** Every earlier table (the 2026-09-09 models table, D-053
+  retrieval numbers) was scored under the old rules and is not comparable;
+  both are re-run on this build. On the seed, equal tokens change the
+  story: Loom leads clearly at 400–800 tokens and the vector baseline
+  catches up at 1,600+ — the docs say so.
+
+## D-058 · Read-path correctness and wire-honest budgets (2026-09-24)
+
+- **Scalar conflicts compare each source's newest claim only.** A source
+  that moved on (cmdb 20.04 → 22.04, nmap 22.04) is no longer a side;
+  values one source asserts at the same instant still count as a set. The
+  planted seed conflicts (web-01 `runs_os`, initech `contract_owner`)
+  still surface — verified on a live engine.
+- **Briefs are second-class citizens no more.** A type-scoped key gets a
+  brief only if it can see every observation the brief cites; briefs are
+  withheld for `as_of` and `valid_at` reads; a brief takes at most 25 % of
+  the budget and carries its newest 8 citations. Withheld briefs are
+  counted in `ContextPack.withheld_briefs` (additive).
+- **Subjects resolve to their canonical entity** at `build_pack`,
+  `expand_pack` and scope entry (`resolve_refs`), so a merged-away name
+  keeps its conflicts and does not reappear as a second subject.
+- **Scope walks are bounded**: `LOOM_MAX_SCOPE_ENTITIES` (2,000) and
+  `LOOM_MAX_SCOPE_OBSERVATIONS` (100,000); a cut is reported as
+  `ScopeTruncation.reason = "scope_cap"` (additive; `gather_limit` for the
+  per-entity cap). Walks skip superseded edges. A scope expand predicate
+  the question names ranks as the question's topic (the seed
+  alert→host→logins question went from 0/2 users to 2/2).
+- **Budget honesty on the MCP wire.** D-051 measured only the answer
+  prompt; an MCP agent received 2.2–3.6× the budget. The concise view now
+  carries citations as `"<cite> <source> <date>"` strings, drops the
+  per-item score, adds `charged_tokens`, and pack tools send compact JSON;
+  the charge is recalibrated to that output: worst 1.02× (cl100k, items +
+  handles; the fixed ~70-token envelope is not charged). Demo numbers moved
+  (60 / 380 / "76 more") and were re-verified on a live engine.
+- **Excerpt KNN filters inside the index** (sqlite-vec metadata filter;
+  exact SQL sort over the cited artifacts on Postgres): 196 → 33 ms on
+  SQLite for 60 cited artifacts among 30k chunks.
+- **Smaller:** expand supersession uses only rows the reader can see and
+  finds corrections outside a page's window (`corrections_of`); thread
+  expansions hand back a conflict that does not fit as a handle; excerpt
+  expansion charges its citations; `truncated` counts only visible rows;
+  exports write tombstones first and `restore_tombstone` drops briefs
+  citing the row; trailing punctuation no longer breaks auto-resolution;
+  the SQLite v5→v6 migration takes `BEGIN IMMEDIATE`; `merge_candidates`
+  skips groups whose every pair was declined — grouped first, then tested,
+  because the direct self-join made SQLite compare 74k × 74k entities per
+  worker tick on the vulns corpus (found while embedding it).
+
+## D-059 · Browser-facing guards and write-side scope (2026-09-24)
+
+- **Open dev mode is no longer writable from a web page.** The engine, the
+  MCP http transports and the gateway refuse a foreign `Host` (400; DNS
+  rebinding), a foreign `Origin` (403) and non-JSON bodies on `/v1` POSTs
+  (415; a `text/plain` no-cors POST was a CSRF write). Allowed by default:
+  IP literals, `localhost`, single-label names and the cluster suffixes
+  (`*.svc`, `*.cluster.local`, `*.internal`); `LOOM_ALLOWED_HOSTS` and
+  `LOOM_ALLOWED_ORIGINS` extend them, `*` disables the host check. The MCP
+  server's `--host` defaults to 127.0.0.1.
+- **Citations are a write-side gate.** H-A6 let a type-scoped reader open a
+  document once some visible fact cites it — but the citing key chose the
+  citation. A type-gated key may now cite only a document it ingested or
+  one already backing a fact inside its entity types. The engine records
+  the uploader in `attrs["loom.uploader"]` (reserved: a sender that
+  supplies it is refused). HTTP single and batch ingest, and the NATS
+  writer — which resolves the gateway-stamped `Loom-Principal` to a live
+  grant when the keys file is mounted on it — apply the same check.
+  Extraction keeps claims from such a document inside the uploader's
+  entity types.
+- **Supersession** is one shared check for HTTP, MCP and the queue: a
+  correction stays on its subject and inside the key's entity types.
+- **Auth before parse:** no key → 401, unknown key → 403, before the body
+  is read.
+- **Spend control:** MCP tool calls spend the general bucket, and `answer`
+  / `find_related` the LLM bucket (`rate_llm_per_sec` now holds there). A
+  batch of n costs n tokens on the engine as on the gateway; a batch over
+  the burst is 413, not a 429 a shipper retries forever. The gateway parses
+  rate dials as floats (`0.5` silently meant unlimited) and fails start-up
+  on garbage, as the engine does. Compose passes `LOOM_RATE_*`,
+  `LOOM_MAX_BATCH`, `LOOM_ALLOWED_*` through. Buckets stay per process:
+  the ceiling is rate × workers × replicas — documented, not a shared
+  limiter.
+- **Scoped views:** type-scoped keys get a narrowed `GET /v1/schemas` and
+  filtered counts from MCP `list_namespaces` / `describe_namespace`. The
+  gateway's HTTP-forward batch path reports the engine's per-item verdict.
+
+## D-060 · Sticky resolution, bounded adjudication, lifecycle-chained imports (2026-09-24)
+
+- **An unmerge sticks.** It records a decline for the pair; every
+  resolution tier honours declines and re-reads them each job, so the
+  worker no longer re-merges within one tick. `python -m loom.enrich
+  distinct a b --namespace ns` marks two entities as different (splitting
+  a current merge first); `lifecycle unmerge` gains `--allow-remerge`.
+- **Adjudication spend is bounded.** Every model call counts against
+  `ADJUDICATIONS_PER_TICK`; an unreadable verdict backs off per pair
+  (60 s doubling to 1 h) and becomes a persisted decline after 3; an outage
+  ends the pass without charging the pair; verdicts parse leniently
+  ("yes", "95%") but are never guessed.
+- **EPSS emits movement only** (`--epss-ledger`): a new observation when
+  the score moves ≥ 0.001 or 5 %, or the percentile ≥ 0.01 — a nightly
+  refresh added ~109k unchanged rows (and their embedding cost) before.
+- **Imports chain versions.** OCSF and STIX imports set `supersedes` on
+  each new version of a record (`connectors/chain.py`); a resolved OCSF
+  finding closes the host's exposure, Suppressed (3) is not resolved, and a
+  STIX revocation closes an imported edge. Malformed records are counted,
+  not fatal.
+- **The queue consumer settles per message**: a failed batch is re-written
+  one message at a time so one poison envelope parks only itself, and a
+  claim whose document has not arrived is redelivered with a growing delay
+  instead of dropped. `python -m loom.ingest` retries 429 / 5xx honouring
+  `Retry-After`.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
