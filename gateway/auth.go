@@ -31,6 +31,12 @@ type grant struct {
 	Sources     []string `json:"sources"`
 	Expires     string   `json:"expires"`
 	Disabled    bool     `json:"disabled"`
+	// per-key rate limit (R-10); nil = the LOOM_RATE_PER_SEC default. The
+	// engine reads the same two fields (and rate_llm_per_sec, which only
+	// it enforces — the gateway has no LLM routes), so one keys file
+	// serves both.
+	RatePerSec *float64 `json:"rate_per_sec"`
+	RateBurst  *int     `json:"rate_burst"`
 
 	expiresAt time.Time // parsed; zero = never
 }
@@ -163,7 +169,16 @@ func parseEntry(k *grantFile) (authEntry, error) {
 		}
 	}
 	g := &grant{ID: k.ID, Namespaces: k.Namespaces, Perms: k.Perms,
-		EntityTypes: k.EntityTypes, Sources: k.Sources}
+		EntityTypes: k.EntityTypes, Sources: k.Sources,
+		RatePerSec: k.RatePerSec, RateBurst: k.RateBurst}
+	// zero/negative is a configuration error, not "unlimited" (the way to
+	// lift a key's cap is to remove the field) — same rule as the engine
+	if k.RatePerSec != nil && *k.RatePerSec <= 0 {
+		return authEntry{}, fmt.Errorf("rate_per_sec must be positive")
+	}
+	if k.RateBurst != nil && *k.RateBurst <= 0 {
+		return authEntry{}, fmt.Errorf("rate_burst must be positive")
+	}
 	if k.Expires != "" {
 		t, err := parseExpires(k.Expires)
 		if err != nil {
@@ -183,6 +198,8 @@ type grantFile struct {
 	Sources     []string `json:"sources"`
 	Expires     string   `json:"expires"`
 	Disabled    bool     `json:"disabled"`
+	RatePerSec  *float64 `json:"rate_per_sec"`
+	RateBurst   *int     `json:"rate_burst"`
 }
 
 func parseAuth(raw string) (*authConfig, error) {

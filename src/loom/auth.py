@@ -14,6 +14,8 @@ Two configuration sources, checked in this order:
           "entity_types": ["host", "ip"],      # optional gate; null = any
           "sources": ["auth-log"],             # optional write gate; null = any
           "expires": "2027-01-01T00:00:00Z",   # optional
+          "rate_per_sec": 5, "rate_burst": 20,   # optional per-key rate limit (R-10)
+          "rate_llm_per_sec": 0.5,               # optional; /v1/answer + semantic search
           "disabled": false
        }]}
 
@@ -54,6 +56,10 @@ class Grant:
     entity_types: tuple[str, ...] | None = None
     sources: tuple[str, ...] | None = None
     expires: datetime | None = None
+    # per-key rate limits (R-10); None = the LOOM_RATE_* defaults apply
+    rate_per_sec: float | None = None
+    rate_burst: int | None = None
+    rate_llm_per_sec: float | None = None
 
     def allows(self, namespace: str, action: str) -> bool:
         if action not in self.perms:
@@ -84,6 +90,20 @@ def _parse_expires(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _parse_rate(item: dict, field: str, integer: bool = False) -> float | int | None:
+    """A per-key rate field: a positive number, or absent/null for 'use
+    the default'. Zero or a negative value is a configuration error, not
+    'unlimited' — the way to lift a key's cap is to remove the field."""
+    value = item.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a number")
+    if value <= 0:
+        raise ValueError(f"{field} must be positive (remove it for the default)")
+    return max(1, int(value)) if integer else float(value)
+
+
 def _parse_entry(item: dict) -> tuple[str, Grant]:
     digest = str(item["sha256"]).lower()
     if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
@@ -106,6 +126,9 @@ def _parse_entry(item: dict) -> tuple[str, Grant]:
                 if item.get("sources") is not None else None
             ),
             expires=_parse_expires(item.get("expires")),
+            rate_per_sec=_parse_rate(item, "rate_per_sec"),
+            rate_burst=_parse_rate(item, "rate_burst", integer=True),
+            rate_llm_per_sec=_parse_rate(item, "rate_llm_per_sec"),
         ),
     )
 

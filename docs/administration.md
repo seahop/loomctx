@@ -120,13 +120,52 @@ grant found *server-side* is the only authority. Consequences:
   TLS at your ingress/LB in any deployment that leaves localhost (no
   plaintext HTTP across networks).
 
+## Rate limits (R-10)
+
+A valid reader can otherwise burn LLM spend on `/v1/answer` without
+bound, and one noisy sender can starve the others. Both the engine and
+the Go gateway keep **one token bucket per key** (per grant id — never per
+raw header value, so an unauthenticated caller rotating bogus keys gets
+no bucket at all) and answer `429` with `Retry-After` when it is empty.
+Unset = unlimited, so a dev checkout is unchanged.
+
+| Dial | Where | Meaning |
+| --- | --- | --- |
+| `LOOM_RATE_PER_SEC` | engine + gateway | requests per second per key on every `/v1` route (the gateway: per ingest request; a batch of *n* envelopes costs *n*) |
+| `LOOM_RATE_BURST` | engine | bucket size (default: the rate, rounded up; the gateway uses the rate) |
+| `LOOM_RATE_LLM_PER_SEC` | engine | a second, stricter bucket per key for the routes that spend LLM/embedder budget: `/v1/answer` and `/v1/entities/semantic` |
+| `LOOM_RATE_LLM_BURST` | engine | its bucket size (default: the rate, rounded up) |
+
+**Per-key overrides** live in the keys file beside the grant, so one file
+serves both tiers (`rate_llm_per_sec` is engine-only; the gateway has no
+LLM routes):
+
+```bash
+python -m loom.keys generate --id dashboard --namespace netsec --perms r \
+  --rate-per-sec 20 --rate-burst 60 --rate-llm-per-sec 0.2   # one answer every 5 s
+python -m loom.keys update --id dashboard --rate-llm-per-sec 1    # loosen; hot-reloaded, no restart
+python -m loom.keys update --id dashboard --rate-per-sec 0        # 0 = drop the override, defaults apply
+```
+
+An override applies even when the global dials are unset ("unlimited by
+default, this key is capped"), and a tightened key's live bucket is
+retuned on reload — the old, larger balance is not honoured. A zero or
+negative value *in the file* is a configuration error that disables that
+key entry (logged), not "unlimited": remove the field to lift a cap.
+
+With auth disabled (open dev mode) the engine dials, when set, apply per
+client IP; `/healthz`, `/readyz` and `/metrics` are never limited.
+
 ## Watching for trouble
 
 - `loom_requests_rejected_total{reason="auth"|"scope"}` (engine) and
   `loom_gateway_rejected_unauthorized_total` (gateway) climbing = someone
   is probing or a sender is misconfigured.
-- `loom_gateway_rejected_ratelimited_total` = a sender is misbehaving; its
-  per-key bucket protects everyone else.
+- `loom_requests_rejected_total{reason="rate"}` (engine) and
+  `loom_gateway_rejected_ratelimited_total` (gateway) = a key is over its
+  budget; its own bucket protects everyone else. A steady climb on one
+  reader's `/v1/answer` calls is the LLM-spend guard doing its job — raise
+  that key's `rate_llm_per_sec` deliberately, not the global dial.
 - Auth denials name the key **id** (never the key) in error details, so a
   400-level spike traces to a principal.
 

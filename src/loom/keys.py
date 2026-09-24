@@ -7,7 +7,7 @@ credentials.
 
     python -m loom.keys generate --id netsec-shipper \
         --namespace netsec --perms w --entity-types host,ip --sources auth-log \
-        --expires-days 180
+        --expires-days 180 --rate-per-sec 50 --rate-burst 200
     python -m loom.keys list
     python -m loom.keys revoke --id netsec-shipper
 
@@ -87,6 +87,10 @@ def cmd_generate(args) -> None:
             .isoformat()
             if args.expires_days else None
         ),
+        # per-key rate limits (R-10); null = the LOOM_RATE_* defaults apply
+        "rate_per_sec": args.rate_per_sec,
+        "rate_burst": args.rate_burst,
+        "rate_llm_per_sec": args.rate_llm_per_sec,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "disabled": False,
     }
@@ -112,6 +116,11 @@ def cmd_list(args) -> None:
             gates.append(f"sources={','.join(k['sources'])}")
         if k.get("expires"):
             gates.append(f"expires={k['expires'][:10]}")
+        if k.get("rate_per_sec") is not None:
+            burst = f" burst={k['rate_burst']}" if k.get("rate_burst") is not None else ""
+            gates.append(f"rate={k['rate_per_sec']:g}/s{burst}")
+        if k.get("rate_llm_per_sec") is not None:
+            gates.append(f"llm_rate={k['rate_llm_per_sec']:g}/s")
         print(f"{k['id']:<24} {','.join(k['namespaces']):<16} "
               f"{k['perms']:<3} {state:<9} {' '.join(gates) or '(no extra gates)'}")
 
@@ -143,10 +152,17 @@ def cmd_update(args) -> None:
                 else (datetime.now(timezone.utc)
                       + timedelta(days=args.expires_days)).isoformat()
             )
+        # rate overrides: 0 drops the override (the LOOM_RATE_* defaults apply)
+        for field in ("rate_per_sec", "rate_burst", "rate_llm_per_sec"):
+            value = getattr(args, field)
+            if value is not None:
+                k[field] = None if value == 0 else value
         _save(args.file, data)
         print(f"updated {args.id!r}: namespaces={k['namespaces']} "
               f"perms={k['perms']} entity_types={k.get('entity_types')} "
-              f"sources={k.get('sources')} expires={k.get('expires')}")
+              f"sources={k.get('sources')} expires={k.get('expires')} "
+              f"rate_per_sec={k.get('rate_per_sec')} rate_burst={k.get('rate_burst')} "
+              f"rate_llm_per_sec={k.get('rate_llm_per_sec')}")
         return
     sys.exit(f"error: no key with id {args.id!r}")
 
@@ -160,6 +176,25 @@ def cmd_revoke(args) -> None:
             print(f"revoked {args.id!r}")
             return
     sys.exit(f"error: no key with id {args.id!r}")
+
+
+def _non_negative(kind):
+    def parse(text: str):
+        value = kind(text)
+        if value < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return value
+    return parse
+
+
+def _rate_flags(parser: argparse.ArgumentParser, tail: str) -> None:
+    """Per-key rate limits (R-10) — the same fields the Go gateway reads."""
+    parser.add_argument("--rate-per-sec", type=_non_negative(float), default=None,
+                        help=f"requests/second this key may make on /v1 routes; {tail}")
+    parser.add_argument("--rate-burst", type=_non_negative(int), default=None,
+                        help=f"bucket size for that rate (default: the rate, rounded up); {tail}")
+    parser.add_argument("--rate-llm-per-sec", type=_non_negative(float), default=None,
+                        help=f"requests/second on /v1/answer and /v1/entities/semantic; {tail}")
 
 
 def main() -> None:
@@ -178,6 +213,7 @@ def main() -> None:
     gen.add_argument("--sources", default=None,
                      help="comma list of allowed claim sources for writes")
     gen.add_argument("--expires-days", type=int, default=None)
+    _rate_flags(gen, "omit for the LOOM_RATE_* defaults")
 
     lst = sub.add_parser("list")
 
@@ -192,6 +228,7 @@ def main() -> None:
                      help="repeatable; replaces the namespace list")
     upd.add_argument("--expires-days", type=int, default=None,
                      help="from now; 0 = never expires")
+    _rate_flags(upd, "0 = drop the override (LOOM_RATE_* defaults apply)")
 
     rev = sub.add_parser("revoke")
     rev.add_argument("--id", required=True)

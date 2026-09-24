@@ -314,6 +314,56 @@ func TestUnknownKeysGetNoBuckets(t *testing.T) {
 	}
 }
 
+// R-10: a key's own rate_per_sec / rate_burst cap that principal even when
+// LOOM_RATE_PER_SEC is unset; keys without the fields stay unlimited, and
+// a zero rate is a bad entry (skipped), not "unlimited".
+func TestPerKeyRateOverride(t *testing.T) {
+	fwd := &fakeForwarder{}
+	schema, err := newValidator("../contracts/schemas.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped, plain, zero := "loomk_capped", "loomk_plain", "loomk_zero"
+	sumC, sumP, sumZ := sha256.Sum256([]byte(capped)), sha256.Sum256([]byte(plain)), sha256.Sum256([]byte(zero))
+	doc := fmt.Sprintf(`{"keys":[
+	  {"id":"capped","sha256":"%x","namespaces":["default"],"perms":"w","rate_per_sec":1,"rate_burst":2,"rate_llm_per_sec":0.5},
+	  {"id":"plain","sha256":"%x","namespaces":["default"],"perms":"w"},
+	  {"id":"zero","sha256":"%x","namespaces":["default"],"perms":"w","rate_per_sec":0}
+	]}`, sumC, sumP, sumZ)
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOM_AUTH_FILE", path)
+	auth, err := loadAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := auth.grantFor(capped); g == nil || g.ID != "capped" || g.RatePerSec == nil || *g.RateBurst != 2 {
+		t.Fatalf("capped grant not parsed: %+v", g)
+	}
+	if g := auth.grantFor(zero); g != nil {
+		t.Fatalf("rate_per_sec 0 must disable that entry, got %+v", g)
+	}
+	limiters := newLimiterPool(0) // no default limit
+	h := newServerWithLimiters(config{maxBodyBytes: 1 << 20}, schema, fwd, auth, limiters)
+	codes := []int{}
+	for i := 0; i < 3; i++ {
+		codes = append(codes, postWithKey(h, validClaim, capped).Code)
+	}
+	if codes[0] != http.StatusOK || codes[1] != http.StatusOK || codes[2] != http.StatusTooManyRequests {
+		t.Fatalf("capped key: %v", codes)
+	}
+	for i := 0; i < 10; i++ {
+		if rec := postWithKey(h, validClaim, plain); rec.Code != http.StatusOK {
+			t.Fatalf("plain key request %d: %d", i, rec.Code)
+		}
+	}
+	if limiters.size() != 1 {
+		t.Fatalf("only the capped key should hold a bucket, got %d", limiters.size())
+	}
+}
+
 // H-A5/H-A13: a bad entry disables only itself; naive expires is UTC.
 func TestKeysFileToleratesBadEntries(t *testing.T) {
 	good := "loomk_good"
