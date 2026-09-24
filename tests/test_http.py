@@ -146,6 +146,71 @@ def test_supersedes_must_name_a_visible_observation_about_the_same_subject(tmp_p
         assert "supersedes" in body["results"][1]["detail"]
 
 
+def test_observation_prov_route(tmp_path, monkeypatch):
+    """D-050: PROV-O JSON-LD for one observation, gated like the raw
+    observations route; unknown ids are 404."""
+    with make_client(tmp_path, monkeypatch) as client:
+        doc = client.post("/v1/ingest", json={
+            "kind": "document", "text": "web-01 runs fedora 44 per the inventory.",
+            "filename": "inv.txt", "source": "ir-pipeline", "observed_at": "2026-09-01T09:00:00Z"})
+        artifact_id = doc.json()["artifact_id"]
+        r = client.post("/v1/ingest", json={
+            **CLAIM, "predicate": "runs_os", "object": "fedora-44", "source": "doc:inv.txt",
+            "attrs": {"extracted": True, "extractor_model": "test/model"},
+            "provenance": {"artifact_id": artifact_id, "span_start": 0, "span_end": 21}})
+        assert r.status_code == 200
+        oid = r.json()["observation_id"]
+        prov = client.get(f"/v1/observations/{oid}/prov")
+        assert prov.status_code == 200
+        body = prov.json()
+        assert body["@context"]["prov"] == "http://www.w3.org/ns/prov#"
+        nodes = {n["@id"]: n for n in body["@graph"]}
+        entity = nodes[f"loom:default/observation/{oid}"]
+        assert entity["@type"] == "prov:Entity"
+        assert entity["prov:wasAttributedTo"]["@id"] == "loom:default/agent/doc%3Ainv.txt"
+        assert entity["prov:generatedAtTime"]["@value"].startswith("2026-09-01T14:03")
+        assert entity["prov:wasDerivedFrom"]["@id"] == f"loom:default/artifact/{artifact_id}#char=0,21"
+        assert nodes[f"loom:default/artifact/{artifact_id}"]["loom:filename"] == "inv.txt"
+        activity = nodes[entity["prov:wasGeneratedBy"]["@id"]]
+        assert activity["@type"] == "prov:Activity" and activity["loom:activity"] == "extraction"
+        assert activity["prov:used"]["@id"] == f"loom:default/artifact/{artifact_id}"
+        assert nodes[activity["prov:wasAssociatedWith"]["@id"]]["loom:model"] == "test/model"
+        assert client.get("/v1/observations/nope/prov").status_code == 404
+        assert client.get(f"/v1/observations/{oid}/prov?namespace=other").status_code == 404
+
+
+def test_observation_prov_supersession_chain():
+    """`prov:wasRevisionOf` on the correction, `prov:wasInvalidatedBy` on
+    the corrected observation, and no artifact or activity nodes invented
+    for a plain sender-asserted claim."""
+    from datetime import datetime, timezone
+
+    from loom.contracts import EntityRef, Observation
+    from loom.prov import observation_prov
+    when = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    obs = Observation(id="b" * 32, namespace="netsec", subject=EntityRef(type="host", key="web-01"),
+                      predicate="runs_os", object="ubuntu-22.04", observed_at=when, recorded_at=when,
+                      source="asset-inventory", confidence=0.9, supersedes="a" * 32,
+                      valid_from=when)
+    body = observation_prov(obs)
+    nodes = {n["@id"]: n for n in body["@graph"]}
+    me = nodes["loom:netsec/observation/" + "b" * 32]
+    assert me["prov:wasRevisionOf"]["@id"] == "loom:netsec/observation/" + "a" * 32
+    assert me["loom:validFrom"]["@type"] == "xsd:dateTime" and "loom:validTo" not in me
+    assert me["loom:confidence"] == 0.9 and me["loom:object"] == "ubuntu-22.04"
+    old = nodes["loom:netsec/observation/" + "a" * 32]
+    invalidation = nodes[old["prov:wasInvalidatedBy"]["@id"]]
+    assert invalidation["loom:activity"] == "supersession"
+    assert invalidation["prov:wasAssociatedWith"]["@id"] == "loom:netsec/agent/asset-inventory"
+    assert not any(k in me for k in ("prov:wasDerivedFrom", "prov:wasGeneratedBy"))
+    assert all(n["@type"] != "prov:Activity" or n["loom:activity"] == "supersession" for n in body["@graph"])
+    # an entity-valued object is a reference, not a string
+    edge = obs.model_copy(update={"object": EntityRef(type="user", key="jdoe"), "supersedes": None})
+    me = {n["@id"]: n for n in observation_prov(edge)["@graph"]}["loom:netsec/observation/" + "b" * 32]
+    assert me["loom:object"] == {"@id": "loom:netsec/entity/user%3Ajdoe"}
+    assert "prov:wasRevisionOf" not in me
+
+
 def test_invalid_envelope_rejected(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/ingest", json={"kind": "claim", "predicate": "x"})

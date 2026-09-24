@@ -249,6 +249,38 @@ a side), ranks as history (half score), and renders with a
 correction it is current again. The store column that persists the field
 lands with the store work of the same decision.
 
+## Provenance export: `GET /v1/observations/{id}/prov`
+
+One observation's provenance as JSON-LD in the W3C PROV-O vocabulary
+(D-050), for lineage tools that should not have to learn Loom's
+contracts. Namespace comes from `X-Loom-Namespace` or `?namespace=`;
+the route is gated like the raw observations route (a type-scoped reader
+gets `404` for an observation touching an entity outside their world).
+The body is a plain object, not a contract model:
+
+```json
+{"@context": {"prov": "http://www.w3.org/ns/prov#", "xsd": "…", "loom": "urn:loom:"},
+ "@graph": [
+   {"@id": "loom:netsec/observation/<id>", "@type": "prov:Entity",
+    "prov:generatedAtTime": {"@value": "2026-09-01T14:03:00+00:00", "@type": "xsd:dateTime"},
+    "prov:wasAttributedTo": {"@id": "loom:netsec/agent/auth-log"},
+    "prov:wasDerivedFrom": {"@id": "loom:netsec/artifact/<artifact>#char=118,203"},
+    "prov:wasGeneratedBy": {"@id": "loom:netsec/activity/extraction%2F<id>"},
+    "prov:wasRevisionOf": {"@id": "loom:netsec/observation/<older id>"},
+    "loom:subject": {"@id": "loom:netsec/entity/host%3Aweb-01"}, "loom:predicate": "runs_os",
+    "loom:object": "fedora-44", "loom:confidence": 1.0, "loom:recordedAt": {"…": "…"}},
+   {"@id": "loom:netsec/agent/auth-log", "@type": "prov:Agent", "loom:source": "auth-log"},
+   {"@id": "loom:netsec/observation/<older id>", "@type": "prov:Entity",
+    "prov:wasInvalidatedBy": {"@id": "loom:netsec/activity/supersession%2F<id>"}}
+ ]}
+```
+
+`prov:wasDerivedFrom` (the artifact span) appears only when the
+observation carries provenance; the `extraction` `prov:Activity` (with
+the extractor model as a `prov:SoftwareAgent` when `attrs` name one) only
+for document-extracted claims; the revision/invalidation pair only when
+`supersedes` is set. Nothing is invented for a plain sender-asserted claim.
+
 ## Schema registry
 
 `SchemaRegistration`: per-namespace `entity_types` (name, description, facets) and

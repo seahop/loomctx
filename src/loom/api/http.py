@@ -49,6 +49,7 @@ from ..contracts import (
     SemanticSearchResponse,
 )
 from ..llm import LLMError, embedder_from_env, llm_from_env
+from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
 from ..consumer import resolve_provenance
 from ..store.factory import store_from_env
@@ -430,6 +431,32 @@ def entity_observations(
         "count": len(observations),
         "observations": [o.model_dump(mode="json") for o in observations],
     }
+
+
+@app.get("/v1/observations/{observation_id}/prov")
+def observation_provenance(
+    observation_id: str,
+    request: Request,
+    namespace: Annotated[str, Header(alias="X-Loom-Namespace")] = "default",
+    namespace_q: Annotated[str | None, Query(alias="namespace")] = None,
+) -> dict:
+    """One observation's provenance as PROV-O JSON-LD (D-050): source
+    agent, observed time, the artifact span it was derived from, the
+    extraction activity, and the supersession chain. Gated like the raw
+    observations route: the reader's namespace, and every entity the
+    observation touches must be in their world — anything else is
+    unknown to them, not forbidden."""
+    namespace = namespace_q or namespace  # query param wins over the header (D-039)
+    grant = _authorize(request, namespace, "r")
+    store = request.app.state.store
+    found = store.observations_by_ids(namespace, [observation_id])
+    if not found or not _in_scope(found[0], _allowed_types(grant)):
+        raise HTTPException(status_code=404, detail="unknown observation")
+    obs = found[0]
+    artifact = None
+    if obs.provenance is not None and obs.provenance.artifact_id:
+        artifact = store.get_artifact(namespace, obs.provenance.artifact_id)
+    return observation_prov(obs, artifact)
 
 
 @app.get("/v1/artifacts/{artifact_id}")

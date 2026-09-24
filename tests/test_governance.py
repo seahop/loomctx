@@ -351,6 +351,29 @@ def test_expand_handle_passes_entity_type_gate(tmp_path, monkeypatch):
         assert r.status_code == 200 and r.json()["items"]
 
 
+def test_prov_route_applies_the_read_gates(tmp_path, monkeypatch):
+    """D-050: the PROV-O export is gated like the raw observations route —
+    a host/user reader gets the login's provenance, and 404 (not the
+    content, not a 403 that confirms it exists) for an edge to a domain,
+    for a vendor's fact, and without a key at all."""
+    client, reader, writer = make_type_scoped_reader(tmp_path, monkeypatch)
+    with client:
+        _seed_scoped_world(client, writer)
+        h = {"X-Loom-Key": writer}
+        rows = client.get("/v1/entities/host/web-01/observations", headers=h).json()["observations"]
+        by_pred = {o["predicate"]: o["id"] for o in rows}
+        vendor = client.get("/v1/entities/vendor/initech/observations", headers=h).json()["observations"]
+        contract = next(o["id"] for o in vendor if o["predicate"] == "contract_owner")
+        r = client.get(f"/v1/observations/{by_pred['logged_in_by']}/prov", headers={"X-Loom-Key": reader})
+        assert r.status_code == 200 and r.json()["@graph"][0]["loom:predicate"] == "logged_in_by"
+        for oid in (by_pred["member_of"], contract):
+            assert client.get(f"/v1/observations/{oid}/prov", headers={"X-Loom-Key": reader}).status_code == 404
+            assert client.get(f"/v1/observations/{oid}/prov", headers=h).status_code == 200
+        assert client.get(f"/v1/observations/{contract}/prov").status_code == 401
+        assert client.get(f"/v1/observations/{contract}/prov?namespace=other",
+                          headers={"X-Loom-Key": reader}).status_code == 403
+
+
 def test_expand_clamps_budget_to_ceiling(tmp_path, monkeypatch):
     """H-A3: expand honors LOOM_MAX_BUDGET like ask does."""
     from loom.context import encode_handle, expand_pack

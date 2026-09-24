@@ -1686,6 +1686,74 @@
         "summary": "Ingest Batch"
       }
     },
+    "/v1/observations/{observation_id}/prov": {
+      "get": {
+        "description": "One observation's provenance as PROV-O JSON-LD (D-050): source\nagent, observed time, the artifact span it was derived from, the\nextraction activity, and the supersession chain. Gated like the raw\nobservations route: the reader's namespace, and every entity the\nobservation touches must be in their world \u2014 anything else is\nunknown to them, not forbidden.",
+        "operationId": "observation_provenance_v1_observations__observation_id__prov_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "observation_id",
+            "required": true,
+            "schema": {
+              "title": "Observation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Loom-Namespace",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "title": "X-Loom-Namespace",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Observation Provenance V1 Observations  Observation Id  Prov Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Observation Provenance"
+      }
+    },
     "/v1/schemas": {
       "get": {
         "operationId": "get_schema_v1_schemas_get",
