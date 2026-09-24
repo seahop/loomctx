@@ -21,7 +21,13 @@ COPY requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir --no-deps .
+RUN pip install --no-cache-dir --no-deps . \
+    # The runtime image needs no package manager: pip (with its vendored
+    # msgpack) and the base image's setuptools were the only HIGH findings
+    # the Trivy gate reported on the first gated build, and nothing at run
+    # time imports either. Removing them is the fix, not pinning them.
+    && pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true \
+    && rm -rf /usr/local/lib/python3*/ensurepip /root/.cache
 
 # Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
 # /data is created owned by that user, so a fresh named volume inherits it.
