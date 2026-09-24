@@ -44,6 +44,7 @@ log = logging.getLogger("loom.auth")
 
 ENV_KEYS = "LOOM_API_KEYS"
 ENV_FILE = "LOOM_AUTH_FILE"
+MIN_KEY_CHARS = 20   # below this a legacy plaintext key is flagged at load
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,11 @@ def _parse_env(raw: str) -> list[tuple[str, Grant]]:
         key, namespace, perms = parts
         if not set(perms) <= {"r", "w"}:
             raise ValueError(f"{ENV_KEYS}: perms must be r, w or rw, got {perms!r}")
+        if len(key) < MIN_KEY_CHARS:
+            # the examples' "agentsecret" is a placeholder, not a credential
+            log.warning("%s entry %d: a %d-character key is guessable; mint one with "
+                        "`python -m loom.keys generate` (or use %d+ random characters)",
+                        ENV_KEYS, index, len(key), MIN_KEY_CHARS)
         entries.append((
             _sha256(key),
             Grant(id=f"env-{index}", namespaces=(namespace,), perms=perms),
@@ -227,6 +233,20 @@ class AuthConfig:
         now = datetime.now(timezone.utc)
         for stored, grant in self._entries:
             if hmac.compare_digest(stored, digest) and not grant.expired(now):
+                return grant
+        return None
+
+    def grant_by_id(self, grant_id: str | None) -> Grant | None:
+        """The live grant with this id — for a writer that receives only the
+        principal (the gateway's Loom-Principal header, H-A10) and must
+        apply that grant's gates, e.g. `gates.check_citation`. None if the
+        id is unknown, disabled or expired."""
+        if not grant_id:
+            return None
+        self._maybe_reload()
+        now = datetime.now(timezone.utc)
+        for _, grant in self._entries:
+            if grant.id == grant_id and not grant.expired(now):
                 return grant
         return None
 

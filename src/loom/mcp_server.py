@@ -18,7 +18,12 @@ process already owns the data. The HTTP transports authenticate like the
 REST API: every request must carry `X-Loom-Key` / `Authorization: Bearer`
 when LOOM_AUTH_FILE / LOOM_API_KEYS is set (an ASGI gate rejects the rest
 before MCP sees them), and every tool call applies the key's namespace,
-perms, entity-type and source gates exactly as the HTTP routes do.
+perms, entity-type and source gates exactly as the HTTP routes do. In
+front of that, the engine's Host allowlist and foreign-Origin refusal
+(LOOM_ALLOWED_HOSTS / LOOM_ALLOWED_ORIGINS, D-059) stop a browser page from
+driving an open MCP server by DNS rebinding, and the engine's LOOM_RATE_*
+dials and per-key overrides apply per tool call (`answer` and
+`find_related` also spend the LLM bucket).
 
 MCP 2026-07-28 alignment (R-7): every tool publishes an `outputSchema`
 derived from the contract models and returns `structuredContent` next to
@@ -53,7 +58,10 @@ from .context import build_pack, decode_handle, expand_pack, semantic_search
 from .contracts import (AnswerRequest, AskRequest, ClaimIn, EntityRef, ExpansionHandle,
                         Observation, PredicateDef, ScopeSpec, ScopeTruncation,
                         SemanticSearchResponse)
+from .gates import check_supersedes, scope_counts, scope_schema
 from .llm import LLMError, embedder_from_env, llm_from_env
+from .metrics import REJECTED
+from .ratelimit import LimiterPool, RateLimitSettings
 from .registry import validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
@@ -101,19 +109,66 @@ def _get_auth() -> AuthConfig:
 def _caller(ctx) -> Grant | None:
     """The caller's grant, or None when no gate applies (stdio transport,
     or auth disabled). Raises PermissionError — which the MCP layer returns
-    to the agent as a tool error — when the key is missing or unknown."""
+    to the agent as a tool error — when the key is missing or unknown.
+    Every tool call on an HTTP transport also spends one token of the
+    caller's general rate bucket (D-059)."""
     if _transport == "stdio":
         return None
     auth = _get_auth()
-    if not auth.enabled:
-        return None
-    headers = getattr(ctx, "headers", None) if ctx is not None else None
-    key = extract_key(headers or {})
-    grant = auth.grant_for(key)
-    if grant is None:
-        raise PermissionError("missing or unknown API key: send X-Loom-Key "
-                              "(or Authorization: Bearer) on every request")
+    grant = None
+    if auth.enabled:
+        headers = getattr(ctx, "headers", None) if ctx is not None else None
+        key = extract_key(headers or {})
+        grant = auth.grant_for(key)
+        if grant is None:
+            raise PermissionError("missing or unknown API key: send X-Loom-Key "
+                                  "(or Authorization: Bearer) on every request")
+    _throttle(ctx, grant)
     return grant
+
+
+# ------------------------------------------------------------ rate limits #
+# The engine's LOOM_RATE_* dials and per-key overrides (R-10), applied per
+# tool call on the HTTP transports: one general token per call, plus one
+# from the stricter LLM bucket for the tools that spend LLM / embedder
+# budget (answer, find_related) — the same split as /v1/answer and
+# /v1/entities/semantic. stdio is local trust and is not limited. Buckets
+# are per process, like the engine's.
+
+_limits: tuple[RateLimitSettings, LimiterPool, LimiterPool] | None = None
+
+
+def _get_limits() -> tuple[RateLimitSettings, LimiterPool, LimiterPool]:
+    global _limits
+    if _limits is None:
+        _limits = (RateLimitSettings.from_env(), LimiterPool(), LimiterPool())
+    return _limits
+
+
+def _principal(ctx, grant: Grant | None) -> str:
+    """The grant id; in open mode the client IP (as on the engine)."""
+    if grant is not None:
+        return grant.id
+    request = getattr(getattr(ctx, "_request_context", None), "request", None)
+    client = getattr(request, "client", None)
+    return getattr(client, "host", None) or "unknown"
+
+
+def _throttle(ctx, grant: Grant | None, llm: bool = False) -> None:
+    if _transport == "stdio":
+        return
+    settings, general, llm_pool = _get_limits()
+    key = _principal(ctx, grant)
+    checks = [(general, settings.general(grant))]
+    if llm:
+        checks = [(llm_pool, settings.llm(grant))]   # the general token was taken in _caller
+    for pool, limit in checks:
+        if limit is None:
+            continue
+        allowed, retry = pool.allow(key, limit)
+        if not allowed:
+            REJECTED.labels(reason="rate").inc()
+            raise ToolError(f"rate limit exceeded; retry in {retry}s")
 
 
 def _grant(ctx, namespace: str, action: str) -> Grant | None:
@@ -145,7 +200,7 @@ class KeyGate:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and self.auth.enabled:
-            headers = {k.decode().lower(): v.decode()
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1")   # never a 500 on odd bytes
                        for k, v in scope.get("headers", [])}
             key = extract_key(headers)
             if key is None:
@@ -209,11 +264,12 @@ def configure(store: GraphStore, auth: AuthConfig | None = None,
               transport: str = "stdio") -> None:
     """Inject a store (tests); optionally an auth config + transport so the
     tool-level gates can be exercised without a network."""
-    global _store, _auth, _transport, _summary_cache
+    global _store, _auth, _transport, _summary_cache, _limits
     _store = store
     _auth = auth
     _transport = transport
     _summary_cache = None
+    _limits = None   # re-read the LOOM_RATE_* dials
 
 
 # namespace_summary() is a GROUP BY over every entity; every tool call ran
@@ -460,8 +516,11 @@ def list_namespaces(ctx: Context = None) -> list[NamespaceInfo]:
     first when you don't know where the data lives."""
     grant = _caller(ctx)
     summary = _summary()
-    return [{"namespace": ns, "entities": summary[ns], "total": sum(summary[ns].values())}
-            for ns in _visible(grant, summary)]
+    out: list[NamespaceInfo] = []
+    for ns in _visible(grant, summary):
+        counts = scope_counts(summary[ns], grant)   # a type-scoped key counts its own world
+        out.append({"namespace": ns, "entities": counts, "total": sum(counts.values())})
+    return out
 
 
 def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> NamespaceDescription:
@@ -473,7 +532,9 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
     _known_namespace(namespace, grant)
     store = _get_store()
     schema = store.get_schema(namespace)
-    counts = _summary().get(namespace, {})
+    if schema is not None:
+        schema = scope_schema(schema, grant)
+    counts = scope_counts(_summary().get(namespace, {}), grant)
     return {
         "namespace": namespace,
         "entity_types": [
@@ -521,6 +582,7 @@ def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
         raise ToolError("no embedder configured on this Loom (set LOOM_EMBED_*);"
                         " use find_entity with a key fragment instead")
     _known_namespace(namespace, grant)
+    _throttle(ctx, grant, llm=True)   # embeds the question: the LLM bucket, as /v1/entities/semantic
     return semantic_search(_get_store(), namespace, embedder, question,
                            limit=limit, allowed_types=_allowed(grant))
 
@@ -712,6 +774,11 @@ def record_claim(
     problem = validate_claim(_get_store().get_schema(namespace), claim)
     if problem is not None:
         raise ValueError(problem)
+    # the same rule as POST /v1/ingest: a correction stays on its subject,
+    # inside the key's entity types (D-050, D-059)
+    problem = check_supersedes(_get_store(), claim, grant)
+    if problem is not None:
+        raise ValueError(problem)
     obs = _get_store().record_claim(claim)
     out: RecordClaimResult = {"status": "recorded", "observation_id": obs.id, "event_id": event_id}
     if superseded_id:
@@ -763,6 +830,7 @@ def answer(
         raise ToolError("no LLM configured on this Loom (set LOOM_LLM_MODEL plus "
                         "LOOM_LLM_PROVIDER or LOOM_LLM_BASE_URL); use the ask tool instead")
     _known_namespace(namespace, grant)
+    _throttle(ctx, grant, llm=True)   # LLM spend: rate_llm_per_sec / LOOM_RATE_LLM_PER_SEC, as /v1/answer
     req = AnswerRequest(
         namespace=namespace,
         question=question,
@@ -843,16 +911,34 @@ for _fn in TOOLS:
              annotations=_annotations(_fn.__name__))(_surface_errors(_fn))
 
 
+def build_http_app(transport: str, host: str, auth: AuthConfig):
+    """The ASGI app for an HTTP transport, outermost gate first:
+    BrowserGuard (Host allowlist + foreign-Origin refusal, D-059) ->
+    KeyGate -> the SDK app.
+
+    The SDK only turns on its own DNS-rebinding protection when bound to a
+    loopback address; compose binds 0.0.0.0 (inside the container), which
+    left it off. Its host list is exact-match only and cannot express the
+    policy the deployments need (IP literals for probes and LAN agents,
+    service names, cluster suffixes), so the settings are passed
+    explicitly: the SDK check is off *because* BrowserGuard enforces
+    LOOM_ALLOWED_HOSTS / LOOM_ALLOWED_ORIGINS in front of it, the same
+    policy as the engine. The SDK still requires application/json on POST."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from .webguard import BrowserGuard
+
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    app = (mcp.streamable_http_app(host=host, transport_security=security)
+           if transport == "streamable-http"
+           else mcp.sse_app(host=host, transport_security=security))
+    # DELETE (session end) and GET (event stream) carry no body; the SDK
+    # validates POST content types itself
+    return BrowserGuard(KeyGate(app, auth), check_content_type=False, metric=REJECTED)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="loom.mcp_server", description=__doc__)
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "streamable-http", "sse"],
-        default="stdio",
-    )
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8300)
-    args = parser.parse_args()
+    args = _arg_parser().parse_args()
     global _transport
     _transport = args.transport
     if args.transport == "stdio":
@@ -861,13 +947,27 @@ def main() -> None:
     import logging
     import uvicorn
     auth = _get_auth()
+    _get_limits()   # a malformed LOOM_RATE_* stops start-up here, not on a tool call
     if not auth.enabled:
         logging.getLogger("loom.mcp").warning(
             "no LOOM_AUTH_FILE / LOOM_API_KEYS — MCP %s transport is OPEN; every "
             "connected agent gets full access", args.transport)
-    app = (mcp.streamable_http_app(host=args.host) if args.transport == "streamable-http"
-           else mcp.sse_app(host=args.host))
-    uvicorn.run(KeyGate(app, auth), host=args.host, port=args.port)
+    uvicorn.run(build_http_app(args.transport, args.host, auth), host=args.host, port=args.port)
+
+
+def _arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="loom.mcp_server", description=__doc__)
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http", "sse"],
+        default="stdio",
+    )
+    # loopback unless told otherwise: an open (keyless) MCP server on every
+    # interface is the LAN's. Compose passes --host 0.0.0.0 inside the
+    # container and publishes the port on LOOM_BIND (localhost by default).
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8300)
+    return parser
 
 
 if __name__ == "__main__":
