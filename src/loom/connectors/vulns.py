@@ -13,8 +13,10 @@ What each source contributes (all into ONE namespace, `netsec` by default,
 so the facts join the seed hosts):
 
   * NVD 2.0 yearly feeds (`--years`): per CVE — status, a trimmed summary,
-    one `cvss_score` + `has_severity` per *scoring source* (NIST and the CNA
-    routinely disagree, so real cross-source conflicts surface, uninvented),
+    one `cvss_score` + `has_severity` per *scoring source* (NIST, the CNA
+    and, since 2024, CISA's ADP as `cisa-adp` — they routinely disagree, so
+    real cross-source conflicts surface, uninvented), CISA Vulnrichment's
+    SSVC decision points when the record carries the ADP container,
     `has_weakness` -> cwe, `affects` -> product parsed from vulnerable CPEs,
     `made_by` product -> vendor. Streamed with ijson: the feeds are 25 MB
     gzipped / ~300 MB JSON each and never fully in memory.
@@ -71,6 +73,15 @@ SOURCE_NVD = "nvd"
 SOURCE_KEV = "cisa-kev"
 SOURCE_EPSS = "first-epss"
 SOURCE_BRIDGE = "asset-inventory"
+# The third scorer (2024-): CISA's Authorized Data Publisher enriches CVE
+# records ("Vulnrichment") with its own CVSS and SSVC decision points. NVD
+# 2.0 carries the CVSS under this org id as the metric's `source`; it lands
+# as its own source label so a CNA-vs-CISA disagreement is a real
+# cross-source conflict rather than a UUID nobody recognizes.
+CISA_ADP_ORG = "134c704f-9b21-4f2e-91b3-4a467353bcc0"
+SOURCE_CISA_ADP = "cisa-adp"
+SSVC_PREDICATES = {"exploitation": "ssvc_exploitation", "automatable": "ssvc_automatable",
+                   "technical impact": "ssvc_technical_impact"}
 
 # Products the seed hosts plausibly run, keyed the way NVD CPEs key them
 # (vendor:product). Chosen for CVE volume so the joins are never empty.
@@ -104,8 +115,14 @@ def schema(namespace: str) -> SchemaRegistration:
         predicates=[
             PredicateDef(name="status", description="NVD vulnStatus"),
             PredicateDef(name="summary", description="NVD description, trimmed"),
-            PredicateDef(name="cvss_score", description="CVSS base score; source names the scorer"),
+            PredicateDef(name="cvss_score", description="CVSS base score; source names the scorer "
+                         "(nvd:<NIST or CNA>, or cisa-adp for CISA Vulnrichment)"),
             PredicateDef(name="has_severity", description="CVSS base severity (lowercase)"),
+            PredicateDef(name="ssvc_exploitation",
+                         description="CISA Vulnrichment SSVC: none / poc / active"),
+            PredicateDef(name="ssvc_automatable", description="CISA Vulnrichment SSVC: yes / no"),
+            PredicateDef(name="ssvc_technical_impact",
+                         description="CISA Vulnrichment SSVC: partial / total"),
             PredicateDef(name="has_weakness", object_types=["cwe"]),
             PredicateDef(name="affects", object_types=["product"],
                          description="the CVE affects this product"),
@@ -286,6 +303,34 @@ def _severity(metric: dict) -> str | None:
     return sev.lower() if isinstance(sev, str) else None
 
 
+def scorer_source(scorer: str) -> str:
+    """The source label for a CVSS entry's `source`: NIST and the CNAs keep
+    their address under `nvd:`; CISA's ADP org id is `cisa-adp`."""
+    return SOURCE_CISA_ADP if scorer.lower() == CISA_ADP_ORG else f"{SOURCE_NVD}:{scorer}"
+
+
+def ssvc_decisions(item: dict) -> dict[str, str]:
+    """Vulnrichment's SSVC decision points, when the record carries the CVE
+    5.1 ADP container (`containers.adp[]` with an `other.type == "ssvc"`
+    metric — a cvelistV5 / Vulnrichment record; NVD 2.0 feeds carry the
+    ADP's CVSS but not its SSVC). {"exploitation": "none", ...}, lowercase."""
+    out: dict[str, str] = {}
+    for adp in (item.get("containers") or {}).get("adp") or []:
+        meta = adp.get("providerMetadata") or {}
+        if str(meta.get("orgId", "")).lower() != CISA_ADP_ORG and \
+                str(meta.get("shortName", "")).upper() != "CISA-ADP":
+            continue
+        for metric in adp.get("metrics") or []:
+            other = metric.get("other") or {}
+            if other.get("type") != "ssvc":
+                continue
+            for option in (other.get("content") or {}).get("options") or []:
+                for key, value in (option or {}).items():
+                    if isinstance(value, str) and key.strip().lower() in SSVC_PREDICATES:
+                        out[key.strip().lower()] = value.strip().lower()
+    return out
+
+
 def nvd_envelopes(item: dict, namespace: str) -> Iterator[ClaimIn]:
     cve = item["cve"]
     cid = cve["id"]
@@ -314,13 +359,16 @@ def nvd_envelopes(item: dict, namespace: str) -> Iterator[ClaimIn]:
         data = metric.get("cvssData", {})
         score = data.get("baseScore")
         tag = f":{scorer}"
+        source = scorer_source(scorer)
         attrs = {"version": data.get("version"), "type": metric.get("type"),
                  "vector": data.get("vectorString")}
         if isinstance(score, (int, float)):
-            yield claim("cvss_score", float(score), source=f"{SOURCE_NVD}:{scorer}", tag=tag, attrs=attrs)
+            yield claim("cvss_score", float(score), source=source, tag=tag, attrs=attrs)
         if sev := _severity(metric):
-            yield claim("has_severity", sev, source=f"{SOURCE_NVD}:{scorer}", tag=tag,
+            yield claim("has_severity", sev, source=source, tag=tag,
                         attrs={"version": data.get("version")})
+    for point, value in ssvc_decisions(item).items():
+        yield claim(SSVC_PREDICATES[point], value, source=SOURCE_CISA_ADP, attrs={"framework": "SSVC"})
     seen_cwe: set[str] = set()
     for weakness in cve.get("weaknesses", []) or []:
         for desc in weakness.get("description", []) or []:

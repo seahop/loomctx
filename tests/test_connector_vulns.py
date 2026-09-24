@@ -83,6 +83,56 @@ def test_nvd_mapping_one_score_per_source_and_products_from_cpes():
         {c.event_id for c in claims if c.predicate != "made_by"})
 
 
+THREE_SCORERS = json.loads(json.dumps(NVD_ITEM))
+THREE_SCORERS["cve"]["metrics"]["cvssMetricV31"].append(
+    {"source": vulns.CISA_ADP_ORG, "type": "Secondary",
+     "cvssData": {"version": "3.1", "vectorString": "CVSS:3.1/AV:N/AC:L", "baseScore": 8.8,
+                  "baseSeverity": "HIGH"}})
+# the CVE 5.1 ADP container as Vulnrichment publishes it (cvelistV5 shape)
+THREE_SCORERS["containers"] = {"adp": [{
+    "title": "CISA ADP Vulnrichment",
+    "providerMetadata": {"orgId": vulns.CISA_ADP_ORG, "shortName": "CISA-ADP"},
+    "metrics": [{"other": {"type": "ssvc", "content": {
+        "id": "CVE-2026-1337", "role": "CISA Coordinator", "version": "2.0.3",
+        "options": [{"Exploitation": "poc"}, {"Automatable": "no"}, {"Technical Impact": "Total"}]}}},
+                {"other": {"type": "kev", "content": {"dateAdded": "2026-03-02"}}}],
+}]}
+
+
+def test_cisa_adp_is_the_third_scorer_with_its_own_source_and_ssvc_points(tmp_path):
+    """NVD 2.0 carries CISA's Vulnrichment CVSS under the ADP org id; it
+    lands as `cisa-adp`, its own source, so CNA-vs-CISA is a real
+    cross-source conflict — and the SSVC decision points ride along when
+    the record carries the ADP container."""
+    claims = list(vulns.nvd_envelopes(THREE_SCORERS, "netsec"))
+    scores = {c.source: c.object for c in claims if c.predicate == "cvss_score"}
+    assert scores == {"nvd:nvd@nist.gov": 9.8, "nvd:security@nginx.org": 7.5, "cisa-adp": 8.8}
+    assert all("134c704f" not in c.source for c in claims)                  # no UUID source labels
+    sev = {c.source: c.object for c in claims if c.predicate == "has_severity"}
+    assert sev["cisa-adp"] == "high"
+    ssvc = {c.predicate: c for c in claims if c.predicate.startswith("ssvc_")}
+    assert {p: c.object for p, c in ssvc.items()} == {
+        "ssvc_exploitation": "poc", "ssvc_automatable": "no", "ssvc_technical_impact": "total"}
+    assert all(c.source == "cisa-adp" and c.attrs == {"framework": "SSVC"} for c in ssvc.values())
+    assert ssvc["ssvc_exploitation"].event_id == "nvd:CVE-2026-1337:20260201T120000:ssvc_exploitation"
+    assert {p.name for p in vulns.schema("netsec").predicates} >= set(vulns.SSVC_PREDICATES.values())
+    # a record without the container (every NVD 2.0 feed record) yields no SSVC claims
+    assert not [c for c in vulns.nvd_envelopes(NVD_ITEM, "netsec") if c.predicate.startswith("ssvc_")]
+    assert vulns.ssvc_decisions({"containers": {"adp": [{"providerMetadata": {"orgId": "someone-else"},
+                                                          "metrics": THREE_SCORERS["containers"]["adp"][0]["metrics"]}]}}) == {}
+    # in the store: the three-way disagreement is one cross-source conflict naming all three
+    db = tmp_path / "three.db"
+    load_direct(str(db), vulns.to_lines(claims), size=100)
+    store = SqliteStore(db)
+    pack = build_pack(store, AskRequest(namespace="netsec", subject=EntityRef(type="cve", key="CVE-2026-1337"),
+                                       question="how severe is this?", budget=1500))
+    conflict = next(i for i in pack.items if i.kind == "conflict" and "cvss_score" in i.text)
+    assert "cisa-adp says '8.8'" in conflict.text and "nvd:nvd@nist.gov" in conflict.text \
+        and "nvd:security@nginx.org" in conflict.text
+    assert any("ssvc_exploitation" in i.text and "cisa-adp" in i.text for i in pack.items)
+    store.close()
+
+
 def test_rejected_cves_keep_only_their_status():
     claims = list(vulns.nvd_envelopes(REJECTED, "netsec"))
     assert [c.predicate for c in claims] == ["status"] and claims[0].object == "Rejected"
