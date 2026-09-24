@@ -1143,7 +1143,16 @@ def test_alias_scan_uses_the_stores_since_filter_when_it_has_one(tmp_path):
     from loom.store.sqlite import SqliteStore
     store = _alias_store(tmp_path)
     hwm = datetime(2030, 1, 1, tzinfo=timezone.utc)                    # entities are created at load time
-    assert enrich._entities_since(store, "ns", hwm) is None            # this store cannot filter
+    assert enrich._entities_since(store, "ns", hwm) == []              # the real store filters (D-054): nothing that new
+
+    class NoSince(SqliteStore):                                        # an older store generation: no `since`
+        def iter_entities(self, namespace=None):
+            yield from super().iter_entities(namespace)
+
+    (tmp_path / "n").mkdir()
+    n = _alias_store(tmp_path / "n"); n.close(); n = NoSince(tmp_path / "n" / "alias.db")
+    assert enrich._entities_since(n, "ns", hwm) is None                # cannot filter: the caller walks
+    n.close()
     calls = []
 
     class Since(SqliteStore):
