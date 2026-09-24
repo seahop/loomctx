@@ -220,7 +220,7 @@ new pod posture) means each must be re-run on the current build before
 the talk.
 
 - [x] Fresh clone, uncached build, seed, first cited answer, connector: 142 s total (2026-09-09, laptop)
-- [ ] Both Act 1 `curl` commands return what the script says — re-run after D-058 (budget charge recalibrated to the MCP wire): expect laptop-17 + charged_tokens 60, conflict first + charged_tokens 380, 77 logins / "76 more" handle (computed on the seed 2026-09-24; last engine check 2026-09-23 on the pre-D-058 build)
+- [x] Both Act 1 `curl` commands return what the script says — laptop-17 + charged_tokens 60, conflict first + charged_tokens 380, "76 more 'logged_in_by'" handle with omitted_handles 4 (verified against a live engine on the post-D-058 build, 2026-09-24)
 - [x] Both Act 2 `curl` commands return what the script says (2026-09-09 corpus) — **re-run on the frozen volume**
 - [x] Act 3 run with Claude Code (2026-09-10 before aliases, 2026-09-11 after); transcripts saved in `demo/`
 - [ ] Night-before load on the current build, alias pass with the pinned judge, `demo-frozen.jsonl` exported and copied off
