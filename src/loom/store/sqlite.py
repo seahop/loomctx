@@ -324,14 +324,21 @@ _OBS_INSERT = (
 # settled, and must not occupy the limit (D-058). A decline stores its pair
 # as sorted "type:key" strings; BINARY order is Python's code-point order.
 _PAIR_SIDE = "e{n}.type || ':' || e{n}.key"
+# Multi-type keys first (an index-ordered GROUP BY), then the pair/decline
+# test only inside those few groups: a direct self-join let the planner
+# match e2 on namespace alone — 74k × 74k comparisons on the vulns corpus.
 _MERGE_CANDIDATES_SQL = (
-    "SELECT DISTINCT e1.namespace, e1.key FROM entities e1"
-    " JOIN entities e2 ON e2.namespace = e1.namespace AND e2.key = e1.key AND e2.type <> e1.type"
-    " WHERE 1 = 1 {ns} AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
+    "WITH multi AS (SELECT namespace, key FROM entities e1 WHERE 1 = 1 {ns}"
+    "  GROUP BY namespace, key HAVING COUNT(DISTINCT type) > 1)"
+    " SELECT m.namespace, m.key FROM multi m WHERE EXISTS ("
+    "  SELECT 1 FROM entities e1 INDEXED BY idx_entity_key JOIN entities e2 INDEXED BY idx_entity_key"
+    "   ON e2.namespace = e1.namespace AND e2.key = e1.key AND e2.type <> e1.type"
+    "  WHERE e1.namespace = m.namespace AND e1.key = m.key"
+    "  AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
     "   WHERE d.namespace = e1.namespace"
     f"    AND d.a = min({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)})"
-    f"    AND d.b = max({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)}))"
-    " ORDER BY e1.namespace, e1.key LIMIT ?"
+    f"    AND d.b = max({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)})))"
+    " ORDER BY m.namespace, m.key LIMIT ?"
 )
 
 _ON_EVENT_CONFLICT = (
