@@ -38,10 +38,34 @@ python -m loom.connectors.vulns schema                                      # th
 ```
 
 Flags: `--years` (default: this year), `--sources kev,nvd,epss`, `--epss
-known|all|none`, `--cache DIR` (default `/data/feeds`, or `$LOOM_FEED_CACHE`),
-`--offline`. Feeds are fetched with conditional GETs and streamed
-(`ijson`), never held in memory. On Kubernetes,
-`deploy/k8s/jobs/vulns-refresh.yaml` runs it nightly against the engine.
+known|all|none`, `--epss-ledger auto|none|PATH`, `--cache DIR` (default
+`/data/feeds`, or `$LOOM_FEED_CACHE`), `--offline`. Feeds are fetched with
+conditional GETs and streamed (`ijson`), never held in memory. On
+Kubernetes, `deploy/k8s/jobs/vulns-refresh.yaml` runs it nightly against
+the engine.
+
+**Nightly EPSS is movement, not a daily copy.** FIRST republishes a score
+for every CVE every day and most move only in the fourth decimal; keying
+the rows on the score date added ~110k observations a night (each one
+embedded by the worker, i.e. paid for) with nothing new in them. The
+connector keeps a ledger in the cache (`epss-ledger-<namespace>-<target>.json.gz`:
+the last value it emitted per CVE, per target store) and emits a value
+only when the score moved by ≥ 0.001 or ≥ 5 % of itself, or the
+percentile by ≥ 0.01; slow drift accumulates against the last emitted
+value, so it surfaces eventually. The ledger is written only after the
+load (or `emit`) completes, so a failed night re-offers its changes; the
+same feed file loaded twice adds nothing either way (event ids stay
+date-keyed). The stats line counts what was held back as
+`epss_unchanged`. `--epss-ledger none` restores one row per CVE per day;
+a lost ledger costs one full night, nothing more. The first night after
+upgrading emits everything once (no ledger yet).
+
+Over `--url`, a batch the engine turns away for the moment (429 from the
+rate limiter, D-056; 5xx; a dropped connection) is retried with backoff
+that honors `Retry-After`, up to `LOOM_INGEST_ATTEMPTS` (default 6) tries —
+the schema registration too. A malformed NVD or KEV record (a
+`lastModified` in the future, a field of the wrong shape) is counted as
+`nvd_invalid` / `kev_invalid` and skipped rather than ending the load.
 
 Run the connector as the engine's uid (`--user 10001` in compose) so the
 SQLite WAL files it creates stay writable by the engine.

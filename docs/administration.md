@@ -248,6 +248,47 @@ python -m loom.lifecycle redact --namespace netsec --observation-id <id> --reaso
 Schedule `purge` as a cron/k8s CronJob per your retention policy; `export`
 before destructive maintenance.
 
+### Correcting entity resolution
+
+The enrichment worker folds entities it judges to be one thing (type drift,
+spelling drift, an LLM's confident yes). Every merge is reversible, and a
+reversal **sticks**: it records the pair as declined, which every
+resolution tier — automatic and adjudicated — honors, so the worker does
+not fold it again on its next tick (each resolution job re-reads the
+declines, so an unmerge from another process is seen at once).
+
+```bash
+python -m loom.lifecycle unmerge --namespace netsec --alias ip_address:10.0.4.7   # split + remember
+python -m loom.lifecycle unmerge --namespace netsec --alias ... --allow-remerge   # split only
+python -m loom.enrich distinct host:web-01 host:web01 --namespace netsec          # never merge these
+```
+
+`distinct` is the operator's ruling that two entities are different
+things: it splits them first if one is folded into the other, and neither
+tier will merge or ask about them again. Declines travel in `export` /
+`import`. There is no "un-decline" command yet; a wrongly declined pair
+stays apart (the safe direction) until one exists.
+
+Adjudication spend is bounded: at most 8 model calls per resolution job
+per tick, whatever the replies say. A reply that cannot be read (verdicts
+are read leniently — `"yes"`, `"True"`, `"90%"`, `"high"`, single-quoted
+near-JSON — but never guessed) backs the pair off (1 min doubling to 1 h)
+and after 3 such replies the pair is recorded as declined — never merged,
+never billed again — with the reason `gave up after 3 unreadable
+adjudication replies`. A provider outage (unreachable, 429, 5xx) ends
+that job's pass for the tick without counting against the pair.
+
+### Queue consumer settlement
+
+A batch the store rejects is re-written one message at a time: good
+envelopes land and are acked, and only the one that fails on its own is
+redelivered (and dead-lettered with `Loom-Error-Code: store_rejected` on
+its `LOOM_MAX_DELIVER`-th delivery). A claim citing a document the store
+does not have yet — with two consumer replicas the document can be in the
+other one's batch — is nak'd with a growing delay (`LOOM_PROVENANCE_RETRY`
+seconds × delivery count, default 5) and dead-lettered with
+`provenance_unresolved` on its last delivery, never silently dropped.
+
 ## What's deliberately NOT here (yet)
 
 - **Admin HTTP API / UI** for key management — the file+CLI flow is the

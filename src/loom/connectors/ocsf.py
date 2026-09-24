@@ -14,8 +14,13 @@ provider's, a SIEM's) becomes claims on the affected host and the CVE
     (`host:<name>`); each `vulnerabilities[].cve.uid` is `cve:<id>` — the
     entity the KEV/NVD connector and the STIX importer also write to;
   * `host affected_by cve` with valid_from = first_seen_time, valid_to =
-    last_seen_time when the finding is resolved/closed, and the finding's
-    uid, title, status and severity in attrs;
+    last_seen_time when the finding is resolved (status_id 4) or closed
+    (activity_id 3) — NOT when it is suppressed (3: muted, still present)
+    — and the finding's uid, title, status and severity in attrs. `import`
+    chains the versions of one finding (connectors/chain.py): each new
+    event's `affected_by` supersedes the previous one (D-050), so a
+    resolution closes the exposure instead of sitting next to the stale
+    open row, and a re-scan does not pile up open rows;
   * on the CVE: `cvss_score` + `has_severity` per CVSS entry (source
     `<product>:cvss<version>`), `epss_score` / `epss_percentile`,
     `summary` (cve.desc), `exploit_available` / `fix_available`, and
@@ -61,9 +66,17 @@ SEVERITY = {0: "unknown", 1: "informational", 2: "low", 3: "medium", 4: "high", 
             6: "fatal", 99: "other"}
 SEVERITY_ID = {"informational": 1, "info": 1, "low": 2, "medium": 3, "moderate": 3, "high": 4,
                "critical": 5, "fatal": 6}
-STATUS = {0: "unknown", 1: "new", 2: "in progress", 3: "suppressed", 4: "resolved", 99: "other"}
-CLOSED_STATUS_IDS = {3, 4}
+# Finding status_id (OCSF 1.x): Suppressed means an operator muted the
+# finding (accepted risk, false positive, snoozed) — the host is still
+# affected, so it never closes the exposure. Resolved does; so does a Close
+# activity unless the status says suppressed. Archived/Deleted are record
+# housekeeping, not remediation.
+STATUS = {0: "unknown", 1: "new", 2: "in progress", 3: "suppressed", 4: "resolved",
+          5: "archived", 6: "deleted", 99: "other"}
+CLOSED_STATUS_IDS = {4}
+SUPPRESSED = 3
 ACTIVITY = {0: "unknown", 1: "create", 2: "update", 3: "close", 99: "other"}
+ACTIVITY_CLOSE = 3
 
 
 # ------------------------------------------------------------------ helpers #
@@ -126,6 +139,24 @@ def finding_uid(event: dict) -> str:
     return f"sha256:{digest}"
 
 
+def _int(value: Any) -> int:
+    """An OCSF enum id; real producers send "4" as often as 4, and an
+    unreadable one is 0 (Unknown) rather than a crashed import."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def closes_exposure(event: dict) -> bool:
+    status_id = _int(event.get("status_id"))
+    if status_id == SUPPRESSED:
+        return False
+    return status_id in CLOSED_STATUS_IDS or _int(event.get("activity_id")) == ACTIVITY_CLOSE
+
+
 def _float(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -139,7 +170,7 @@ def _float(value: Any) -> float | None:
 
 def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -> Iterator[ClaimIn]:
     """Claims for one vulnerability_finding event. Other classes yield nothing."""
-    if int(event.get("class_uid") or 0) != CLASS_UID:
+    if _int(event.get("class_uid")) != CLASS_UID:
         return
     info = event.get("finding_info") or {}
     observed = (_epoch(event.get("time")) or _epoch(info.get("modified_time"))
@@ -149,11 +180,11 @@ def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -
     uid = finding_uid(event)
     prefix = f"ocsf:{uid}:{_stamp(observed)}"
     host = host_of(event)
-    status_id = int(event.get("status_id") or 0)
-    severity_id = int(event.get("severity_id") or 0)
+    status_id = _int(event.get("status_id"))
+    severity_id = _int(event.get("severity_id"))
     first_seen = _epoch(info.get("first_seen_time")) or _epoch(info.get("created_time"))
     last_seen = _epoch(info.get("last_seen_time"))
-    closed = status_id in CLOSED_STATUS_IDS or int(event.get("activity_id") or 0) == 3
+    closed = closes_exposure(event)
     base_attrs = {"finding_uid": uid, "ocsf_class_uid": CLASS_UID}
 
     def claim(subject: EntityRef, pred: str, obj, tag: str = "", **kw) -> ClaimIn:
@@ -227,26 +258,40 @@ def events_to_envelopes(events: Iterable[dict], namespace: str, source: str | No
         if not isinstance(event, dict):
             stats["skipped"] = stats.get("skipped", 0) + 1
             continue
-        n = 0
-        for env in event_to_envelopes(event, namespace, source):
-            n += 1
-            yield env
-        kind = "finding" if n else ("other_class" if int(event.get("class_uid") or 0) != CLASS_UID else "empty")
+        try:
+            # materialized per event: a malformed one (a future `time`, a
+            # field of the wrong shape) is counted, not the end of the import
+            envs = list(event_to_envelopes(event, namespace, source))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            stats["invalid"] = stats.get("invalid", 0) + 1
+            print(f"ocsf event {finding_uid(event) if isinstance(event, dict) else '?'}: skipped: "
+                  f"{str(exc).splitlines()[0][:200]}", file=sys.stderr)
+            continue
+        n = len(envs)
+        yield from envs
+        kind = "finding" if n else ("other_class" if _int(event.get("class_uid")) != CLASS_UID else "empty")
         stats[kind] = stats.get(kind, 0) + 1
 
 
 def iter_events(path: str) -> Iterator[dict]:
-    """NDJSON (one event per line) or a JSON array / single object."""
+    """NDJSON (one event per line), a JSON array, or a single object —
+    pretty-printed or not (a pretty-printed object used to be read as
+    NDJSON and fail on its first line)."""
     fh = sys.stdin if path == "-" else open(path, encoding="utf-8")
     with fh:
         text = fh.read()
-    stripped = text.lstrip()
-    if stripped.startswith("["):
-        yield from json.loads(stripped)
-        return
-    if stripped.startswith("{") and "\n" not in stripped.strip():
-        yield json.loads(stripped)
-        return
+    stripped = text.strip()
+    if stripped.startswith(("[", "{")):
+        try:
+            whole = json.loads(stripped)
+        except ValueError:
+            whole = None          # several objects: NDJSON, read below
+        if isinstance(whole, list):
+            yield from whole
+            return
+        if isinstance(whole, dict):
+            yield whole
+            return
     for line in text.splitlines():
         if line.strip():
             yield json.loads(line)
@@ -336,8 +381,11 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
         status_id = 1
         if edge is not None:
             cited.insert(0, edge.id)
-            if edge.attrs.get("status_id") in CLOSED_STATUS_IDS or edge.valid_to is not None:
-                status_id = int(edge.attrs.get("status_id") or 4)
+            recorded = _int(edge.attrs.get("status_id"))
+            if edge.valid_to is not None and recorded not in (4, 5, 6):
+                status_id = 4                      # closed (a Close activity): resolved
+            elif recorded in STATUS and recorded:
+                status_id = recorded               # suppressed / in progress survive the round trip
             if edge.attrs.get("severity_id"):
                 severity_id = severity_id or int(edge.attrs["severity_id"])
             for flag in ("is_exploit_available", "is_fix_available"):
@@ -470,13 +518,21 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.url and args.db:
         parser.error("import: give --url or --db, not both")
-    from ..ingest import load_direct, post_batches
+    from .chain import HttpSink, StoreSink, keyed_by, load_chained
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace), args.url, args.db, args.key)
-    lines = _to_lines(envs)
-    totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
-              else load_direct(args.db, lines, args.batch))
+    # each finding's affected_by versions are chained by supersession, so
+    # a resolved finding closes the exposure (connectors/chain.py)
+    key = keyed_by("finding_uid", {PRED_AFFECTED})
+    if args.url:
+        totals = load_chained(envs, HttpSink(args.url, args.key), key, args.batch)
+    else:
+        store = _open_store(args.db)
+        try:
+            totals = load_chained(envs, StoreSink(store), key, args.batch)
+        finally:
+            store.close()
     print(json.dumps({**totals, "events": stats}))
 
 

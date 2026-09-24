@@ -52,6 +52,31 @@ def test_write_with_retry_then_deadletter(tmp_path, monkeypatch):
     assert store.count_observations("default", EntityRef(type="host", key="web-01")) == 1
 
 
+def test_only_the_poison_envelope_is_dead_lettered(tmp_path, monkeypatch):
+    """The last attempt writes the batch one envelope at a time: the good
+    batch-mates of a poison envelope land instead of being parked with it."""
+    from loom import kafka_consumer
+    store = SqliteStore(tmp_path / "k3.db")
+    real = store.record_claims
+
+    def picky(claims):
+        if any(c.source == "poison" for c in claims):
+            raise RuntimeError("constraint failed")
+        return real(claims)
+
+    poison = CLAIM.replace(b'"auth-log"', b'"poison"')
+    monkeypatch.setattr(store, "record_claims", picky)
+    monkeypatch.setattr(kafka_consumer, "MAX_DELIVER", 2)
+    producer = FakeProducer()
+
+    async def no_sleep(s):
+        pass
+
+    counts = asyncio.run(write_with_retry(store, producer, [CLAIM, poison, CLAIM], sleep=no_sleep))
+    assert counts["recorded"] == 2 and counts["deadlettered"] == 1
+    assert [v for _, v, _ in producer.sent] == [poison]
+
+
 def test_strict_registry_rejects_on_the_kafka_path(tmp_path):
     from loom.contracts import SchemaRegistration
     store = SqliteStore(tmp_path / "k2.db")
