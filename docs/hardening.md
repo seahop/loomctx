@@ -256,7 +256,7 @@ against the code before it was fixed. Landed on branch `release-hardening`.
 | S-26 | P3 | ✅ | (D-060) `fuzzy_merge_candidates` could still fill its limit with permanently declined groups (same shape as S-22's fix). |
 | S-27 | P3 | ✅ | (D-060) Scope facts gathered as inbound edges on a reached subject did not carry their path (now they carry the reached entity's chain). |
 | S-28 | P3 | ✅ | (D-060) No command to undo a decline: now `GraphStore.forget_decline` and `python -m loom.enrich undistinct`. |
-| S-29 | P3 | ⬜ | A KEV `knownRansomwareCampaignUse` flip keeps its event id and is never recorded (fixing it changes KEV event ids). |
-| S-30 | P3 | ⬜ | OCSF/STIX `emit` (export) does not chain versions — it has no store to look earlier versions up in. |
+| S-29 | P3 | ✅ | (D-060) A KEV `knownRansomwareCampaignUse` flip (or a moved due date / required action) kept its event id and was never recorded. `load` now looks the stored KEV rows up and records a changed value as a superseding version; unchanged values keep their ids, so existing stores gain only the changes. |
+| S-30 | P3 | ✅ | (D-060) OCSF/STIX export did not express version chains. STIX versions share the object's id (newest by default, `--history` for all, `revoked`); OCSF versions share `finding_info.uid`; exports restate cited observations so import → export → import is stable. |
 | S-31 | P3 | ➖ | A shared rate limiter across processes/replicas: buckets stay per process, the effective ceiling (rate × workers × replicas) is documented instead. |
 | S-32 | P3 | ⬜ | The GCP project id remains in git history (not a secret; scrubbed from the tree). Rewriting history is not planned. |
