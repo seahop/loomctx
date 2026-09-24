@@ -191,30 +191,44 @@ func (f *natsForwarder) close() { f.nc.Close() }
 type limiterPool struct {
 	mu      sync.Mutex
 	rate    float64 // 0 = no default limit
+	burst   int     // LOOM_RATE_BURST; 0 = int(rate)
 	buckets map[string]*rate.Limiter
 }
 
 const maxLimiterBuckets = 10000
 
 func newLimiterPool(perSec float64) *limiterPool {
+	return newLimiterPoolBurst(perSec, 0)
+}
+
+func newLimiterPoolBurst(perSec float64, burst int) *limiterPool {
 	if perSec < 0 {
 		perSec = 0
 	}
-	return &limiterPool{rate: perSec, buckets: map[string]*rate.Limiter{}}
+	if burst < 0 {
+		burst = 0
+	}
+	return &limiterPool{rate: perSec, burst: burst, buckets: map[string]*rate.Limiter{}}
 }
 
 // effective is the (rate, burst) a principal is held to: its grant's
-// override, else the pool default sized as the gateway always did
-// (burst = int(rate)); a burst below one would admit nothing.
+// override, else the pool default. A key's own rate brings its own burst
+// (rate_burst, else int(rate)) — never LOOM_RATE_BURST sized for another
+// rate; the same resolution as the engine. A burst below one would admit
+// nothing.
 func (p *limiterPool) effective(g *grant) (float64, int) {
 	perSec := p.rate
-	if g != nil && g.RatePerSec != nil {
+	override := g != nil && g.RatePerSec != nil
+	if override {
 		perSec = *g.RatePerSec
 	}
 	if perSec <= 0 {
 		return 0, 0
 	}
 	burst := int(perSec)
+	if !override && p.burst > 0 {
+		burst = p.burst
+	}
 	if g != nil && g.RateBurst != nil {
 		burst = *g.RateBurst
 	}
@@ -261,19 +275,22 @@ func (p *limiterPool) allow(key string, g *grant) bool {
 	return lim == nil || lim.Allow()
 }
 
-// allowN takes n tokens at once (a batch of n envelopes costs n).
-func (p *limiterPool) allowN(key string, g *grant, n int) bool {
+// allowN takes n tokens at once (a batch of n envelopes costs n). A batch
+// larger than the bucket can never pass: tooBig reports that (with the
+// burst), so the caller answers 413 instead of a 429 a sender would retry
+// forever — the engine does the same.
+func (p *limiterPool) allowN(key string, g *grant, n int) (ok, tooBig bool, burst int) {
 	if p == nil {
-		return true
+		return true, false, 0
 	}
 	lim := p.limiterFor(key, g)
 	if lim == nil {
-		return true
+		return true, false, 0
 	}
 	if n > lim.Burst() {
-		return false // a batch larger than the burst can never pass; refuse cleanly
+		return false, true, lim.Burst()
 	}
-	return lim.AllowN(time.Now(), n)
+	return lim.AllowN(time.Now(), n), false, lim.Burst()
 }
 
 func (p *limiterPool) size() int {
@@ -286,7 +303,7 @@ func (p *limiterPool) size() int {
 }
 
 func newServer(cfg config, schema *jsonschema.Schema, fwd forwarder, auth *authConfig) http.Handler {
-	return newServerWithLimiters(cfg, schema, fwd, auth, newLimiterPool(cfg.ratePerSec))
+	return newServerWithLimiters(cfg, schema, fwd, auth, newLimiterPoolBurst(cfg.ratePerSec, cfg.rateBurst))
 }
 
 func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
@@ -342,8 +359,14 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 				map[string]string{"detail": fmt.Sprintf("batch of %d exceeds %d items", len(items), cfg.maxBatch)})
 			return
 		}
-		if !limiters.allowN(bucket, g, len(items)) {
+		if ok, tooBig, burst := limiters.allowN(bucket, g, len(items)); !ok {
 			m.rejectedRate.Add(1)
+			if tooBig {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"detail": fmt.Sprintf(
+					"batch of %d items exceeds this key's rate burst of %d; send smaller batches "+
+						"or raise rate_burst / LOOM_RATE_BURST", len(items), burst)})
+				return
+			}
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"detail": "rate limit exceeded"})
 			return
@@ -389,10 +412,29 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 					continue
 				}
 			}
-			if _, _, err := fwd.forward(r.Context(), kind, apiKey, principal, raw); err != nil {
+			if detail := checkReservedAttrs(kind, doc); detail != "" {
+				reject(i, detail)
+				continue
+			}
+			payload := raw
+			if cfg.natsURL != "" {
+				if payload, err = stampUploader(raw, kind, g); err != nil {
+					reject(i, "invalid JSON")
+					continue
+				}
+			}
+			code, respBody, err := fwd.forward(r.Context(), kind, apiKey, principal, payload)
+			if err != nil || code >= 500 {
 				m.upstreamErr.Add(1)
 				writeJSON(w, http.StatusBadGateway, map[string]string{"detail": "upstream unavailable"})
 				return
+			}
+			if code >= 300 {
+				// the engine refused this item (HTTP-forward mode): its
+				// own gates — registry, provenance, citation, rate — are
+				// the verdict; report them per item, never "recorded"
+				reject(i, upstreamDetail(code, respBody))
+				continue
 			}
 			m.queued.Add(1)
 			status := "recorded"
@@ -484,6 +526,18 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 				return
 			}
 		}
+		if detail := checkReservedAttrs(kind, doc); detail != "" {
+			m.rejectedBad.Add(1)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": detail})
+			return
+		}
+		if cfg.natsURL != "" {
+			if body, err = stampUploader(body, kind, g); err != nil {
+				m.rejectedBad.Add(1)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"detail": "invalid JSON"})
+				return
+			}
+		}
 		principal := ""
 		if g != nil {
 			principal = g.ID
@@ -501,7 +555,79 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 		_, _ = w.Write(respBody)
 	})
 
+	if cfg.hosts != nil {
+		return guardBrowser(mux, *cfg.hosts, m)
+	}
 	return mux
+}
+
+// uploaderAttr is the engine's reserved artifact attribute (loom.gates):
+// which grant ingested a document, and that grant's entity types. Senders
+// may not supply it; in the NATS shape the gateway — the only hop that
+// knows the grant — records it, since the writer consumer sees only the
+// principal header.
+const uploaderAttr = "loom.uploader"
+
+func checkReservedAttrs(kind string, doc any) string {
+	if kind != "document" {
+		return ""
+	}
+	obj, _ := doc.(map[string]any)
+	if attrs, ok := obj["attrs"].(map[string]any); ok {
+		if _, taken := attrs[uploaderAttr]; taken {
+			return fmt.Sprintf("attrs key %q is reserved (the engine records the uploader)", uploaderAttr)
+		}
+	}
+	return ""
+}
+
+// stampUploader returns the document envelope with attrs["loom.uploader"]
+// set from the grant; other envelopes, and open mode, pass through
+// byte-for-byte. Fields other than attrs keep their raw encoding.
+func stampUploader(raw []byte, kind string, g *grant) ([]byte, error) {
+	if kind != "document" || g == nil {
+		return raw, nil
+	}
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, err
+	}
+	attrs := map[string]json.RawMessage{}
+	if a, ok := env["attrs"]; ok && string(a) != "null" {
+		if err := json.Unmarshal(a, &attrs); err != nil {
+			return nil, err
+		}
+	}
+	stamp := map[string]any{"grant": g.ID}
+	if g.EntityTypes != nil {
+		stamp["entity_types"] = g.EntityTypes
+	}
+	encoded, err := json.Marshal(stamp)
+	if err != nil {
+		return nil, err
+	}
+	attrs[uploaderAttr] = encoded
+	if env["attrs"], err = json.Marshal(attrs); err != nil {
+		return nil, err
+	}
+	return json.Marshal(env)
+}
+
+// upstreamDetail: the engine's {"detail": ...} for a refused item, or its
+// status when the body carries none.
+func upstreamDetail(code int, body []byte) string {
+	var out struct {
+		Detail any `json:"detail"`
+	}
+	if json.Unmarshal(body, &out) == nil && out.Detail != nil {
+		if s, ok := out.Detail.(string); ok {
+			return s
+		}
+		if b, err := json.Marshal(out.Detail); err == nil {
+			return string(b)
+		}
+	}
+	return fmt.Sprintf("engine refused the envelope (HTTP %d)", code)
 }
 
 // splitBatch turns a request body into individual envelope documents:
