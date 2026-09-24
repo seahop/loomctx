@@ -20,7 +20,7 @@ presentable.
 | 2026-09-11 | Validated on GKE (D-043): eight laptop-vs-cloud differences fixed in the repo, capacity numbers on real nodes, 18 h soak (found and fixed the worker OOM), HA failover measured end to end at 11 s |
 | 2026-09-11 | Release gate (D-045): scale shape smoke in CI, v3→v4 migration proven on a populated Postgres, published image validated on GKE before the tag moves |
 | 2026-09-23 | Review-fix batch: dependency lock consumed by the Dockerfile (the boto3 drift D-045 found), base images by digest, SHA-pinned actions + Trivy + build-once CI, pod security posture + NetworkPolicies + PDBs, registry validation on the queue paths, Kafka SASL/TLS, compose env passthroughs, demo script made honest (night-before prep, frozen volume), docs numbers reconciled |
-| late Sep | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23): lexical leg + rank fusion, budget accounting, scorecard with baselines |
+| 2026-09-24 | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23, D-050…D-056): recorded supersession + PROV-O export, honest budget (`charged_tokens`) + BM25/rank fusion + value-per-token packing, retrieval scorecard with baselines (`docs/evaluation.md`), schema v6 store work, MCP 2026-07-28 alignment, engine-side rate limiting, STIX/OCSF connectors; GKE re-validation including an in-place v5→v6 migration (D-052) |
 | early Oct | Freeze features; night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist); presentation materials |
 | ~2026-10-13 | **Conference** (moved up from end of October) |
 
@@ -54,7 +54,9 @@ presentable.
 - ✅ `POST /v1/ask`, `POST /v1/expand`; SDK `ask()`/`expand()` live
 - Known v1 limitation: relevance is keyword overlap — "operating system"
   doesn't match `runs_os` facts (the conflict item still surfaces the answer).
-  Embedding similarity replaces this scorer in phase 4.
+  Embedding similarity replaces this scorer in phase 4. *(Since D-051 the
+  lexical leg is BM25 over the rendered facts, fused with cosine by
+  reciprocal rank fusion when vectors exist.)*
 
 ## Phase 2.5 — Scopes + answering LLMs ✅ (2026-09-03, D-012)
 
@@ -150,6 +152,11 @@ presentable.
   default-deny NetworkPolicies + PodDisruptionBudgets in every shape,
   registry validation on the NATS and Kafka write paths, Kafka SASL/TLS,
   dead-letter headers without row data, atomic 0600 keys file.
+- ✅ Design follow-ups (2026-09-24, D-050…D-056): recorded supersession
+  and PROV-O export, honest budget + hybrid ranking + value-per-token
+  packing, retrieval scorecard, schema v6 (incremental worker ticks,
+  per-entity gather limits, SQLite WAL readers), MCP 2026-07-28
+  alignment, engine-side rate limiting, STIX 2.1 / OCSF connectors.
 - ~~Scale-shape ingestion tier~~ **✅ built 2026-09-03 (pulled forward by the
   user), D-010:** Go ingest gateway validating against
   `contracts/schemas.json` (go tests run in the image build), nginx-balanced
@@ -263,6 +270,6 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
 `src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
-Verify from clean checkout: `docker compose run --rm test` (about 230 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
+Verify from clean checkout: `docker compose run --rm test` (about 380 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
 Demo rehearsal: `docker compose up -d loom && docker compose exec loom
 python -m loom.seed load`, then hit `/v1/ask`.

@@ -277,7 +277,7 @@ and the failover finding are in `docs/decisions.md`.
 The posture changes of D-048 (container securityContext with a read-only
 root filesystem, no service-account token, default-deny NetworkPolicies,
 PodDisruptionBudgets, non-root NATS, the bounded JetStream) had only been
-kustomize-validated. Same recipe as D-043 — project `loom1-508221`, a fresh
+kustomize-validated. Same recipe as D-043 — project `<PROJECT_ID>`, a fresh
 zonal cluster (`3 × e2-standard-4`, `us-central1-a`, **Dataplane V2** so
 NetworkPolicy is enforced), CloudNativePG 1.26, images built from `dda1051`
 and pushed to Artifact Registry, the `scale-pg-ha` overlay rendered with

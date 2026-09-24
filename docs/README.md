@@ -27,10 +27,15 @@ Read in this order depending on why you're here.
   store-derived questions (lease at T, conflicts, multi-hop, abstention,
   numeric, ordering), rule-scored, with the command that reproduces the
   talk table.
+- **[interop.md](interop.md)** — standards at the edges: STIX 2.1 and OCSF
+  connectors (import and export, mapping tables, what is not mapped,
+  `examples/stix_import.py`). The PROV-O provenance export
+  (`GET /v1/observations/{id}/prov`) is in
+  [contracts.md](contracts.md#provenance-export-get-v1observationsidprov).
 - **[demo.md](demo.md)** — the conference walkthrough: three acts, every
   command, expected output, fallbacks, rehearsal checklist.
 - **[contracts.md](contracts.md)** — the wire shapes (the real API); JSON
-  Schema export.
+  Schema export; PROV-O provenance export.
 - **[concepts.md](concepts.md)** — glossary: observation, claim, context pack,
   scope, bitemporal, dossier, tombstone, and the rest, defined precisely.
 
@@ -46,9 +51,9 @@ Read in this order depending on why you're here.
 - **[infrastructure.md](infrastructure.md)** — detailed Mermaid views: the
   one-container shape, the fully scaled k8s shape, and the read and write
   flows through them.
-- **[decisions.md](decisions.md)** — every design decision (D-001…D-045) with
+- **[decisions.md](decisions.md)** — every design decision (D-001 onward) with
   rationale, the hard constraints, and the open questions.
 - **[roadmap.md](roadmap.md)** — phase status and the path to the conference.
-- **[hardening.md](hardening.md)** — verified issue list from the 2026-09-08
-  review (security gates, store robustness, provenance gaps, demo risks),
-  with priorities and status.
+- **[hardening.md](hardening.md)** — verified issue lists from the
+  2026-09-08 and 2026-09-23 reviews and later ones (security gates, store
+  robustness, provenance gaps, demo risks), with priorities and status.

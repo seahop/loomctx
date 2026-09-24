@@ -1,9 +1,14 @@
+# credentials: .env and every variant (.env.local, .env.prod, ...);
+# the template stays tracked
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 *.db
 .pytest_cache/
 dist/
+node_modules/
 *.egg-info/
 # contracts/schemas.json is TRACKED (the language-neutral contract the Go
 # gateway builds against; CI checks it stays in sync) — only ignore stray

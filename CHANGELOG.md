@@ -3,12 +3,83 @@
 Loom is pre-1.0: contracts are stable within a minor version and every
 change to them is recorded in `docs/decisions.md` (D-numbers below).
 
-## Unreleased — the 2026-09-23 review batch (D-046…D-049)
+## Unreleased
+
+Everything below is on `main` and not yet in a tagged release (the latest
+tag is v0.1.0).
+
+<!-- COORDINATOR: add the 2026-09-24 review batch here, as
+     "### The 2026-09-24 review batch (D-0xx…)", above the D-050…D-056 section. -->
+
+### Design follow-ups to the 2026-09-23 review (D-050…D-056)
+
+#### Read path (D-050, D-051)
+- Recorded supersession: `ClaimIn.supersedes` / `Observation.supersedes`
+  (additive) name the earlier observation a claim corrects — recorded,
+  never inferred. A visibly superseded row leaves conflict detection, ranks
+  ×0.5 and renders `[superseded by <cite>]`; for an `as_of` before the
+  correction it is current again. Every ingest door validates the target
+  (same namespace, same subject, visible)
+- `GET /v1/observations/{id}/prov` exports one observation's provenance as
+  PROV-O JSON-LD, gated like the raw observations route
+- Honest budget: the budget charges the compact rendering an agent receives
+  (text plus citations plus handle hints); `est_tokens` recalibrated to
+  `len/3 + 4`; `ContextPack.charged_tokens` (additive); handles capped at
+  15 % of the budget. Documented pack numbers moved accordingly
+- Hybrid ranking: BM25 over the gathered candidates (predicate names split
+  into words) fused with cosine by reciprocal rank fusion; value-per-token
+  packing with a diversity penalty; entity-valued conflicts with normalized
+  values and overlapping validity windows; a `more` handle pages past the
+  gather cap
+
+#### Store (D-054, schema v6)
+- Schema v6: `observations.supersedes`, five indexes, `norm_key` recompute
+  for colon-separated hex keys (IPv6, MAC, host:port); an older image warns
+  and skips DDL
+- Worker ticks are incremental (per-model/shard high-water marks with a
+  periodic full rescan); the multi-entity gather pre-limits per entity
+  (20k-edge hub: SQLite 101 → 21 ms, Postgres 170 → 13 ms)
+- SQLite reads use a pool of WAL readers (`LOOM_DB_READERS`, default 4);
+  `iter_entities(since=)` makes the alias pass incremental
+
+#### Evaluation (D-053)
+- `python -m loom.retrieval_eval`: packs at graded budgets against `full`,
+  vector top-k and recency top-k on store-derived questions, rule-scored,
+  no LLM judge; see `docs/evaluation.md`
+
+#### MCP, enrichment, connectors (D-055, D-056)
+- MCP 2026-07-28 alignment: `outputSchema` + `structuredContent` on every
+  tool, read-only/idempotent annotations, `format: concise|detailed`,
+  `record_claim` takes `supersedes` and derives a content-addressed
+  `event_id`
+- CISA ADP lands as the third CVSS scorer (`cisa-adp`); SSVC decision points
+  become `ssvc_*` claims when present
+- Extraction retries only the windows that failed; a partial is `done` at
+  the attempt bound; `agent_eval` uses adaptive thinking on Anthropic models
+- STIX 2.1 and OCSF interop as connectors (`loom.connectors.stix`,
+  `loom.connectors.ocsf`), import and export, with per-item Loom citations;
+  the engine core learns nothing about either (`docs/interop.md`,
+  `examples/stix_import.py`)
+- Seed: 592 claims, including a same-source `contract_owner` correction
+  that supersedes its predecessor
+
+#### Security and operations (D-052, D-056)
+- Engine-side rate limiting (`RateLimitMiddleware`): one token bucket per
+  grant, a stricter bucket for the LLM/embedder routes, 429 +
+  `Retry-After`; dials `LOOM_RATE_*` and per-key fields in the keys file;
+  unset = unlimited
+- Runtime image ships without a package manager (the first gated publish
+  failed Trivy on pip's vendored `msgpack` and the base `setuptools`)
+- GKE re-validation of the D-048 posture (NetworkPolicy enforcement, PDB
+  drains, failover with zero failed writes) and an in-place v5 → v6
+  migration on a populated HA Postgres (`deploy/README.md`)
+
+### The 2026-09-23 review batch (D-046…D-049)
 
 Six parallel review passes found ~60 verified issues; all landed except the
 design follow-ups listed in `docs/hardening.md` §R.
 
-### Read path (D-046)
+#### Read path (D-046)
 - `as_of` is the observation-time axis, applied in the store query (busy
   entities no longer yield empty time-travel packs; `truncated` counts as of T)
 - Ingest rejects `observed_at` more than 24 h in the future; recency clamps to now
@@ -19,7 +90,7 @@ design follow-ups listed in `docs/hardening.md` §R.
 - Chunked-upload body cap, `nosniff`/`no-store`, ungated key required for
   `POST /v1/schemas`, answer prompt delimits items as data
 
-### Store (D-049)
+#### Store (D-049)
 - Reversible merges: `merge_log` + `unmerge` (schema v5); claims for a
   merged-away ref land on the canonical entity
 - Blob-offload wrapper delegates the batch paths; shards no longer inherit
@@ -28,7 +99,7 @@ design follow-ups listed in `docs/hardening.md` §R.
   per model; purge cleans ANN rows; pgvector minority-namespace fallback;
   `norm_key` keeps IP/version separators
 
-### Enrichment, LLM, MCP (D-047)
+#### Enrichment, LLM, MCP (D-047)
 - Anthropic client works with thinking-enabled models; no redirects with the
   key; Retry-After to 60 s with jitter; usage logged per job
 - Extraction per window with lease renewal; random document delimiter;
@@ -40,7 +111,7 @@ design follow-ups listed in `docs/hardening.md` §R.
 - Eval: store-derived lease truth, non-KEV CVEs penalized; connector
   validates downloads before caching
 
-### Supply chain, CI, deployment (D-048)
+#### Supply chain, CI, deployment (D-048)
 - `requirements.lock` consumed by the Dockerfile; every base image pinned by
   digest; Dependabot; SHA-pinned actions; `govulncheck`; Trivy gate; SBOM +
   provenance; build once, promote the tested image
@@ -49,7 +120,7 @@ design follow-ups listed in `docs/hardening.md` §R.
 - k8s: securityContext, NetworkPolicies, PDBs, bounded JetStream, no SA token
 - Compose binds to 127.0.0.1 by default; documented env vars now pass through
 
-### Docs and demo
+#### Docs and demo
 - Demo script made honest (night-before prep, pinned judge, frozen volume,
   rendered fallback transcripts); numbers reconciled; README gains
   "How it differs" and "Limitations"; talk date is mid-October

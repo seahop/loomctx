@@ -1,5 +1,6 @@
 .git
 .env
+.env.*
 __pycache__
 *.pyc
 *.db
@@ -7,3 +8,13 @@ __pycache__
 scratch
 secrets
 keys.json
+# never part of an image: harness/session state (incl. worktrees), local eval
+# output, JS build/deps, and stray local databases in any directory
+.claude
+eval
+**/node_modules
+**/dist
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/__pycache__

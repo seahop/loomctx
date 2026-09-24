@@ -191,3 +191,30 @@ before destructive maintenance.
 - **SSO/OIDC identity** — keys identify *principals* Loom-side; mapping
   them onto your IdP is an integration, not a core concern, until demand
   says otherwise.
+
+## Environment reference: dials not covered above
+
+Most settings are documented where they are used: `.env.example` (the
+compose pass-through list), `deploy/README.md` "Scaling dials", and the
+rate-limit table above. These remaining ones are read by the code but were
+not written down anywhere else. Unset means the default shown.
+
+| Variable | Read by | Default | What it does |
+| --- | --- | --- | --- |
+| `LOOM_HTTP_HOST` | engine (`python -m loom.serve`) | `0.0.0.0` | listen address. Deliberately not `LOOM_HOST`/`LOOM_PORT`: Kubernetes injects `LOOM_PORT=tcp://…` into every pod when a Service is named `loom` |
+| `LOOM_HTTP_PORT` | engine | `8000` | listen port (non-numeric values fall back to the default) |
+| `LOOM_BLOB_S3_PREFIX` | engine, workers (artifact offload) | `loom` | key prefix inside `LOOM_BLOB_S3_BUCKET` |
+| `LOOM_KAFKA_BATCH` | `loom.kafka_consumer` | `200` | records fetched and committed per batch |
+| `LOOM_KAFKA_CONNECT_TIMEOUT` | `loom.kafka_consumer` | `120` | seconds to keep retrying the first broker connection before exiting |
+| `LOOM_WORKER_ID` | `loom.enrich` | hostname | worker identity recorded on leases |
+| `LOOM_WORKER_SHARD` | `loom.enrich` | unset | explicit embedding-backlog shard as `i/n`; overrides the StatefulSet-ordinal split driven by `LOOM_WORKER_COUNT` |
+| `LOOM_LEASE_SECONDS` | `loom.enrich` | `600` | how long an artifact or dossier lease lasts before another worker may take it over (renewed per extraction window) |
+| `LOOM_AGENT_THINKING` | `loom.agent_eval` | `adaptive` | `off` omits the thinking parameter on the Anthropic path |
+| `LOOM_GATEWAY_ADDR` | Go gateway | `:8080` | listen address |
+| `LOOM_SCHEMAS_PATH` | Go gateway | `/etc/loom/schemas.json` | the contract schema it validates envelopes against (baked into the image) |
+| `LOOM_FORWARD_URL` | Go gateway | `http://loom:8000` | where envelopes go when `LOOM_NATS_URL` is unset (no queue) |
+| `LOOM_URL`, `LOOM_SCHEMAS` | SDK test containers (`sdk-ts`, `sdk-go`) | set by compose | the live engine and the schema file the SDK tests use; not engine settings |
+
+Not settings, despite the name: `LOOM_UUID_NS` is a constant in
+`loom.connectors.stix` (the UUIDv5 namespace for deterministic STIX ids)
+and `LOOM_CONTEXT` is the delimiter of the answer prompt's data block.

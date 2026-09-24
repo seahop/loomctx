@@ -53,19 +53,21 @@ without touching Loom's code.
 | `docs/quickstart.md` | 5-minute run: seeded demo, a cited pack, an answer |
 | `docs/tutorial.md` | 30-minute build of your own security domain, end to end |
 | `docs/demo.md` | The conference demo script: night-before prep, three acts, fallbacks, rehearsal checklist |
-| `examples/` | Runnable sender + agent-query scripts (stdlib only) |
+| `examples/` | Runnable sender, agent-query and STIX-import scripts (stdlib only) |
 | `demo/` | Saved agent transcripts (Claude Code over MCP, `agent_eval`) rendered as fallback pages, and an MCP config |
 | `docs/architecture.md` | Full system design: layers, write/read paths, retrieval contract |
 | `docs/contracts.md` | The data contracts (the real API of the framework) |
 | `docs/concepts.md` | Glossary — precise definitions of every term of art |
 | `docs/decisions.md` | Language/tech choices with rationale, and the constraints we hold |
-| `docs/hardening.md` | The verified issue list from the 2026-09-08 review, with status |
+| `docs/hardening.md` | The verified issue lists from the 2026-09-08 and 2026-09-23 reviews (and later ones), with status |
 | `docs/administration.md` | Running it for a team: users, scopes, rotation, retention |
 | `docs/roadmap.md` | Phased execution plan with current status |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
 | `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
 | `docs/models.md` | Which LLMs drive Loom well as agents: measured scorecard with cost, and how to re-run it |
+| `docs/evaluation.md` | The retrieval scorecard: context packs against full-context, vector and recency baselines, rule-scored |
+| `docs/interop.md` | STIX 2.1 and OCSF connectors: import/export, mapping tables, `examples/stix_import.py` (PROV-O provenance export, `GET /v1/observations/{id}/prov`, is in `docs/contracts.md`) |
 | `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
 | `gateway/` | The Go ingest gateway for the scale shape: validates against `contracts/schemas.json`, forwards to NATS JetStream |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
@@ -148,11 +150,13 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 
 ## Limitations
 
-Known and deliberate, as of `v0.1.0`; the open list is `docs/hardening.md`.
+Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.md`.
 
-- **Ranking without an embedder is keyword overlap.** Set `LOOM_EMBED_*` for
+- **Ranking without an embedder is lexical.** Set `LOOM_EMBED_*` for
   semantic ranking, document excerpts and `find_related`; without it the
-  engine still works, but "operating system" does not match `runs_os`.
+  engine still works (BM25 over what the pack renders, predicate names
+  split into words), but a question has to share words with the facts it
+  wants — synonyms are the embedder's job.
 - **Gather cap.** A read collects at most 1,000 observations per entity;
   when a subject has more, the pack says so in `truncated` (gathered/total)
   and the handles reach the rest. A hub entity is never silently sampled.
@@ -175,7 +179,10 @@ Known and deliberate, as of `v0.1.0`; the open list is `docs/hardening.md`.
 
 ## Status
 
-`v0.1.0` (2026-09-09, `CHANGELOG.md`). Working end to end: contracts,
+Latest tag `v0.1.0` (2026-09-09); `main` carries the unreleased work listed
+under "Unreleased" in `CHANGELOG.md` (review fixes, recorded supersession,
+PROV-O export, honest budgets and hybrid ranking, schema v6, rate limiting,
+STIX/OCSF connectors). Working end to end: contracts,
 SQLite/Postgres stores, claim + document ingestion (single, batch, Go
 gateway, Kafka, shippers), context packs with scopes, relation chains and
 coverage reporting (`/v1/ask`, `/v1/expand`), provider-flexible answering

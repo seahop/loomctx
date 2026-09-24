@@ -26,8 +26,8 @@ get a numbered entry in `decisions.md` rather than a comment.
 
 ## Workflow
 
-1. Branch from `main`. Keep `main` green — the repo is public and CI
-   publishes images from it.
+1. Branch from `main`. Keep `main` green — the repo is meant to be public
+   and CI publishes images from it.
 2. `scripts/verify.sh` — the suite under CI conditions (no provider
    variables) plus the contract drift checks; `--pg` adds the Postgres
    lane. Anything that touches `contracts.py` or `api/http.py` changes
