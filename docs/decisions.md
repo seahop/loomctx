@@ -1710,6 +1710,73 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   `subjects_citing` is bounded in SQL. `wipe()` sweeps declines and the
   merge log. The SQLite lock is re-entrant with outermost-only commit.
 
+## D-050 · Recorded supersession and PROV-O export (2026-09-24)
+
+`ClaimIn.supersedes` / `Observation.supersedes` name an earlier observation
+this one corrects; it is **recorded, never inferred**. Read side: an
+observation that a *visible* later observation supersedes is excluded from
+conflict detection, ranks at ×0.5, and renders `[superseded by <cite>]`;
+for an `as_of` before the correction it is current again (visibility
+decides, so a redacted, out-of-scope, or after-T correction does not act).
+Ingest validates against the store at every HTTP door — same namespace,
+same subject, visible, else 422 or a rejected batch item, and a batch
+cannot supersede a row recorded earlier in the same batch. The store
+persists the column (schema v6, D-054); export/import carry it;
+`superseded_ids` answers the single-row question. `GET
+/v1/observations/{id}/prov` exports one observation as PROV-O JSON-LD
+(prov:Entity/Agent/Activity, derivation from the artifact span, an
+extraction Activity with the model agent when attrs name one,
+wasRevisionOf/wasInvalidatedBy for a supersession), gated like the raw
+observations route with 404 for anything outside the reader's world — a
+plain dict, not a contract model. The seed carries one same-source
+`contract_owner` correction so the demo can show a recorded correction
+next to the two-source conflict.
+
+## D-051 · Honest budget, hybrid ranking, value-per-token packing, entity conflicts, pages (2026-09-24)
+
+The read-path design gaps the 2026-09-23 review left open (hardening §R
+1–5), all landed and measured with the retrieval scorecard (D-053):
+
+- **Honest budget.** The budget charges the compact rendering an agent
+  actually receives — item text plus every citation (cite, source, date),
+  handle hint plus id — not item text alone. `est_tokens` is recalibrated
+  to `len/3 + 4` from a cl100k measurement (2.7 chars/token on rendered
+  facts; the old `len/4 + 8` under-counted conflicts by about a quarter).
+  `ContextPack.charged_tokens` (additive) reports the sum; handles take at
+  most 15 % of the budget with the first always shipped (a pack that cut
+  something must say so; it rides outside the budget only when the budget
+  is below twice a handle's cost). The scorecard checks the rendered prompt
+  with a real tokenizer (`tiktoken` in the test extra): measured
+  wire/budget 0.82–0.99, never over 1.0. Every documented pack number
+  moved (web-01 at budget 400 is now `charged_tokens` 378, one handle
+  "74 more", `omitted_handles` 4; the IP lease pack is 47).
+- **Hybrid ranking.** A BM25 leg over the gathered candidates (predicate
+  names split so "operating system" reaches `runs_os` and "port" reaches
+  `listens_on_port`, one suffix rule, `attrs` never scored) fused with the
+  cosine leg by reciprocal rank fusion (k=60) when vectors exist; with a
+  single leg the normalized scores are used, because RRF collapses rank 1
+  vs 2 to 1/61 vs 1/62 and the rare-term IDF signal would vanish. Recency
+  and confidence are post-fusion multipliers; a relevance floor keeps
+  unmatched facts shippable by recency; extracted ×0.85; superseded ×0.5.
+  Two new scorecard rows (predicate-name words, rare-term IDF) fail the
+  old keyword scorer.
+- **Value-per-token packing.** Selection is score per charged token with
+  an MMR-style diversity penalty (×0.5 once a predicate holds three items),
+  so 40 logins no longer crowd out flows and ports; conflicts still ship
+  first.
+- **Entity-valued conflicts.** Values are normalized before comparison
+  (casefold, bool↔"true", 9 == 9.0) and validity windows must overlap;
+  entity-valued predicates now conflict when each source asserts one
+  current object (a single source asserting several current objects makes
+  the predicate a set on that subject, e.g. logins, `affects` — not a
+  contradiction). The single-source lease reassignment stays a time
+  series.
+- **Pages past the gather cap.** A truncated entity gets a `more` handle
+  carrying the window edge and the question; expanding it gathers
+  `observed_before` that edge and pages until exhausted, so the 1,7xx
+  older kernel observations are reachable — the confident-"no" gap D-038
+  described now has a handle to pull.
+
 ## D-052 · GKE re-validation of the posture changes (2026-09-24)
 
 D-048 changed what every pod is allowed to do (read-only root, no

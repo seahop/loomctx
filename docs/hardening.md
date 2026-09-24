@@ -209,11 +209,11 @@ which change measured numbers and wait for the frozen-volume rehearsal.
 
 | ID | Status | Item |
 | --- | --- | --- |
-| R-1 | ⬜ | Budget honesty: the budget charges item text only; citations (~25 tokens each) and up to 32 handles ride free, so an "800-token" pack is ~2,500 on the wire for an MCP agent. Charge the rendered form; one real-tokenizer test. |
-| R-2 | ⬜ | Lexical leg: FTS5 / `tsvector` BM25 fused with cosine by reciprocal rank (every serious peer has it); tokenize predicate names so "operating system" matches `runs_os`. |
-| R-3 | ⬜ | Packing: value-per-token with an MMR diversity term instead of greedy trim by score; cosine normalized within the gathered set (real embedders compress to ~0.27–0.40, so recency dominates). |
-| R-4 | ⬜ | Entity-valued conflicts never surface (`isinstance(object, EntityRef): continue`); `str()` value normalization false-conflicts `True`/`"true"`. |
-| R-5 | ⬜ | Pagination past the gather cap: a `before:` cursor in the handle payload so the 1,740 truncated kernel CVEs are reachable. |
+| R-1 | ✅ | (D-051) Budget honesty: the budget charges item text only; citations (~25 tokens each) and up to 32 handles ride free, so an "800-token" pack is ~2,500 on the wire for an MCP agent. Charge the rendered form; one real-tokenizer test. |
+| R-2 | ✅ | (D-051) Lexical leg: FTS5 / `tsvector` BM25 fused with cosine by reciprocal rank (every serious peer has it); tokenize predicate names so "operating system" matches `runs_os`. |
+| R-3 | ✅ | (D-051) Packing: value-per-token with an MMR diversity term instead of greedy trim by score; cosine normalized within the gathered set (real embedders compress to ~0.27–0.40, so recency dominates). |
+| R-4 | ✅ | (D-051) Entity-valued conflicts never surface (`isinstance(object, EntityRef): continue`); `str()` value normalization false-conflicts `True`/`"true"`. |
+| R-5 | ✅ | (D-051) Pagination past the gather cap: a `before:` cursor in the handle payload so the 1,740 truncated kernel CVEs are reachable. |
 | R-6 | ✅ | (D-053) Scorecard: `test_quality.py` is eight booleans with no baseline. A small labeled set over the vulns corpus, MRR/nDCG, a recency-only and a full-context baseline, abstention and as-of cases, an NLI/LLM-judge citation *support* check, cost columns. |
 | R-7 | ✅ | (D-055) MCP 2026-07-28: `outputSchema` from the contracts, `readOnlyHint` annotations, handle TTL in the `expand` description, a `format: concise|detailed` knob, consider merging `ask`/`ask_scope`. |
 | R-8 | 🔨 | (STIX/OCSF + Vulnrichment landed, D-055/D-056; supersession + PROV-O in D-050) Explicit, cited supersession edge (recorded, never inferred); PROV-O JSON-LD export; STIX 2.1 / OCSF predicate mapping in the registry; CISA Vulnrichment as a third vuln source. |
