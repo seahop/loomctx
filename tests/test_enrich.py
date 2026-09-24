@@ -1025,9 +1025,11 @@ def test_extracted_source_label_is_sanitized_and_unforgeable(tmp_path):
 
 def test_extraction_writes_each_window_and_survives_a_garbled_one(tmp_path):
     """One bad window used to discard the whole document's claims, five
-    times over; now each window's claims land as soon as they parse and the
-    artifact is done unless EVERY window was unreadable."""
+    times over; now each window's claims land as soon as they parse. A
+    garbled window leaves the artifact pending (D-047 follow-up: it used to
+    be marked done and never retried) and the retry runs only that window."""
     from loom import enrich
+    enrich._parsed_windows.clear()
     store = _store(tmp_path)
     filler = ("Routine paragraph about nothing in particular that pads the "
               "report out to a realistic length for testing purposes.\n\n")
@@ -1044,10 +1046,14 @@ def test_extraction_writes_each_window_and_survives_a_garbled_one(tmp_path):
 
         def __init__(self):
             self.n = 0
+            self.garbled = False
 
         def complete(self, system, user, max_tokens=1024):
             self.n += 1
-            if self.n == 2:
+            # the appendix window is garbled once (the filler windows are
+            # byte-identical, and an identical window that parsed counts)
+            if "db-02 was patched" in user and not self.garbled:
+                self.garbled = True
                 return "<<garbage>>"
             claims = []
             if "web-01 runs fedora" in user:
@@ -1056,15 +1062,114 @@ def test_extraction_writes_each_window_and_survives_a_garbled_one(tmp_path):
                 claims.append(_claim_json("db-02", "patched_to", "rhel-9.4", "db-02 was patched to rhel-9.4"))
             return '{"claims":[%s]}' % ",".join(claims)
 
-    assert extract_from_artifact(store, PerWindow(), art) == 2
+    llm = PerWindow()
+    with pytest.raises(enrich.PartialExtractionError, match="1 of %d windows" % len(windows)) as exc:
+        extract_from_artifact(store, llm, art)
+    assert exc.value.written == 1 and exc.value.failed_offsets == [windows[-1][0]]
+    assert store.get_artifact("default", art.id).extraction_status == "pending"
+    assert store.observations_for("default", EntityRef(type="host", key="web-01"))
+    assert not store.observations_for("default", EntityRef(type="host", key="db-02"))
+    # byte-identical windows (the filler) are one unit of work: a twin that
+    # parsed covers the other, within a run and across retries
+    distinct = len({w for _, w in windows})
+    assert distinct < len(windows) and llm.n == distinct
+    assert len(extended) == distinct and extended[0] == (art.id, enrich.WORKER_ID, enrich.LEASE_SECONDS)
+    # the retry costs only the failed window: the others are skipped by
+    # content hash, the claims already written stay single
+    assert extract_from_artifact(store, llm, art) == 1
+    assert llm.n == distinct + 1
     assert store.get_artifact("default", art.id).extraction_status == "done"
+    assert art.id not in enrich._parsed_windows
     assert store.observations_for("default", EntityRef(type="host", key="db-02"))
-    assert len(extended) == len(windows) and extended[0] == (art.id, enrich.WORKER_ID, enrich.LEASE_SECONDS)
+    assert len(store.observations_for("default", EntityRef(type="host", key="web-01"))) == 1
     # every window garbled: a parse error, so the artifact is deferred and retried
     art2 = store.store_artifact(DocumentIn(text=text, source="s", observed_at=OBSERVED))
     with pytest.raises(enrich.ExtractionParseError, match="every window"):
         extract_from_artifact(store, UsageLLM("nope"), art2)
     assert store.get_artifact("default", art2.id).extraction_status == "pending"
+    # through the worker: a partial failure is deferred with backoff like
+    # any other, its written count reaches the tick, and at the attempt
+    # bound the artifact is done (what parsed is stored) rather than failed
+    enrich._parsed_windows.clear()
+    store.set_extraction_status("default", art2.id, "done")            # out of the backlog
+    art3 = store.store_artifact(DocumentIn(text=text, source="s", observed_at=OBSERVED))
+    assert enrich.extract_pending(store, PerWindow()) == 1
+    a3 = store.get_artifact("default", art3.id)
+    assert a3.extraction_status == "pending" and a3.extraction_attempts == 1
+    past = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.defer_extraction("default", art3.id, enrich.EXTRACTION_MAX_ATTEMPTS - 1, past)
+    garbled = UsageLLM("<<garbage>>")
+    assert enrich.extract_pending(store, garbled) == 0
+    assert len(garbled.prompts) == 1                                     # only the failed window re-ran
+    a3 = store.get_artifact("default", art3.id)
+    assert a3.extraction_status == "done" and a3.extraction_attempts == enrich.EXTRACTION_MAX_ATTEMPTS
+    assert art3.id not in enrich._parsed_windows
+
+
+def test_vanished_blob_is_skipped_not_retried(tmp_path, caplog):
+    """An artifact whose blob is gone (attrs._blob_missing, text None,
+    D-049) has nothing to extract or chunk: extraction marks it skipped
+    and chunking reports it once, instead of both retrying every tick."""
+    from loom import enrich
+    store = _store(tmp_path)
+    art = store.store_artifact(DocumentIn(text="web-01 runs fedora.", source="s", observed_at=OBSERVED))
+    ghost = art.model_copy(update={"text": None, "attrs": {**art.attrs, "_blob_missing": True}})
+    llm = UsageLLM('{"claims":[]}')
+    with caplog.at_level("ERROR", logger="loom.enrich"):
+        assert extract_from_artifact(store, llm, ghost) == 0
+    assert not llm.prompts and "blob missing" in caplog.text
+    assert store.get_artifact("default", art.id).extraction_status == "skipped"
+    caplog.clear()
+    store.artifacts_needing_chunks = lambda model, limit, lease=None: [ghost]
+    enrich._unchunkable.discard(art.id)
+    with caplog.at_level("ERROR", logger="loom.enrich"):
+        assert enrich.chunk_artifacts(store, HashingEmbedder()) == 0
+        assert enrich.chunk_artifacts(store, HashingEmbedder()) == 0
+    assert caplog.text.count("blob missing") == 1 and art.id in enrich._unchunkable
+    # an ordinary empty document is still the plain 'skipped' (no error)
+    empty = store.store_artifact(DocumentIn(text="   ", source="s", observed_at=OBSERVED))
+    caplog.clear()
+    with caplog.at_level("ERROR", logger="loom.enrich"):
+        extract_from_artifact(store, llm, empty)
+    assert store.get_artifact("default", empty.id).extraction_status == "skipped" and not caplog.text
+    store.close()
+
+
+def test_alias_scan_uses_the_stores_since_filter_when_it_has_one(tmp_path):
+    """With a high-water mark, a store whose iter_entities takes `since=`
+    answers 'anything new?' in one cheap query; nothing new means no full
+    walk. A store without the parameter is walked as before."""
+    from loom import enrich
+    from loom.store.sqlite import SqliteStore
+    store = _alias_store(tmp_path)
+    hwm = datetime(2030, 1, 1, tzinfo=timezone.utc)                    # entities are created at load time
+    assert enrich._entities_since(store, "ns", hwm) is None            # this store cannot filter
+    calls = []
+
+    class Since(SqliteStore):
+        def iter_entities(self, namespace=None, since=None):
+            calls.append(since)
+            for e in super().iter_entities(namespace):
+                if since is None or e.created_at > since:
+                    yield e
+
+    (tmp_path / "s").mkdir()
+    s2 = _alias_store(tmp_path / "s")
+    s2.close()
+    s2 = Since(tmp_path / "s" / "alias.db")
+    assert enrich._entities_since(s2, "ns", hwm) == []
+    future = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    calls.clear()
+    assert enrich.alias_candidates(s2, "ns", "product", since=future) == []
+    assert calls == [future]                                             # one filtered query, no walk
+    calls.clear()
+    assert enrich.alias_candidates(s2, "ns", "product", since=None)
+    assert calls == [None]
+    calls.clear()
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert enrich.alias_candidates(s2, "ns", "product", since=old)     # something new: the full walk
+    assert calls == [old, None]
+    store.close(); s2.close()
 
 
 def test_extraction_counts_a_none_reply_as_an_attempt(tmp_path):

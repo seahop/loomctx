@@ -275,6 +275,19 @@ def _chunk_text(text: str, target: int = 400, hard: int = 800,
     return chunks
 
 
+BLOB_MISSING = "_blob_missing"   # attrs marker set by the offload wrapper (D-049)
+
+# Artifacts whose blob vanished, seen by this process's chunking job: the
+# row keeps its stub text, so the backlog query re-offers it every lease
+# window; there is no chunk status to persist, so it is remembered here
+# and reported once (a store-side marker is the real fix).
+_unchunkable: set[str] = set()
+
+
+def _blob_missing(artifact: Artifact) -> bool:
+    return bool(artifact.attrs.get(BLOB_MISSING)) and artifact.text is None
+
+
 def chunk_artifacts(store: GraphStore, embedder: Embedder, limit: int = 4) -> int:
     """Chunk + embed pending document artifacts so their passages can rank
     into packs as doc_excerpt items (D-020). Chunks are keyed by embedding
@@ -282,6 +295,12 @@ def chunk_artifacts(store: GraphStore, embedder: Embedder, limit: int = 4) -> in
     total = 0
     for artifact in store.artifacts_needing_chunks(
             embedder.model, limit, lease=(WORKER_ID, LEASE_SECONDS)):
+        if _blob_missing(artifact):
+            if artifact.id not in _unchunkable:
+                _unchunkable.add(artifact.id)
+                log.error("artifact %s/%s: blob missing (attrs.%s); nothing to chunk — restore the "
+                          "blob or purge the artifact", artifact.namespace, artifact.id, BLOB_MISSING)
+            continue
         pieces = _chunk_text(artifact.text or "")
         if not pieces:
             continue
@@ -359,6 +378,32 @@ class ExtractionParseError(ValueError):
     error (models are nondeterministic), dead-lettered after the bound."""
 
 
+class PartialExtractionError(ExtractionParseError):
+    """Some windows were unreadable while others parsed and landed. The
+    artifact stays pending so the next attempt re-runs only the failed
+    windows (D-047 follow-up: it used to be marked done and the garbled
+    windows were never retried). `written` is what this run stored, so
+    the tick's count stays right."""
+
+    def __init__(self, message: str, written: int, failed_offsets: list[int]):
+        super().__init__(message)
+        self.written = written
+        self.failed_offsets = failed_offsets
+
+
+# Windows that parsed, per artifact, keyed by the window's content hash
+# (per process). A retry after a partial failure — or after a provider
+# outage mid-document — skips them, so it costs only the windows that
+# failed. The store has no per-window state, so a restart re-runs a
+# pending artifact's good windows once; claims are content-addressed, so
+# that costs calls, never duplicates. Cleared when the artifact settles.
+_parsed_windows: dict[str, set[str]] = {}
+
+
+def _window_hash(window: str) -> str:
+    return hashlib.sha256(window.encode()).hexdigest()[:16]
+
+
 def _conform_type(store: GraphStore, namespace: str, ref: EntityRef,
                   registered: set[str], cache: dict) -> EntityRef | None:
     """An extractor names types freely (ip_address, vulnerability, URL). When
@@ -386,6 +431,15 @@ def _conform_type(store: GraphStore, namespace: str, ref: EntityRef,
 def extract_from_artifact(
     store: GraphStore, llm: LLMClient, artifact: Artifact
 ) -> int:
+    if _blob_missing(artifact):
+        # the row is a pointer whose blob vanished (D-049): there is no
+        # text to extract and a retry cannot conjure it — skipped, with an
+        # error an operator can act on, instead of retried every tick
+        log.error("artifact %s/%s: blob missing (attrs.%s); extraction skipped — restore the "
+                  "blob or purge the artifact", artifact.namespace, artifact.id, BLOB_MISSING)
+        _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "skipped")
+        _parsed_windows.pop(artifact.id, None)
+        return 0
     if not artifact.text or not artifact.text.strip():
         _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "skipped")
         return 0
@@ -406,11 +460,17 @@ def extract_from_artifact(
     written = 0
     failed_windows: list[tuple[int, str]] = []
     usage: dict[str, int] = {}
+    parsed = _parsed_windows.setdefault(artifact.id, set())
+    skipped = 0
     for offset, window in windows:
         # each window is its own unit of work: parsed claims are written at
         # once (event ids are content-addressed, so a retry never
         # duplicates) and a garbled reply costs only its own window instead
         # of the whole document, five times over
+        digest = _window_hash(window)
+        if digest in parsed:
+            skipped += 1        # landed on an earlier attempt; only the failed windows re-run
+            continue
         raw = llm.complete(EXTRACT_SYSTEM, _document_prompt(window, _document_tag()),
                            max_tokens=2000)
         _add_usage(usage, llm)
@@ -422,6 +482,7 @@ def extract_from_artifact(
                         artifact.id, offset, exc)
             _extend_lease(store, artifact.namespace, artifact.id)
             continue
+        parsed.add(digest)
         claims: list[ClaimIn] = []
         for index, c in enumerate(extracted):
             try:
@@ -490,17 +551,27 @@ def extract_from_artifact(
         _extend_lease(store, artifact.namespace, artifact.id)
     if dropped:
         log.info("artifact %s: %d extracted claims dropped by the registry", artifact.id, dropped)
-    if failed_windows and len(failed_windows) == len(windows):
-        raise ExtractionParseError(
-            f"every window of {artifact.id} unreadable; first: window @{failed_windows[0][0]}: "
-            f"{failed_windows[0][1]}")
     if failed_windows:
-        log.warning("artifact %s: %d of %d windows unreadable (@%s); %d claims kept from the rest",
+        offsets = [o for o, _ in failed_windows]
+        if not parsed:
+            _parsed_windows.pop(artifact.id, None)
+            raise ExtractionParseError(
+                f"every window of {artifact.id} unreadable; first: window @{failed_windows[0][0]}: "
+                f"{failed_windows[0][1]}")
+        # the good windows landed; the artifact stays pending and the next
+        # attempt (backed off and bounded like any failure) runs only these
+        log.warning("artifact %s: %d of %d windows unreadable (@%s); %d claims kept from the rest, "
+                    "%d windows already extracted; the unreadable ones are retried",
                     artifact.id, len(failed_windows), len(windows),
-                    ", ".join(str(o) for o, _ in failed_windows), written)
+                    ", ".join(str(o) for o in offsets), written, skipped)
+        raise PartialExtractionError(
+            f"{len(failed_windows)} of {len(windows)} windows of {artifact.id} unreadable "
+            f"(@{', '.join(str(o) for o in offsets)}); first: {failed_windows[0][1]}",
+            written, offsets)
+    _parsed_windows.pop(artifact.id, None)
     _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "done")
-    log.info("extraction %s: %d claims from %d windows, %s", artifact.id, written, len(windows),
-             _usage_line(usage))
+    log.info("extraction %s: %d claims from %d windows (%d re-run), %s", artifact.id, written,
+             len(windows), len(windows) - skipped, _usage_line(usage))
     return written
 
 
@@ -517,13 +588,25 @@ def extract_pending(store: GraphStore, llm: LLMClient, limit: int = 4) -> int:
             # ValueError/TypeError: a reply the client could not shape
             # (None, a non-string) counts as an attempt like a parse error,
             # instead of escaping the guard with the attempt counter untouched
+            partial = isinstance(exc, PartialExtractionError)
+            if partial:
+                total += exc.written
             attempts = artifact.extraction_attempts + 1
             if attempts >= EXTRACTION_MAX_ATTEMPTS:
-                log.error("extraction dead-lettered for %s after %d attempts: %s",
-                          artifact.id, attempts, exc)
                 _with_worker(store.defer_extraction, artifact.namespace, artifact.id, attempts,
                              datetime.now(timezone.utc))
-                _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "failed")
+                if partial:
+                    # what parsed is stored; the rest never will — done, with
+                    # the offsets on record, rather than a dead letter that
+                    # reads as if nothing was extracted
+                    log.error("extraction of %s done with unreadable windows @%s after %d attempts: %s",
+                              artifact.id, ", ".join(str(o) for o in exc.failed_offsets), attempts, exc)
+                    _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "done")
+                else:
+                    log.error("extraction dead-lettered for %s after %d attempts: %s",
+                              artifact.id, attempts, exc)
+                    _with_worker(store.set_extraction_status, artifact.namespace, artifact.id, "failed")
+                _parsed_windows.pop(artifact.id, None)
                 continue
             delay = min(EXTRACTION_BACKOFF_MAX,
                         EXTRACTION_BACKOFF_BASE * 2 ** (attempts - 1))
@@ -788,6 +871,19 @@ _alias_seen_until: dict[tuple[str, str], datetime] = {}
 _alias_newest: dict[tuple[str, str], datetime] = {}
 
 
+def _entities_since(store: GraphStore, namespace: str, since: datetime) -> list | None:
+    """Entities created after `since`, when the store's `iter_entities`
+    takes `since=` (added alongside; probed, not assumed — a generator
+    raises the TypeError at the call or on the first next, depending on
+    the wrapper). None when it cannot filter: the caller walks everything."""
+    try:
+        it = store.iter_entities(namespace, since=since)
+        first = next(it, None)
+    except TypeError:
+        return None
+    return [] if first is None else [first, *it]
+
+
 def alias_candidates(store: GraphStore, namespace: str, entity_type: str,
                      since: datetime | None = None) -> list[tuple[EntityRef, EntityRef]]:
     """(stray, candidate) pairs of vendor:product keys that look like the
@@ -798,6 +894,10 @@ def alias_candidates(store: GraphStore, namespace: str, entity_type: str,
     left alone, never guessed. Measured on the KEV↔NVD join (D-042).
     With `since`, only pairs where at least one key was created after it
     are offered (the others were offered by an earlier pass)."""
+    if since is not None:
+        new = _entities_since(store, namespace, since)
+        if new is not None and not any(e.type == entity_type and e.key.count(":") == 1 for e in new):
+            return []       # nothing new of this type since the last pass: nothing to offer, no walk
     created: dict[str, datetime] = {}
     for e in store.iter_entities(namespace):
         if e.type == entity_type and e.key.count(":") == 1:

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -37,6 +38,15 @@ from .llm import OPENAI_COMPAT_BASES, _env, _post_json
 
 MAX_STEPS = int(os.environ.get("LOOM_AGENT_MAX_STEPS", "20"))   # model turns per task (D-037: 14 cut off thorough models)
 MAX_TOOL_CHARS = 24_000       # a tool result larger than this is cut, with a marker
+# Anthropic models think before they act, by default: at max_tokens=1500
+# the thinking alone hit the cap before a tool_use block, and the turn
+# read as a final answer. Current models take adaptive thinking
+# (`thinking: {"type": "adaptive"}`); Haiku 4.5 still takes a
+# budget_tokens form and runs without thinking here, as it did on the
+# scorecard. LOOM_AGENT_THINKING=off omits the parameter for every model.
+ANTHROPIC_MAX_TOKENS = 8000
+THINKING = (os.environ.get("LOOM_AGENT_THINKING") or "adaptive").strip().lower()
+_NO_ADAPTIVE = re.compile(r"haiku-4-5|sonnet-4-5|opus-4-5|claude-3")
 NAMESPACE = "netsec"
 LEASE_IP = "10.0.4.7"
 LEASE_AT = datetime(2026, 8, 20, tzinfo=timezone.utc)    # the moment the lease task asks about
@@ -268,19 +278,38 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
         return Turn(msg.get("content") or "", calls, msg,
                     {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0),
                      "cost": float(u.get("cost") or 0.0)})
-    data = _post_json(p.base_url + "/v1/messages", {
-        "model": p.model, "max_tokens": max_tokens, "system": system,
-        "tools": _anthropic_tools(tools), "messages": messages,
-    }, {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}, timeout=180)
+    data = _post_json(p.base_url + "/v1/messages", anthropic_body(p, system, messages, tools, max_tokens),
+                      {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}, timeout=180)
+    stop = data.get("stop_reason")
+    if stop == "refusal":
+        details = data.get("stop_details") or {}
+        raise RuntimeError(f"provider refused the request (category={details.get('category')!r})")
     text, calls = "", []
     for block in data.get("content", []):
         if block.get("type") == "text":
             text += block.get("text", "")
         elif block.get("type") == "tool_use":
             calls.append((block["id"], block["name"], block.get("input") or {}))
+    if stop == "max_tokens" and not calls:
+        logging.getLogger("loom.agent_eval").warning(
+            "%s hit max_tokens=%d before a tool call or an answer", p.model, ANTHROPIC_MAX_TOKENS)
     u = data.get("usage") or {}
+    # the whole content list goes back on the next turn — thinking blocks
+    # included, unchanged, as the same model expects them
     return Turn(text, calls, {"role": "assistant", "content": data.get("content", [])},
                 {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0)})
+
+
+def anthropic_body(p: Provider, system: str, messages: list, tools, max_tokens: int) -> dict:
+    """The Messages request: room for thinking plus a tool call, adaptive
+    thinking on the models that take it."""
+    body = {
+        "model": p.model, "max_tokens": max(max_tokens, ANTHROPIC_MAX_TOKENS), "system": system,
+        "tools": _anthropic_tools(tools), "messages": messages,
+    }
+    if THINKING != "off" and not _NO_ADAPTIVE.search(p.model):
+        body["thinking"] = {"type": "adaptive"}
+    return body
 
 
 def tool_result_messages(p: Provider, turn: Turn, results: list[tuple[str, str]]) -> list:

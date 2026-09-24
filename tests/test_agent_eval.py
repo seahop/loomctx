@@ -148,6 +148,51 @@ def test_anthropic_dialect_round_trip():
     assert msgs[1]["content"][0] == {"type": "tool_result", "tool_use_id": "t1", "content": "{}"}
 
 
+class _Tool:
+    def __init__(self, name):
+        self.name, self.description, self.input_schema = name, "d", {"type": "object"}
+
+
+def test_anthropic_call_leaves_room_for_thinking_and_keeps_the_blocks(monkeypatch):
+    """D-047 follow-up: with thinking on by default, max_tokens=1500 was
+    spent before a tool_use block. The request now carries 8000 and
+    adaptive thinking (omitted for the models that take budget_tokens or
+    when LOOM_AGENT_THINKING=off); the reply's blocks — thinking included —
+    go back on the next turn unchanged; a refusal is an error, not an answer."""
+    sent = []
+
+    def fake_post(url, body, headers, timeout=0):
+        sent.append((url, body, headers))
+        return {"stop_reason": "tool_use", "usage": {"input_tokens": 7, "output_tokens": 3},
+                "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
+                            {"type": "text", "text": "looking"},
+                            {"type": "tool_use", "id": "t1", "name": "ask", "input": {"subject": "host:web-01"}}]}
+
+    monkeypatch.setattr(ae, "_post_json", fake_post)
+    monkeypatch.setattr(ae, "THINKING", "adaptive")
+    p = ae.Provider("anthropic", "https://api.anthropic.com", "claude-opus-5", "k")
+    turn = ae.call_model(p, "sys", [{"role": "user", "content": "q"}], [_Tool("ask")])
+    url, body, headers = sent[-1]
+    assert url.endswith("/v1/messages") and headers["x-api-key"] == "k"
+    assert body["max_tokens"] == ae.ANTHROPIC_MAX_TOKENS == 8000 and body["thinking"] == {"type": "adaptive"}
+    assert body["tools"][0]["input_schema"] == {"type": "object"} and body["system"] == "sys"
+    assert turn.calls == [("t1", "ask", {"subject": "host:web-01"})] and turn.text == "looking"
+    assert turn.raw_message["content"][0]["type"] == "thinking"           # replayed as-is
+    assert turn.usage == {"in": 7, "out": 3}
+    # models on the budget_tokens form run without the parameter, as on the scorecard
+    ae.call_model(ae.Provider("anthropic", "https://api.anthropic.com", "claude-haiku-4-5", "k"),
+                  "sys", [], [_Tool("ask")])
+    assert "thinking" not in sent[-1][1]
+    monkeypatch.setattr(ae, "THINKING", "off")
+    ae.call_model(p, "sys", [], [_Tool("ask")])
+    assert "thinking" not in sent[-1][1] and sent[-1][1]["max_tokens"] == 8000
+    # a refusal is reported, never scored as an empty answer
+    monkeypatch.setattr(ae, "_post_json", lambda *a, **k: {"stop_reason": "refusal", "content": [],
+                                                           "stop_details": {"category": "cyber"}})
+    with pytest.raises(RuntimeError, match="refused.*cyber"):
+        ae.call_model(p, "sys", [], [_Tool("ask")])
+
+
 @pytest.mark.skipif(not os.environ.get("LOOM_LIVE_AGENT"), reason="set LOOM_LIVE_AGENT=1 (and LOOM_LLM_*) for a live agent run")
 def test_live_agent_answers_the_lease_question(seeded_db):
     r = ae.evaluate(seeded_db, ["lease"])[0]
