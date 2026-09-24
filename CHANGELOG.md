@@ -8,7 +8,7 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
-### The 2026-09-24 review batch (D-057…D-060)
+### The 2026-09-24 review batch (D-057…D-061)
 
 Full list with statuses: `docs/hardening.md` §S.
 
@@ -38,6 +38,16 @@ Full list with statuses: `docs/hardening.md` §S.
   JSON, string citations, `charged_tokens` in the agent view
 - Excerpt KNN filters inside the index; SQLite `merge_candidates` no
   longer scans entities quadratically
+
+#### Multihop over hubs (D-061)
+- A scope question's topic (the predicates it names) completes a hub the
+  gather limit cut: `GraphStore.edges_to_carriers` (additive) admits the
+  far-end entities that carry the topic whatever their age — the KEV
+  exposure question goes from 0/6 to 6/6 in one ask
+- Sibling topic facts render grouped (four per item, each fact and edge
+  cited); a reached entity's off-topic conflict becomes a handle
+- `observations_for_many(predicates=)` (additive); `observations_by_ids`
+  uses the primary key on SQLite
 
 #### Security (D-059)
 - Host / Origin allowlist and JSON-only `/v1` bodies on the engine, MCP

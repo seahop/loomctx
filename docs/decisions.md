@@ -2103,6 +2103,45 @@ condition to the same bar, and a row nobody answered is never a score.
   export the newest version unless `--history`. Exports carry the original
   event ids and sources, so importing an export is a replay.
 
+## D-061 · Scope topics reach past a hub's window (2026-09-24)
+
+On the embedded vulns corpus every KEV multihop question ("which CVEs that
+CISA lists as exploited in the wild affect software host:web-01 runs?")
+sat outside Loom's gather: the kernel product keeps its newest 1,000 of
+~2,785 `affects` edges and 26 of the 31 KEV CVEs are older. A token-matched
+vector baseline got 5/6 at 3,200 tokens; Loom got 0/6 at every budget.
+
+- **Topic.** A scope question's topic is the predicates it names — every
+  content word of the predicate in the question — from the registry plus
+  the gathered rows, minus the walk's own edges.
+- **Hub completion.** For a hub the gather limit cut,
+  `GraphStore.edges_to_carriers` (additive) joins its expand edges (newest
+  10,000) to far-end rows on the topic in one indexed join per side
+  (SQLite `CROSS JOIN`: the planner otherwise scanned the namespace, 7 s →
+  19 ms; Postgres `LATERAL`). Those carriers are admitted whatever their
+  age, and first when the D-058 entity cap binds. Skipped when most far
+  ends carry the topic, so "highest CVSS" does not fill the scope to its
+  cap. `observations_for_many(predicates=)` (additive).
+- **Pack.** A reached entity's conflict ships first only on a focus
+  predicate; otherwise it is a conflict handle after the pages (the root
+  subject's conflicts still ship first). Topic facts are selected before
+  briefs and excerpts. Siblings sharing value, source and the reaching
+  edge render four per item, citing each fact and edge (~56 tokens per
+  CVE instead of ~127).
+- **Measured** (scripted reader, real corpus, `--namespaces netsec`):
+  loom@3200 multihop 0/6 → 6/6 (vector@3200 5/6), loom@3200 overall 85 % →
+  100 %; every other family at every budget unchanged; no multihop
+  question outside Loom's gather any more; build_pack p50 ~1.4 → ~1.55 s
+  on a shared host (roughly flat). `SqliteStore.observations_by_ids` now
+  uses the primary key (255 → 4 ms per 500 ids). Seed demo numbers
+  unchanged (verified live).
+- **Limits.** Completion needs the attribute named in the question in the
+  registry's words ("exploited in the wild" → `exploited_in_wild`); a
+  question saying only "KEV" gathers as before, and agents can still page
+  (R-5). At 1,600 tokens no condition passes multihop — 32–44 CVEs do not
+  fit. The retrieval harness's rule-based reader learned to read grouped
+  items; scoring is unchanged (D-057).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
