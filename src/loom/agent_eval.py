@@ -8,7 +8,9 @@ data itself — resolve names, pick ask vs ask_scope, work out which
 predicates to expand, pull handles, and answer with citations. Ground
 truth is computed from the store, never hard-coded, and the score checks
 what matters: did it name the right entities, did it invent any, and do
-its citations point at observations it actually saw.
+its citations point at observations it actually saw. Every task whose
+answer is a fact must cite at least one observation the agent saw, and no
+id it did not (D-057).
 
     python -m loom.agent_eval                                   # every task, the LOOM_DB store
     python -m loom.agent_eval --db /data/loom.db --tasks lease  # one task, an explicit store
@@ -25,6 +27,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -34,7 +37,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .contracts import EntityRef
-from .llm import OPENAI_COMPAT_BASES, _env, _post_json
+from .llm import OPENAI_COMPAT_BASES, LLMError, _env, _post_json
 
 MAX_STEPS = int(os.environ.get("LOOM_AGENT_MAX_STEPS", "20"))   # model turns per task (D-037: 14 cut off thorough models)
 MAX_TOOL_CHARS = 24_000       # a tool result larger than this is cut, with a marker
@@ -52,6 +55,16 @@ LEASE_IP = "10.0.4.7"
 LEASE_AT = datetime(2026, 8, 20, tzinfo=timezone.utc)    # the moment the lease task asks about
 _CVE = re.compile(r"CVE-\d{4}-\d{4,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,32}\b")
+_HEX_LETTER = re.compile(r"[a-f]")
+# the exposure task passes on recall of the KEV set, not on one name: at
+# least this share of it (every one when the set has at most
+# _EXPOSURE_ALL_UNDER members), with no invented or non-KEV CVE (D-057)
+EXPOSURE_RECALL = 0.5
+_EXPOSURE_ALL_UNDER = 4
+# asides — "(moved from web-01 on Aug 10)", "[a1b2c3d4e5f6]" — are history
+# and citations, not the asserted answer
+_ASIDE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]")
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 # sentence boundary: a period not inside a dotted token (10.0.4.7, 22.04)
 _SENTENCE = re.compile(r"(?<!\d)\.(?!\d)|\n")
 
@@ -93,28 +106,61 @@ def _truth_exposure(store) -> dict:
         for o in _obs(store, EntityRef(type="product", key=key)):
             if o.predicate == "affects":
                 candidates.setdefault(o.subject.key, key)
+    via: dict[str, set[str]] = {}
+    for key in products:
+        for o in _obs(store, EntityRef(type="product", key=key)):
+            if o.predicate == "affects":
+                via.setdefault(o.subject.key, set()).add(key)
     kev = {}
     for cve, product in candidates.items():
         if any(o.predicate == "exploited_in_wild" and o.object is True
                for o in _obs(store, EntityRef(type="cve", key=cve), limit=200)):
             kev[cve] = product
-    return {"products": products, "kev": kev, "candidates": len(candidates)}
+    return {"products": products, "kev": kev, "candidates": len(candidates),
+            "via": {c: sorted(via.get(c, {kev[c]})) for c in sorted(kev)}}
+
+
+def exposure_required(total: int) -> int:
+    """How many of the KEV set an exposure answer must name to pass."""
+    return total if total <= _EXPOSURE_ALL_UNDER else math.ceil(EXPOSURE_RECALL * total)
+
+
+def _product_named(answer: str, key: str) -> bool:
+    """A product key `vendor:product` is named when its product part is
+    (`linux:linux_kernel` by "Linux kernel", `openssl:openssl` by "OpenSSL")."""
+    part = _loose(key.split(":", 1)[-1])
+    return bool(part) and part in _loose(answer)
 
 
 def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """Pass: at least `exposure_required` of the KEV set named, none
+    invented, none real-but-not-KEV-for-this-host, the software each named
+    CVE reaches the host through named too, and a faithful citation. It
+    used to pass on any one of 29 CVEs, software unchecked, uncited (D-057)."""
     mentioned = set(_CVE.findall(answer))
-    hits = sorted(mentioned & set(truth["kev"]))
+    kev = set(truth["kev"])
+    hits = sorted(mentioned & kev)
     invented = sorted(c for c in mentioned
                       if store.get_entity(NAMESPACE, EntityRef(type="cve", key=c)) is None)
     # real CVEs that are NOT in the KEV set for web-01: naming them as the
     # exposure is a precision failure, not just a recall shortfall
-    false_kev = sorted((mentioned - set(truth["kev"])) - set(invented))
+    false_kev = sorted((mentioned - kev) - set(invented))
+    via = truth.get("via") or {c: [p] for c, p in truth["kev"].items()}
+    software = sorted({p for c in hits for p in via.get(c, []) if _product_named(answer, p)})
+    unexplained = [c for c in hits if not any(p in software for p in via.get(c, []))]
+    required = exposure_required(len(kev))
     cites = _cited(answer, seen)
+    # with no KEV exposure at all, the right answer names no CVE
+    ok = (len(hits) >= required and not invented and not false_kev and not unexplained
+          and (bool(kev) or not mentioned))
     return {
-        "kev_total": len(truth["kev"]), "kev_named": len(hits), "hits": hits,
+        "kev_total": len(kev), "kev_named": len(hits), "kev_required": required, "hits": hits,
+        "recall": round(len(hits) / len(kev), 3) if kev else None,
+        "precision": round(len(hits) / len(mentioned), 3) if mentioned else None,
         "cves_mentioned": len(mentioned), "invented_cves": invented,
-        "false_kev": len(false_kev), "false_kev_examples": false_kev[:3], **cites,
-        "pass": bool(hits) and not invented and not false_kev and cites["citations_unseen"] == 0,
+        "false_kev": len(false_kev), "false_kev_examples": false_kev[:3],
+        "software_named": software, "software_missing_for": unexplained[:3], **cites,
+        "pass": ok and _faithful(cites),
     }
 
 
@@ -132,19 +178,33 @@ def _truth_lease(store) -> dict:
     return {"expect": sorted(holders), "reject": sorted(others - holders)}
 
 
+def _asserted(text: str) -> str:
+    """The text without its asides (parentheses, brackets), nested ones too."""
+    prev = None
+    while prev != text:
+        prev, text = text, _ASIDE.sub(" ", text)
+    return text
+
+
+def _mentions(text: str, key: str) -> bool:
+    """`key` as a whole token, case-insensitive: web-01 is not web-010."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(key.lower()) + r"(?![a-z0-9])", text.lower()) is not None
+
+
 def _score_lease(answer: str, truth: dict, seen: set[str], store) -> dict:
     cites = _cited(answer, seen)
-    low = answer.lower()
     # the sentence that answers must name the holder; a former holder may
-    # appear only as history ("until Aug 10"), so the reject is: answering
-    # it outright in the first sentence
-    first = _SENTENCE.split(low)[0]
-    named = [h for h in truth["expect"] if h in low]
-    rejected = [h for h in truth["reject"] if h in first]
+    # appear only as history — a later sentence ("Before Aug 10 it was
+    # web-01") or an aside ("laptop-17 (moved from web-01 on Aug 10)") —
+    # so the reject is: asserting it outright in the first sentence
+    asserted = _asserted(answer).strip().lower()
+    first = _SENTENCE.split(asserted)[0]
+    named = [h for h in truth["expect"] if _mentions(asserted, h)]
+    rejected = [h for h in truth["reject"] if _mentions(first, h)]
     ok = bool(truth["expect"]) and len(named) == len(truth["expect"]) and not rejected
     return {"names_expected": named, "rejected_in_answer": rejected,
             "first_sentence": first[:120], **cites,
-            "pass": ok and cites["citations_unseen"] == 0}
+            "pass": ok and _faithful(cites)}
 
 
 def _truth_conflict(store) -> dict:
@@ -155,11 +215,19 @@ def _truth_conflict(store) -> dict:
     return {"values": sorted(values), "sources": sorted(sources)}
 
 
+def _value_named(answer: str, value: str) -> bool:
+    """A reported value: numbers by value (7.5 is not named by 17.5 or
+    7.55), anything else as a whole token."""
+    if _NUMBER.fullmatch(value):
+        return any(float(n) == float(value) for n in _NUMBER.findall(answer))
+    return _mentions(answer, value)
+
+
 def _score_conflict(answer: str, truth: dict, seen: set[str], store) -> dict:
     cites = _cited(answer, seen)
-    values_named = [v for v in truth["values"] if v in answer]
+    values_named = [v for v in truth["values"] if _value_named(answer, v)]
     return {"values_expected": truth["values"], "values_named": values_named, **cites,
-            "pass": len(values_named) == len(truth["values"]) >= 2 and cites["citations_unseen"] == 0}
+            "pass": len(values_named) == len(truth["values"]) >= 2 and _faithful(cites)}
 
 
 def _truth_os(store) -> dict:
@@ -176,25 +244,40 @@ def _score_os(answer: str, truth: dict, seen: set[str], store) -> dict:
     cites = _cited(answer, seen)
     named = [v for v in truth["values"] if _loose(v) in _loose(answer)]
     return {**cites, "values_expected": truth["values"], "values_named": named,
-            "pass": len(named) == len(truth["values"]) and cites["citations_unseen"] == 0}
+            "pass": bool(truth["values"]) and len(named) == len(truth["values"]) and _faithful(cites)}
+
+
+def cite_tokens_in(text: str) -> list[str]:
+    """The hex runs in `text` that can be citations: 8 to 32 hex digits
+    with at least one a-f letter, or a full 32-hex id. A date or a count
+    (20260820, 12345678) is not a citation — it used to be taken for one,
+    and then flagged as unseen."""
+    return [t for t in _HEX.findall(text) if len(t) == 32 or _HEX_LETTER.search(t)]
 
 
 def _cited(answer: str, seen: set[str]) -> dict:
     """Every hex id the answer cites must be (a prefix of) an observation id
     that appeared in a tool result during THIS run — the faithfulness check."""
-    cited = set(_HEX.findall(answer))
+    cited = set(cite_tokens_in(answer))
     # a cite is seen when it prefixes a seen id, or a seen cite token (12
     # hex) prefixes it — the agent may quote either form
     unseen = sorted(c for c in cited
                     if not any(s.startswith(c) or c.startswith(s) for s in seen))
-    return {"citations": len(cited), "citations_unseen": len(unseen), "unseen_examples": unseen[:3]}
+    return {"citations": len(cited), "citations_seen": len(cited) - len(unseen),
+            "citations_unseen": len(unseen), "unseen_examples": unseen[:3]}
+
+
+def _faithful(cites: dict) -> bool:
+    """A factual answer must stand on at least one observation the agent
+    saw, and cite nothing it did not (D-057: an uncited answer used to pass)."""
+    return cites["citations_seen"] >= 1 and cites["citations_unseen"] == 0
 
 
 TASKS = [
     Task("exposure",
          "Is host web-01 exposed to any vulnerability that CISA lists as exploited in the wild? "
-         "Work out what software it runs and which of those products have such CVEs. Name the "
-         "CVEs and the software, and cite observation ids.",
+         "Work out what software it runs and which of those products have such CVEs. Name every "
+         "such CVE and the software it affects, and cite observation ids.",
          _truth_exposure, _score_cves),
     Task("lease",
          "Which host held the IP address 10.0.4.7 on 2026-08-20? Cite observation ids.",
@@ -254,6 +337,26 @@ def _anthropic_tools(tools) -> list[dict]:
             for t in tools]
 
 
+# Models that answered a temperature parameter with an error (some
+# reasoning models take none): they run at their default for the rest of
+# the process, and every other model at 0 so repeats differ by the model's
+# own nondeterminism, not by sampling (D-057).
+_NO_TEMPERATURE: set[str] = set()
+
+
+def _post_at_zero(p: Provider, url: str, body: dict, headers: dict) -> dict:
+    """POST with temperature 0, retried once without it when the model
+    rejects the parameter."""
+    if p.model not in _NO_TEMPERATURE:
+        try:
+            return _post_json(url, {**body, "temperature": 0}, headers, timeout=180)
+        except LLMError as exc:
+            if "temperature" not in str(exc).lower():
+                raise
+            _NO_TEMPERATURE.add(p.model)
+    return _post_json(url, body, headers, timeout=180)
+
+
 def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int = 1500) -> Turn:
     if p.kind == "openai":
         headers = {"authorization": f"Bearer {p.api_key}"} if p.api_key else {}
@@ -264,7 +367,7 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
         }
         if "openrouter.ai" in p.base_url:
             body["usage"] = {"include": True}   # billed cost per call, cache discounts included
-        data = _post_json(p.base_url + "/chat/completions", body, headers, timeout=180)
+        data = _post_at_zero(p, p.base_url + "/chat/completions", body, headers)
         msg = data["choices"][0]["message"]
         calls = []
         for tc in msg.get("tool_calls") or []:
@@ -278,8 +381,12 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
         return Turn(msg.get("content") or "", calls, msg,
                     {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0),
                      "cost": float(u.get("cost") or 0.0)})
-    data = _post_json(p.base_url + "/v1/messages", anthropic_body(p, system, messages, tools, max_tokens),
-                      {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}, timeout=180)
+    body = anthropic_body(p, system, messages, tools, max_tokens)
+    headers = {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}
+    url = p.base_url + "/v1/messages"
+    # extended thinking takes no temperature but the default
+    data = (_post_json(url, body, headers, timeout=180) if "thinking" in body
+            else _post_at_zero(p, url, body, headers))
     stop = data.get("stop_reason")
     if stop == "refusal":
         details = data.get("stop_details") or {}
@@ -425,7 +532,10 @@ async def _session(db: str | None, fn):
 
 
 def evaluate(db: str | None, task_names: list[str] | None, model: str | None = None,
-             caller: Callable = call_model) -> list[RunResult]:
+             caller: Callable = call_model,
+             on_result: Callable[[RunResult], None] | None = None) -> list[RunResult]:
+    """Every task, one after another; `on_result` sees each result as it
+    finishes (the CLI writes --out then, so a crash keeps what was paid for)."""
     from .store.factory import store_from_env, store_from_url
     # a scripted caller (tests) needs no provider: CI has no LOOM_LLM_* and
     # must not need one to exercise the loop
@@ -435,10 +545,23 @@ def evaluate(db: str | None, task_names: list[str] | None, model: str | None = N
     store = store_from_url(db) if db else store_from_env()
     try:
         async def run_all(session, instructions):
-            return [await run_task(session, provider, t, store, caller, instructions) for t in tasks]
+            out = []
+            for t in tasks:
+                out.append(await run_task(session, provider, t, store, caller, instructions))
+                if on_result:
+                    on_result(out[-1])
+            return out
         return asyncio.run(_session(db, run_all))
     finally:
         store.close()
+
+
+def write_json(path: str, payload: Any) -> None:
+    """Replace `path` atomically: a reader (or a crash) never sees half a file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+    os.replace(tmp, path)
 
 
 def summarize(results: list[RunResult], model: str) -> str:
@@ -513,7 +636,7 @@ def scorecard_markdown(rows: list[dict]) -> str:
     return head + "\n" + "\n".join(body)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="loom.agent_eval", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", help="explicit store URL/path; bypasses LOOM_SHARDS / LOOM_BLOB_* "
@@ -522,21 +645,30 @@ def main() -> None:
     parser.add_argument("--model", help="override LOOM_AGENT_MODEL / LOOM_LLM_MODEL")
     parser.add_argument("--models", help="comma-separated models to compare (a scorecard run)")
     parser.add_argument("--repeat", type=int, default=1, help="scorecard runs: full runs per model (pass rates)")
-    parser.add_argument("--out", help="write the full transcript (JSON) here")
+    parser.add_argument("--out", help="write the full transcript (JSON) here, rewritten as each task finishes")
     parser.add_argument("--markdown", help="scorecard runs: also write a Markdown table here")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     names = [n.strip() for n in args.tasks.split(",")] if args.tasks else None
     if args.models:
         runs: dict[str, list[RunResult]] = {}
+
+        def save(_=None) -> None:
+            if args.out:
+                write_json(args.out, {m: [r.__dict__ for r in rs] for m, rs in runs.items()})
         for model in [m.strip() for m in args.models.split(",") if m.strip()]:
             runs[model] = []
             for rep in range(max(1, args.repeat)):
+                done = len(runs[model])
                 try:
-                    batch = evaluate(args.db, names, model)
+                    batch = evaluate(args.db, names, model,
+                                     on_result=lambda r, m=model: (runs[m].append(r), save()))
                 except Exception as exc:  # a model that cannot even start still gets a row
                     batch = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
                                        score={"pass": False}) for t in TASKS if not names or t.name in names]
+                # the callback appended what finished; a start-up failure appends the error rows
+                del runs[model][done:]
                 runs[model].extend(batch)
+                save()
                 print(summarize(batch, f"{model} (run {rep + 1}/{max(1, args.repeat)})"), flush=True)
                 print(flush=True)
         rows = scorecard(runs, args.repeat)
@@ -545,16 +677,19 @@ def main() -> None:
             with open(args.markdown, "w") as fh:
                 fh.write(scorecard_markdown(rows) + "\n")
         if args.out:
-            with open(args.out, "w") as fh:
-                json.dump({m: [r.__dict__ for r in rs] for m, rs in runs.items()}, fh, indent=2, default=str)
             print(f"transcripts: {args.out}")
         return
-    results = evaluate(args.db, names, args.model)
+    partial: list[RunResult] = []
+
+    def keep(r: RunResult) -> None:
+        partial.append(r)
+        if args.out:
+            write_json(args.out, [x.__dict__ for x in partial])
+    results = evaluate(args.db, names, args.model, on_result=keep)
     model = Provider.from_env(args.model).model
     print(summarize(results, model))
     if args.out:
-        with open(args.out, "w") as fh:
-            json.dump([r.__dict__ for r in results], fh, indent=2, default=str)
+        write_json(args.out, [r.__dict__ for r in results])
         print(f"transcript: {args.out}")
     sys.exit(0 if all(r.score.get("pass") for r in results) else 1)
 

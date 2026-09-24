@@ -98,7 +98,9 @@ def test_exposure_truth_is_computed_from_the_store(tmp_path):
     store = SqliteStore(db)
     truth = ae._truth_exposure(store)
     assert "openssl:openssl" in truth["products"] and truth["kev"] == {"CVE-2026-10001": "openssl:openssl"}
-    score = ae._score_cves("CVE-2026-10001 via openssl [abc]; also CVE-2026-9999", truth, {"abcdef" * 5 + "ab"}, store)
+    assert truth["via"] == {"CVE-2026-10001": ["openssl:openssl"]}
+    seen = {"abcdef" * 5 + "ab"}
+    score = ae._score_cves("CVE-2026-10001 via openssl [abcdefab]; also CVE-2026-9999", truth, seen, store)
     assert score["kev_named"] == 1 and score["invented_cves"] == ["CVE-2026-9999"] and not score["pass"]
     # a real CVE that is not KEV-for-web-01 named as the exposure is a
     # precision failure (the score used to measure recall only)
@@ -107,12 +109,57 @@ def test_exposure_truth_is_computed_from_the_store(tmp_path):
     store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="cve", key="CVE-2026-10002"),
                                predicate="status", object="Analyzed", source="nvd",
                                observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)))
-    score = ae._score_cves("CVE-2026-10001 and CVE-2026-10002 [abcdef]", truth, {"abcdef" * 5 + "ab"}, store)
+    score = ae._score_cves("CVE-2026-10001 in OpenSSL and CVE-2026-10002 [abcdefab]", truth, seen, store)
     assert score["false_kev"] == 1 and score["false_kev_examples"] == ["CVE-2026-10002"] and not score["pass"]
-    assert score["invented_cves"] == []
-    score = ae._score_cves("CVE-2026-10001 [abcdef]", truth, {"abcdef" * 5 + "ab"}, store)
-    assert score["pass"] and score["false_kev"] == 0
+    assert score["invented_cves"] == [] and score["precision"] == 0.5
+    score = ae._score_cves("CVE-2026-10001 in OpenSSL [abcdefab]", truth, seen, store)
+    assert score["pass"] and score["false_kev"] == 0 and score["recall"] == 1.0
+    assert score["software_named"] == ["openssl:openssl"]
+    # the software must be named, and the answer must cite something it saw
+    assert not ae._score_cves("CVE-2026-10001 [abcdefab]", truth, seen, store)["pass"]
+    s = ae._score_cves("CVE-2026-10001 in OpenSSL", truth, seen, store)
+    assert not s["pass"] and s["citations"] == 0
     store.close()
+
+
+def test_exposure_passes_on_recall_not_on_one_name():
+    """D-057: naming one of 29 KEV CVEs used to pass. Now at least half
+    (every one of a set of four or fewer) must be named."""
+    kev = {f"CVE-2026-{i:04d}": "linux:linux_kernel" for i in range(1, 30)}
+    truth = {"kev": kev, "via": {c: [p] for c, p in kev.items()}, "products": ["linux:linux_kernel"]}
+
+    class Store:
+        def get_entity(self, ns, ref):
+            return object()        # every CVE named exists
+    seen = {"abcdef" * 5 + "ab"}
+    names = sorted(kev)
+    assert ae.exposure_required(29) == 15 and ae.exposure_required(4) == 4 and ae.exposure_required(1) == 1
+    one = ae._score_cves(f"{names[0]} in the Linux kernel [abcdefab]", truth, seen, Store())
+    assert not one["pass"] and one["recall"] == round(1 / 29, 3)
+    half = ae._score_cves(", ".join(names[:15]) + " in the Linux kernel [abcdefab]", truth, seen, Store())
+    assert half["pass"] and half["kev_required"] == 15
+    few = {"kev": dict(list(kev.items())[:3]), "via": {c: ["linux:linux_kernel"] for c in names[:3]}}
+    assert not ae._score_cves(f"{names[0]}, {names[1]} (Linux kernel) [abcdefab]", few, seen, Store())["pass"]
+    # no KEV exposure: the right answer names no CVE
+    none = {"kev": {}, "via": {}}
+    assert ae._score_cves("No KEV-listed CVE affects its software [abcdefab].", none, seen, Store())["pass"]
+    assert not ae._score_cves(f"{names[0]} [abcdefab]", none, seen, Store())["pass"]
+
+
+def test_every_factual_task_needs_a_seen_citation_and_dates_are_not_cites():
+    seen = {"abcdef" * 5 + "ab"}
+    assert ae.cite_tokens_in("on 20260820, id 12345678 [abcdefab] [0123456789abcdef0123456789abcdef]") == [
+        "abcdefab", "0123456789abcdef0123456789abcdef"]
+    c = ae._cited("held on 20260820 [abcdefab]", seen)
+    assert c == {"citations": 1, "citations_seen": 1, "citations_unseen": 0, "unseen_examples": []}
+    os_truth = {"values": ["fedora-44", "ubuntu-22.04"]}
+    assert ae._score_os("Sources disagree: Fedora 44 and Ubuntu 22.04 [abcdefab].", os_truth, seen, None)["pass"]
+    assert not ae._score_os("Sources disagree: Fedora 44 and Ubuntu 22.04.", os_truth, seen, None)["pass"]
+    conflict = {"values": ["7.5", "9.8"], "sources": ["a", "b"]}
+    assert ae._score_conflict("a says 7.5, b says 9.8 [abcdefab]", conflict, seen, None)["pass"]
+    assert not ae._score_conflict("a says 7.5, b says 9.8", conflict, seen, None)["pass"]
+    # 17.5 does not name 7.5
+    assert not ae._score_conflict("a says 17.5, b says 9.8 [abcdefab]", conflict, seen, None)["pass"]
 
 
 def test_lease_truth_comes_from_validity_windows_and_dotted_ips_do_not_end_sentences(seeded_db, tmp_path):
@@ -124,10 +171,17 @@ def test_lease_truth_comes_from_validity_windows_and_dotted_ips_do_not_end_sente
     seen = {"abcdef" * 5 + "ab"}
     # the old splitter cut the first sentence at the IP's first dot, so
     # "web-01" after "10.0.4.7" was never in the judged sentence
-    s = ae._score_lease("On 2026-08-20 the address 10.0.4.7 was held by web-01, not laptop-17 [abcdef].", truth, seen, store)
+    s = ae._score_lease("On 2026-08-20 the address 10.0.4.7 was held by web-01, not laptop-17 [abcdefab].", truth, seen, store)
     assert "web-01" in s["first_sentence"] and s["rejected_in_answer"] == ["web-01"] and not s["pass"]
-    s = ae._score_lease("10.0.4.7 was held by laptop-17 [abcdef]. Before Aug 10 it was web-01.", truth, seen, store)
+    s = ae._score_lease("10.0.4.7 was held by laptop-17 [abcdefab]. Before Aug 10 it was web-01.", truth, seen, store)
     assert s["pass"] and s["names_expected"] == ["laptop-17"] and s["rejected_in_answer"] == []
+    # history in an aside is not the asserted answer (it used to fail this)
+    s = ae._score_lease("laptop-17 (moved from web-01 on Aug. 10) [abcdefab].", truth, seen, store)
+    assert s["pass"] and s["rejected_in_answer"] == []
+    s = ae._score_lease("web-01 (laptop-17 took it later) [abcdefab].", truth, seen, store)
+    assert not s["pass"] and s["rejected_in_answer"] == ["web-01"]
+    # a correct but uncited answer does not pass
+    assert not ae._score_lease("10.0.4.7 was held by laptop-17.", truth, seen, store)["pass"]
     # the truth follows the store: move the lease and the answer moves with it
     from loom.contracts import ClaimIn, EntityRef
     from datetime import datetime, timezone
@@ -191,6 +245,54 @@ def test_anthropic_call_leaves_room_for_thinking_and_keeps_the_blocks(monkeypatc
                                                            "stop_details": {"category": "cyber"}})
     with pytest.raises(RuntimeError, match="refused.*cyber"):
         ae.call_model(p, "sys", [], [_Tool("ask")])
+
+
+def test_calls_run_at_temperature_zero_unless_the_model_refuses_it(monkeypatch):
+    sent = []
+
+    def fake_post(url, body, headers, timeout=0):
+        sent.append(body)
+        if "temperature" in body and body["model"].startswith("picky"):
+            raise ae.LLMError('provider returned 400: {"error":"Unsupported parameter: temperature"}')
+        if url.endswith("/v1/messages"):
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}], "usage": {}}
+        return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    monkeypatch.setattr(ae, "_post_json", fake_post)
+    monkeypatch.setattr(ae, "_NO_TEMPERATURE", set())
+    ae.call_model(ae.Provider("openai", "https://x/v1", "cheap", "k"), "sys", [], [_Tool("ask")])
+    assert sent[-1]["temperature"] == 0
+    ae.call_model(ae.Provider("openai", "https://x/v1", "picky-r1", "k"), "sys", [], [_Tool("ask")])
+    assert "temperature" not in sent[-1] and len(sent) == 3
+    ae.call_model(ae.Provider("openai", "https://x/v1", "picky-r1", "k"), "sys", [], [_Tool("ask")])
+    assert "temperature" not in sent[-1] and len(sent) == 4          # remembered: no second refusal
+    # thinking takes the default temperature; without it, 0
+    monkeypatch.setattr(ae, "THINKING", "adaptive")
+    ae.call_model(ae.Provider("anthropic", "https://a", "claude-opus-5", "k"), "sys", [], [_Tool("ask")])
+    assert "thinking" in sent[-1] and "temperature" not in sent[-1]
+    ae.call_model(ae.Provider("anthropic", "https://a", "claude-haiku-4-5", "k"), "sys", [], [_Tool("ask")])
+    assert sent[-1]["temperature"] == 0
+
+
+def test_results_are_handed_over_as_each_task_finishes(seeded_db, tmp_path):
+    def cite(messages):
+        return "laptop-17 [" + json.loads(_last_tool_output(messages))["items"][0]["citations"][0]["cite"] + "]"
+    model = Scripted([
+        [("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec",
+                  "valid_at": "2026-08-20T00:00:00Z"})], cite,
+        [("ask", {"subject": "host:web-01", "question": "os?", "namespace": "netsec"})], "no idea",
+    ])
+    out = tmp_path / "t.json"
+    got = []
+
+    def keep(r):
+        got.append(r)
+        ae.write_json(str(out), [x.__dict__ for x in got])
+        # written before the next task ran
+        assert len(json.loads(out.read_text())) == len(got)
+    results = ae.evaluate(seeded_db, ["lease", "os"], model="fake", caller=model, on_result=keep)
+    assert [r.task for r in got] == ["lease", "os"] and got == results
+    assert results[0].score["pass"] and not results[1].score["pass"]
 
 
 @pytest.mark.skipif(not os.environ.get("LOOM_LIVE_AGENT"), reason="set LOOM_LIVE_AGENT=1 (and LOOM_LLM_*) for a live agent run")
