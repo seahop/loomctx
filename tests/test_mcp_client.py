@@ -75,7 +75,8 @@ def test_agent_loop_over_stdio(seeded_db):
             "subject": "host:web-01", "question": "what operating system does it run?",
             "budget": 300, "namespace": "netsec", "format": "detailed"}))
         assert all(len(c["observation_id"]) == 32 for i in detailed["items"] for c in i["citations"])
-        assert all(i["citations"] for i in pack["items"])
+        assert all(i["cites"] for i in pack["items"])
+        assert "\n" not in res.content[0].text                  # a compact text mirror (D-058)
         assert pack["handles"], "a small budget leaves threads to expand"
 
         more = _payload(await session.call_tool(
@@ -97,7 +98,7 @@ def test_agent_loop_over_stdio(seeded_db):
             "get_observations", {"subject": "host:web-01", "namespace": "netsec", "limit": 5}))
         assert any(o["source"] == "agent-writeback" for o in raw["observations"])
         # a recorded correction names what it supersedes by cite token
-        cite = next(c["cite"] for i in pack["items"] for c in i["citations"])
+        cite = next(c.split()[0] for i in pack["items"] for c in i["cites"])
         fixed = _payload(await session.call_tool("record_claim", {
             "subject": "host:web-01", "predicate": "runs_os", "object_value": "fedora-44",
             "observed_at": "2026-09-08T12:00:00Z", "source": "agent-writeback",

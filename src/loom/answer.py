@@ -101,9 +101,17 @@ def render_user_prompt(question: str, pack: ContextPack) -> str:
         prefix = "unresolved conflict" if handle.kind == "conflict" else "more available"
         lines.append(f"- {prefix}: {_one_line(handle.hint)}")
     for t in pack.truncated:  # partial coverage is a fact the reader needs (D-038)
-        lines.append(f"- coverage: only the newest {t.gathered:,} of {t.total:,} observations about "
-                     f"{_one_line(f'{t.entity.type}:{t.entity.key}')} were examined; "
-                     "do not conclude absence for it")
+        name = _one_line(f"{t.entity.type}:{t.entity.key}")
+        if t.reason == "scope_cap":   # the walk itself was cut (D-058)
+            lines.append(f"- coverage: the scope was cut at {t.gathered:,} entities (at least "
+                         f"{t.total:,} reached; stopped while expanding {name}); do not "
+                         "conclude absence for entities beyond it")
+        else:
+            lines.append(f"- coverage: only the newest {t.gathered:,} of {t.total:,} observations "
+                         f"about {name} were examined; do not conclude absence for it")
+    if pack.withheld_briefs:
+        lines.append(f"- coverage: {pack.withheld_briefs} entity brief(s) withheld (outside this "
+                     "view, or over their budget share); the items above are the evidence")
     lines.append(_BLOCK_CLOSE)
     return "\n".join(lines)
 

@@ -165,6 +165,79 @@ def test_q10_budget_holds_under_a_real_tokenizer(store):
     _score("real-tokenizer-budget", worst <= 1.15, f"worst wire/budget ratio {worst:.2f}")
 
 
+def test_q10b_budget_holds_on_the_mcp_wire(store):
+    """D-058: D-051 measured the answer prompt only. What an MCP agent
+    received for an 800-token pack was ~2,200 tokens (indented JSON,
+    citation objects, ISO timestamps, a score per item). The concise view
+    is now compact and the charge is sized to it: items and handles as the
+    agent receives them stay within 15 % of the budget; the envelope
+    (namespace, question echo, subject list) is a fixed ~70 tokens beside
+    it, not charged."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+    except Exception as exc:  # noqa: BLE001 — no package, or offline with no cached encoding
+        pytest.skip(f"tiktoken encoding unavailable: {exc}")
+    import pydantic_core
+    from loom import mcp_server
+    from loom.context import expand_pack
+
+    def body_tokens(pack) -> int:
+        view = mcp_server._agent_view(pack)
+        wire = pydantic_core.to_json(view).decode()
+        envelope = pydantic_core.to_json({**view, "items": [], "handles": []}).decode()
+        assert len(enc.encode(envelope)) <= 200, envelope
+        return len(enc.encode(wire)) - len(enc.encode(envelope))
+
+    scope = ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")], expand=["member_of"])
+    asks = [
+        ("netsec", EntityRef(type="host", key="web-01"), None, "what operating system does this run?"),
+        ("netsec", EntityRef(type="host", key="db-01"), None, ""),
+        ("netsec", EntityRef(type="ip", key="10.0.4.7"), None, "which host was assigned this ip?"),
+        ("procurement", EntityRef(type="vendor", key="initech"), None, "who owns this contract?"),
+        ("netsec", None, scope, "who logged in?"),
+    ]
+    worst = 0.0
+    for ns, subject, sc, question in asks:
+        for budget in (200, 400, 800, 1200, 3200):
+            pack = _ask(store, question, subject=subject, scope=sc, budget=budget, namespace=ns)
+            packs = [pack] + [expand_pack(store, h.id, budget) for h in pack.handles[:2]]
+            for p in packs:
+                real = body_tokens(p)
+                worst = max(worst, real / budget)
+                assert real <= budget * 1.15, (question, budget, real, p.charged_tokens)
+    _score("mcp-wire-budget", worst <= 1.15, f"worst MCP wire/budget ratio {worst:.2f}")
+
+
+def test_q11_a_scope_answers_along_the_predicates_it_walks(store):
+    """D-058: alert -> host -> logins, walked over triggered_on +
+    logged_in_by. The pack spent every budget up to 1,600 on
+    communicated_with ("host" is rare among the gathered rows, "logged" is
+    on every login) and shipped the logins — what the question walks and
+    asks — only as handles. An expand predicate the question names now
+    ranks as the topic."""
+    alert = EntityRef(type="alert", key="AL-2291")
+    host = EntityRef(type="host", key="web-01")
+    scope = ScopeSpec(subjects=[alert], expand=["triggered_on", "logged_in_by"], depth=2)
+    question = ("Which users logged in to the host that alert:AL-2291 triggered on, on 2026-09-01? "
+                "List every user as user:<key>.")
+    truth = {o.object.key for o in store.observations_for("netsec", host, limit=1000)
+             if o.predicate == "logged_in_by" and o.observed_at.date().isoformat() == "2026-09-01"}
+    pack = _ask(store, question, scope=scope, budget=800)
+    facts = [i.text for i in pack.items if i.kind in ("fact", "relation")]
+    found = {t.split()[2].split(":", 1)[1] for t in facts
+             if t.startswith("host:web-01 logged_in_by") and "(2026-09-01," in t}
+    logins = sum(" logged_in_by " in t for t in facts)
+    flows = sum(" communicated_with " in t for t in facts)
+    _score("scope-walked-predicates", truth and found == truth and logins > flows,
+           f"found {sorted(found)} of {sorted(truth)}; {logins} logins vs {flows} flows")
+    # a scope whose walked predicate the question does not name is unchanged:
+    # "who logged in?" over member_of still ranks logins, not memberships
+    domain = ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")], expand=["member_of"])
+    texts = [i.text for i in _ask(store, "who logged in?", scope=domain, budget=800).items if i.kind == "fact"]
+    assert sum(" logged_in_by " in t for t in texts) > sum(" member_of " in t for t in texts)
+
+
 def test_q4b_valid_at_fact_time(store):
     """D-024: 'which host HELD this ip on Aug 20' — exactly one answer."""
     pack = build_pack(store, AskRequest(

@@ -239,6 +239,23 @@ _PREFIX_END = "\U0010ffff"
 # (R-9); hex/colon norm_key rule (recompute keys carrying ':')
 SCHEMA_VERSION = 6
 
+# Columns added after their table's first release: added on open when missing
+_WANTED_COLUMNS = {
+    "observations": [("event_id", "TEXT"), ("supersedes", "TEXT")],
+    "artifacts": [("event_id", "TEXT"),
+                  ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                  ("next_attempt_at", "TEXT"),
+                  ("extract_claimed_by", "TEXT"),
+                  ("extract_claimed_until", "TEXT"),
+                  ("chunk_claimed_until", "TEXT"),
+                  ("chunk_claimed_by", "TEXT")],
+    "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
+    "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
+    "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''"),
+                 ("dossier_claimed_until", "TEXT"),
+                 ("dossier_claimed_by", "TEXT")],
+}
+
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
 )
@@ -300,6 +317,21 @@ _OBS_INSERT = (
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
     " recorded_at, source, confidence, provenance_json, attrs_json, supersedes)"
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+# Tier-1 merge candidates (D-019): keys shared across types, less the groups
+# whose every cross-type pair has a remembered decline (D-044) — those are
+# settled, and must not occupy the limit (D-058). A decline stores its pair
+# as sorted "type:key" strings; BINARY order is Python's code-point order.
+_PAIR_SIDE = "e{n}.type || ':' || e{n}.key"
+_MERGE_CANDIDATES_SQL = (
+    "SELECT DISTINCT e1.namespace, e1.key FROM entities e1"
+    " JOIN entities e2 ON e2.namespace = e1.namespace AND e2.key = e1.key AND e2.type <> e1.type"
+    " WHERE 1 = 1 {ns} AND NOT EXISTS (SELECT 1 FROM resolution_declines d"
+    "   WHERE d.namespace = e1.namespace"
+    f"    AND d.a = min({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)})"
+    f"    AND d.b = max({_PAIR_SIDE.format(n=1)}, {_PAIR_SIDE.format(n=2)}))"
+    " ORDER BY e1.namespace, e1.key LIMIT ?"
 )
 
 _ON_EVENT_CONFLICT = (
@@ -389,32 +421,42 @@ class SqliteStore(GraphStore):
 
     def _migrate(self) -> None:
         """Bring pre-existing database files up to the current shape:
-        idempotent column adds first, then one-shot versioned steps."""
-        wanted = {
-            "observations": [("event_id", "TEXT"), ("supersedes", "TEXT")],
-            "artifacts": [("event_id", "TEXT"),
-                          ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
-                          ("next_attempt_at", "TEXT"),
-                          ("extract_claimed_by", "TEXT"),
-                          ("extract_claimed_until", "TEXT"),
-                          ("chunk_claimed_until", "TEXT"),
-                          ("chunk_claimed_by", "TEXT")],
-            "dossiers": [("observation_ids", "TEXT NOT NULL DEFAULT '[]'")],
-            "doc_chunks": [("model", "TEXT NOT NULL DEFAULT ''")],
-            "entities": [("norm_key", "TEXT NOT NULL DEFAULT ''"),
-                         ("dossier_claimed_until", "TEXT"),
-                         ("dossier_claimed_by", "TEXT")],
-        }
-        for table, columns in wanted.items():
-            have = {
-                r["name"]
-                for r in self._conn.execute(f"PRAGMA table_info({table})")
-            }
-            for name, ddl in columns:
-                if name not in have:
-                    self._conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
-                    )
+        idempotent column adds first, then one-shot versioned steps.
+
+        Two processes opening one old file at once (the engine and a
+        worker after an image roll) both saw a column missing and the
+        second ALTER died on "duplicate column name". The work now runs
+        under BEGIN IMMEDIATE — one migrator at a time; the second re-reads
+        the shape inside the lock and finds nothing left to do — and a
+        duplicate column is tolerated regardless. An up-to-date file is
+        detected before the lock, so opening it takes no write lock (D-039)."""
+        if not self._migration_due():
+            return
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._migrate_locked()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+
+    def _missing_columns(self) -> list[tuple[str, str, str]]:
+        out = []
+        for table, columns in _WANTED_COLUMNS.items():
+            have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            out += [(table, name, ddl) for name, ddl in columns if name not in have]
+        return out
+
+    def _migration_due(self) -> bool:
+        return self._meta_version() < SCHEMA_VERSION or bool(self._missing_columns())
+
+    def _migrate_locked(self) -> None:
+        for table, name, ddl in self._missing_columns():
+            try:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
         current = self._meta_version()
         if current < 2:
             # v2: backfill normalized keys for fuzzy resolution (D-024)
@@ -442,11 +484,10 @@ class SqliteStore(GraphStore):
             self._conn.executemany(
                 "UPDATE entities SET norm_key = ? WHERE id = ?",
                 [(nk, r["id"]) for r in rows if (nk := common.norm_key(r["key"])) != r["norm_key"]])
-        if current < SCHEMA_VERSION:  # an up-to-date open takes no write lock (D-039)
+        if current < SCHEMA_VERSION:
             self._conn.execute(
                 "INSERT OR REPLACE INTO loom_meta (key, value) VALUES"
                 " ('schema_version', ?)", (str(SCHEMA_VERSION),))
-        self._conn.commit()
 
     def _meta_version(self) -> int:
         row = self._conn.execute(
@@ -524,19 +565,29 @@ class SqliteStore(GraphStore):
             self._vec_tables[row["key"][4:]] = int(row["value"])
 
     def _vec_query(self, kind: str, model: str, namespace: str,
-                   query: list[float], k: int) -> list[tuple[str, str, float]] | None:
+                   query: list[float], k: int,
+                   artifact_ids: list[str] | None = None) -> list[tuple[str, str, float]] | None:
         """(ref_id, artifact_id, cosine) via the ANN index, best first; None
-        when no index fits this (model, dimension) so callers scan exactly."""
+        when no index fits this (model, dimension) so callers scan exactly.
+        `artifact_ids` filters inside the KNN (a vec0 metadata column), so
+        the k nearest are the k nearest *among those artifacts*."""
         name = common.vec_table(kind, model, len(query))
         if name not in self._vec_tables:
             self._refresh_vec_tables()
         if name not in self._vec_tables:
             return None
-        rows = self._conn.execute(
-            f"SELECT ref_id, artifact_id, distance FROM {name}"
-            " WHERE embedding MATCH ? AND k = ? AND namespace = ? ORDER BY distance",
-            (json.dumps(query), k, namespace),
-        ).fetchall()
+        sql = (f"SELECT ref_id, artifact_id, distance FROM {name}"
+               " WHERE embedding MATCH ? AND k = ? AND namespace = ?")
+        params: tuple = (json.dumps(query), k, namespace)
+        if artifact_ids is not None:
+            sql += " AND artifact_id IN (SELECT value FROM json_each(?))"
+            params += (json.dumps(artifact_ids),)
+        try:
+            rows = self._conn.execute(sql + " ORDER BY distance", params).fetchall()
+        except sqlite3.OperationalError:
+            if artifact_ids is None:
+                raise
+            return None  # an index without metadata filtering (sqlite-vec < 0.1.6): scan exactly
         return [(r["ref_id"], r["artifact_id"], 1.0 - float(r["distance"])) for r in rows]
 
     def nearest_observations(
@@ -551,7 +602,7 @@ class SqliteStore(GraphStore):
                     "SELECT ref_id, vector FROM embeddings WHERE namespace = ? AND model = ?",
                     (namespace, model)).fetchall()
                 scored = common.cosines(
-                    query, {r["ref_id"]: common.unpack_vector(r["vector"]) for r in rows})
+                    query, {r["ref_id"]: common.unpack_array(r["vector"]) for r in rows})
             if not scored:
                 return []
             marks = ",".join("?" * len(scored))
@@ -564,26 +615,26 @@ class SqliteStore(GraphStore):
         self, namespace: str, model: str, query: list[float], limit: int = 20,
         artifact_ids: list[str] | None = None,
     ) -> list[tuple[dict, float]]:
-        wanted = set(artifact_ids) if artifact_ids is not None else None
+        wanted = sorted(set(artifact_ids)) if artifact_ids is not None else None
+        if wanted is not None and not wanted:
+            return []
         with self._tx(read=True):
-            scored: dict[str, float] = {}
-            hits = (self._vec_query("vchk", model, namespace, query, max(limit * 8, 128))
-                    if self._vec else None)
-            # over-fetch, then filter by artifact in Python; if the filter
-            # leaves us short (or there is no index), scan exactly below
-            for cid, aid, s in hits or []:
-                if wanted is None or aid in wanted:
-                    scored[cid] = s
-            if len(scored) < limit:
-                sql = ("SELECT id, vector FROM doc_chunks WHERE namespace = ? AND model = ?")
+            # The artifact filter runs inside the KNN (D-058): the k nearest
+            # among the cited documents. Filtering the namespace's nearest
+            # afterwards starved on nearly every ask and fell through to
+            # decoding every chunk vector of every cited artifact in Python.
+            hits = self._vec_query("vchk", model, namespace, query, limit, wanted) if self._vec else None
+            scored = {cid: s for cid, _, s in hits or []}
+            # short of `limit`: fewer chunks exist (done), or there is no
+            # index / it lags the chunk table the worker backfills it from
+            if len(scored) < limit and (hits is None or self._chunk_count(namespace, model, wanted) > len(scored)):
+                sql = "SELECT id, vector FROM doc_chunks WHERE namespace = ? AND model = ?"
                 params: tuple = (namespace, model)
                 if wanted is not None:
-                    if not wanted:
-                        return []
-                    sql += f" AND artifact_id IN ({','.join('?' * len(wanted))})"
-                    params += tuple(wanted)
+                    sql += " AND artifact_id IN (SELECT value FROM json_each(?))"
+                    params += (json.dumps(wanted),)
                 rows = self._conn.execute(sql, params).fetchall()
-                scored = common.cosines(query, {r["id"]: common.unpack_vector(r["vector"]) for r in rows})
+                scored = common.cosines(query, {r["id"]: common.unpack_array(r["vector"]) for r in rows})
             best = common.top_k(scored, limit)
             if not best:
                 return []
@@ -595,6 +646,14 @@ class SqliteStore(GraphStore):
                 f" WHERE c.id IN ({marks})", tuple(cid for cid, _ in best)).fetchall()
         by_id = {r["id"]: common.row_to_chunk(r) for r in rows}
         return [(by_id[cid], s) for cid, s in best if cid in by_id]
+
+    def _chunk_count(self, namespace: str, model: str, artifact_ids: list[str] | None) -> int:
+        sql = "SELECT COUNT(*) AS n FROM doc_chunks WHERE namespace = ? AND model = ?"
+        params: tuple = (namespace, model)
+        if artifact_ids is not None:
+            sql += " AND artifact_id IN (SELECT value FROM json_each(?))"
+            params += (json.dumps(artifact_ids),)
+        return int(self._conn.execute(sql, params).fetchone()["n"])
 
     def ensure_vector_index(self, model: str) -> dict:
         out = {"backend": self.vector_backend(), "observations": 0, "chunks": 0}
@@ -664,6 +723,42 @@ class SqliteStore(GraphStore):
                     f" WHERE o.namespace = ? AND o.supersedes IN ({','.join('?' * len(chunk))})"
                     + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
                 out.update(r["sid"] for r in rows)
+        return out
+
+    def corrections_of(
+        self, namespace: str, ids: list[str], observed_before: datetime | None = None,
+    ) -> list[Observation]:
+        if not ids:
+            return []
+        before_sql, before_args = _observed_before("?", observed_before)
+        out: list[Observation] = []
+        with self._tx(read=True):
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = self._conn.execute(
+                    _OBS_SELECT + " WHERE o.namespace = ?"
+                    f" AND o.supersedes IN ({','.join('?' * len(chunk))})"
+                    + _NOT_TOMBSTONED + before_sql, (namespace, *chunk, *before_args)).fetchall()
+                out.extend(common.row_to_observation(r) for r in rows)
+        return out
+
+    def resolve_refs(
+        self, namespace: str, refs: list[EntityRef],
+    ) -> dict[tuple[str, str], EntityRef]:
+        out: dict[tuple[str, str], EntityRef] = {}
+        if not refs:
+            return out
+        with self._tx(read=True):
+            owners = self._resolve_many(namespace, refs)
+            ids = list(owners)
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for r in self._conn.execute(
+                        f"SELECT id, type, key FROM entities WHERE id IN ({','.join('?' * len(chunk))})",
+                        tuple(chunk)).fetchall():
+                    canonical = EntityRef(type=r["type"], key=r["key"])
+                    for ref in owners[r["id"]]:
+                        out[(ref.type, ref.key)] = canonical
         return out
 
     _PREFIX_CAP = 20
@@ -951,11 +1046,11 @@ class SqliteStore(GraphStore):
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:
         with self._tx(read=True):
+            # a group every pair of which an adjudicator declined is settled:
+            # left in, fifty of them filled the limit for good and starved
+            # every new candidate (D-058)
             rows = self._conn.execute(
-                "SELECT namespace, key FROM entities"
-                + (" WHERE namespace = ?" if namespace else "")
-                + " GROUP BY namespace, key HAVING COUNT(DISTINCT type) > 1"
-                " ORDER BY namespace, key LIMIT ?",
+                _MERGE_CANDIDATES_SQL.format(ns="AND e1.namespace = ?" if namespace else ""),
                 ((namespace, limit) if namespace else (limit,)),
             ).fetchall()
             groups = []
@@ -985,21 +1080,35 @@ class SqliteStore(GraphStore):
         return [common.row_to_entity(r) for r in rows]
 
     def count_observations(
-        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None
+        self, namespace: str, ref: EntityRef, observed_before: datetime | None = None,
+        allowed_types: tuple[str, ...] | None = None,
     ) -> int:
         with self._tx(read=True):
             entity = self._resolve_entity(namespace, ref)
             if entity is None:
                 return 0
             before_sql, before_args = _observed_before("?", observed_before)
+            # a type-scoped caller's count: the far end of each half must be
+            # in its types too (the ref's own type is the caller's to check)
+            subj_types, obj_types, type_args = "", "", ()
+            if allowed_types is not None:
+                if not allowed_types:
+                    return 0
+                tm = ",".join("?" * len(allowed_types))
+                subj_types = (" AND (o.object_entity_id IS NULL OR EXISTS (SELECT 1 FROM entities x"
+                              f" WHERE x.id = o.object_entity_id AND x.type IN ({tm})))")
+                obj_types = f" AND EXISTS (SELECT 1 FROM entities x WHERE x.id = o.subject_id AND x.type IN ({tm}))"
+                type_args = tuple(allowed_types)
             # two indexed halves, like observations_for (D-035/D-038)
             row = self._conn.execute(
                 "SELECT (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
-                "          AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql + ")"
+                "          AND o.subject_id = ?" + _NOT_TOMBSTONED + before_sql + subj_types + ")"
                 "     + (SELECT COUNT(*) FROM observations o WHERE o.namespace = ?"
-                "          AND o.object_entity_id = ? AND o.subject_id != ?" + _NOT_TOMBSTONED + before_sql + ")"
+                "          AND o.object_entity_id = ? AND o.subject_id != ?" + _NOT_TOMBSTONED
+                + before_sql + obj_types + ")"
                 " AS n",
-                (namespace, entity.id, *before_args, namespace, entity.id, entity.id, *before_args),
+                (namespace, entity.id, *before_args, *type_args,
+                 namespace, entity.id, entity.id, *before_args, *type_args),
             ).fetchone()
         return int(row["n"])
 
@@ -1249,7 +1358,7 @@ class SqliteStore(GraphStore):
                     (namespace, model, *chunk),
                 ).fetchall()
                 for row in rows:
-                    result[row["ref_id"]] = common.unpack_vector(row["vector"])
+                    result[row["ref_id"]] = common.unpack_array(row["vector"])
         return result
 
     # hex value of the id's last character, 0..15: the shard key (D-031)
@@ -1559,14 +1668,20 @@ class SqliteStore(GraphStore):
             if row is None:
                 return False
             self._put_tombstone(namespace, observation_id, reason, common.now())
-            # a brief synthesized from this observation may still be quoting
-            # it; drop it and let the worker rebuild from what remains (H-D8)
-            self._conn.execute(
-                "DELETE FROM dossiers WHERE namespace = ? AND observation_ids LIKE ?",
-                (namespace, f'%"{observation_id}"%'),
-            )
+            self._drop_briefs_citing(namespace, observation_id)
             self._hwm_reset(self._DOSSIER_HWM)   # a dropped brief is rebuilt next tick
             return True
+
+    def _drop_briefs_citing(self, namespace: str, observation_id: str) -> None:
+        """A brief synthesized from a redacted observation may still be
+        quoting it; drop it and let the worker rebuild from what remains
+        (H-D8) — on redact and on a restored tombstone alike (D-058)."""
+        dropped = self._conn.execute(
+            "DELETE FROM dossiers WHERE namespace = ? AND observation_ids LIKE ?",
+            (namespace, f'%"{observation_id}"%'),
+        ).rowcount
+        if dropped:
+            self._hwm_reset(self._DOSSIER_HWM)
 
     def purge_older_than(self, namespace: str, before: datetime) -> int:
         cutoff = common.iso(before)
@@ -1759,6 +1874,7 @@ class SqliteStore(GraphStore):
     ) -> None:
         with self._tx():
             self._put_tombstone(namespace, observation_id, reason, recorded_at)
+            self._drop_briefs_citing(namespace, observation_id)
 
     def wipe(self) -> None:
         with self._tx():

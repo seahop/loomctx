@@ -1027,7 +1027,7 @@
         "type": "object"
       },
       "ScopeTruncation": {
-        "description": "An entity whose observations exceeded the gather limit: only the\nnewest `gathered` of `total` were examined. A reader must not conclude\nabsence about it \u2014 \"no KEV fact among the kernel's CVEs\" means nothing\nwhen 1,740 of 2,740 were never looked at (D-038).",
+        "description": "Partial coverage a reader must know about. An entity whose\nobservations exceeded the gather limit: only the newest `gathered` of\n`total` were examined. A reader must not conclude absence about it \u2014\n\"no KEV fact among the kernel's CVEs\" means nothing when 1,740 of 2,740\nwere never looked at (D-038). A scope walk cut by the entity cap is\nreported the same way, with reason `scope_cap` (D-058).",
         "properties": {
           "entity": {
             "$ref": "#/$defs/EntityRef"
@@ -1041,6 +1041,16 @@
             "minimum": 0,
             "title": "Total",
             "type": "integer"
+          },
+          "reason": {
+            "default": "gather_limit",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058)",
+            "enum": [
+              "gather_limit",
+              "scope_cap"
+            ],
+            "title": "Reason",
+            "type": "string"
           }
         },
         "required": [
@@ -1149,9 +1159,16 @@
       },
       "charged_tokens": {
         "default": 0,
-        "description": "what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, except that a pack too small to hold one handle beside an item still ships its first handle (D-051)",
+        "description": "what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, with one exception: the first handle always ships (a pack that cut something must say so): when facts cannot be trimmed to make room for it \u2014 the budget is under two handles, or conflicts, briefs and excerpts filled it \u2014 charged_tokens exceeds `budget` by at most that one handle's cost (D-051, D-058)",
         "minimum": 0,
         "title": "Charged Tokens",
+        "type": "integer"
+      },
+      "withheld_briefs": {
+        "default": 0,
+        "description": "entity briefs (dossiers) that exist but were left out: a brief is prose written from every observation it cites, so a type-scoped caller gets it only when it may see all of them, and a brief never takes more than a quarter of the budget (D-058)",
+        "minimum": 0,
+        "title": "Withheld Briefs",
         "type": "integer"
       }
     },
@@ -1515,9 +1532,16 @@
           },
           "charged_tokens": {
             "default": 0,
-            "description": "what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, except that a pack too small to hold one handle beside an item still ships its first handle (D-051)",
+            "description": "what the pack charged against `budget`, in its compact rendered form: every item's text plus its citations, and every handle's hint plus id. At most `budget`, with one exception: the first handle always ships (a pack that cut something must say so): when facts cannot be trimmed to make room for it \u2014 the budget is under two handles, or conflicts, briefs and excerpts filled it \u2014 charged_tokens exceeds `budget` by at most that one handle's cost (D-051, D-058)",
             "minimum": 0,
             "title": "Charged Tokens",
+            "type": "integer"
+          },
+          "withheld_briefs": {
+            "default": 0,
+            "description": "entity briefs (dossiers) that exist but were left out: a brief is prose written from every observation it cites, so a type-scoped caller gets it only when it may see all of them, and a brief never takes more than a quarter of the budget (D-058)",
+            "minimum": 0,
+            "title": "Withheld Briefs",
             "type": "integer"
           }
         },
@@ -1589,7 +1613,7 @@
         "type": "object"
       },
       "ScopeTruncation": {
-        "description": "An entity whose observations exceeded the gather limit: only the\nnewest `gathered` of `total` were examined. A reader must not conclude\nabsence about it \u2014 \"no KEV fact among the kernel's CVEs\" means nothing\nwhen 1,740 of 2,740 were never looked at (D-038).",
+        "description": "Partial coverage a reader must know about. An entity whose\nobservations exceeded the gather limit: only the newest `gathered` of\n`total` were examined. A reader must not conclude absence about it \u2014\n\"no KEV fact among the kernel's CVEs\" means nothing when 1,740 of 2,740\nwere never looked at (D-038). A scope walk cut by the entity cap is\nreported the same way, with reason `scope_cap` (D-058).",
         "properties": {
           "entity": {
             "$ref": "#/$defs/EntityRef"
@@ -1603,6 +1627,16 @@
             "minimum": 0,
             "title": "Total",
             "type": "integer"
+          },
+          "reason": {
+            "default": "gather_limit",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058)",
+            "enum": [
+              "gather_limit",
+              "scope_cap"
+            ],
+            "title": "Reason",
+            "type": "string"
           }
         },
         "required": [

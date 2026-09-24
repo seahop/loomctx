@@ -107,7 +107,7 @@ That last call answers with the IP's full lease timeline — it belonged to
 `web-01` until 2026-08-10, then `laptop-17` — each fact cited to `dhcp-log`.
 Ask about `host web-01`'s OS instead (budget 400) and the pack *leads with a
 conflict item* (two sources disagree), plus expansion handles like
-`"74 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
+`"76 more 'logged_in_by' observations"` that agents pass to `/v1/expand` to
 pull one thread deeper. Ingestion is `POST /v1/ingest` with a `claim` or
 `document` envelope, or `POST /v1/ingest/batch` for many at once — which is
 what log shippers (Fluent Bit, Vector), the bulk loader, and the Kafka
