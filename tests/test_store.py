@@ -1709,3 +1709,63 @@ def test_iter_entities_since_is_incremental(store):
         plan = _exec(b_, "EXPLAIN QUERY PLAN SELECT * FROM entities WHERE 1=1 AND namespace = ? AND created_at >= ?"
                          " AND (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT ?", ("default", "2026", "", "", 10))
         assert any("idx_entity_created" in r["detail"] for r in plan), plan
+
+
+# ------------------------------------------------ SQLite readers (R-9) #
+
+def test_sqlite_reads_use_pooled_readers(tmp_path):
+    """WAL serves readers beside the writer, so the read-only methods
+    borrow pooled read connections instead of queueing on the writer's
+    lock: N threads reading at once get identical answers with no
+    'database is locked'; a reader sees only committed state while a read
+    inside the writer's own transaction sees its uncommitted rows; a store
+    with no readers answers identically."""
+    import threading
+    store = SqliteStore(tmp_path / "r.db", readers=3)
+    assert len(store._readers) == 3
+    keys = [f"h{i}" for i in range(40)]
+    store.record_claims([login_claim().model_copy(update={
+        "subject": EntityRef(type="host", key=k), "object": EntityRef(type="user", key=f"u{i % 5}"),
+        "observed_at": OBSERVED.replace(minute=i % 60)}) for i, k in enumerate(keys * 3)])
+    expected = {k: [o.id for o in store.observations_for("default", EntityRef(type="host", key=k))] for k in keys}
+    assert all(len(v) == 3 for v in expected.values())
+    errors: list[Exception] = []
+
+    def reader(n):
+        try:
+            for i in range(150):
+                k = keys[(n * 7 + i) % len(keys)]
+                got = [o.id for o in store.observations_for("default", EntityRef(type="host", key=k))]
+                assert got == expected[k]
+                assert store.count_observations("default", EntityRef(type="host", key=k)) == 3
+                assert store.search_entities("default", k)[0].key == k
+                assert set(store.observations_for_many("default", [EntityRef(type="host", key=k)])) == {("host", k)}
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert store._reader_pool.qsize() == 3                     # every reader came back
+    host = EntityRef(type="host", key="web-01")
+    with store._tx():
+        store.record_claim(login_claim(namespace="inner"))
+        assert len(store.observations_for("inner", host)) == 1       # same thread: joins the write
+        seen: list[int] = []
+        t = threading.Thread(target=lambda: seen.append(len(store.observations_for("inner", host))))
+        t.start()
+        t.join()
+        assert seen == [0]                                            # another thread: committed state only
+    assert len(store.observations_for("inner", host)) == 1 and store.ping()
+    assert [e.key for e in store.iter_entities("inner")] == ["web-01", "jdoe"]
+    store.close()
+    plain = SqliteStore(tmp_path / "r.db", readers=0)
+    try:
+        assert plain._reader_pool is None
+        assert {k: [o.id for o in plain.observations_for("default", EntityRef(type="host", key=k))]
+                for k in keys} == expected
+    finally:
+        plain.close()
