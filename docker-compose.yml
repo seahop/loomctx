@@ -3,8 +3,11 @@ services:
   # the server-backed store instead (D-011), e.g.:
   #   LOOM_DB=postgresql://loom:loom@postgres:5432/loom \
   #     docker compose --profile pg up -d loom postgres
-  # All engine-based services (loom, test, consumer, mcp) share ONE image so
-  # they can never drift apart — `docker compose build loom` refreshes them all.
+  # All engine-based services (loom, test, consumer, kafka-consumer, enrich,
+  # mcp) share ONE image so they can never drift apart — `docker compose build
+  # loom` refreshes them all. Each also carries `build: .` so a fresh clone can
+  # start with any of them (e.g. `docker compose run --rm test`) and compose
+  # builds the image instead of trying to pull loom-engine:local.
   # Ports bind to localhost unless LOOM_BIND says otherwise (.env.example).
   # Third-party images are pinned by digest; Dependabot bumps them.
   loom:
@@ -61,6 +64,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
 
   test:
+    build: .
     image: loom-engine:local
     profiles: ["test"]
     environment:
@@ -130,6 +134,7 @@ services:
       retries: 20
 
   consumer:
+    build: .
     image: loom-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
@@ -158,6 +163,7 @@ services:
   # is no per-message principal on this path — anyone who can produce to the
   # topic writes into any namespace. Topic ACLs are the write permission.
   kafka-consumer:
+    build: .
     image: loom-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
@@ -198,6 +204,7 @@ services:
   # dossiers + entity resolution. One-shot drain: docker compose run --rm enrich
   #   python -m loom.enrich run --once
   enrich:
+    build: .
     image: loom-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
@@ -230,6 +237,7 @@ services:
   # REST API, and each tool call is scoped by that key's grants. Unset =
   # open dev mode, which is why the port binds to localhost by default.
   mcp:
+    build: .
     image: loom-engine:local
     profiles: ["mcp"]
     restart: unless-stopped

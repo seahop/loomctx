@@ -7,8 +7,9 @@ cd "$(dirname "$0")/.."
 cleanup() { docker compose --profile scale stop >/dev/null 2>&1 || true; docker compose --profile scale rm -f nats gateway lb consumer >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
-# Build first so compose never tries to pull the shared local image; --wait only on the
-# services with healthchecks (the consumer disables its own, and newer Compose fails
+# Build first so the run uses THIS checkout's code (every engine service carries `build: .`,
+# so a missing image is built rather than pulled — but an existing loom-engine:local from an
+# older checkout would otherwise be reused as-is); --wait only on the services with healthchecks (the consumer disables its own, and newer Compose fails
 # --wait on that rather than treating "running" as enough).
 docker compose --profile scale build loom gateway >/dev/null
 docker compose --profile scale up -d --scale gateway=2 --wait --wait-timeout 180 loom nats gateway lb >/dev/null
