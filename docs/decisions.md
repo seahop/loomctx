@@ -1241,7 +1241,7 @@ normalized; these do not.
 
 ## D-043 · Validated on GKE: what a real cloud found that k3s could not (2026-09-10)
 
-Project `loom1-508221`, one zonal GKE Standard cluster (3 × e2-standard-4,
+One zonal GKE Standard cluster (3 × e2-standard-4,
 us-central1-a), the `scale-pg-ha` overlay with CloudNativePG 1.26 on
 `standard-rwo` disks, images pushed from the local build to Artifact
 Registry, the seed plus the full vulnerability corpus loaded, the
