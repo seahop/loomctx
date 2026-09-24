@@ -255,3 +255,41 @@ def test_claim_may_cite_a_document_later_in_its_batch(tmp_path):
                                   json.dumps(doc).encode()])
     assert counts == {"recorded": 1, "accepted": 1, "skipped": 0, "rejected": 0}
     store.close()
+
+
+# ------------------------------------------- write gates on the queue path #
+
+def test_queue_path_applies_the_senders_write_gates(tmp_path):
+    """D-059 on the NATS path: the gateway stamps the grant id; with keys
+    configured the consumer applies that grant's citation and supersession
+    gates as the HTTP path does, and refuses a principal that is no longer
+    a live grant."""
+    import json
+    from loom.auth import AuthConfig, Grant
+    from loom.consumer import handle_batch
+    store = SqliteStore(tmp_path / "g.db")
+    auth = AuthConfig([
+        ("a" * 64, Grant(id="admin", namespaces=("default",), perms="rw")),
+        ("b" * 64, Grant(id="host-agent", namespaces=("default",), perms="rw", entity_types=("host",))),
+    ])
+    secret = {"kind": "document", "event_id": "hr-1", "text": "salary review", "source": "hr",
+              "observed_at": "2026-09-01T00:00:00Z"}
+    handle_batch(store, [json.dumps(secret).encode()], principals=["admin"], auth=auth)
+    claim = {"kind": "claim", "subject": {"type": "host", "key": "web-01"}, "predicate": "rebuilt",
+             "object": "true", "observed_at": "2026-09-02T00:00:00Z", "source": "wiki",
+             "provenance": {"artifact_event_id": "hr-1"}}
+    payload = [json.dumps({**claim, "event_id": "c1"}).encode()]
+    # the host-scoped key cannot cite the HR document; the admin can
+    assert handle_batch(store, payload, principals=["host-agent"], auth=auth)["rejected"] == 1
+    assert handle_batch(store, payload, principals=["admin"], auth=auth)["recorded"] == 1
+    # an unknown / revoked principal writes nothing
+    other = [json.dumps({**claim, "event_id": "c2", "provenance": None}).encode()]
+    assert handle_batch(store, other, principals=["ghost"], auth=auth)["rejected"] == 1
+    # a correction must stay on its subject, on the queue path too
+    old = store.observations_for("default", EntityRef(type="host", key="web-01"))[0]
+    moved = {**claim, "event_id": "c3", "provenance": None,
+             "subject": {"type": "host", "key": "db-01"}, "supersedes": old.id}
+    assert handle_batch(store, [json.dumps(moved).encode()], principals=["admin"], auth=auth)["rejected"] == 1
+    # without keys configured the consumer trusts the gateway, as before
+    assert handle_batch(store, [json.dumps({**claim, "event_id": "c4"}).encode()])["recorded"] == 1
+    store.close()

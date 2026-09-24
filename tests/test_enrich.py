@@ -1429,3 +1429,27 @@ def test_store_writers_get_worker_id_only_when_they_take_it(tmp_path):
     enrich._with_worker(forwarding, "ns", "a", "done")
     enrich._with_worker(forwarding_old, "ns", "a", "done")
     assert seen["new"] == enrich.WORKER_ID and seen["old"] == ("ns", "a", "done")
+
+
+def test_extraction_stays_inside_the_uploaders_entity_types(tmp_path):
+    """D-059: a document ingested by a host-scoped key (the engine stamps
+    attrs["loom.uploader"]) yields no facts about users — extraction writes
+    on the uploader's behalf and gets no wider reach than the key had."""
+    store = _store(tmp_path)
+    reply = ('{"claims":['
+             '{"subject_type":"host","subject_key":"web-01","predicate":"rebooted",'
+             '"object_value":"yes","quote":"web-01 rebooted","confidence":0.8},'
+             '{"subject_type":"user","subject_key":"jdoe","predicate":"salary",'
+             '"object_value":"90k","quote":"jdoe","confidence":0.8},'
+             '{"subject_type":"host","subject_key":"web-01","predicate":"logged_in_by",'
+             '"object_entity_type":"user","object_entity_key":"jdoe","quote":"jdoe","confidence":0.8}]}')
+    gated = store.store_artifact(DocumentIn(
+        text="web-01 rebooted; jdoe salary 90k", source="wiki", observed_at=OBSERVED,
+        attrs={"loom.uploader": {"grant": "host-agent", "entity_types": ["host"]}}))
+    assert extract_from_artifact(store, ScriptedLLM(reply), gated) == 1
+    assert store.observations_for("default", EntityRef(type="user", key="jdoe")) == []
+    # an ungated uploader (no entity_types in the stamp) extracts everything
+    free = store.store_artifact(DocumentIn(
+        text="web-01 rebooted; jdoe salary 90k", source="wiki2", observed_at=OBSERVED,
+        attrs={"loom.uploader": {"grant": "admin"}}))
+    assert extract_from_artifact(store, ScriptedLLM(reply), free) == 3

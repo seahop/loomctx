@@ -44,7 +44,16 @@ spec:
               value: nats://nats:4222
             - name: LOOM_STREAM_REPLICAS
               value: "3"
+            # --- auth (D-059): mount the same keys file the gateway uses so
+            # the writer applies each sender's citation / supersession gates
+            # (the gateway stamps the grant id on every message). Uncomment
+            # with the gateway's block once the `loom-keys` Secret exists.
+            # - name: LOOM_AUTH_FILE
+            #   value: /etc/loom/keys.json
           volumeMounts:
+            # - name: keys
+            #   mountPath: /etc/loom
+            #   readOnly: true
             - name: tmp
               mountPath: /tmp
           resources:

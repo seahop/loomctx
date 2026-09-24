@@ -167,6 +167,9 @@ services:
       LOOM_ACK_WAIT: ${LOOM_ACK_WAIT:-}
       LOOM_MAX_DELIVER: ${LOOM_MAX_DELIVER:-}
       LOOM_DEADLETTER_MAX_BYTES: ${LOOM_DEADLETTER_MAX_BYTES:-}
+      # the gateway's keys, so queued claims get the sender's write gates (D-059)
+      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
+      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
     volumes:
       - loom-data:/data
     depends_on:

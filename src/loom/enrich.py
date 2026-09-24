@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 
 from .context import _render_fact
 from .contracts import Artifact, ClaimIn, EntityRef, Provenance
+from .gates import UPLOADER_ATTR
 from .llm import Embedder, LLMClient, LLMError, embedder_from_env, llm_from_env
 from .registry import validate_claim
 from .store.base import GraphStore
@@ -464,6 +465,12 @@ def extract_from_artifact(
     schema = store.get_schema(artifact.namespace)
     registered = {t.name for t in schema.entity_types} if schema else set()
     strict = bool(schema and schema.strict)
+    # a document ingested by a type-gated key (D-059) yields facts only
+    # inside that key's entity types: extraction is writing on the
+    # uploader's behalf, so it gets no wider reach than the uploader had
+    stamp = (artifact.attrs or {}).get(UPLOADER_ATTR)
+    uploader_types = set(stamp["entity_types"]) if isinstance(stamp, dict) and isinstance(
+        stamp.get("entity_types"), list) else None
     conform_cache: dict = {}
     dropped = 0
     text = artifact.text
@@ -521,6 +528,13 @@ def extract_from_artifact(
                 if strict and (subject.type not in registered
                                or (isinstance(obj, EntityRef) and obj.type not in registered)):
                     dropped += 1
+                    continue
+                if uploader_types is not None and (
+                        subject.type not in uploader_types
+                        or (isinstance(obj, EntityRef) and obj.type not in uploader_types)):
+                    dropped += 1
+                    log.info("artifact %s: extracted claim outside the uploader's entity types "
+                             "dropped (%s)", artifact.id, subject.type)
                     continue
                 predicate = str(c["predicate"])
                 quote = str(c.get("quote") or "")

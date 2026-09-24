@@ -16,7 +16,9 @@ import os
 
 from pydantic import TypeAdapter, ValidationError
 
+from .auth import AuthConfig
 from .contracts import ClaimIn, IngestEnvelope
+from .gates import check_citation, check_supersedes
 from .registry import RegistryCache, validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
@@ -51,6 +53,12 @@ ERROR_HEADER = "Loom-Error"
 ERROR_CODE_HEADER = "Loom-Error-Code"
 ERROR_CODE_STORE = "store_rejected"
 ERROR_CODE_PROVENANCE = "provenance_unresolved"
+# The gateway stamps the authenticated grant id (never the key) on every
+# message (H-A10). With LOOM_AUTH_FILE / LOOM_API_KEYS mounted on the
+# consumer too, that grant's write gates (D-059: citation, supersession)
+# are applied here as well — the queue path gets the checks the HTTP path
+# has. Without keys configured the consumer trusts the gateway, as before.
+PRINCIPAL_HEADER = "Loom-Principal"
 # A claim citing a document the store does not have yet (the document is in
 # another replica's in-flight batch, or later in the stream) is nak'd with
 # this delay times its delivery count, and dead-lettered on its last allowed
@@ -78,9 +86,24 @@ def resolve_provenance(store: GraphStore, claim: ClaimIn) -> str | None:
     return None
 
 
+def _write_gate(store: GraphStore, claim: ClaimIn, principal: str | None,
+                auth: AuthConfig | None) -> str | None:
+    """The D-059 write gates for a queued claim, as the HTTP path applies
+    them. With keys configured a message must carry a live principal: a
+    revoked or unknown grant id writes nothing."""
+    grant = None
+    if auth is not None and auth.enabled:
+        grant = auth.grant_by_id(principal)
+        if grant is None:
+            return f"principal {principal!r} is not a live grant"
+    return check_supersedes(store, claim, grant) or check_citation(store, claim, grant)
+
+
 def handle_batch(store: GraphStore, payloads: list[bytes],
                  registry: RegistryCache | None = None,
-                 retry: list[int] | None = None) -> dict[str, int]:
+                 retry: list[int] | None = None,
+                 principals: list[str | None] | None = None,
+                 auth: AuthConfig | None = None) -> dict[str, int]:
     """Write one fetched batch: claims land in a single transaction.
 
     Gateways validated against the same contract, so a parse failure here
@@ -96,6 +119,9 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
     caller passes `retry`: then its payload index is appended there and
     nothing is counted, for the caller to redeliver (the queue consumer:
     with two replicas the document may be in the other one's batch).
+
+    `principals` (aligned with `payloads`) and `auth` apply the sending
+    grant's write gates (`_write_gate`); a claim failing them is rejected.
     """
     registry = registry or RegistryCache(store)
     counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
@@ -119,6 +145,15 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
     for index, envelope in parsed:
         problem = validate_claim(registry.get(envelope.namespace), envelope)
         if problem is not None:
+            log.warning("rejecting claim %s: %s", envelope.event_id, problem)
+            counts["rejected"] += 1
+            continue
+        principal = principals[index] if principals is not None else None
+        problem = _write_gate(store, envelope, principal, auth)
+        if problem is not None:
+            if problem.endswith("ingest the document first") and retry is not None:
+                retry.append(index)     # the cited document may still be in flight
+                continue
             log.warning("rejecting claim %s: %s", envelope.event_id, problem)
             counts["rejected"] += 1
             continue
@@ -195,8 +230,13 @@ async def defer_unresolved(js, msgs, max_deliver: int | None = None) -> int:
     return parked
 
 
+def _principal(msg) -> str | None:
+    return (getattr(msg, "headers", None) or {}).get(PRINCIPAL_HEADER)
+
+
 async def write_batch(js, store: GraphStore, msgs, registry: RegistryCache | None = None,
-                      max_deliver: int | None = None) -> dict[str, int]:
+                      max_deliver: int | None = None,
+                      auth: AuthConfig | None = None) -> dict[str, int]:
     """Write one fetched batch and settle every message. The fast path is
     one transaction for the batch. When the store rejects it (it rolled
     back, D-022), each message is written alone: the good ones land and
@@ -209,7 +249,8 @@ async def write_batch(js, store: GraphStore, msgs, registry: RegistryCache | Non
     counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0, "deadlettered": 0}
     retry: list[int] = []
     try:
-        batch_counts = handle_batch(store, [m.data for m in msgs], registry, retry)
+        batch_counts = handle_batch(store, [m.data for m in msgs], registry, retry,
+                                    [_principal(m) for m in msgs], auth)
     except Exception as exc:  # noqa: BLE001 — the store rolled back (D-022)
         if len(msgs) == 1:
             counts["deadlettered"] += await settle_failed_batch(js, msgs, exc, max_deliver)
@@ -222,7 +263,7 @@ async def write_batch(js, store: GraphStore, msgs, registry: RegistryCache | Non
         for m in msgs:
             mine: list[int] = []
             try:
-                one = handle_batch(store, [m.data], registry, mine)
+                one = handle_batch(store, [m.data], registry, mine, [_principal(m)], auth)
             except Exception as one_exc:  # noqa: BLE001 — this message, on its own
                 counts["deadlettered"] += await settle_failed_batch(js, [m], one_exc, max_deliver)
                 continue
@@ -250,6 +291,10 @@ async def run() -> None:
 
     store = store_from_env()
     registry = RegistryCache(store)
+    auth = AuthConfig.from_env()
+    if not auth.enabled:
+        log.warning("no LOOM_AUTH_FILE / LOOM_API_KEYS on the consumer: queued claims are written "
+                    "without the sending key's citation/supersession gates (D-059)")
     url = os.environ.get("LOOM_NATS_URL", "nats://nats:4222")
     # The queue may still be booting when we start (compose/k8s ordering
     # is best-effort): keep trying instead of dying on the first refusal
@@ -291,9 +336,9 @@ async def run() -> None:
         # gateway stamps the grant id, never the key, on each message
         principals: dict[str, int] = {}
         for m in msgs:
-            who = (m.headers or {}).get("Loom-Principal", "-")
+            who = _principal(m) or "-"
             principals[who] = principals.get(who, 0) + 1
-        batch_counts = await write_batch(js, store, msgs, registry)
+        batch_counts = await write_batch(js, store, msgs, registry, auth=auth)
         for key, val in batch_counts.items():
             totals[key] += val
         log.info("progress: %s (principals: %s)", totals, principals)
