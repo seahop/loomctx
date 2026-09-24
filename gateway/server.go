@@ -183,27 +183,63 @@ func (f *natsForwarder) close() { f.nc.Close() }
 // keyed by grant, never by the raw header value: an unauthenticated caller
 // can't mint a fresh bucket per request by rotating a bogus key (H-A4).
 // The map is bounded as a belt-and-braces guard.
+//
+// A grant may carry its own rate_per_sec / rate_burst (R-10, keys file):
+// the override applies even when LOOM_RATE_PER_SEC is unset ("unlimited
+// by default, this key is capped"), and a hot-reloaded change retunes the
+// principal's live bucket.
 type limiterPool struct {
 	mu      sync.Mutex
-	rate    float64
+	rate    float64 // 0 = no default limit
 	buckets map[string]*rate.Limiter
 }
 
 const maxLimiterBuckets = 10000
 
 func newLimiterPool(perSec float64) *limiterPool {
-	if perSec <= 0 {
-		return nil
+	if perSec < 0 {
+		perSec = 0
 	}
 	return &limiterPool{rate: perSec, buckets: map[string]*rate.Limiter{}}
 }
 
-func (p *limiterPool) allow(key string) bool {
-	if p == nil {
-		return true
+// effective is the (rate, burst) a principal is held to: its grant's
+// override, else the pool default sized as the gateway always did
+// (burst = int(rate)); a burst below one would admit nothing.
+func (p *limiterPool) effective(g *grant) (float64, int) {
+	perSec := p.rate
+	if g != nil && g.RatePerSec != nil {
+		perSec = *g.RatePerSec
+	}
+	if perSec <= 0 {
+		return 0, 0
+	}
+	burst := int(perSec)
+	if g != nil && g.RateBurst != nil {
+		burst = *g.RateBurst
+	}
+	if burst < 1 {
+		burst = 1
+	}
+	return perSec, burst
+}
+
+// limiterFor returns the principal's bucket, or nil when nothing limits
+// it (no default and no override) — no bucket is minted in that case.
+func (p *limiterPool) limiterFor(key string, g *grant) *rate.Limiter {
+	perSec, burst := p.effective(g)
+	if perSec <= 0 {
+		return nil
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	lim, ok := p.buckets[key]
+	if ok && (float64(lim.Limit()) != perSec || lim.Burst() != burst) {
+		// the keys file changed this principal's cap: retune in place so
+		// a tightened key can't cash in an old, larger allowance
+		lim.SetLimit(rate.Limit(perSec))
+		lim.SetBurst(burst)
+	}
 	if !ok {
 		if len(p.buckets) >= maxLimiterBuckets {
 			for k := range p.buckets { // evict one arbitrary entry
@@ -211,31 +247,29 @@ func (p *limiterPool) allow(key string) bool {
 				break
 			}
 		}
-		lim = rate.NewLimiter(rate.Limit(p.rate), int(p.rate))
+		lim = rate.NewLimiter(rate.Limit(perSec), burst)
 		p.buckets[key] = lim
 	}
-	p.mu.Unlock()
-	return lim.Allow()
+	return lim
 }
 
-// allowN takes n tokens at once (a batch of n envelopes costs n).
-func (p *limiterPool) allowN(key string, n int) bool {
+func (p *limiterPool) allow(key string, g *grant) bool {
 	if p == nil {
 		return true
 	}
-	p.mu.Lock()
-	lim, ok := p.buckets[key]
-	if !ok {
-		if len(p.buckets) >= maxLimiterBuckets {
-			for k := range p.buckets {
-				delete(p.buckets, k)
-				break
-			}
-		}
-		lim = rate.NewLimiter(rate.Limit(p.rate), int(p.rate))
-		p.buckets[key] = lim
+	lim := p.limiterFor(key, g)
+	return lim == nil || lim.Allow()
+}
+
+// allowN takes n tokens at once (a batch of n envelopes costs n).
+func (p *limiterPool) allowN(key string, g *grant, n int) bool {
+	if p == nil {
+		return true
 	}
-	p.mu.Unlock()
+	lim := p.limiterFor(key, g)
+	if lim == nil {
+		return true
+	}
 	if n > lim.Burst() {
 		return false // a batch larger than the burst can never pass; refuse cleanly
 	}
@@ -308,7 +342,7 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 				map[string]string{"detail": fmt.Sprintf("batch of %d exceeds %d items", len(items), cfg.maxBatch)})
 			return
 		}
-		if !limiters.allowN(bucket, len(items)) {
+		if !limiters.allowN(bucket, g, len(items)) {
 			m.rejectedRate.Add(1)
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"detail": "rate limit exceeded"})
@@ -400,7 +434,7 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 			}
 			bucket = g.ID
 		}
-		if !limiters.allow(bucket) {
+		if !limiters.allow(bucket, g) {
 			m.rejectedRate.Add(1)
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests,
