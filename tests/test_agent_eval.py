@@ -361,6 +361,19 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
     assert ae.scorecard_markdown([row]).split("\n")[2].endswith("| 1 |")
     # a request the provider rejects outright (400) is the model's problem: scored
     assert not LLMError("provider returned 400: bad tool schema").transient
+    # out of credit (402) is the account's problem: transient, never retried
+    import io
+    import urllib.error
+    from unittest import mock
+    from loom import llm as _llm
+    err = urllib.error.HTTPError("https://x/v1", 402, "Payment Required", {}, io.BytesIO(b"{}"))
+    with mock.patch.object(_llm, "_urlopen", side_effect=err) as call:
+        try:
+            _llm._post_json("https://x/v1", {}, {})
+        except LLMError as exc:
+            assert exc.transient and call.call_count == 1
+        else:
+            raise AssertionError("402 must raise")
 
 
 def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retries(seeded_db):

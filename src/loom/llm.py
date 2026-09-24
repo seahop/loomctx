@@ -146,9 +146,11 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
                 detail = exc.read()[:500].decode(errors="replace")
             except Exception:  # noqa: BLE001 — a synthetic HTTPError may carry no body
                 detail = ""
+            # 402 (out of credit) says nothing about the request either —
+            # not worth retrying, but never the model's answer in an eval
             last = LLMError(f"provider returned {exc.code}: {detail}",
                             public=f"LLM provider returned HTTP {exc.code}",
-                            transient=exc.code in _RETRYABLE)
+                            transient=exc.code in _RETRYABLE or exc.code == 402)
             if exc.code not in _RETRYABLE:
                 raise last from exc
             retry_after = _retry_after_seconds(
