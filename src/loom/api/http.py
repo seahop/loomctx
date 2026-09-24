@@ -42,7 +42,6 @@ from ..contracts import (
 )
 from ..contracts import (
     MAX_BATCH_ITEMS,
-    DocumentIn,
     IngestBatchResponse,
     IngestItemResult,
     SchemaRegistration,

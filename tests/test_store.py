@@ -716,7 +716,6 @@ def _unit(*xs):
 
 
 def test_nearest_observations_rank_by_cosine(store):
-    host = EntityRef(type="host", key="web-01")
     ids = []
     for i, vec in enumerate([_unit(1, 0, 0), _unit(0.9, 0.1, 0), _unit(0, 1, 0), _unit(0, 0, 1)]):
         obs = store.record_claim(login_claim().model_copy(
@@ -783,8 +782,6 @@ def test_vector_index_backfill_and_exact_fallback_agree(store):
     """Rows that reach the JSON table without the index (imports, older
     versions) are picked up by ensure_vector_index; the exact path ranks
     identically to the ANN path."""
-    import json as _json
-    host = EntityRef(type="host", key="web-01")
     ids = []
     vecs = [_unit(1, 0, 0), _unit(0, 1, 0), _unit(0.7, 0.7, 0)]
     for i, vec in enumerate(vecs):
@@ -1030,7 +1027,6 @@ def test_chunk_and_dossier_release_honour_ownership(store):
 
 
 def test_embedding_backlog_shards_partition_the_work(store):
-    host = EntityRef(type="host", key="web-01")
     ids = {store.record_claim(login_claim().model_copy(update={
         "object": EntityRef(type="user", key=f"u{i}")})).id for i in range(24)}
     seen: list[str] = []

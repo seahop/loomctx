@@ -536,7 +536,7 @@ def schema(namespace: str, mapping: dict | Mapping | None = None) -> SchemaRegis
                    | set(REF_PROPERTIES.values()) | {m.sighting, SIGHTED_COUNT})
     return SchemaRegistration(
         namespace=namespace,
-        entity_types=[EntityTypeDef(name=t, description=f"STIX 2.1 object (loom.connectors.stix)") for t in types],
+        entity_types=[EntityTypeDef(name=t, description="STIX 2.1 object (loom.connectors.stix)") for t in types],
         predicates=[PredicateDef(name=p, description="STIX 2.1 relationship type or object property "
                                                      "(loom.connectors.stix)") for p in preds],
     )

@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from loom.auth import AuthConfig
-from loom.contracts import ClaimIn, DocumentIn, EntityRef
+from loom.contracts import ClaimIn, EntityRef
 from loom.store.sqlite import SqliteStore
 
 OBSERVED = datetime(2026, 9, 1, 14, 3, tzinfo=timezone.utc)

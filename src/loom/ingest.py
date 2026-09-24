@@ -75,7 +75,7 @@ def request_json(url: str, data: bytes | None, headers: dict[str, str], *, metho
     `what`, as the loader always did."""
     attempts = attempts or POST_ATTEMPTS
     sleep = sleep or time.sleep
-    problem = ""
+    problem, delay = "", 0.0
     for attempt in range(attempts):
         if attempt:
             print(f"{what}: {problem}; retry {attempt + 1}/{attempts} in {delay:.0f}s", file=sys.stderr)

@@ -21,7 +21,6 @@ Usage (inside Docker; see README):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import random
 from datetime import datetime, timedelta, timezone

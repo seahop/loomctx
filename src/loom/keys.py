@@ -215,7 +215,7 @@ def main() -> None:
     gen.add_argument("--expires-days", type=int, default=None)
     _rate_flags(gen, "omit for the LOOM_RATE_* defaults")
 
-    lst = sub.add_parser("list")
+    sub.add_parser("list")
 
     upd = sub.add_parser("update", help="change grants without re-minting")
     upd.add_argument("--id", required=True)

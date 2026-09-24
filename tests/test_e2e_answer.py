@@ -5,7 +5,6 @@ and fill in a key); skips cleanly otherwise, so CI and keyless runs are
 unaffected. Costs one small completion per run.
 """
 
-import os
 from datetime import datetime, timezone
 
 import pytest

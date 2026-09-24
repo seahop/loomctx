@@ -2,7 +2,6 @@
 truth and scoring run here against a scripted fake model (no network); the
 live run against a real model is opt-in: LOOM_LIVE_AGENT=1 plus LOOM_LLM_*."""
 
-import asyncio
 import json
 import os
 

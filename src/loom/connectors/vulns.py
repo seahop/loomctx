@@ -56,7 +56,6 @@ import csv
 import email.utils
 import gzip
 import hashlib
-import io
 import json
 import os
 import re
@@ -64,7 +63,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 

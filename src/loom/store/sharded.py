@@ -26,7 +26,7 @@ from __future__ import annotations
 import abc
 import inspect
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Iterator
 
 from ..contracts import (
     Artifact, ClaimIn, DocumentIn, Entity, EntityRef, Observation,

@@ -106,7 +106,7 @@ _SUPERSEDED_DISCOUNT = 0.5     # a corrected fact is history (D-050)
 _DIVERSITY_AFTER = 3
 _DIVERSITY_LAMBDA = 0.5
 
-from .store.common import cosine as _cosine, cosines  # noqa: E402  (re-exported)
+from .store.common import cosine as _cosine, cosines  # noqa: E402, F401  (re-exported)
 
 # Question words that carry no retrieval signal; stripped from the keyword
 # scorer so "what is the operating system" isn't 60% noise (H-C7).

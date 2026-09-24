@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from loom.connectors import ocsf, stix
 from loom.context import build_pack
-from loom.contracts import AskRequest, EntityRef, ScopeSpec
+from loom.contracts import AskRequest, EntityRef
 from loom.store.sqlite import SqliteStore
 
 T0 = 1756728000000            # 2025-09-01T12:00:00Z

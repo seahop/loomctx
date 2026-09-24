@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from loom.context import build_pack
-from loom.contracts import AnswerRequest, AskRequest, ClaimIn, DocumentIn, EntityRef
+from loom.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef
 from loom.enrich import (
     embed_pending,
     extract_from_artifact,
