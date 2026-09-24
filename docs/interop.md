@@ -193,7 +193,10 @@ earlier in the same run by host, CVE and `finding_uid`. A re-scan of an
 open finding therefore does not pile up open rows, and a resolution
 supersedes the open row instead of sitting next to it, so the host stops
 reading as affected. An older event arriving late supersedes nothing
-newer. `emit` has no store to ask and does not chain. The input may be
+newer. `emit` has no store to ask and does not chain; over `--url` the
+prior versions are read through `GET /v1/entities/.../observations`, so the
+key needs `r` on the namespace (a write-only key imports with in-run
+chaining only, and says so). The input may be
 NDJSON, a JSON array, or one (pretty-printed) object; an event that cannot
 be mapped (a `time` in the future, a field of the wrong shape) is counted
 as `invalid` and skipped. `status_id` / `severity_id` sent as strings

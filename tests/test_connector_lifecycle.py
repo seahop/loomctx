@@ -175,6 +175,43 @@ def test_finding_chain_through_the_batch_api(tmp_path, monkeypatch, capsys):
     assert len([r for r in rows if r["predicate"] == "affected_by"]) == 3
 
 
+def test_a_write_only_key_imports_without_cross_run_chaining(monkeypatch, capsys):
+    """The usual shipper grant cannot read: the lookup's 403 degrades to
+    in-run chaining with a warning instead of failing the import."""
+    from loom.connectors.chain import HttpSink, keyed_by, load_chained
+    posted = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        if req.get_method() == "GET":
+            raise urllib.error.HTTPError(req.full_url, 403, "no", {}, io.BytesIO(b"key may not read"))
+        items = [json.loads(line) for line in req.data.decode().splitlines()]
+        posted.append(items)
+        base = sum(len(p) for p in posted[:-1])
+        return Resp(json.dumps({"total": len(items), "recorded": len(items), "accepted": 0, "rejected": 0,
+                                "results": [{"index": i, "status": "recorded", "observation_id": f"o{base + i}"}
+                                            for i in range(len(items))]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    envs = ocsf.events_to_envelopes([OPEN, RESCAN], "netsec")
+    totals = load_chained(envs, HttpSink("http://loom", "k"), keyed_by("finding_uid", {"affected_by"}))
+    assert totals["recorded"] == 2 and totals["superseded"] == 1        # in-run chaining still works
+    assert posted[1][0]["supersedes"] == "o0"
+    assert "WITHOUT version chaining" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("text", [
     json.dumps(OPEN, indent=2),
     json.dumps([OPEN, RESCAN], indent=2),

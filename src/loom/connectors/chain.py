@@ -113,14 +113,27 @@ class HttpSink:
         self.key = key
         self.totals = {"total": 0, "recorded": 0, "accepted": 0, "rejected": 0}
         self._n = 0
+        self.cannot_read = False
 
     def lookup(self, namespace: str, ref: EntityRef) -> list[Observation]:
         from ..ingest import request_json
+        if self.cannot_read:
+            return []
         headers = {"X-Loom-Key": self.key} if self.key else {}
         path = (f"/v1/entities/{urllib.parse.quote(ref.type, safe='')}/{urllib.parse.quote(ref.key, safe='')}"
                 f"/observations?limit={LOOKUP_LIMIT}&namespace={urllib.parse.quote(namespace, safe='')}")
-        body = request_json(self.url + path, None, headers, method="GET",
-                            what=f"lookup {ref.type}:{ref.key}")
+        try:
+            body = request_json(self.url + path, None, headers, method="GET",
+                                what=f"lookup {ref.type}:{ref.key}")
+        except SystemExit as exc:
+            if "HTTP 401" not in str(exc) and "HTTP 403" not in str(exc):
+                raise
+            # a write-only key (the usual shipper grant) cannot read prior
+            # versions: import without chaining rather than not at all
+            self.cannot_read = True
+            print(f"lookup refused ({exc}); importing WITHOUT version chaining — give the key "
+                  "'r' on this namespace to chain", file=sys.stderr)
+            return []
         return [Observation.model_validate(o) for o in body.get("observations", [])]
 
     def write(self, envelopes: list) -> list[str | None]:
