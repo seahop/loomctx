@@ -11,8 +11,12 @@ COPY contracts /contracts
 # tests read ../contracts/schemas.json, i.e. /contracts/schemas.json here
 RUN go vet ./... && go test ./...
 # known-vulnerable code paths in the module graph fail the build (the
-# publish job additionally scans the finished image with Trivy)
-RUN go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+# publish job additionally scans the finished image with Trivy). The tool is
+# pinned (not @latest) so a build is reproducible; Dependabot cannot see a
+# `go run pkg@version`, so bump it by hand — the vuln DATABASE it queries is
+# always current regardless.
+ARG GOVULNCHECK_VERSION=v1.8.0
+RUN go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
 RUN CGO_ENABLED=0 go build -trimpath -o /gateway .
 
 FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8

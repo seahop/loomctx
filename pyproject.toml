@@ -75,3 +75,13 @@ filterwarnings = [
     # the alias. Third-party and harmless; drop this once starlette moves to anyio.from_thread.
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
 ]
+
+# CI lint (the `lint` job): deliberately minimal — syntax errors, undefined
+# names and other hard errors only. Widen `select` (e.g. to "F") once the
+# existing unused-import findings are cleaned up.
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["eval"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

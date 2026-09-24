@@ -2,8 +2,10 @@
 # build, and test against a live engine. Nothing installs on the host.
 FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
 WORKDIR /app
-COPY sdk/typescript/package.json ./
-RUN npm install --no-audit --no-fund
+# package-lock.json is committed: `npm ci` installs exactly it and fails if it
+# disagrees with package.json (regenerate inside node, never on the host)
+COPY sdk/typescript/package.json sdk/typescript/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY sdk/typescript/tsconfig.json ./
 COPY sdk/typescript/scripts ./scripts
 COPY sdk/typescript/src ./src

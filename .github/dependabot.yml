@@ -1,6 +1,6 @@
 # Keeps the pinned things current: action SHAs, base-image digests, the
-# Python lock, and the Go modules. One PR per ecosystem per week; CI gates
-# each one like any other change.
+# Python lock, the Go modules and the TypeScript SDK's npm lock. One PR per
+# ecosystem per week; CI gates each one like any other change.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -26,4 +26,7 @@ updates:
     schedule: {interval: weekly}
   - package-ecosystem: gomod
     directory: /sdk/go
+    schedule: {interval: weekly}
+  - package-ecosystem: npm
+    directory: /sdk/typescript
     schedule: {interval: weekly}
