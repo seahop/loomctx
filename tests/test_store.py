@@ -1077,7 +1077,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -1182,7 +1182,7 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
 
 
 # ------------------------------------------------------- schema v5 #
@@ -1218,7 +1218,7 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 5
+        assert again.schema_version() == SCHEMA_VERSION == 6
         rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
@@ -1409,3 +1409,77 @@ def test_sqlite_transactions_are_reentrant(store):
             store.record_claim(login_claim(namespace="lost"))
             raise RuntimeError("outer failure")
     assert store.observations_for("lost", EntityRef(type="host", key="web-01")) == []
+
+
+# ------------------------------------------------------- schema v6 #
+
+def test_supersedes_is_recorded_and_round_trips(store, tmp_path):
+    """D-050: a claim may name the observation it corrects. The edge is
+    stored, served on every read path, carried by export/import, and
+    `superseded_ids` reports exactly the rows a visible later observation
+    names — a redacted superseder no longer counts, an unknown target is
+    a dangling pointer, not an error."""
+    import io
+    from loom.lifecycle import export_jsonl, import_jsonl
+    host = EntityRef(type="host", key="web-01")
+    old = store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-43"}))
+    assert old.supersedes is None
+    new = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-44", "supersedes": old.id, "event_id": "evt-sup"}))
+    assert new.supersedes == old.id
+    by_read = {o.id: o for o in store.observations_for("default", host)}
+    assert by_read[new.id].supersedes == old.id and by_read[old.id].supersedes is None
+    many = {o.id: o for o in store.observations_for_many("default", [host])[("host", "web-01")]}
+    assert many[new.id].supersedes == old.id
+    assert store.observations_by_ids("default", [new.id])[0].supersedes == old.id
+    replay = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-44", "supersedes": old.id, "event_id": "evt-sup"}))
+    assert replay.id == new.id and replay.supersedes == old.id            # the dedupe path carries it too
+    assert store.superseded_ids("default", [old.id, new.id, "nope"]) == {old.id}
+    assert store.superseded_ids("other", [old.id]) == set()               # namespace-scoped
+    assert store.superseded_ids("default", []) == set()
+    dangling = store.record_claim(login_claim().model_copy(update={
+        "predicate": "runs_os", "object": "fedora-45", "supersedes": "0" * 32}))
+    assert dangling.supersedes == "0" * 32 and store.superseded_ids("default", ["0" * 32]) == {"0" * 32}
+
+    buf = io.StringIO()
+    export_jsonl(store, buf, "default")
+    assert any(json.loads(l)["data"].get("supersedes") == old.id for l in buf.getvalue().splitlines())
+    dst = SqliteStore(tmp_path / "restored-sup.db")
+    try:
+        buf.seek(0)
+        import_jsonl(dst, buf)
+        restored = {o.id: o for o in dst.iter_observations("default")}
+        assert restored[new.id].supersedes == old.id
+        assert dst.superseded_ids("default", [old.id]) == {old.id}
+    finally:
+        dst.close()
+
+    store.redact("default", new.id, "wrong correction")
+    assert store.superseded_ids("default", [old.id]) == set()             # only a visible superseder counts
+
+
+def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
+    """A v5 file gains the column, its index and the version bump on open;
+    rows written before the column carry no supersession."""
+    _raw(store)
+    from loom.store.sqlite import SCHEMA_VERSION
+    before = store.record_claim(login_claim())
+    _exec(store, "DROP INDEX idx_obs_supersedes")
+    _exec(store, "ALTER TABLE observations DROP COLUMN supersedes")
+    _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
+    again = _reopen(store, tmp_path)
+    try:
+        assert again.schema_version() == SCHEMA_VERSION == 6
+        obs = again.observations_for("default", EntityRef(type="host", key="web-01"))
+        assert [o.id for o in obs] == [before.id] and obs[0].supersedes is None
+        later = again.record_claim(login_claim().model_copy(update={"supersedes": before.id}))
+        assert again.superseded_ids("default", [before.id]) == {before.id} and later.supersedes == before.id
+        if isinstance(again, SqliteStore):
+            plan = _exec(again, "EXPLAIN QUERY PLAN SELECT supersedes FROM observations o"
+                                " WHERE o.namespace = ? AND o.supersedes IN (?, ?)", ("default", "a", "b"))
+            assert any("idx_obs_supersedes" in r["detail"] for r in plan), plan
+        else:
+            assert _exec(again, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_obs_supersedes'")
+    finally:
+        again.close()

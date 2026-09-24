@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS observations (
     source           TEXT NOT NULL,
     confidence       REAL NOT NULL,
     provenance_json  TEXT,
-    attrs_json       TEXT NOT NULL DEFAULT '{}'
+    attrs_json       TEXT NOT NULL DEFAULT '{}',
+    supersedes       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -205,6 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key));
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
+CREATE INDEX IF NOT EXISTS idx_obs_supersedes
+    ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
 """
 
 # search_entities: a half-open range on the indexed expression (the LIKE
@@ -220,8 +223,9 @@ _PREFIX_END = "\U0010ffff"
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
 # v3: packed vectors (D-039); v4: resolution_declines (D-044); v5: merge_log,
-# lease owners, lower(key) index, numeric norm_key rule (recompute)
-SCHEMA_VERSION = 5
+# lease owners, lower(key) index, numeric norm_key rule (recompute);
+# v6: observations.supersedes (D-050)
+SCHEMA_VERSION = 6
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -250,8 +254,8 @@ _OBS_SELECT_ENT = (
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
-    " recorded_at, source, confidence, provenance_json, attrs_json)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " recorded_at, source, confidence, provenance_json, attrs_json, supersedes)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _ON_EVENT_CONFLICT = (
@@ -304,7 +308,7 @@ class SqliteStore(GraphStore):
         """Bring pre-existing database files up to the current shape:
         idempotent column adds first, then one-shot versioned steps."""
         wanted = {
-            "observations": [("event_id", "TEXT")],
+            "observations": [("event_id", "TEXT"), ("supersedes", "TEXT")],
             "artifacts": [("event_id", "TEXT"),
                           ("extraction_attempts", "INTEGER NOT NULL DEFAULT 0"),
                           ("next_attempt_at", "TEXT"),
@@ -551,6 +555,20 @@ class SqliteStore(GraphStore):
                     _OBS_SELECT + f" WHERE o.namespace = ? AND o.id IN ({','.join('?' * len(chunk))})"
                     + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
                 out.extend(common.row_to_observation(r) for r in rows)
+        return out
+
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        out: set[str] = set()
+        with self._tx():
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = self._conn.execute(
+                    "SELECT DISTINCT o.supersedes AS sid FROM observations o"
+                    f" WHERE o.namespace = ? AND o.supersedes IN ({','.join('?' * len(chunk))})"
+                    + _NOT_TOMBSTONED, (namespace, *chunk)).fetchall()
+                out.update(r["sid"] for r in rows)
         return out
 
     _PREFIX_CAP = 20
@@ -1710,6 +1728,7 @@ class SqliteStore(GraphStore):
             source=claim.source,
             confidence=claim.confidence,
             provenance=self._resolve_provenance(claim),
+            supersedes=claim.supersedes,
             attrs=claim.attrs,
         )
         cur = self._conn.execute(
@@ -1730,7 +1749,7 @@ class SqliteStore(GraphStore):
             common.iso(obs.valid_from), common.iso(obs.valid_to),
             common.iso(obs.recorded_at), obs.source, obs.confidence,
             json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
-            json.dumps(obs.attrs),
+            json.dumps(obs.attrs), obs.supersedes,
         )
 
     def _insert_artifact(

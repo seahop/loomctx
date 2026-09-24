@@ -224,6 +224,16 @@ class GraphStore(ABC):
         in no particular order."""
 
     @abstractmethod
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        """Of the given observation ids, those that a *visible* (not
+        tombstoned) observation in the namespace names in its `supersedes`
+        (D-050: recorded supersession, never inferred). The read path
+        derives supersession from the rows it gathered; this serves a
+        caller checking specific rows (PROV export, a single-row view).
+        A `supersedes` that names an unknown id is dangling, not an error
+        (claims may arrive out of order), and never appears here."""
+
+    @abstractmethod
     def observations_by_prefix(self, namespace: str, prefix: str) -> list[Observation]:
         """Visible observations whose id starts with `prefix` — how a
         12-hex cite token from a pack resolves back to its observation —

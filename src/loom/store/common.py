@@ -208,6 +208,7 @@ def row_to_observation(row: Mapping[str, Any]) -> Observation:
         source=row["source"],
         confidence=row["confidence"],
         provenance=provenance,
+        supersedes=row["supersedes"] if "supersedes" in row.keys() else None,
         attrs=json.loads(row["attrs_json"]),
     )
 

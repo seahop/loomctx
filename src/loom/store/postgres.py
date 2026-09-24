@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS observations (
     source           TEXT NOT NULL,
     confidence       DOUBLE PRECISION NOT NULL,
     provenance_json  TEXT,
-    attrs_json       TEXT NOT NULL DEFAULT '{}'
+    attrs_json       TEXT NOT NULL DEFAULT '{}',
+    supersedes       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -200,6 +201,7 @@ ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_until TEXT;
 ALTER TABLE entities     ADD COLUMN IF NOT EXISTS dossier_claimed_by TEXT;
 ALTER TABLE artifacts    ADD COLUMN IF NOT EXISTS chunk_claimed_by TEXT;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS supersedes TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_obs_subject
     ON observations (namespace, subject_id, observed_at);
@@ -217,6 +219,8 @@ CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key) text_pattern_ops);
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
+CREATE INDEX IF NOT EXISTS idx_obs_supersedes
+    ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
 """
 
 # search_entities: a half-open range with the text_pattern_ops operators —
@@ -228,7 +232,7 @@ _SEARCH_SQL = (
 )
 _PREFIX_END = "\U0010ffff"
 
-SCHEMA_VERSION = 5  # keep in step with sqlite.py (v5: merge_log, lease owners, lower(key) index, norm_key recompute)
+SCHEMA_VERSION = 6  # keep in step with sqlite.py (v6: observations.supersedes, D-050)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -257,8 +261,8 @@ _OBS_SELECT_ENT = (
 _OBS_INSERT = (
     "INSERT INTO observations (id, namespace, event_id, subject_id, predicate,"
     " object_json, object_entity_id, observed_at, valid_from, valid_to,"
-    " recorded_at, source, confidence, provenance_json, attrs_json)"
-    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    " recorded_at, source, confidence, provenance_json, attrs_json, supersedes)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 _ON_EVENT_CONFLICT = (
@@ -563,6 +567,16 @@ class PostgresStore(GraphStore):
                 _OBS_SELECT + " WHERE o.namespace = %s AND o.id = ANY(%s)" + _NOT_TOMBSTONED,
                 (namespace, list(ids)))
         return [common.row_to_observation(r) for r in rows]
+
+    def superseded_ids(self, namespace: str, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT DISTINCT o.supersedes AS sid FROM observations o"
+                " WHERE o.namespace = %s AND o.supersedes = ANY(%s)" + _NOT_TOMBSTONED,
+                (namespace, list(ids)))
+        return {r["sid"] for r in rows}
 
     _PREFIX_CAP = 20
 
@@ -1733,6 +1747,7 @@ class PostgresStore(GraphStore):
             source=claim.source,
             confidence=claim.confidence,
             provenance=self._resolve_provenance(claim),
+            supersedes=claim.supersedes,
             attrs=claim.attrs,
         )
         inserted = self._x(
@@ -1753,7 +1768,7 @@ class PostgresStore(GraphStore):
             common.iso(obs.valid_from), common.iso(obs.valid_to),
             common.iso(obs.recorded_at), obs.source, obs.confidence,
             json.dumps(obs.provenance.model_dump()) if obs.provenance else None,
-            json.dumps(obs.attrs),
+            json.dumps(obs.attrs), obs.supersedes,
         )
 
     def _insert_artifact(self, artifact: Artifact, suffix: str = "") -> bool:
