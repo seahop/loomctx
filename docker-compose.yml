@@ -40,7 +40,18 @@ services:
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
       LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
       LOOM_MAX_BODY_BYTES: ${LOOM_MAX_BODY_BYTES:-}
+      LOOM_MAX_BATCH: ${LOOM_MAX_BATCH:-}
       LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
+      # per-key rate limits (R-10, D-059); unset = unlimited. Per process:
+      # the ceiling is rate x LOOM_WORKERS x replicas (docs/administration.md)
+      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
+      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
+      LOOM_RATE_LLM_PER_SEC: ${LOOM_RATE_LLM_PER_SEC:-}
+      LOOM_RATE_LLM_BURST: ${LOOM_RATE_LLM_BURST:-}
+      # Host / Origin allowlist (D-059): localhost, IPs and service names
+      # always pass; add the public name you serve Loom under
+      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
+      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
       # The stdio MCP server (`docker compose run --rm -T loom python -m
       # loom.mcp_server`), `loom.agent_eval` and `loom.enrich resolve` all run
       # from THIS service via run/exec, so their dials ride along here.
@@ -94,6 +105,13 @@ services:
       LOOM_NATS_URL: nats://nats:4222
       LOOM_API_KEYS: ${LOOM_API_KEYS:-}
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
+      # per-key rate limit (a batch of n costs n) and Host / Origin
+      # allowlist, same dials and meaning as the engine (D-059)
+      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
+      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
+      LOOM_MAX_BATCH: ${LOOM_MAX_BATCH:-}
+      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
+      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
       # stream shape (D-029): single-node NATS here, so replicas stay 1;
       # cap the buffer so an ingestion storm degrades predictably
       LOOM_STREAM_REPLICAS: ${LOOM_STREAM_REPLICAS:-1}
@@ -231,6 +249,8 @@ services:
   # open dev mode, which is why the port binds to localhost by default.
   mcp:
     image: loom-engine:local
+    healthcheck:
+      disable: true    # the image's check probes the engine's :8000/readyz, which this service doesn't serve
     profiles: ["mcp"]
     restart: unless-stopped
     command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
@@ -257,6 +277,13 @@ services:
       LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
       LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
       LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
+      # per tool call; `answer` / `find_related` also spend the LLM bucket
+      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
+      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
+      LOOM_RATE_LLM_PER_SEC: ${LOOM_RATE_LLM_PER_SEC:-}
+      LOOM_RATE_LLM_BURST: ${LOOM_RATE_LLM_BURST:-}
+      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
+      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
 
   # TypeScript SDK toolchain (D-026): regen-check the generated contract
   # types, build, and run the client test against the live engine.
