@@ -10,6 +10,8 @@ custom code. Loom meets them where they are:
 | Files / exports / cron jobs (any language) | `python -m loom.ingest --url … file.jsonl` or `--db` for direct writes | emit NDJSON envelopes |
 | Custom code | Python SDK, TypeScript SDK, Go SDK (`sdk/`); anything else via `contracts/openapi.json` + your language's OpenAPI generator | a few lines |
 | Public feeds (CISA KEV, NVD, EPSS) | `python -m loom.connectors.vulns load` — a connector: pull, map, register schema, ingest (`docs/real-data.md`) | none — the pattern for your own connector is in `src/loom/connectors/` |
+| STIX 2.1 bundles (a TIP, MISP, OpenCTI, a vendor feed) | `python -m loom.connectors.stix import bundle.json` — relationships, sightings and object properties become cited, time-windowed claims; `export` writes the namespace back as a valid bundle (`docs/interop.md`) | none, or a `--mapping` JSON to rename predicates |
+| OCSF `vulnerability_finding` events (scanners, cloud security hubs, SIEMs) | `python -m loom.connectors.ocsf import findings.ndjson` — host/CVE claims that join the KEV/NVD record; `export` writes findings back (`docs/interop.md`) | none |
 | AI agents | MCP (stdio or streamable-http) | none |
 
 Every path lands in the same append-only, cited, idempotent store. Give
