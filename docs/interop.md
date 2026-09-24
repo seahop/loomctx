@@ -70,13 +70,24 @@ merge it when the object arrives later.
 | `confidence` (0–100) | `confidence` (0–1); absent → the contract default 1.0 |
 | `created_by_ref` | `source` = that identity's `name`; no identity → `--source` (default `stix`) |
 | `description` | `attrs.description` |
-| `revoked: true` | skipped (counted as `revoked`) |
+| `revoked: true` | `import`: a final version closed at the revocation (`valid_to` = its `modified`, `attrs.revoked`) superseding the imported edge; dropped (`dropped_no_prior`) when that edge was never imported; `emit`: skipped (counted as `revoked`) |
 | `sighting.sighting_of_ref` `where_sighted_refs[i]` | one claim per place: `subject sighted_by object` (the mapping's `sighting` name) |
 | `sighting` with no `where_sighted_refs` | `subject sighted_count <count>` |
 | `sighting.first_seen` / `last_seen` / `count` | `valid_from` / `valid_to` / `attrs.count` |
 
 Every claim carries `attrs.stix_id` and `attrs.stix_type`; the event id is
 `stix:<id>:<modified>:<predicate>[:tag]`.
+
+**Versions chain (import).** A revised relationship or sighting (a new
+`modified`: a `stop_time` appeared, the confidence changed) lands as a new
+observation that names the previous version's in `supersedes` (D-050), so
+the reader shows the old one as history instead of beside the new one.
+The previous version is found in the target store (or earlier in the same
+run) by subject, predicate, object and `attrs.stix_id`; an older version
+arriving late supersedes nothing newer. `emit` has no store to ask and
+does not chain. An object that cannot be read (a malformed timestamp, a
+`modified` in the future) is counted as `invalid` and skipped; the rest of
+the bundle imports.
 
 ### Object properties → scalar claims on the object's entity
 
@@ -111,8 +122,8 @@ excerpt for those entities.
 - `object_marking_refs` / `granular_markings`: Loom scopes data by
   namespace and grant (D-013a), not per-object marking. Import TLP:RED
   into its own namespace.
-- Relationship `revoked: true` is dropped rather than recorded as a
-  tombstone; Loom's own supersession is an explicit edge (roadmap).
+- `revoked: true` on anything but a relationship or sighting (an SDO,
+  an SCO, a report) is skipped; revocation of an edge is mapped (above).
 
 ### Overriding the tables
 
@@ -165,7 +176,7 @@ Other event classes are ignored (counted as `other_class`).
 | --- | --- |
 | `device.hostname` / `name` / `uid`, else `resources[].hostname` / `name` / `uid`, else `device.ip` | the host entity `host:<name>` |
 | `vulnerabilities[].cve.uid` | the CVE entity `cve:<CVE-…>` (upper-cased; non-CVE uids are dropped) |
-| the pair | `host affected_by cve` — `valid_from` = `vulnerabilities[].first_seen_time` / `finding_info.first_seen_time` / `created_time`; `valid_to` = `last_seen_time` (or the event time) **only when the finding is closed** (`status_id` 3/4 or `activity_id` 3); attrs: `finding_uid`, `title`, `status`, `status_id`, `severity`, `severity_id`, `is_exploit_available`, `is_fix_available` |
+| the pair | `host affected_by cve` — `valid_from` = `vulnerabilities[].first_seen_time` / `finding_info.first_seen_time` / `created_time`; `valid_to` = `last_seen_time` (or the event time) **only when the finding is closed**: `status_id` 4 (Resolved), or `activity_id` 3 (Close) unless the status is 3 (Suppressed — muted, still present, so the exposure stays open); `status_id` 5/6 (Archived/Deleted) are record housekeeping and close nothing; attrs: `finding_uid`, `title`, `status`, `status_id`, `severity`, `severity_id`, `is_exploit_available`, `is_fix_available` |
 | `cve.cvss[]` (`base_score`, `version`, `vector_string`, `severity`) | `cvss_score` + `has_severity` on the CVE, one per entry, `source` = `<product>:cvss<version>` (so a scanner's score sits beside NVD's and the CNA's as a real cross-source conflict, D-035) |
 | `cve.epss.score` / `.percentile` | `epss_score` / `epss_percentile` |
 | `cve.desc` (or `vulnerabilities[].desc`) | `summary`, trimmed to 400 chars |
@@ -174,6 +185,19 @@ Other event classes are ignored (counted as `other_class`).
 | `time` (epoch ms; else `finding_info.modified_time` / `created_time` / `metadata.logged_time`) | `observed_at` |
 | `metadata.product.name` (normalized: `Acme Scanner` → `acme_scanner`) | `source` (`--source` overrides) |
 | `finding_info.uid` (else `metadata.uid`, else a hash of the event) + `time` | the event-id prefix `ocsf:<uid>:<time>` |
+
+**Versions chain (import).** Each event for a finding lands as a new
+`affected_by` observation (the event id embeds its time) that names the
+previous version's in `supersedes` (D-050) — found in the target store or
+earlier in the same run by host, CVE and `finding_uid`. A re-scan of an
+open finding therefore does not pile up open rows, and a resolution
+supersedes the open row instead of sitting next to it, so the host stops
+reading as affected. An older event arriving late supersedes nothing
+newer. `emit` has no store to ask and does not chain. The input may be
+NDJSON, a JSON array, or one (pretty-printed) object; an event that cannot
+be mapped (a `time` in the future, a field of the wrong shape) is counted
+as `invalid` and skipped. `status_id` / `severity_id` sent as strings
+(`"4"`) are read as numbers.
 
 Not mapped: `observables`, `evidences`, `remediation`, `enrichments`,
 `actor`, cloud/`api` context, and anything under `unmapped`. Findings with
@@ -187,7 +211,7 @@ per CVE that has facts but no host:
 
 | Loom | OCSF |
 | --- | --- |
-| the edge | `resources[{name, type: host}]`, `device.hostname`, `finding_info.uid` = the observation id, `first_seen_time` / `last_seen_time` from the validity window, `status_id` 4 (Resolved) when the window is closed |
+| the edge | `resources[{name, type: host}]`, `device.hostname`, `finding_info.uid` = the observation id, `first_seen_time` / `last_seen_time` from the validity window, `status_id` 4 (Resolved) when the window is closed, else the recorded status (Suppressed and In Progress round-trip) |
 | `cvss_score` (newest per source) with `attrs.version` / `vector` | `vulnerabilities[0].cve.cvss[]` |
 | `has_severity` (newest) | `severity_id` / `severity`, and `cvss[].severity` |
 | `epss_score` / `epss_percentile` | `cve.epss` |
