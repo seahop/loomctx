@@ -68,6 +68,7 @@ from .context import (_aware, _citation, _is_extracted, _render_fact, build_pack
                       covers_valid_at, item_tokens)
 from .contracts import AskRequest, ContextItem, ContextPack, EntityRef, Observation, ScopeSpec
 from .llm import LLMError, _post_json, embedder_from_env
+from .store.common import redact_dsn
 
 BUDGETS = (400, 800, 1600, 3200)
 FAMILIES = ("lease", "conflict", "multihop", "abstention", "numeric", "order")
@@ -1457,7 +1458,9 @@ def main(argv: list[str] | None = None) -> None:
         store.close()
     summary = summarize(records, conditions)
     capped = cost_capped(records)
-    meta = {"date": date, "store": args.db or os.environ.get("LOOM_DB", "loom.db"),
+    # the scorecard is meant to be published: never with the DSN's password
+    # (a GKE run printed the operator's Postgres credentials, D-063)
+    meta = {"date": date, "store": redact_dsn(args.db or os.environ.get("LOOM_DB", "loom.db")),
             "namespaces": namespaces, "model": model.model, "embedder": getattr(embedder, "model", None),
             "questions": len(questions), "per_family": _family_counts(questions), "runs": args.runs,
             "seed": args.seed, "budgets": list(budgets), "max_cost": args.max_cost, "cost_capped": capped,

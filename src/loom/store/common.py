@@ -236,6 +236,12 @@ def row_to_dossier(row: Mapping[str, Any]) -> dict:
     }
 
 
+def redact_dsn(url: str) -> str:
+    """A DSN is fine to show only without its password (operator-issued
+    credentials end up in pod logs and published scorecards otherwise)."""
+    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
+
+
 def redacted_view(obs: Observation) -> Observation:
     """Content-free stand-in for a tombstoned observation: keeps identity
     (id, namespace, event_id, subject, predicate, timestamps, source) so a

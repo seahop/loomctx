@@ -457,3 +457,15 @@ def test_cli_canned_run_writes_the_table(db, tmp_path, capsys):
                   "--budgets", "400", "--out", str(out), "--quiet", "--max-cost", "-1"])
     assert exc.value.code == 3 and "INCOMPLETE" in out.read_text()
     assert "INCOMPLETE" in capsys.readouterr().err
+
+
+def test_the_scorecard_never_prints_a_dsn_password():
+    """D-063: a GKE run's scorecard header carried the operator's Postgres
+    password — and scorecards are meant to be published."""
+    from loom.store.common import redact_dsn
+    assert redact_dsn("postgresql://loom:s3cret@loom-pg-rw.loom:5432/loom") == \
+        "postgresql://loom:***@loom-pg-rw.loom:5432/loom"
+    assert redact_dsn("/data/loom.db") == "/data/loom.db"
+    import inspect
+    import loom.retrieval_eval as re_
+    assert "redact_dsn(args.db" in inspect.getsource(re_.main)

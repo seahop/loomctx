@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .contracts import ClaimIn, DocumentIn, EntityRef
+from .store.common import redact_dsn
 from .store.factory import store_from_env, store_from_url
 
 # Fixed epoch: the dataset describes July-September 2026 regardless of when
@@ -249,12 +250,6 @@ def generate(seed: int = 42) -> tuple[list[ClaimIn], list[DocumentIn]]:
     ]
     return claims, docs
 
-
-def redact_dsn(url: str) -> str:
-    """A DSN is fine to log only without its password (operator-issued
-    credentials end up in pod logs otherwise)."""
-    import re
-    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
 
 
 def resolve_supersessions(claims: list[ClaimIn], recorded) -> list[ClaimIn]:
