@@ -29,7 +29,8 @@ Read in this order depending on why you're here.
   talk table.
 - **[interop.md](interop.md)** — standards at the edges: STIX 2.1 and OCSF
   connectors (import and export, mapping tables, what is not mapped,
-  `examples/stix_import.py`). The PROV-O provenance export
+  `examples/stix_import.py`), and the raw LDAP / LDIF connector for
+  object-level Active Directory reachability. The PROV-O provenance export
   (`GET /v1/observations/{id}/prov`) is in
   [contracts.md](contracts.md#provenance-export-get-v1observationsidprov).
 - **[demo.md](demo.md)** — the conference walkthrough: three acts, every

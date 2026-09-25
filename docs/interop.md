@@ -1,12 +1,12 @@
-# Interop: STIX 2.1 and OCSF
+# Interop: STIX 2.1, OCSF and raw LDAP / LDIF
 
 Loom's own shapes are the contracts in `src/loom/contracts.py`; the world
-speaks STIX (threat intelligence) and OCSF (security events). Two
-connectors translate both ways, so a TIP's bundle or a scanner's findings
-land as cited, time-windowed claims, and Loom's facts leave as records
-other tools accept. The engine learns nothing about either standard: the
-mapping is a connector plus a schema registration (hard constraint: domain
-specifics stay in the registry).
+speaks STIX (threat intelligence), OCSF (security events) and, for Active
+Directory, raw LDAP. Connectors translate at the edges, so a TIP's bundle,
+a scanner's findings or a directory export land as cited, time-windowed
+claims, and Loom's facts leave as records other tools accept. The engine
+learns nothing about any standard: the mapping is a connector plus a schema
+registration (hard constraint: domain specifics stay in the registry).
 
 Everything here is idempotent (event ids embed the record's own
 modification stamp: a re-import is a no-op, a *revised* record is a new
@@ -28,6 +28,12 @@ python -m loom.connectors.ocsf import findings.ndjson --namespace netsec        
 python -m loom.connectors.ocsf export --namespace netsec --out findings.ndjson       # --history: every version
 python -m loom.connectors.ocsf emit findings.ndjson --namespace netsec
 python -m loom.connectors.ocsf schema --namespace netsec
+
+# raw LDAP / LDIF (Active Directory)
+python -m loom.connectors.ldap import export.ldif --namespace ad                      # into the LOOM_DB store
+python -m loom.connectors.ldap import export.ldif --namespace ad --url http://loom:8000 --key loomk_...
+python -m loom.connectors.ldap emit export.ldif --namespace ad > envelopes.jsonl
+python -m loom.connectors.ldap schema --namespace ad [--as-of 2026-09-20T09:00:00Z]
 ```
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
@@ -298,14 +304,140 @@ same findings (and CVE facts, with their sources) on the next export.
 Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
 `metadata.product.name Loom`.
 
+## Raw LDAP / LDIF (Active Directory) → Loom
+
+`loom.connectors.ldap` decodes a raw directory export — object by object,
+deterministically — into typed, cited claims in an `ad` namespace, so an
+agent can ask **object-level reachability** questions over the ordinary
+scope walk: *"what rights / trust / membership path connects user:X to
+domain:B?"*. It reads a **file** (LDIF); it is not a collector and issues
+no directory operations.
+
+**It is NOT BloodHound.** It performs no graph reasoning: no transitive or
+*effective* admin, no shortest / cheapest attack-path scoring, no edge
+exploitability weighting. Loom carries the evidence (the direct edges and
+the decoded rights); the agent (or a later analysis layer) assembles and
+ranks the path. Group **nesting** is the scope walk's job at depth N, not
+the connector's.
+
+**The boundary — object-level only.** LDAP gives you ACL / membership /
+delegation / trust reachability. It does **not** contain sessions or
+local-admin-on-member-servers — those need host collection (what SharpHound
+does at the host), not the directory. So an LDAP-only Loom answers
+control-of-account, delegation, trust and GPO-control questions, but not
+session-based lateral movement. Load host/session data as its own claims
+later and the same walk extends over it; this connector does not invent it.
+
+### Input — LDIF (RFC 2849)
+
+Canonical input is LDIF: base64 values (`attr:: <b64>`), line folding (a
+continuation line begins with a single space), multi-valued attributes and
+plain `changetype`-free entries are all handled; `attr:< url` (an external
+reference) is skipped. CSV/JSON from `Get-AD*` can be normalized to the same
+claims by a thin adapter later. A small synthetic fixture
+(`tests/fixtures/corp_ad.ldif`) drives the tests and demo; real AD data is
+never required.
+
+### Entities — keyed by objectSid
+
+Every object is keyed by its **objectSid**, decoded from the binary/base64
+LDIF value to the standard string `S-1-5-21-…-<rid>` (MS-DTYP 2.4.2) — it is
+stable across rename. `distinguishedName` (`dn_name`) and `sAMAccountName`
+(`sam`) ride as scalar claims so entity resolution (D-042/D-060) can fold
+them onto the SID-keyed entity, and the friendly `name` is carried too.
+Within one export, `member` / `memberOf` DNs are resolved to the SID of the
+object they name, so the edges connect the SID-keyed entities directly. The
+object's type comes from `objectClass` (most specific wins):
+
+| objectClass | Loom type |
+| --- | --- |
+| `domainDNS` / `domain` | `domain` |
+| `computer` | `computer` |
+| `user` (not a computer) | `user` |
+| `group` | `group` |
+| `organizationalUnit` | `ou` |
+| `groupPolicyContainer` | `gpo` |
+| `container` (and the fallback) | `container` |
+
+A `trustedDomain` object is not SID-keyed: its partner is an external
+domain, keyed by DNS name (`domain:dev.local`).
+
+### Decode (deterministic, per-object)
+
+| Directory fact | Loom claim |
+| --- | --- |
+| `member` / `memberOf` | `member_of` (subject = principal, object = group) — **DIRECT only**; nesting is the walk's job |
+| DN parentage | `contains` (parent object → child), containment |
+| `trustedDomain` | `trusts` (trusting domain → partner), attrs `direction` (from `trustDirection`), `transitive` and `sid_filtering` (from `trustAttributes`), `forest_transitive`, `partner` |
+| `nTSecurityDescriptor` (base64 SD blob) | `has_ace` (trustee SID → this object), `attrs.right` decoded from the access mask, `attrs.object_type` the ObjectType GUID for object ACEs |
+| `userAccountControl` bitmask | `enabled` (not 0x2), `unconstrained_delegation` (0x80000), `no_preauth` (0x400000, AS-REP roastable), `is_dc` (0x2000 SERVER_TRUST_ACCOUNT) |
+| a `user` with a non-empty `servicePrincipalName` | `kerberoastable`; each SPN as an `spn` claim |
+| `msDS-AllowedToDelegateTo` | `can_delegate_to` (object = the target `spn`), constrained delegation |
+| `msDS-AllowedToActOnBehalfOfOtherIdentity` (an SD) | `rbcd_from` (object = each trustee allowed to act on behalf of this object) |
+| `operatingSystem` | `os` |
+
+**The SD / ACE parser is hand-rolled** (`parse_security_descriptor`), no
+heavy dependency (no impacket) — the self-relative Security Descriptor and
+ACE binary layout is stable and documented (MS-DTYP): the DACL offset in the
+20-byte SD header, the ACL header (revision, size, ACE count), each ACE
+header (type, flags, size) and body — `ACCESS_ALLOWED` (0x00) is mask + SID;
+`ACCESS_ALLOWED_OBJECT` (0x05) is mask + flags + the ObjectType /
+InheritedObjectType GUIDs the flags say are present + SID. The access mask is
+decoded to the interesting rights and **an ACE that grants none of them is
+skipped**:
+
+| Right | How it is recognized |
+| --- | --- |
+| `GenericAll` | `GENERIC_ALL` (0x10000000) or the expanded full-control bitset (0x000F01FF) |
+| `GenericWrite` | `GENERIC_WRITE` (0x40000000) |
+| `WriteDacl` | `WRITE_DAC` (0x00040000) |
+| `WriteOwner` | `WRITE_OWNER` (0x00080000) |
+| `ForceChangePassword` | control-access (0x100) on the extended-right GUID `00299570-246d-11d0-a768-00aa006e0529` |
+| `AddMember` | write-property (0x20) on the `member` attribute GUID `bf9679c0-0de6-11d0-a285-00aa003049e2` |
+| `AllExtendedRights` | control-access (0x100) with no ObjectType GUID |
+
+A truncated or malformed SD / ACE ends the parse rather than raising; one
+bad object is counted `invalid` and skipped, not the whole export.
+
+### Provenance & time
+
+Each claim carries `attrs.dn` (its source object) and `attrs.export` (the
+export label), and `observed_at` is the **export timestamp** — an LDIF
+`# … <ISO date>` comment, then `--as-of`, then the file mtime — so `valid_at`
+and `as_of` work. Event ids are content-addressed and embed that stamp:
+re-importing the same export is a no-op, and a later export records history
+rather than overwriting. Two exports a month apart, or LDAP plus a later
+host feed, reconcile as claims with conflicts surfaced (append-only), not
+silently merged.
+
+### The question it answers
+
+```python
+ask_scope(subjects=["user:S-1-5-21-…-1106"],           # svc-sql
+          expand_predicates=["member_of", "has_ace", "trusts"],
+          depth=3,
+          question="what rights and trust path connects svc-sql to domain dev.local?")
+```
+
+The walk gathers the chain — e.g. `svc-sql -member_of-> Domain Admins
+-has_ace(GenericAll)-> corp.local -trusts-> dev.local` — and every edge
+ships **cited** (its source object's DN, observation id) and with its
+**validity window**. Time and citations are the differentiators over a
+static graph tool: `valid_at` answers "was this ACE / trust real as of X?",
+supersession shows an ACL that was tightened between two exports, and each
+step of the answer points at the directory fact it came from — auditable,
+not a black-box path.
+
 ## Registering the names in the schema registry
 
-Both importers register a non-strict schema for the namespace on
-`import` (`--no-schema` skips it); `schema` prints it. The predicate
+Every importer registers a non-strict schema for the namespace on
+`import` (`--no-schema` skips it); `schema` prints it. The CVE predicate
 names deliberately coincide across the vulns connector, the OCSF importer
 and a STIX `vulnerability` (`cvss_score`, `has_severity`, `epss_score`,
 `summary`, `affects`), so one CVE's record reads as one record whatever
-produced it. To pin a namespace to exactly these names:
+produced it. The LDAP connector registers its own `ad` vocabulary
+(`member_of`, `has_ace`, `trusts`, …) — a separate domain, typically its own
+namespace. To pin a namespace to exactly these names:
 
 ```bash
 python -m loom.connectors.stix schema --namespace netsec > stix.json

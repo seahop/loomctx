@@ -8,4 +8,6 @@ connector registers a schema for the namespace and everything else is data.
     vulns   CISA KEV + NVD + EPSS feeds (D-035)
     stix    STIX 2.1 bundles, both directions (R-8; docs/interop.md)
     ocsf    OCSF vulnerability_finding events, both directions (R-8)
+    ldap    raw LDAP / LDIF directory exports -> object-level AD reachability
+            claims (D-065; docs/interop.md)
 """

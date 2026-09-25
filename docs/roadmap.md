@@ -248,8 +248,13 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   packed vector storage, worker robustness, query-embedding fallback
 - ✅ `find_related` over document passages as well as facts (D-040,
   2026-09-09): a passage maps back to the entities whose claims cite it
-- ⬜ Second connector once a second domain is wanted (GitHub issues/PRs is
-  the obvious non-security one)
+- ✅ Second connector (2026-09-25, D-065): raw LDAP / LDIF → object-level
+  Active Directory reachability (`member_of` / `has_ace` / `trusts` /
+  delegation / GPO), keyed by objectSid, with a hand-rolled SD/ACE parser.
+  Decodes directory facts as cited, time-stamped claims — NOT BloodHound (no
+  transitive effective-admin, no path ranking; nesting is the walk's job).
+  Object-level only: sessions / local-admin need host collection. GitHub
+  issues/PRs is still the obvious non-security third one.
 
 ## Deployment & CI (2026-09-03)
 

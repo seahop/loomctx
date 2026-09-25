@@ -67,7 +67,7 @@ without touching Loom's code.
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
 | `docs/models.md` | Which LLMs drive Loom well as agents: measured scorecard with cost, and how to re-run it |
 | `docs/evaluation.md` | The retrieval scorecard: context packs against full-context, vector and recency baselines, rule-scored |
-| `docs/interop.md` | STIX 2.1 and OCSF connectors: import/export, mapping tables, `examples/stix_import.py` (PROV-O provenance export, `GET /v1/observations/{id}/prov`, is in `docs/contracts.md`) |
+| `docs/interop.md` | STIX 2.1 and OCSF connectors and the raw LDAP / LDIF connector (object-level AD reachability): import/export, mapping tables, `examples/stix_import.py` (PROV-O provenance export, `GET /v1/observations/{id}/prov`, is in `docs/contracts.md`) |
 | `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
 | `gateway/` | The Go ingest gateway for the scale shape: validates against `contracts/schemas.json`, forwards to NATS JetStream |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
@@ -186,7 +186,7 @@ Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.
 Latest tag `v0.1.0` (2026-09-09); `main` carries the unreleased work listed
 under "Unreleased" in `CHANGELOG.md` (review fixes, recorded supersession,
 PROV-O export, honest budgets and hybrid ranking, schema v6, rate limiting,
-STIX/OCSF connectors). Working end to end: contracts,
+STIX/OCSF/LDAP connectors). Working end to end: contracts,
 SQLite/Postgres stores, claim + document ingestion (single, batch, Go
 gateway, Kafka, shippers), context packs with scopes, relation chains and
 coverage reporting (`/v1/ask`, `/v1/expand`), provider-flexible answering

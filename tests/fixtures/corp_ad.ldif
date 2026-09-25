@@ -1,0 +1,87 @@
+# Synthetic AD export for the LDAP connector demo (loom.connectors.ldap).
+# Not real data. objectSid is given in string form here for readability;
+# real exports carry it base64/binary and the connector decodes it the same.
+# Export date drives observed_at / valid_at:
+# 2026-09-20T09:00:00Z
+version: 1
+
+dn: DC=corp,DC=local
+objectClass: top
+objectClass: domain
+objectClass: domainDNS
+objectSid: S-1-5-21-1111111111-2222222222-3333333333
+name: corp.local
+
+dn: CN=Users,DC=corp,DC=local
+objectClass: top
+objectClass: container
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-9001
+name: Users
+
+dn: CN=DC01,OU=Domain Controllers,DC=corp,DC=local
+objectClass: top
+objectClass: computer
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-1000
+name: DC01
+sAMAccountName: DC01$
+operatingSystem: Windows Server 2022 Standard
+userAccountControl: 532480
+
+dn: CN=WEB01,CN=Computers,DC=corp,DC=local
+objectClass: top
+objectClass: computer
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-1101
+name: WEB01
+sAMAccountName: WEB01$
+operatingSystem: Windows Server 2019 Standard
+userAccountControl: 4096
+msDS-AllowedToDelegateTo: MSSQLSvc/db01.corp.local:1433
+msDS-AllowedToDelegateTo: MSSQLSvc/db01.corp.local
+
+dn: CN=Domain Admins,CN=Users,DC=corp,DC=local
+objectClass: top
+objectClass: group
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-512
+name: Domain Admins
+sAMAccountName: Domain Admins
+
+dn: CN=Help Desk,CN=Users,DC=corp,DC=local
+objectClass: top
+objectClass: group
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-1105
+name: Help Desk
+sAMAccountName: Help Desk
+description:: SGVscCBkZXNrIG9wZXJhdG9ycw==
+member: CN=svc-sql,CN=Users,DC=corp,DC=local
+
+dn: CN=svc-sql,CN=Users,DC=corp,DC=local
+objectClass: top
+objectClass: person
+objectClass: user
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-1106
+name: svc-sql
+sAMAccountName: svc-sql
+userAccountControl: 66048
+servicePrincipalName: MSSQLSvc/db01.corp.local:1433
+servicePrincipalName: MSSQLSvc/db01.corp.local
+memberOf: CN=Help Desk,CN=Users,DC=corp,DC=local
+description:: U2VydmljZSBhY2NvdW50IGZvciB0aGUg
+ U1FMIFNlcnZlciBzZXJ2aWNl
+
+dn: CN=jdoe,CN=Users,DC=corp,DC=local
+objectClass: top
+objectClass: person
+objectClass: user
+objectSid: S-1-5-21-1111111111-2222222222-3333333333-1107
+name: jdoe
+sAMAccountName: jdoe
+userAccountControl: 4194816
+
+dn: CN=dev.local,CN=System,DC=corp,DC=local
+objectClass: top
+objectClass: trustedDomain
+name: dev.local
+trustPartner: dev.local
+flatName: DEV
+trustDirection: 3
+trustAttributes: 8
