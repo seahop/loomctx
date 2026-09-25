@@ -2015,6 +2015,32 @@ def test_observations_for_many_filters_by_predicate(store):
     assert store.observations_for_many("m", cves, limit=2, predicates=[]) == {}
 
 
+def test_relation_summary_counts_how_types_connect(store):
+    """D-064: (subject type, predicate, object type or None for a value,
+    visible rows), most frequent first — describe_namespace's links and
+    attributes. Tombstoned rows and other namespaces do not count; the
+    default implementation agrees with the backend's query."""
+    from loom.store.base import GraphStore
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    host, product = EntityRef(type="host", key="h1"), EntityRef(type="product", key="p1")
+    rows = store.record_claims([
+        ClaimIn(namespace="rel", subject=host, predicate="runs_software", object=product, observed_at=t,
+                source="inv"),
+        *[ClaimIn(namespace="rel", subject=EntityRef(type="cve", key=f"c{i}"), predicate="affects",
+                  object=product, observed_at=t, source="nvd") for i in range(3)],
+        ClaimIn(namespace="rel", subject=EntityRef(type="cve", key="c0"), predicate="exploited_in_wild",
+                object=True, observed_at=t, source="kev"),
+        ClaimIn(namespace="rel", subject=host, predicate="runs_os", object="linux", observed_at=t, source="inv"),
+        ClaimIn(namespace="other", subject=host, predicate="runs_os", object="bsd", observed_at=t, source="inv"),
+    ])
+    store.redact("rel", rows[-2].id, "test")
+    expected = [("cve", "affects", "product", 3), ("cve", "exploited_in_wild", None, 1),
+                ("host", "runs_software", "product", 1)]
+    assert store.relation_summary("rel") == expected
+    assert GraphStore.relation_summary(store, "rel") == expected
+    assert store.relation_summary("nowhere") == []
+
+
 def test_edges_to_carriers_joins_a_hubs_edges_to_the_far_attribute(store):
     """(hub, edge, attribute) for the hub's edges on `via` — either
     direction — whose far end is the subject of a row on `predicates`,

@@ -159,7 +159,12 @@ and excerpts filled it, the pack exceeds the budget by that handle's cost
 at most. Handles take at most 15 % of the budget (`omitted_handles`
 counts the rest); conflict items take at most half, briefs a quarter
 (`withheld_briefs` counts one that did not fit, or that draws on
-observations a type-scoped key may not see). A scope walk stops at
+observations a type-scoped key may not see). `notes` (D-064) say what
+the pack could not do as asked — an expand predicate the namespace does
+not know (with up to three close ones), an attribute named in `expand`
+taken as the question's topic, a link the question names that the scope
+stops short of, a subject that names no entity; they are advice, not
+evidence, and are not charged. A scope walk stops at
 `LOOM_MAX_SCOPE_ENTITIES` (2,000) entities and `LOOM_MAX_SCOPE_OBSERVATIONS`
 (100,000) gathered rows; the cut is a `truncated` entry with reason
 `scope_cap`.

@@ -102,6 +102,24 @@ class GraphStore(ABC):
         """Every namespace that holds entities -> {entity type: count}. What
         an agent needs to orient itself before it can ask anything (D-036)."""
 
+    def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        """How a namespace is connected (D-064): (subject type, predicate,
+        object type — None for a value —, visible observations) for every
+        combination that occurs, most frequent first. What describe_namespace
+        shows an agent so a two-hop path (host -runs_software-> product
+        <-affects- cve) is visible before it asks; the registry names a
+        predicate's object types but never its subjects. Backends answer it
+        with one GROUP BY; this default reads every observation."""
+        from collections import Counter
+        dead = {t["observation_id"] for t in self.iter_tombstones(namespace)}
+        counts: Counter = Counter()
+        for o in self.iter_observations(namespace):
+            if o.id not in dead:
+                counts[(o.subject.type, o.predicate,
+                        o.object.type if isinstance(o.object, EntityRef) else None)] += 1
+        return sorted(((s, p, t, n) for (s, p, t), n in counts.items()),
+                      key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+
     @abstractmethod
     def record_claim(self, claim: ClaimIn) -> Observation:
         """Append one observation (auto-creating subject/object entities).

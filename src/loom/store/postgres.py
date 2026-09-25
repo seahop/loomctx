@@ -1697,6 +1697,18 @@ class PostgresStore(GraphStore):
                                ("o.recorded_at", "o.id")):
             yield common.row_to_observation(row)
 
+    def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        sql = ("SELECT s.type AS stype, o.predicate AS predicate, e.type AS otype, COUNT(*) AS n"
+               " FROM observations o JOIN entities s ON s.id = o.subject_id"
+               " LEFT JOIN entities e ON e.id = o.object_entity_id"
+               " WHERE o.namespace = %s"
+               " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
+               " GROUP BY s.type, o.predicate, e.type")
+        with self._tx(read=True):
+            rows = self._q(sql, (namespace,))
+        return sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
+                      key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+
     def namespace_summary(self) -> dict[str, dict[str, int]]:
         with self._tx(read=True):
             rows = self._q("SELECT namespace, type, COUNT(*) AS n FROM entities"

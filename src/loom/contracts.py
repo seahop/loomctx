@@ -365,6 +365,15 @@ class ContextPack(BaseModel):
         "type-scoped caller gets it only when it may see all of them, and a "
         "brief never takes more than a quarter of the budget (D-058)",
     )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="what the pack could not do as asked, and what it did "
+        "instead: an expand predicate the namespace does not know (with the "
+        "closest ones it does), an attribute named in expand taken as the "
+        "question's topic rather than walked, a subject that names no "
+        "entity. Advice about the request, not evidence: not cited, not "
+        "charged against the budget (D-064)",
+    )
 
 
 class SemanticMatch(BaseModel):

@@ -905,10 +905,95 @@ def subject_attribute(question: str | None, observations: list[Observation],
     return named - valued
 
 
-def _registry_predicates(store: GraphStore, namespace: str) -> set[str]:
+def _schema(store: GraphStore, namespace: str):
     getter = getattr(store, "get_schema", None)
-    schema = getter(namespace) if callable(getter) else None
+    return getter(namespace) if callable(getter) else None
+
+
+def _registry_predicates(store: GraphStore, namespace: str) -> set[str]:
+    schema = _schema(store, namespace)
     return {p.name for p in schema.predicates} if schema is not None else set()
+
+
+def _loose_stem(word: str) -> str:
+    """`_stem` plus -ed / -ing, for matching prose (registry descriptions)
+    against a question: "listed" and "listing" both read `list`."""
+    for suffix, keep in (("ing", 4), ("ed", 3)):
+        if word.endswith(suffix) and len(word) - len(suffix) >= keep:
+            return word[:-len(suffix)]
+    return _stem(word)
+
+
+def _prose_words(text: str) -> set[str]:
+    """Content words of prose or of an identifier, loosely stemmed: no
+    stopwords, nothing under three characters, no bare numbers."""
+    words = set(_WORD.findall(_SEPARATORS.sub(" ", text.lower()))) - _STOPWORDS
+    return {_loose_stem(w) for w in words if len(w) >= 3 and not w.isdigit()}
+
+
+_DESCRIBED_SHARE = 0.4   # of a description's words the question must say
+
+
+def described_predicates(question: str | None, definitions, roots: list[EntityRef] | tuple = (),
+                         exclude=frozenset()) -> frozenset[str]:
+    """The attributes a question names by their registry *description*
+    rather than their name (D-064): "which CVEs are listed by CISA"
+    names the predicate described "CISA KEV listing (bool)". Prose names
+    half a registry if any shared word counts, so a match must be
+    distinctive: at least two of the question's content words (loosely
+    stemmed, the asked-about entities' names aside) among the predicate's
+    name and description words, and the question must say a good part of
+    the description (`_DESCRIBED_SHARE` of its words) — "cite observation
+    ids" and "CISA" name two of the dozen words describing `cvss_score`,
+    which is no match — and only the best-scoring predicates (ties kept)
+    are taken. Attributes only (no registered object types): a topic is
+    what the reached entities carry, not a link. `scope_topic` asks this
+    only when the question names no attribute by its name."""
+    if not question:
+        return frozenset()
+    frame: set[str] = set()
+    for r in roots:
+        frame |= _prose_words(f"{r.type} {r.key}")
+    asked = _prose_words(question) - frame
+    scored: dict[str, int] = {}
+    for d in definitions:
+        if d.name in exclude or d.object_types or d.containment or not d.description:
+            continue
+        words = _prose_words(d.description)
+        described = words & asked
+        if not described or len(described) < _DESCRIBED_SHARE * len(words):
+            continue
+        score = len((described | _prose_words(d.name)) & asked)
+        if score >= 2:
+            scored[d.name] = score
+    if not scored:
+        return frozenset()
+    top = max(scored.values())
+    return frozenset(p for p, s in scored.items() if s == top)
+
+
+def expand_attributes(expand, definitions, observations=()) -> frozenset[str]:
+    """The predicates in a scope's expand list that are attributes, not
+    links (D-064): registered with no object types (and not containment),
+    or unregistered and seen only with values — and in either case never
+    seen here with an entity at the other end (a STIX relationship is
+    registered without object types and is still a link). An agent that
+    writes expand_predicates=["runs_software", "affects",
+    "exploited_in_wild"] has named the attribute its answer turns on;
+    there is nothing to walk along it."""
+    defs = {d.name: d for d in definitions}
+    linked: set[str] = set()
+    valued: set[str] = set()
+    for o in observations:
+        (linked if isinstance(o.object, EntityRef) else valued).add(o.predicate)
+    out = set()
+    for p in expand:
+        if p in linked:
+            continue
+        d = defs.get(p)
+        if (d is not None and not d.object_types and not d.containment) or (d is None and p in valued):
+            out.add(p)
+    return frozenset(out)
 
 
 def scope_expand(store: GraphStore, namespace: str, scope: ScopeSpec) -> set[str]:
@@ -922,19 +1007,35 @@ def scope_expand(store: GraphStore, namespace: str, scope: ScopeSpec) -> set[str
 
 
 def scope_topic(store: GraphStore, namespace: str, scope: ScopeSpec | None, question: str | None,
-                seen_predicates=(), expand: set[str] | None = None) -> frozenset[str]:
+                seen=(), expand: set[str] | None = None) -> frozenset[str]:
     """A scope question's topic (D-061): the predicates it names that are
     not the walk's own edges — the attribute the answer turns on, which
     lives on the entities the walk reaches, not on the edges it follows
     ("which CVEs CISA lists as exploited in the wild affect software
     web-01 runs": topic `exploited_in_wild`; `runs_software` and `affects`
     are the path). The vocabulary is the namespace's registry (domain
-    knowledge is data) plus every predicate already gathered."""
-    if scope is None or not question:
+    knowledge is data) plus every predicate already gathered (`seen`: the
+    gathered observations). Two more ways to name it (D-064): an attribute
+    in the expand list itself (`expand_attributes`), and — when neither
+    it nor the question names an attribute by its name — a registered
+    attribute the question names by its description
+    (`described_predicates`)."""
+    if scope is None:
         return frozenset()
     expand = scope_expand(store, namespace, scope) if expand is None else expand
-    vocabulary = _registry_predicates(store, namespace) | set(seen_predicates)
-    return named_predicates(question, vocabulary - expand, list(scope.subjects))
+    schema = _schema(store, namespace)
+    definitions = list(schema.predicates) if schema is not None else []
+    seen = list(seen)
+    attributes = expand_attributes(expand, definitions, seen)
+    if not question:
+        return attributes
+    edges = expand - attributes
+    roots = list(scope.subjects)
+    vocabulary = {d.name for d in definitions} | {o.predicate for o in seen}
+    topic = named_predicates(question, vocabulary - edges, roots) | attributes
+    if expand_attributes(topic, definitions, seen):
+        return topic   # an attribute named by its name: descriptions are only the fallback
+    return topic | described_predicates(question, definitions, roots, exclude=edges | topic)
 
 
 def _record_scope_cap(truncated: Truncations, at: EntityRef, kept: int, reached: int) -> None:
@@ -999,7 +1100,6 @@ def resolve_scope_paths(
     beyond: set[tuple[str, str]] = set()   # reached, but past the entity cap
     cut_at: EntityRef | None = None
     topic: frozenset[str] | None = None     # computed once the first rows are in
-    seen_predicates: set[str] = set()
 
     def walkable(obs: Observation, retired) -> bool:
         return (obs.predicate in expand and obs.id not in retired
@@ -1052,12 +1152,13 @@ def resolve_scope_paths(
             hubs = [ref for ref in chunk
                     if (t := truncated.get((ref.type, ref.key))) is not None and t.reason == "gather_limit"]
             crowded = len(resolved) + len(window) > cap
-            if question and (hubs or crowded) and topic is None:
-                seen_predicates.update(o.predicate for rows in gathered.values() for o in rows)
-                topic = scope_topic(store, namespace, scope, question, seen_predicates, expand)
+            if (hubs or crowded) and topic is None:
+                topic = scope_topic(store, namespace, scope, question,
+                                    [o for rows in gathered.values() for o in rows], expand)
             carriers: Reach = {}
             if topic and (hubs or crowded):
-                carriers, read = _hub_carriers(store, namespace, hubs, expand, topic, seen, as_of,
+                # an attribute named in expand is the topic, not a link (D-064)
+                carriers, read = _hub_carriers(store, namespace, hubs, expand - topic, topic, seen, as_of,
                                                valid_at, allowed_types, walkable, window, truncated)
                 held += read
                 if crowded:   # the rest of the window, by probe
@@ -1231,9 +1332,11 @@ def build_pack(
                 seen_ids.add(obs.id)
                 observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
-    topic = (scope_topic(store, req.namespace, req.scope, req.question,
-                         {o.predicate for o in observations})
+    topic = (scope_topic(store, req.namespace, req.scope, req.question, observations)
              if req.scope is not None else frozenset())
+    notes = request_notes(store, req.namespace, req.scope, asked, observations,
+                          {key for key in examined if not gathered.get(key)}, allowed_types,
+                          question=req.question, hops=max((len(c) for c in paths.values()), default=0))
     # A subject question's named attribute ("what is the has_severity of
     # CVE-X", "the largest invoiced_amount ever recorded") orders its
     # conflicts and ships before the orientation layers, exempt from the
@@ -1345,7 +1448,92 @@ def build_pack(
         roots=asked + [s for s in subjects if (s.type, s.key) not in paths],
         truncated=list(truncated.values()),
         page_cursors=_oldest(gathered),
+        notes=notes,
     )
+
+
+_MAX_SUGGESTIONS = 3
+
+
+def _close_predicates(name: str, definitions, vocabulary: set[str]) -> list[str]:
+    """Up to three predicates an unknown name may have meant: close
+    spellings first (difflib), then the ones sharing the most of its words
+    in their name or registry description ("cisa_known_exploited_…" ->
+    the predicate described "CISA KEV listing")."""
+    import difflib
+    names = sorted(vocabulary)
+    out = difflib.get_close_matches(name, names, n=_MAX_SUGGESTIONS, cutoff=0.6)
+    words = _prose_words(name)
+    described = {d.name: d.description for d in definitions}
+    shared = {n: len(words & (_prose_words(n) | _prose_words(described.get(n, "")))) for n in names}
+    best = max(shared.values(), default=0)
+    if best:
+        out += [n for n in names if shared[n] == best and n not in out]
+    return out[:_MAX_SUGGESTIONS]
+
+
+def request_notes(store: GraphStore, namespace: str, scope: ScopeSpec | None, asked: list[EntityRef],
+                  observations: list[Observation], empty: set[tuple[str, str]],
+                  allowed_types: tuple[str, ...] | None = None,
+                  question: str | None = None, hops: int = 0) -> list[str]:
+    """What the pack could not do as asked, said in the pack (D-064): an
+    expand predicate that is neither registered nor carried by anything
+    the scope reached was ignored without a word — an agent that invented
+    `cisa_known_exploited_vulnerability` got a one-hop pack and no hint —
+    so it is named, with the closest predicates the namespace has; an
+    attribute in the expand list is taken as the topic, and the note says
+    so; when the question names an attribute nothing reached carries and
+    a link the reached entities have that the scope does not follow, the
+    link is pointed out (weaker agents expanded ['runs_software'] for the
+    KEV CVEs affecting that software, and stopped a hop short); a subject
+    that names no entity says so, with entities of that key. `empty`
+    holds the examined subjects that yielded no rows (only those are
+    looked up). A type-scoped reader's suggestions stay in its types."""
+    notes: list[str] = []
+    schema = _schema(store, namespace)
+    definitions = [d for d in (schema.predicates if schema is not None else [])
+                   if allowed_types is None or not d.object_types
+                   or set(d.object_types) & set(allowed_types)]
+    attributes = expand_attributes(scope.expand, definitions, observations) if scope else frozenset()
+    if scope is not None and scope.expand:
+        vocabulary = {d.name for d in definitions} | {o.predicate for o in observations}
+        for p in dict.fromkeys(scope.expand):
+            if p in attributes:
+                notes.append(f"expand predicate '{p}' holds values, not links between entities: "
+                             "taken as the question's topic, not walked")
+            elif p not in vocabulary:
+                close = _close_predicates(p, definitions, vocabulary)
+                notes.append(f"expand predicate '{p}' is not registered in namespace '{namespace}' "
+                             "and nothing this scope reached carries it, so it was not followed"
+                             + (f"; closest: {', '.join(close)}" if close else "")
+                             + " (describe_namespace lists each type's links)")
+    if scope is not None and question:
+        expand = scope_expand(store, namespace, scope)
+        roots = list(scope.subjects)
+        carried = {o.predicate for o in observations}
+        linked = {o.predicate for o in observations if isinstance(o.object, EntityRef)}
+        wanted = (named_predicates(question, {d.name for d in definitions} - expand - carried, roots)
+                  | attributes) - carried
+        links = named_predicates(question, linked - expand, roots)
+        if wanted and links:
+            # one hop more, when the walk went as deep as it was allowed to
+            deeper = f" and depth={scope.depth + 1}" if hops >= scope.depth and scope.depth < 3 else ""
+            notes.append(f"the question names {', '.join(repr(p) for p in sorted(wanted))}, which nothing "
+                         f"this scope reached carries, and {', '.join(repr(p) for p in sorted(links))}, "
+                         "a link the reached entities have that it does not follow: add that to "
+                         f"expand_predicates{deeper} to reach what carries the rest")
+    if empty:
+        refs = list({(r.type, r.key): r for r in asked
+                     if allowed_types is None or r.type in allowed_types}.values())
+        mapping = store.resolve_refs(namespace, refs) if refs else {}
+        for ref in refs:
+            if (ref.type, ref.key) not in empty or (ref.type, ref.key) in mapping:
+                continue   # it had rows, or it names an entity (canonical or merged away)
+            similar = [f"{e.type}:{e.key}" for e in store.search_entities(
+                namespace, ref.key, limit=_MAX_SUGGESTIONS, types=allowed_types)]
+            notes.append(f"no entity '{ref.type}:{ref.key}' in namespace '{namespace}'"
+                         + (f"; entities with that key: {', '.join(similar)}" if similar else ""))
+    return notes
 
 
 def semantic_search(
@@ -1536,6 +1724,7 @@ def _pack(
     focus: frozenset[str] = frozenset(),
     topic: frozenset[str] = frozenset(),
     attribute: frozenset[str] = frozenset(),
+    notes: list[str] | None = None,
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -1876,6 +2065,7 @@ def _pack(
         truncated=truncated or [],
         charged_tokens=sum(item_tokens(i) for i in items) + sum(handle_tokens(h) for h in shipped),
         withheld_briefs=withheld_briefs,
+        notes=notes or [],
     )
 
 

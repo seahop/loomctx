@@ -219,10 +219,23 @@ class KeyGate:
         await send({"type": "http.response.body", "body": body})
 
 
-# Guidance for the budget of a scope ask: the after-alias rehearsal's
-# two-hop ask_scope at the default overflowed Claude Code's inline
-# tool-result limit; 1500 fits and leaves handles to expand.
-SCOPE_BUDGET_HINT = 1500
+# The budget of a scope ask, re-derived from measurement (D-064). The old
+# hint (1500) dates from before D-058, when a pack was 2.2-3.6x its budget
+# on the wire and a 4000-token ask_scope spilled out of Claude Code's inline
+# tool-result limit. The concise view is now ~1.0x its charged budget plus
+# a fixed envelope (question echo, 20 subjects, coverage notes).
+# web-01's two-hop exposure pack on the 600k-observation corpus (cl100k,
+# the whole concise wire): budget 1500 -> 2,070 tokens, 17/32 KEV CVEs;
+# 3000 -> 3,707, 32/32; 4000 -> 4,738; 6000 -> 6,738. The answer (~30
+# items with the edges that reached them) needs ~3000, so that is the
+# default. The ceiling keeps >= 3x headroom under Claude Code's default
+# MAX_MCP_OUTPUT_TOKENS (25,000): the worst concise wire is ~1.15x the
+# budget (tests/test_quality.py q10b) plus an envelope under 1,000 tokens,
+# so 4000 -> <= 5,600 (4.5x headroom); 6000 would leave 3.2x on the
+# measured corpus and less on a long question. tests/test_scope.py
+# measures the synthetic-hub equivalent at 1500/3000/4000/6000.
+SCOPE_BUDGET_DEFAULT = 3000
+SCOPE_BUDGET_HINT = 4000
 
 INSTRUCTIONS = (
     "Loom is a provenance-tracked context engine. Start with "
@@ -232,10 +245,15 @@ INSTRUCTIONS = (
     "you only know what you're looking for, not its name). ask = budgeted, "
     "cited context about ONE entity; ask_scope = several entities and/or "
     "relation hops (multi-hop questions are ask_scope with "
-    "expand_predicates). Start small: expand pulls a thread deeper via the "
-    f"handles a pack returns. Keep ask_scope at budget<={SCOPE_BUDGET_HINT} "
-    "and expand what matters — a bigger scope pack overflows client "
-    "tool-result limits. Every pack tool takes format='concise' (default: "
+    "expand_predicates: chain the `links` describe_namespace lists per "
+    "type, and name the attribute the answer turns on as well). A pack's "
+    "`notes` say what it could not do as asked (an unknown predicate, with "
+    "the closest known ones). Expand pulls a thread deeper via the "
+    f"handles a pack returns. ask_scope's default budget ({SCOPE_BUDGET_DEFAULT}) "
+    "carries ~30 facts with the links that reached them; keep it at "
+    f"budget<={SCOPE_BUDGET_HINT} and expand handles for more — a bigger "
+    "pack overflows client tool-result limits. Every pack tool takes "
+    "format='concise' (default: "
     "12-hex `cite` tokens, subjects summarized) or 'detailed' (full 32-hex "
     "observation ids next to each cite, every reached subject listed). "
     "Cite facts by their 12-hex `cite` token (the first word of each entry "
@@ -270,6 +288,7 @@ def configure(store: GraphStore, auth: AuthConfig | None = None,
     _auth = auth
     _transport = transport
     _summary_cache = None
+    _relations_cache.clear()
     _limits = None   # re-read the LOOM_RATE_* dials
 
 
@@ -374,6 +393,7 @@ class AgentPack(TypedDict):
     truncated: NotRequired[list[ScopeTruncation]]
     coverage_warning: NotRequired[str]
     withheld_briefs: NotRequired[int]
+    notes: NotRequired[list[str]]
 
 
 class ObservationList(TypedDict):
@@ -405,9 +425,17 @@ class NamespaceInfo(TypedDict):
 
 
 class EntityTypeCount(TypedDict):
+    """An entity type and how it connects (D-064): `links` are the
+    predicates that leave it (`-runs_software-> product`) and arrive at it
+    (`<-affects- cve`) with the type at the other end, most used first;
+    `attributes` are the predicates it carries with values. Chaining a
+    type's links through the next type's is how a multi-hop ask_scope is
+    planned."""
     name: str
     count: int
     description: str
+    links: NotRequired[list[str]]
+    attributes: NotRequired[list[str]]
 
 
 class NamespaceDescription(TypedDict):
@@ -495,6 +523,12 @@ def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
         ) + " — do not conclude that something is absent for these entities; ask about them directly, narrow with valid_at, or expand a handle"
     if d.get("withheld_briefs"):
         view["withheld_briefs"] = d["withheld_briefs"]
+    if d.get("notes"):
+        # right before the items: an ignored expand predicate or a subject
+        # that names nothing is the first thing an agent must read (D-064)
+        head = ("namespace", "question", "budget", "charged_tokens", "format")
+        view = {**{k: view[k] for k in head}, "notes": d["notes"],
+                **{k: v for k, v in view.items() if k not in head}}
     return view  # type: ignore[return-value]
 
 
@@ -544,9 +578,12 @@ def list_namespaces(ctx: Context = None) -> list[NamespaceInfo]:
 
 def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> NamespaceDescription:
     """What a namespace contains and how it is connected: entity types with
-    counts, and the registered predicates (description, allowed object types,
-    whether scopes follow it by default). Read this before choosing
-    expand_predicates for a multi-hop ask_scope."""
+    counts, each with its links (predicates to and from other types:
+    `-runs_software-> product`, `<-affects- cve`) and its attributes
+    (predicates holding values), and the registered predicates
+    (description, allowed object types, whether scopes follow it by
+    default). Chain the links to plan expand_predicates for a multi-hop
+    ask_scope; name the attribute the answer turns on too."""
     grant = _grant(ctx, namespace, "r")
     _known_namespace(namespace, grant)
     store = _get_store()
@@ -554,19 +591,80 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
     if schema is not None:
         schema = scope_schema(schema, grant)
     counts = scope_counts(_summary().get(namespace, {}), grant)
+    allowed = _allowed(grant)
+    relations = [r for r in _relations(namespace)
+                 if allowed is None or (r[0] in allowed and (r[2] is None or r[2] in allowed))]
+    types = []
+    for t, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        entry: EntityTypeCount = {
+            "name": t, "count": n,
+            "description": next((e.description for e in (schema.entity_types if schema else [])
+                                 if e.name == t), "")}
+        links = [f"-{p}-> {o}" if s == t else f"<-{p}- {s}"
+                 for s, p, o, _ in relations if o is not None and t in (s, o)]
+        attributes = [p for s, p, o, _ in relations if o is None and s == t]
+        if links:
+            entry["links"] = _capped(list(dict.fromkeys(links)), _LINKS_SHOWN)
+        if attributes:
+            entry["attributes"] = _capped(attributes, _ATTRIBUTES_SHOWN)
+        types.append(entry)
     return {
         "namespace": namespace,
-        "entity_types": [
-            {"name": t, "count": n,
-             "description": next((e.description for e in (schema.entity_types if schema else [])
-                                  if e.name == t), "")}
-            for t, n in sorted(counts.items(), key=lambda kv: -kv[1])
-        ],
+        "entity_types": types,
         "predicates": [p.model_dump(mode="json") for p in (schema.predicates if schema else [])],
         "strict": bool(schema and schema.strict),
-        "hint": "ask_scope(subjects=[...], expand_predicates=[...], depth=2) follows the named "
-                "predicates in both directions: host -runs_software-> product <-affects- cve.",
+        "hint": _path_hint(relations),
     }
+
+
+# describe_namespace counts against the agent's context: a type's links and
+# attributes are listed most used first, to a cap (a corpus of extracted
+# documents carries dozens of one-off predicates)
+_LINKS_SHOWN = 8
+_ATTRIBUTES_SHOWN = 10
+_RELATIONS_TTL = 60.0   # a GROUP BY over the namespace's observations (~1 s at 600k rows)
+_relations_cache: dict[str, tuple[float, list[tuple[str, str, str | None, int]]]] = {}
+
+
+def _relations(namespace: str) -> list[tuple[str, str, str | None, int]]:
+    now = time.monotonic()
+    hit = _relations_cache.get(namespace)
+    if hit is None or hit[0] <= now:
+        hit = _relations_cache[namespace] = (now + _RELATIONS_TTL, _get_store().relation_summary(namespace))
+    return hit[1]
+
+
+def _capped(values: list[str], cap: int) -> list[str]:
+    return values if len(values) <= cap else values[:cap] + [f"+{len(values) - cap} more"]
+
+
+def _path_hint(relations: list[tuple[str, str, str | None, int]]) -> str:
+    """How to ask a multi-hop question, with the two-hop paths this
+    namespace actually has: the best-populated of each shape (A -p-> B
+    <-q- C and A -p-> B -q-> C), starting from the rarer type — the one an
+    agent anchors on."""
+    edges = [(s, p, o, n) for s, p, o, n in relations if o is not None]
+    best: dict[str, tuple[tuple[int, int, int], str, list[str]]] = {}
+    for s1, p1, o1, n1 in edges:
+        for s2, p2, o2, n2 in edges:
+            if p2 == p1 or s1 == o1:
+                continue
+            if o2 == o1 and s2 != o1:
+                shape, text = "in", f"{s1} -{p1}-> {o1} <-{p2}- {s2}"
+            elif s2 == o1 and o2 != o1:
+                shape, text = "out", f"{s1} -{p1}-> {o1} -{p2}-> {o2}"
+            else:
+                continue
+            rank = (min(n1, n2), n1 + n2, -n1)
+            if shape not in best or rank > best[shape][0]:
+                best[shape] = (rank, text, [p1, p2])
+    examples = "; ".join(f"{text} is expand_predicates={expand}, depth=2"
+                         for _, text, expand in (best[k] for k in ("in", "out") if k in best))
+    return ("ask_scope(subjects=[...], expand_predicates=[...], depth=N) follows the named links in "
+            "both directions, N hops from the subjects; chain the entity types' `links` to choose "
+            f"them.{f' In this namespace: {examples}.' if examples else ''} An attribute the answer "
+            "turns on (a type's `attributes`) may be named in expand_predicates too: it becomes the "
+            "pack's topic, not a link to walk.")
 
 
 def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
@@ -645,7 +743,7 @@ def ask_scope(
     question: str,
     expand_predicates: list[str] | None = None,
     depth: int = 1,
-    budget: int = 1200,
+    budget: int = SCOPE_BUDGET_DEFAULT,
     namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
@@ -655,13 +753,20 @@ def ask_scope(
     """Context about SEVERAL entities at once and/or across RELATION HOPS
     (one entity, no hops: use ask). A set of hosts, or an anchor plus its
     contents ('domain:corp.local' expanded over ['member_of'] covers every
-    member; host -runs_software-> product <-affects- cve is a two-hop
-    exposure question). subjects are 'type:key' handles; expand_predicates
-    names the relations to follow outward (omit it to follow the
-    namespace's registered containment predicates); depth bounds the
-    traversal. Keep budget at or under 1500 and expand handles for depth —
-    a large scope pack overflows client tool-result limits. format as in
-    ask; 'detailed' also lists every reached subject."""
+    member). subjects are 'type:key' handles; expand_predicates names the
+    links to follow, in both directions (omit it to follow the namespace's
+    registered containment predicates); depth bounds the hops. Chain the
+    `links` describe_namespace lists per type: host has
+    `-runs_software-> product`, product has `<-affects- cve`, so "which
+    CVEs affect what host:web-01 runs" is expand_predicates=
+    ['runs_software', 'affects'], depth=2. An attribute the answer turns
+    on (a type's `attributes`, e.g. 'exploited_in_wild') may be named in
+    expand_predicates too: it becomes the pack's topic. An unknown
+    predicate is reported in `notes`, with the closest known ones. The
+    default budget (3000) carries ~30 facts with their links; keep it at
+    or under 4000 and expand handles for more — a larger pack overflows
+    client tool-result limits. format as in ask; 'detailed' also lists
+    every reached subject."""
     grant = _grant(ctx, namespace, "r")
     refs = [_parse_ref(s) for s in subjects]
     for ref in refs:

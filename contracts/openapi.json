@@ -456,6 +456,14 @@
             "title": "Namespace",
             "type": "string"
           },
+          "notes": {
+            "description": "what the pack could not do as asked, and what it did instead: an expand predicate the namespace does not know (with the closest ones it does), an attribute named in expand taken as the question's topic rather than walked, a subject that names no entity. Advice about the request, not evidence: not cited, not charged against the budget (D-064)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
           "omitted_handles": {
             "default": 0,
             "description": "expansion threads that existed beyond the handle cap; narrow the scope or raise the budget to see them (D-035)",

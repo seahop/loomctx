@@ -138,17 +138,20 @@ honestly answer "no" from this pack.*
 
 In the `claude` terminal, type exactly:
 
-> Is host web-01 exposed to any vulnerability that CISA lists as exploited in the wild? Work out what software it runs and which of those products have such CVEs. Name the CVEs and the software, and cite observation ids. Namespace is netsec. Use budget 1500 for scope asks.
+> Is host web-01 exposed to any vulnerability that CISA lists as exploited in the wild? Work out what software it runs and which of those products have such CVEs. Name the CVEs and the software, and cite observation ids. Namespace is netsec.
 
-The last sentence is deliberate. In the 2026-09-11 rehearsal the agent's
-first `ask_scope` came back larger than Claude Code's inline tool-result
-limit, so the CLI spilled it to a file on disk and the agent spent 7 of
-its 26 calls running `grep` and `Read` over its own tool output
-(`demo/act3-after-aliases.md` shows them). Correct, but not the story;
-a 1,500-token scope pack stays inline and the handles do the rest.
-Rehearse with the sentence in; if the agent still spills, say so on
-stage — *the pack was bigger than the agent's inbox, so it asked for
-less* — and move on.
+There is no budget sentence any more (D-064). In the 2026-09-11
+rehearsal the agent's first `ask_scope` (budget 4000, before D-058 made
+the concise view wire-honest) came back larger than Claude Code's inline
+tool-result limit, so the CLI spilled it to a file on disk and the agent
+spent 7 of its 26 calls running `grep` and `Read` over its own tool
+output (`demo/act3-after-aliases.md` shows them); the prompt then asked
+for budget 1500 — which, on the 2026-09-24 scorecard, is too small to
+carry web-01's 32 KEV CVEs. `ask_scope` now defaults to 3000 (~3.7k
+tokens on the wire, all 32 CVEs with their edges) and the server
+instructions cap it at 4000 (~4.7k). Rehearse without the sentence; if
+the agent still spills, say so on stage — *the pack was bigger than the
+agent's inbox, so it asked for less* — and move on.
 
 Narrate the tool calls as they scroll: `describe_namespace` (*it learns
 the schema — Loom is domain-agnostic, the domain is data*), `find_entity`
@@ -227,7 +230,7 @@ the talk.
 - [x] Act 3 run with Claude Code (2026-09-10 before aliases, 2026-09-11 after); transcripts saved in `demo/`
 - [ ] Night-before load on the current build, alias pass with the pinned judge, `demo-frozen.jsonl` exported and copied off
 - [ ] Act 2 numbers re-read from the frozen volume and edited into this file
-- [ ] Act 3 re-run on the frozen volume with the "budget 1500" sentence; confirm no `Read`/`grep` over tool-result files in the transcript
+- [ ] Act 3 re-run on the frozen volume without a budget sentence (D-064: default 3000, cap 4000); confirm no `Read`/`grep` over tool-result files in the transcript
 - [ ] Act 3 re-run the morning of the talk (no writes to the volume other than the write-back follow-up)
 - [ ] `claude mcp list` shows `loom` connected (or pass `--mcp-config demo/mcp.json --strict-mcp-config`)
 - [ ] Fallback files on the desktop; slides have the two diagrams from `docs/infrastructure.md`

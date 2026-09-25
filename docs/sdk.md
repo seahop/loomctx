@@ -13,11 +13,11 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | Tool | Purpose |
 | --- | --- |
 | `list_namespaces()` | Where the data is: every namespace with entity counts by type (D-036) |
-| `describe_namespace(namespace)` | How it connects: entity types with counts, registered predicates (descriptions, object types, containment) and a hint for multi-hop `ask_scope` |
+| `describe_namespace(namespace)` | How it connects: entity types with counts, each with its `links` (`-runs_software-> product`, `<-affects- cve`) and `attributes`, registered predicates (descriptions, object types, containment) and a hint naming this namespace's two-hop paths (D-064) |
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
 | `find_related(question)` | Entities related by meaning — over facts *and* the passages of documents that claims cite — each with the fact or passage that matched, cited (needs `LOOM_EMBED_*`; D-040) |
 | `ask(subject, question, budget, as_of?, valid_at?, format?)` | Budgeted, cited context on **one** entity (`as_of` = known at T, `valid_at` = true at T) |
-| `ask_scope(subjects, question, expand_predicates?, depth?, format?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve |
+| `ask_scope(subjects, question, expand_predicates?, depth?, budget?, format?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve; an attribute in `expand_predicates` is the question's topic; default budget 3000 |
 | `expand(handle, budget, format?)` | Progressive disclosure — pull one thread deeper; a `cite` token returns that one observation |
 | `record_claim(subject, predicate, ..., object_ref \| object_value, supersedes?, event_id?)` | Agents write back facts they learn; `supersedes` records a correction of an earlier observation |
 | `get_observations(subject)` | Raw audit view (an entity, or a `cite` token / observation id) |
@@ -59,12 +59,16 @@ surface still serializes the contract itself.
   for audit and for `as_of` reads before it, but is no longer current and
   no longer counts as a conflict.
 - `ask` and `ask_scope` stay two tools with disjoint descriptions: one
-  entity vs. several entities and/or relation hops. The server
-  instructions tell agents to keep `ask_scope` at `budget<=1500` and
-  expand handles from there — the after-alias rehearsal's two-hop scope
-  at the default overflowed Claude Code's inline tool-result limit — and
-  that a pack's `truncated` list names entities whose observations were
-  only partly examined (never conclude absence about those).
+  entity vs. several entities and/or relation hops. `ask_scope`
+  defaults to budget 3000 and the server instructions tell agents to
+  keep it at `budget<=4000` and expand handles from there (D-064,
+  re-derived from the concise wire: 4000 is ~4.7k tokens on the real
+  corpus, over 3x under Claude Code's 25k MCP output limit, while the
+  old 1500 hint could not carry a 32-CVE answer); that a pack's
+  `notes` say what it could not do as asked (an unknown expand
+  predicate, with the closest known ones); and that a pack's
+  `truncated` list names entities whose observations were only partly
+  examined (never conclude absence about those).
 
 **Measuring an agent against Loom** (D-036): `python -m loom.agent_eval
 --db /data/loom.db` runs a real model as an agent over the real MCP

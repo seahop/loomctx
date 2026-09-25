@@ -222,6 +222,74 @@ def test_list_and_describe_namespaces(store):
     assert "expand_predicates" in desc["hint"]
 
 
+
+def test_describe_namespace_shows_each_types_links(store):
+    """D-064: a two-hop path must be visible before the agent asks — the
+    registry names a predicate's object types, never its subjects. Each
+    type lists the predicates leaving and arriving with the other end's
+    type, and the attributes it carries; the hint's example path is one
+    the namespace actually has."""
+    at = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    web = EntityRef(type="host", key="web-01")
+    nginx = EntityRef(type="product", key="nginx")
+    cve = EntityRef(type="cve", key="CVE-1")
+    store.record_claims([
+        ClaimIn(subject=web, predicate="runs_software", object=nginx, observed_at=at, source="inv"),
+        ClaimIn(subject=cve, predicate="affects", object=nginx, observed_at=at, source="nvd"),
+        ClaimIn(subject=cve, predicate="exploited_in_wild", object=True, observed_at=at, source="kev"),
+        ClaimIn(subject=cve, predicate="has_nothing", object=EntityRef(type="thing", key="x"),
+                observed_at=at, source="nvd"),
+    ])
+    mcp_server.configure(store)
+    types = {t["name"]: t for t in mcp_server.describe_namespace("default")["entity_types"]}
+    assert "-runs_software-> product" in types["host"]["links"]
+    assert "-member_of-> domain" in types["host"]["links"]
+    assert types["product"]["links"] == ["<-affects- cve", "<-runs_software- host"] or \
+        set(types["product"]["links"]) == {"<-affects- cve", "<-runs_software- host"}
+    assert "-affects-> product" in types["cve"]["links"] and types["cve"]["attributes"] == ["exploited_in_wild"]
+    assert "attributes" not in types["host"]
+    hint = mcp_server.describe_namespace("default")["hint"]
+    assert "-> " in hint and "depth=2" in hint
+    # a type-scoped key sees only links among its own types
+    import hashlib
+    from loom.auth import AuthConfig, _parse_file
+    auth = AuthConfig(_parse_file(json.dumps({"keys": [{
+        "id": "k", "sha256": hashlib.sha256(b"k").hexdigest(), "namespaces": ["default"], "perms": "r",
+        "entity_types": ["host", "product"]}]})))
+    mcp_server.configure(store, auth=auth, transport="streamable-http")
+
+    class Ctx:
+        headers = {"x-loom-key": "k"}
+    scoped = {t["name"]: t for t in mcp_server.describe_namespace("default", ctx=Ctx())["entity_types"]}
+    assert set(scoped) == {"host", "product"}
+    assert scoped["product"]["links"] == ["<-runs_software- host"]
+    assert not any("cve" in link or "user" in link for t in scoped.values() for link in t.get("links", []))
+    mcp_server.configure(store)
+
+
+def test_describe_namespace_caps_a_types_links():
+    from loom.mcp_server import _LINKS_SHOWN, _capped
+    many = [f"-p{i}-> t" for i in range(_LINKS_SHOWN + 3)]
+    assert _capped(many, _LINKS_SHOWN) == many[:_LINKS_SHOWN] + ["+3 more"]
+    assert _capped(many[:2], _LINKS_SHOWN) == many[:2]
+
+
+def test_scope_pack_notes_reach_the_agent(store):
+    """D-064: an expand predicate the namespace does not know was ignored
+    in silence; the concise view now carries a `notes` list, before the
+    items, naming it and the closest known predicates."""
+    pack = mcp_server.ask_scope(["domain:corp.local"], "who logged in?",
+                                expand_predicates=["member_off"])
+    assert pack["budget"] == mcp_server.SCOPE_BUDGET_DEFAULT
+    assert list(pack)[list(pack).index("items") - 1] == "notes"
+    assert "'member_off'" in pack["notes"][0] and "closest: member_of" in pack["notes"][0]
+    plain = mcp_server.ask_scope(["domain:corp.local"], "who logged in?", expand_predicates=["member_of"])
+    assert "notes" not in plain
+    missing = mcp_server.ask("hostt:web-01", "who logged in?")
+    assert missing["notes"] == ["no entity 'hostt:web-01' in namespace 'default'; "
+                                "entities with that key: host:web-01"]
+
+
 def test_unknown_namespace_is_an_error_not_an_empty_answer(store):
     """D-036: a live agent dropped the namespace argument and spent twelve
     steps querying an empty 'default'. Now it is told, and told what exists."""
@@ -504,7 +572,7 @@ def test_record_claim_supersedes_resolves_a_cite_token(store):
 
 def test_instructions_and_descriptions_carry_the_agent_guidance(store):
     text = mcp_server.INSTRUCTIONS
-    for word in ("cite", "format", "truncated", "supersedes", "1500", "ask_scope"):
+    for word in ("cite", "format", "truncated", "supersedes", "4000", "3000", "ask_scope", "links", "notes"):
         assert word in text, word
     tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
     assert "ONE entity" in tools["ask"].description and "SEVERAL" in tools["ask_scope"].description

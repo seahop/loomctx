@@ -133,6 +133,9 @@ class ShardedStore(GraphStore):
                            lease: tuple[str, float] | None = None) -> list[tuple[str, EntityRef, int]]:
         return self._fill("dossier_candidates", limit, min_new, min_total, lease=lease)
 
+    def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        return self.shard_for(namespace).relation_summary(namespace)
+
     def namespace_summary(self) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}
         for s in self._all:

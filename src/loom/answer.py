@@ -112,6 +112,8 @@ def render_user_prompt(question: str, pack: ContextPack) -> str:
     if pack.withheld_briefs:
         lines.append(f"- coverage: {pack.withheld_briefs} entity brief(s) withheld (outside this "
                      "view, or over their budget share); the items above are the evidence")
+    for note in pack.notes:   # what the pack could not do as asked (D-064)
+        lines.append(f"- note: {_one_line(note)}")
     lines.append(_BLOCK_CLOSE)
     return "\n".join(lines)
 
