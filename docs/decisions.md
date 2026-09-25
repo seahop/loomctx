@@ -2218,6 +2218,40 @@ checks failed; retrieval on the cluster's corpus: Loom 69 / 83 / 83 /
 92 % against vector 74 / 74 / 74 / 80 % at 400 / 800 / 1,600 / 3,200.
 Findings: `docs/hardening.md` S-35…S-45.
 
+## D-064 · Scope asks the agents actually make (2026-09-25)
+
+The 2026-09-24 agent scorecard's transcripts, not its pass counts, set
+this work: 45 of 54 two-hop exposure runs failed, and the failures were
+mostly Loom's ergonomics, not the models' reasoning.
+
+- **The scope budget is measured, not remembered.** The ≤ 1,500 guidance
+  predated D-058, when a scope pack was 2.2–3.6× its budget on the wire;
+  since D-058 the concise view is ~1.02×. Measured (cl100k, whole concise
+  view, web-01's two-hop pack on the real corpus): 1,500 → 2,070 wire
+  tokens and 17 of 32 KEV CVEs; 3,000 → 3,707 and 32/32; 4,000 → 4,738.
+  `ask_scope` defaults to 3,000 and the instructions cap it at 4,000 —
+  ≥ 4.5× under Claude Code's 25k MCP output limit. `ask` is unchanged.
+- **The agent's words pick the topic.** An attribute placed in
+  `expand_predicates` (registered with no object types, or seen only with
+  values and never linking) is the scope topic and is not walked. When the
+  question names no attribute by name, a registered attribute whose
+  *description* it names (≥ 2 shared words, ≥ 40 % of the description, the
+  best match only) is. On the real corpus both phrasings agents used went
+  from 1 of 32 CVEs to 32 of 32 at budget 3,000.
+- **Silence is a bug.** `ContextPack.notes` (additive): an unknown expand
+  predicate with up to three close matches, an attribute taken as topic, a
+  scope that stops a hop short of the link the question names, a subject
+  that names no entity. Shown before the items in the MCP view and in the
+  answer prompt; not charged.
+- **Paths are discoverable.** `describe_namespace` lists, per entity type,
+  its outgoing and incoming links with the other end's type and its
+  attributes (`GraphStore.relation_summary`, additive, cached 60 s), and
+  names the namespace's own two-hop paths.
+- MCP `ask_scope` accepts list arguments a model sends as JSON text.
+
+The retrieval scorecard (scripted) and the seed demo numbers are
+unchanged; the agent scorecard is re-run on this build.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
