@@ -471,6 +471,26 @@ def test_every_tool_publishes_an_output_schema_title_and_annotations(store):
     assert "event_id" in tools["record_claim"].input_schema["properties"]
 
 
+def test_ask_scope_reads_a_list_sent_as_text(store):
+    """D-064 smoke run: qwen3-coder sent expand_predicates="['runs_software']"
+    and the schema refused it twice. Through the MCP layer (the SDK
+    validates arguments), list text — JSON, Python-style, or comma
+    separated — is the list it spells."""
+    from loom.mcp_server import _listed
+    assert _listed("['runs_software', 'affects']") == ["runs_software", "affects"]
+    assert _listed('["member_of"]') == ["member_of"]
+    assert _listed("member_of, logged_in_by") == ["member_of", "logged_in_by"]
+    assert _listed(None) == [] and _listed(["a"]) == ["a"] and _listed("[]") == []
+
+    async def call(args):
+        return await mcp_server.mcp._tool_manager.call_tool("ask_scope", args, context=None, convert_result=True)
+
+    res = asyncio.run(call({"subjects": '["domain:corp.local"]', "question": "who logged in?",
+                            "expand_predicates": "['member_of']"}))
+    assert not res.is_error
+    assert {s["key"] for s in res.structured_content["subjects"]} >= {"web-01", "db-01"}
+
+
 def test_tool_calls_return_structured_content_matching_the_schema(store):
     """The SDK validates the return value against the published schema and
     ships it as structuredContent next to the text mirror."""

@@ -738,10 +738,35 @@ def ask(
         _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)), format)
 
 
+def _listed(value: list[str] | str | None) -> list[str]:
+    """A list argument, also when a model sends it as text: qwen3-coder
+    passed expand_predicates="['runs_software']" on the D-064 smoke run,
+    was refused twice by the schema, and fell back to one ask per product.
+    JSON or Python-style list text, or a comma-separated string, is read
+    as the list it spells."""
+    if value is None:
+        return []
+    if not isinstance(value, str):
+        return list(value)
+    text = value.strip()
+    if text.startswith("["):
+        import ast
+        import json
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                parsed = parse(text)
+            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                continue
+            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                return parsed
+    parts = (p.strip().strip("'\"").strip() for p in text.strip("[]").split(","))
+    return [p for p in parts if p]
+
+
 def ask_scope(
-    subjects: list[str],
+    subjects: list[str] | str,
     question: str,
-    expand_predicates: list[str] | None = None,
+    expand_predicates: list[str] | str | None = None,
     depth: int = 1,
     budget: int = SCOPE_BUDGET_DEFAULT,
     namespace: str = _DEFAULT_NS,
@@ -768,13 +793,13 @@ def ask_scope(
     client tool-result limits. format as in ask; 'detailed' also lists
     every reached subject."""
     grant = _grant(ctx, namespace, "r")
-    refs = [_parse_ref(s) for s in subjects]
+    refs = [_parse_ref(s) for s in _listed(subjects)]
     for ref in refs:
         _gate_type(grant, ref.type)
     _known_namespace(namespace, grant)
     req = AskRequest(
         namespace=namespace,
-        scope=ScopeSpec(subjects=refs, expand=expand_predicates or [], depth=depth),
+        scope=ScopeSpec(subjects=refs, expand=_listed(expand_predicates), depth=depth),
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
