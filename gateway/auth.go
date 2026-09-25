@@ -70,11 +70,20 @@ func (g *grant) allowsSource(s string) bool {
 		return true
 	}
 	for _, e := range g.Sources {
-		if e == s {
+		if sourceMatches(e, s) {
 			return true
 		}
 	}
 	return false
+}
+
+// sourceMatches: an exact source name, or a family ending in ":*" — "nvd:*"
+// covers "nvd:cve@mitre.org" but not "nvd" itself (the engine's rule, D-063).
+func sourceMatches(pattern, source string) bool {
+	if strings.HasSuffix(pattern, ":*") {
+		return strings.HasPrefix(source, pattern[:len(pattern)-1])
+	}
+	return pattern == source
 }
 
 type authEntry struct {

@@ -887,12 +887,22 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         if reader is not None:
             reader.close()
-    if ledger is not None:
-        ledger.save()              # only after the load completed: a failed run re-offers its changes
+    rejected = totals.get("rejected", 0)
+    if ledger is not None and not rejected:
+        # only after a load that landed whole: a failed or partly refused run
+        # re-offers its changes (a ledger saved over refused EPSS rows would
+        # suppress them for good)
+        ledger.save()
     elapsed = time.monotonic() - t0
     total = sum(v for k, v in stats.items() if not k.endswith(("_unchanged", "_invalid", "_revised")))
     print(json.dumps({**totals, "envelopes": stats, "seconds": round(elapsed, 1),
                       "per_second": round(total / elapsed, 1) if elapsed else None}))
+    if rejected:
+        # a scheduled refresh must fail visibly, not "succeed" with a hole in
+        # it — 193k of 474k refused on GKE by a mis-scoped key went unnoticed
+        # until the log was read (D-063)
+        raise SystemExit(f"{rejected} envelopes were refused by the engine (see the lines above); "
+                         "the EPSS ledger was not advanced")
 
 
 if __name__ == "__main__":

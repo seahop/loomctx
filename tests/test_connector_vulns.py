@@ -634,3 +634,71 @@ def test_kev_catalog_date_reads_the_release_stamp(tmp_path):
     path.write_text(json.dumps({"vulnerabilities": []}))
     os.utime(path, (1_750_000_000, 1_750_000_000))
     assert vulns.kev_catalog_date(path).timestamp() == 1_750_000_000
+
+
+def test_a_refused_refresh_fails_loudly_and_keeps_the_ledger(tmp_path, monkeypatch, capsys):
+    """D-063: on GKE a refresh key pinned to `nvd` was refused every per-scorer
+    `nvd:<scorer>` row — 193k of 474k — and the Job still succeeded, with the
+    EPSS ledger advanced over rows that never landed. Now a refused envelope
+    fails the run and leaves the ledger alone; a `:*` source family fixes the
+    key."""
+    import hashlib
+    import io
+    import urllib.error
+    import urllib.parse
+    from fastapi.testclient import TestClient
+
+    def key(k, grant):
+        return {"sha256": hashlib.sha256(k.encode()).hexdigest(), **grant}
+    keys = tmp_path / "keys.json"
+    keys.write_text(json.dumps({"keys": [
+        key("admin", {"id": "admin", "namespaces": ["*"], "perms": "rw"}),
+        key("narrow", {"id": "narrow", "namespaces": ["netsec"], "perms": "rw", "sources": ["cisa-kev"]}),
+        key("wide", {"id": "wide", "namespaces": ["netsec"], "perms": "rw",
+                     "sources": ["cisa-kev", "first-*", "first-epss", "nvd:*"]})]}))
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "keyed.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    cache = tmp_path / "feeds"
+    _write_cache(cache)
+    base = ["load", "--cache", str(cache), "--offline", "--url", "http://loom", "--sources", "kev,epss"]
+    with TestClient(app) as client:
+        def fake_urlopen(req, timeout=0):
+            url = urllib.parse.urlsplit(req.full_url)
+            r = client.request(req.get_method(), url.path + ("?" + url.query if url.query else ""),
+                               content=req.data, headers=dict(req.header_items()))
+            if r.status_code >= 400:
+                raise urllib.error.HTTPError(req.full_url, r.status_code, "error", r.headers, io.BytesIO(r.content))
+            return Resp(r.content)
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        vulns.register(vulns.schema("netsec"), "http://loom", None, "admin")   # the operator's first load
+        with pytest.raises(SystemExit, match="refused by the engine"):
+            vulns.main(base + ["--key", "narrow"])                              # first-epss not granted
+        assert not list(cache.glob("epss-ledger-netsec-*.json.gz"))             # ledger not advanced
+        vulns.main(base + ["--key", "wide"])
+        assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["rejected"] == 0
+        assert list(cache.glob("epss-ledger-netsec-*.json.gz"))
+
+
+def test_source_families():
+    from loom.auth import Grant, source_matches
+    assert source_matches("nvd:*", "nvd:cve@mitre.org") and source_matches("nvd", "nvd")
+    assert not source_matches("nvd:*", "nvd") and not source_matches("nvd:*", "nvdx:a")
+    assert not source_matches("nvd", "nvd:cve@mitre.org") and not source_matches("first-*", "first-epss")
+    g = Grant(id="r", namespaces=("netsec",), perms="rw", sources=("nvd", "nvd:*"))
+    assert g.allows_source("nvd") and g.allows_source("nvd:cna@vuldb.com") and not g.allows_source("cisa-kev")

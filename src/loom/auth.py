@@ -71,10 +71,19 @@ class Grant:
         return self.entity_types is None or entity_type in self.entity_types
 
     def allows_source(self, source: str) -> bool:
-        return self.sources is None or source in self.sources
+        return self.sources is None or any(source_matches(p, source) for p in self.sources)
 
     def expired(self, now: datetime) -> bool:
         return self.expires is not None and now >= self.expires
+
+
+def source_matches(pattern: str, source: str) -> bool:
+    """A source grant is an exact name, or a family ending in `:*` —
+    `nvd:*` covers `nvd:cve@mitre.org`, the per-scorer sources the NVD
+    connector writes (D-035), but not `nvd` itself or `nvdx:…` (D-063)."""
+    if pattern.endswith(":*"):
+        return source.startswith(pattern[:-1])
+    return pattern == source
 
 
 def _sha256(key: str) -> str:

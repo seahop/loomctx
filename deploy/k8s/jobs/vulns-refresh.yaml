@@ -3,7 +3,7 @@
 # NVD has re-scored since yesterday records a NEW observation, so the
 # namespace accumulates real history and `as_of` questions mean something.
 #
-#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # an rw key pinned to sources nvd,cisa-kev,first-epss
+#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # an rw key pinned to sources 'nvd,nvd:*,cisa-kev,first-epss,cisa-adp' (nvd:* = the per-scorer CVSS sources)
 #
 # The key needs `r` as well as `w` on the namespace: a changed KEV entry (a
 # ransomware flag flipped, a due date moved) is found by reading the CVE's

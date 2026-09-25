@@ -60,6 +60,21 @@ python -m loom.keys generate --id netsec-authlog-shipper \
 # -> prints loomk_... ONCE; put it in the shipper's config (X-Loom-Key)
 ```
 
+**A feed refresh job** (the nightly `vulns-refresh` CronJob: reads the
+stored KEV rows, writes only the feed sources). A source grant is an exact
+name or a family ending in `:*` — NVD records each scorer's CVSS under its
+own source, `nvd:<scorer>`, so the key needs both `nvd` and `nvd:*`:
+
+```bash
+python -m loom.keys generate --id vulns-refresh \
+  --namespace netsec --perms rw --sources 'nvd,nvd:*,cisa-kev,first-epss,cisa-adp'
+```
+
+A loader exits non-zero when the engine refuses any envelope, so a
+mis-scoped key fails the Job instead of loading a partial feed (D-063).
+The first load, which registers the namespace schema, needs a key with no
+source gate.
+
 **Onboard a user** (an analyst whose agent may query netsec, but only
 host/ip/alert data — not, say, HR entities another team ingests):
 

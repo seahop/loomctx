@@ -263,3 +263,18 @@ func TestDocumentUploaderStamp(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceFamilies(t *testing.T) {
+	g := &grant{Sources: []string{"nvd", "nvd:*"}}
+	for s, want := range map[string]bool{
+		"nvd": true, "nvd:cve@mitre.org": true, "nvd:cna@vuldb.com": true,
+		"nvdx:a": false, "cisa-kev": false,
+	} {
+		if got := g.allowsSource(s); got != want {
+			t.Errorf("allowsSource(%q) = %v, want %v", s, got, want)
+		}
+	}
+	if sourceMatches("first-*", "first-epss") {
+		t.Error("only a ':*' suffix is a family")
+	}
+}
