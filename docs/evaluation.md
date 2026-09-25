@@ -185,43 +185,85 @@ answers from the rendered context by rule, cites the lines it used, never
 guesses and never answers from memory, so its accuracy is "was the answer
 in the context" and a live model's row minus the scripted row is the
 reading cost. On the seed corpus with the hashing embedder (35 questions,
-none outside Loom's gather, nothing unsent):
+none outside Loom's gather, nothing unsent; build after D-062):
 
 | Condition | Accuracy | Tokens est (mean / max) | Truth in context | Abstained (other) |
 | --- | --- | --- | --- | --- |
-| `loom@400` | 94% | 232 / 317 | 93% | 7% |
-| `vector@400` | 77% | 238 / 332 | 70% | 22% |
-| `recency@400` | 66% | 237 / 332 | 56% | 41% |
-| `loom@800` | 97% | 323 / 543 | 96% | 4% |
-| `vector@800` | 91% | 332 / 574 | 89% | 11% |
-| `recency@800` | 69% | 330 / 574 | 59% | 41% |
-| `loom@1600` | 97% | 508 / 1,042 | 96% | 4% |
-| `vector@1600` | 100% | 516 / 1,070 | 100% | 0% |
-| `recency@1600` | 69% | 511 / 1,065 | 59% | 37% |
-| `loom@3200` | 100% | 855 / 2,018 | 100% | 0% |
-| `vector@3200` | 100% | 860 / 2,036 | 100% | 0% |
-| `recency@3200` | 74% | 859 / 2,031 | 67% | 30% |
+| `loom@400` | 94% | 189 / 256 | 93% | 7% |
+| `vector@400` | 71% | 195 / 260 | 63% | 33% |
+| `recency@400` | 54% | 197 / 264 | 41% | 52% |
+| `loom@800` | 97% | 281 / 433 | 96% | 4% |
+| `vector@800` | 89% | 283 / 450 | 85% | 15% |
+| `recency@800` | 69% | 282 / 442 | 59% | 41% |
+| `loom@1600` | 100% | 411 / 789 | 100% | 0% |
+| `vector@1600` | 97% | 418 / 804 | 96% | 4% |
+| `recency@1600` | 69% | 415 / 805 | 59% | 37% |
+| `loom@3200` | 100% | 677 / 1,506 | 100% | 0% |
+| `vector@3200` | 100% | 682 / 1,534 | 100% | 0% |
+| `recency@3200` | 69% | 680 / 1,526 | 59% | 37% |
 | `full` | 100% | 1,187 / 9,800 | 100% | 0% |
 
-What it says, at equal tokens: the pack's advantage is at small budgets —
-at 400 tokens it carries the answer for 93% of questions against 70% for
-cosine ranking and 56% for recency — and it narrows as the budget grows.
-At 1,600 cosine-only ranking catches up and passes a question `loom@1600`
-misses: the seed's alert -> host -> logins question, where the pack spends
-its budget on the host's `communicated_with` facts and hands the
-`logged_in_by` ones back as expansion handles (a live agent could expand
-them; the scripted reader does not). Recency never catches up: it drops
-half the conflicts and most orderings at every budget. On a small corpus
-`full` is affordable and a perfect reader gets everything right from it,
-so the pack's case at this scale is tokens (under half of `full`'s mean
-at 1,600, for 97%). On the real corpus `full` for a multi-hop question is the whole
-history of every CVE behind a host's products, which is why the harness
-measures it and refuses to send it past `--full-cap` — and the same hubs
-put some KEV ground truth outside Loom's own gather, which the scorecard
-lists. A live model adds the reading cost: the interesting rows there are
-abstention (does a model with everything in front of it still answer from
-memory?) and the `as_of` leases (does it read observation dates when Loom
-has not already applied them?).
+At equal tokens the pack's advantage is at small budgets — at 400 tokens
+it carries the answer for 93% of questions against 63% for cosine ranking
+and 41% for recency — and it narrows as the budget grows until cosine
+ranking catches up at 3,200. Recency never does: it drops conflicts and
+most orderings at every budget. On a corpus this small `full` is
+affordable and a perfect reader gets everything from it, so the pack's
+case here is tokens (a third of `full`'s mean at 1,600, for the same
+100%). The real corpus is where that stops being true.
+
+## Results on the real corpus (2026-09-24)
+
+The store `docs/real-data.md` builds — seed hosts plus CISA KEV, NVD and
+EPSS, 542,099 observations, ~138 adjudicated alias merges — embedded with
+`openai/text-embedding-3-small` at 512 dimensions, read live by
+`deepseek/deepseek-chat-v3.1`, three runs, seed 7, 53 questions (lease 6,
+conflict 9, multihop 6, abstention 8, numeric 12, order 12). Accuracy is
+mean over three runs (sd ≤ 2 points everywhere); tokens are the estimator's
+mean per prompt.
+
+| Budget | `loom@B` | `vector@B` | `recency@B` | Loom tokens / vector tokens |
+| --- | --- | --- | --- | --- |
+| 400 | **81%** | 75% | 50% | 208 / 208 |
+| 800 | **84%** | 77% | 75% | 323 / 309 |
+| 1,600 | **86%** | 79% | 75% | 434 / 409 |
+| 3,200 | **96%** | 87% | 77% | 611 / 593 |
+| `full` | 95% on the 47 questions it could be sent | | | 127,715 mean, 1.87M max |
+
+- **Loom leads at every budget.** At 3,200 tokens it beats handing the
+  model everything (`full`: 95%, and six multi-hop questions could not be
+  sent at all — their contexts run to 0.9–1.9 million tokens) at about
+  half a percent of `full`'s mean prompt.
+- **The multi-hop KEV question** ("which CVEs that CISA lists as exploited
+  in the wild affect software host:web-01 runs?", roughly 30–44 CVEs per host) is
+  answered only by Loom: `loom@3200` 15/18, every other condition 0/18.
+  Cosine ranking at the same budget has the right facts in context for
+  most of these (scripted: 5/6) but a live model does not assemble the
+  exact set from them; the pack's grouped, attribute-first rendering
+  (D-061) is what makes the set readable.
+- **Abstention:** no condition hallucinated on the 24 abstention rows.
+  **Abstained (other)** — answering `unknown` to an answerable question —
+  is where cosine ranking pays: 13–27% of its rows against Loom's 0–5%.
+- **Where Loom still loses a question:** orderings at 400–800 tokens (64%
+  and 78%; the pack keeps the two dated facts but not always enough
+  context to read which came first), and one 44-CVE multi-hop answer at
+  3,200 that the budget cuts short (laptop-17: 41 of 44 named).
+
+**How the numbers moved during the review** (same corpus, same questions;
+D-057 scoring throughout):
+
+| Build | loom@400 | loom@800 | loom@1600 | loom@3200 | multi-hop @3200 |
+| --- | --- | --- | --- | --- | --- |
+| before D-061 (live) | 68% | 84% | 86% | 87% | 0/18 — outside Loom's gather |
+| after D-061 (scripted) | 62% | 83% | 89% | 100% | 6/6 |
+| after D-062 (live, the table above) | **81%** | **84%** | **86%** | **96%** | **15/18** |
+
+Before D-061 the six KEV questions were outside Loom's reach at any budget
+(the kernel hub's KEV edges are older than its newest 1,000); before
+D-062 a 400-token pack could ship the wrong conflict first, lose every fact
+to an excerpt, or spend a third of its budget on one base64 handle.
+`vector@B` did not change between builds: its 74 / 77 / 79 / 86% before
+and 75 / 77 / 79 / 87% after are run-to-run variance.
 
 ## Caveats
 

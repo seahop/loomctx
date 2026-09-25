@@ -82,6 +82,13 @@ Full list with statuses: `docs/hardening.md` §S.
   express version chains (`--history` for every version); export → import
   is a replay
 
+#### Measured (2026-09-24, real corpus, D-057 scoring)
+- Retrieval, live: Loom 81 / 84 / 86 / 96 % vs token-matched vector
+  75 / 77 / 79 / 87 % at 400 / 800 / 1,600 / 3,200 tokens; the multi-hop
+  KEV question only Loom answers (15/18) — `docs/evaluation.md`
+- Agents: eighteen models × three runs; `mistral-large` and
+  `claude-sonnet-4.5` pass all twelve tasks — `docs/models.md`
+
 #### Release
 - Every engine-image compose service builds (a fresh clone's
   `docker compose run --rm test` works); Go SDK CI can fail; `go.sum` and

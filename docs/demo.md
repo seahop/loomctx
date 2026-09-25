@@ -32,8 +32,10 @@ docker compose exec -e LOOM_LLM_MODEL=google/gemini-3.5-flash-lite loom \
 
 **Pin the judge.** The alias pass is LLM-adjudicated; D-042's 58 merges,
 "web-01 reaches 29 KEV CVEs", and the whole Act 3 answer were measured
-with `google/gemini-3.5-flash-lite` as the judge (12/12 on the scorecard,
-the fastest model tested — `docs/models.md`). A different judge produces
+with `google/gemini-3.5-flash-lite` as the judge — pinned for
+reproducibility, not ranking: adjudication is one pair at a time with no
+tool calls, and the agent scorecard (`docs/models.md`) measures something
+else. A different judge produces
 a different merge set, and every number in Acts 2 and 3 moves with it.
 `LOOM_LLM_PROVIDER` / `LOOM_LLM_API_KEY` come from `.env` as usual; only
 the model is overridden for this one command.

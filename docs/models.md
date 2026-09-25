@@ -9,187 +9,166 @@ it, so it can be re-run when models change (they change monthly).
 
 ## TL;DR
 
-Measured 2026-09-09 on OpenRouter: eighteen models, three full runs each
-of four tasks against a real corpus (CISA KEV + NVD + EPSS, 465k
-observations), no hints beyond the server's own instructions. Scored under
-the pre-D-057 rules, where the two-hop task passed on naming one KEV CVE
-and citations were optional — see [How it is measured](#how-it-is-measured);
-the pass counts below are provisional until re-run.
+Measured 2026-09-24 on OpenRouter: eighteen models, three full runs each
+of four tasks (216 task-runs, $13.83 in total) against the real corpus —
+seed hosts plus CISA KEV, NVD and EPSS, 542,099 observations, embedded —
+under the D-057 scorer, with no hints beyond the server's own
+instructions.
 
-- **Nine models pass every task every time**, from two cents to fifty-eight
-  cents per four-task run.
-- **Start with `google/gemini-3.5-flash-lite`**: 12/12, two cents, 25
-  seconds per run, the fastest model tested.
-- **Open weights:** `qwen/qwen3.7-flash` is 12/12 at two cents; `qwen3.7-plus`,
-  `deepseek-v4-pro` and `z-ai/glm-5.2` are also clean.
-- **When answers matter:** `openai/gpt-5.6-sol` or `anthropic/claude-haiku-4.5`,
-  both 12/12. `claude-sonnet-5` is 11/12 and still reads best.
-- **Faithfulness:** 216 task-runs, no model invented a citation. Two
-  models mangled one hand-copied 32-hex id each (now a 12-hex `cite`
-  token), and one model (`glm-5.3-flash`) named two CVEs from its own
-  memory that are not in the store — the failure Loom's citations exist
-  to expose, caught by the check.
-- **The two-hop question is the only discriminator.** Every model with
-  working tool calls passed the three single-entity tasks.
-- **Cost is what the agent reads, not what it writes**: 70k to 720k input
-  tokens per run, so the agent-shaped pack view matters more than any
-  prompt tweak.
+- **Two models pass every task every time:** `mistralai/mistral-large`
+  (six cents per four-task run) and `anthropic/claude-sonnet-4.5` (81
+  cents).
+- **The two-hop question is the only discriminator.** Sixteen of the
+  eighteen models pass all three single-entity tasks at least two runs in
+  three. On the two-hop exposure task only four ever pass (9 passes in 54
+  runs).
+- **Bigger is not better at the two-hop task.** `claude-opus-4.8` names up
+  to 22 of the 32 exposed CVEs but adds CVEs from other products;
+  `gpt-5.2` stops after naming zero to two. Both are 9/12.
+- **Faithfulness:** no model cited an id it had not been shown, in 216
+  runs. Two models named one CVE each from their own memory that is not in
+  the store — caught by the check.
+- **Cost is what the agent reads**: 25k to 470k input tokens per run.
 
 ## Short answer
 
 | If you want… | Use | Why |
 | --- | --- | --- |
-| one model to start with | **`google/gemini-3.5-flash-lite`** | 12/12, two cents and 25 s per four-task run, the fastest model tested |
-| the same, OpenAI | `openai/gpt-5.6-luna` (12/12, three cents) | `gpt-5.4-nano` is a cent but 11/12 |
-| the same, open weights | **`qwen/qwen3.7-flash`** (12/12, two cents) or `qwen3.7-plus`, `deepseek-v4-pro`, `z-ai/glm-5.2` (all 12/12) | self-hostable; Qwen flash is the cheapest clean pass |
-| the model for when answers matter | **`openai/gpt-5.6-sol`** (12/12) or `anthropic/claude-haiku-4.5` (12/12) | verify and explain; `claude-sonnet-5` is 11/12 with one mangled citation, still the pick for the demo's narrative quality |
-| a model to avoid for multi-hop | `z-ai/glm-5.3-flash` (0/3 and invented two CVEs), `moonshotai/kimi-k2.6` (0/3), `google/gemini-3.8-flash` (provider errors in the tool loop), `minimax/minimax-m3` (1/3) | fine for single-entity lookups only |
+| one model to start with | **`mistralai/mistral-large`** | 12/12, six cents and 48 s per four-task run; its provider rate-limited it during the run (see below), so plan for retries |
+| the model for when answers matter | **`anthropic/claude-sonnet-4.5`** | 12/12 with no rate-limit trouble, 81 cents; reads best |
+| cheap single-entity lookups | `google/gemini-2.5-flash` | every single-entity task, one cent and 14 s — but 0/3 on two-hop |
+| open weights | `z-ai/glm-4.6v` | 10/12 at four cents, the only open-weights model with a two-hop pass |
+| to avoid | `mistralai/mistral-medium-3-5` (5/12, one invented CVE), `mistralai/codestral-2508` (lease 0/3) | misses on single-entity tasks |
 
-Model ids age fast — five of these did not exist three months ago. The
-evidence and the command to re-run it follow. The corpus gained alias
-merges after this table was measured (D-042: the two-hop task now has 29
-target CVEs instead of 3), so a re-run will not be identical.
+Model ids age fast. The evidence and the command to re-run it follow.
 
 ## How it is measured
 
 `python -m loom.agent_eval --models a,b,c --repeat 3 --markdown scorecard.md`
 runs each model as an agent over the real MCP transport against the real
-corpus (`docs/real-data.md`: the seed hosts plus CISA KEV, NVD and EPSS,
-embedded). Four tasks, no pre-built scope, no hints beyond the server's
-own instructions:
+corpus (`docs/real-data.md`, embedded with `openai/text-embedding-3-small`
+at 512 dimensions). Four tasks, no pre-built scope, no hints beyond the
+server's own instructions, a 20-step cap per task:
 
 | Task | What it takes |
 | --- | --- |
-| **2-hop exposure** | "Is web-01 exposed to anything CISA lists as exploited in the wild?" — discover the schema, resolve the host, `ask_scope` with `expand_predicates=[runs_software, affects]`, read the chain, name the CVEs and the software, cite |
+| **2-hop exposure** | "Is web-01 exposed to anything CISA lists as exploited in the wild?" — discover the schema, resolve the host, `ask_scope` over `runs_software` and `affects`, read the chain, name the CVEs and the software, cite |
 | **lease** | which host held 10.0.4.7 on a date — an entity ask with `valid_at` |
 | **conflict** | what two scorers say about one CVE's CVSS — read a conflict item, report both sides |
 | **os** | which OS web-01 runs — a conflict on the root subject |
 
-Ground truth is computed from the store. Every task also requires a
-faithful citation: at least one observation id the model saw in a tool
-result during that run, and no cited id it did not see (a date such as
-20260820 is not taken for an id). Beyond that, a task **passes** when:
+Ground truth is computed from the store. Every task requires a faithful
+citation: at least one observation id the model saw in a tool result
+during that run, and no cited id it did not see (a date such as 20260820
+is not taken for an id). Beyond that, a task **passes** when:
 
 - **2-hop exposure** — the answer names at least half of the KEV-listed
-  CVEs that reach web-01 (all of them when there are four or fewer), no CVE
-  that is not in the store, no real CVE that is not KEV-listed for web-01,
-  and, for each CVE it names, the software it reaches web-01 through. The
-  score reports recall and precision alongside.
+  CVEs that reach web-01 (16 of 32 on this corpus; all of them when there
+  are four or fewer), no CVE that is not in the store, no real CVE that is
+  not KEV-listed for web-01, and, for each CVE it names, the software it
+  reaches web-01 through. The score reports recall and precision.
 - **lease** — the first sentence of the answer, asides removed, names the
-  host whose lease covers the date and no former holder; history in a
-  later sentence or in parentheses is fine.
+  host whose lease covers the date and no former holder.
 - **conflict** — every value the sources report is named (numbers by
   value, so 17.5 does not count for 7.5).
 - **os** — every reported operating system is named.
 
-Cost is what OpenRouter billed for the run, cache discounts included.
-Calls run at temperature 0 (dropped for a model that rejects the
-parameter). Three full runs per model, so cells are pass rates; a single
-flipped task is within run-to-run variance, a 12/12 across three
-independent runs at a stable cost is a number you can plan on.
+Cost is what OpenRouter billed, cache discounts included. Calls run at
+temperature 0 (dropped for a model that rejects it). Three full runs per
+model, so cells are pass rates. A task the provider failed — rate limit,
+5xx, out of credit, an error body — after its retries and one task-level
+retry is **not run**: out of the pass rate, never the model's failure, and
+a row with any is marked incomplete and ranked last.
 
-**The table below predates these rules (D-057).** It was scored when the
-exposure task passed on naming *any one* KEV CVE with the software
-unchecked, and when an answer with no citation at all counted as
-faithful. Its exposure column in particular overstates what it measured;
-treat it as provisional until it is re-run under the current scorer.
-
-## Decision table (2026-09-09, OpenRouter, three full runs per model, 20-step cap)
+## Decision table (2026-09-24, OpenRouter, three full runs per model, 20-step cap)
 
 Per-task cells are passes out of three; steps, tokens, time and cost are
-per four-task run. Sorted by pass rate, then cost. `claude-opus-5` was
-left out on cost (about four dollars per run; a single run passed) and
-`llama-4-maverick` because it writes tool calls as text through
-OpenRouter and cannot use the tools at all.
+per four-task run. Sorted by pass rate, then cost.
 
 | Model | Passed | 2-hop exposure | lease | conflict | os | Steps/run | Tokens in/out/run | Time/run | Cost/run | Faithful |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `google/gemini-3.5-flash-lite` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 24 | 121,764/1,561 | 25 s | $0.02 | yes |
-| `qwen/qwen3.7-flash` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 28.7 | 616,042/9,291 | 117 s | $0.02 | yes |
-| `openai/gpt-5.6-luna` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 22.7 | 260,846/3,370 | 70 s | $0.03 | yes |
-| `x-ai/grok-4.3` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 19.7 | 81,592/3,063 | 32 s | $0.06 | yes |
-| `qwen/qwen3.7-plus` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23.7 | 584,689/9,654 | 127 s | $0.09 | yes |
-| `deepseek/deepseek-v4-pro` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 23 | 299,897/7,725 | 127 s | $0.10 | yes |
-| `z-ai/glm-5.2` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 20.3 | 153,124/5,288 | 74 s | $0.11 | yes |
-| `openai/gpt-5.6-sol` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 25.3 | 429,815/4,613 | 122 s | $0.35 | yes |
-| `anthropic/claude-haiku-4.5` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 22 | 552,433/4,696 | 77 s | $0.58 | yes |
-| `mistralai/mistral-small-2603` | 11/12 | 3/3 | 2/3 | 3/3 | 3/3 | 22 | 131,818/2,258 | 35 s | $0.01 | yes |
-| `openai/gpt-5.4-nano` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 20.7 | 68,008/1,556 | 34 s | $0.01 | yes |
-| `deepseek/deepseek-v4-flash` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 26 | 351,325/7,995 | 108 s | $0.01 | no (1 unseen cites, 0 invented) |
-| `openai/gpt-5.4-mini` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 23.7 | 160,675/1,833 | 46 s | $0.06 | yes |
-| `anthropic/claude-sonnet-5` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 21 | 393,012/8,274 | 133 s | $0.87 | no (1 unseen cites, 0 invented) |
-| `minimax/minimax-m3` | 10/12 | 1/3 | 3/3 | 3/3 | 3/3 | 21.7 | 327,391/8,616 | 65 s | $0.05 | yes |
-| `z-ai/glm-5.3-flash` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 30 | 508,193/6,008 | 224 s | $0.03 | no (0 unseen cites, 2 invented) |
-| `moonshotai/kimi-k2.6` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 33.3 | 724,545/9,062 | 216 s | $0.21 | yes |
-| `google/gemini-3.8-flash` | 8/12 | 0/3 | 3/3 | 3/3 | 2/3 | 28.3 | 554,428/7,564 | 126 s | $0.17 | yes |
+| `mistralai/mistral-large` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 17 | 77,863/2,004 | 48 s | $0.06 | yes |
+| `anthropic/claude-sonnet-4.5` | 12/12 | 3/3 | 3/3 | 3/3 | 3/3 | 18.7 | 243,582/4,999 | 126 s | $0.81 | yes |
+| `x-ai/grok-4.7` | 11/12 | 2/3 | 3/3 | 3/3 | 3/3 | 26.7 | 472,879/14,791 | 266 s | $0.41 | yes |
+| `z-ai/glm-4.6v` | 10/12 | 1/3 | 3/3 | 3/3 | 3/3 | 26.7 | 177,277/4,815 | 146 s | $0.04 | yes |
+| `google/gemini-2.5-flash` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 12 | 25,226/815 | 14 s | $0.01 | yes |
+| `google/gemini-3.5-flash-lite` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 28.7 | 145,029/2,245 | 39 s | $0.03 | yes |
+| `minimax/minimax-m2.7` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 24.7 | 407,524/6,131 | 152 s | $0.04 | no (1 invented) |
+| `qwen/qwen3-coder` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 29.7 | 205,283/2,378 | 35 s | $0.05 | yes |
+| `deepseek/deepseek-chat-v3.1` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 41.3 | 341,441/4,776 | 326 s | $0.06 | yes |
+| `qwen/qwen3.5-plus-20260420` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 22.3 | 236,548/8,455 | 222 s | $0.09 | yes |
+| `cohere/command-a-plus` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 37.3 | 272,619/6,402 | 86 s | $0.09 | yes |
+| `openai/gpt-4o-2024-05-13` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 13 | 38,671/1,188 | 40 s | $0.21 | yes |
+| `anthropic/claude-haiku-4.5` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 18.3 | 248,724/3,785 | 66 s | $0.27 | yes |
+| `openai/gpt-5.2` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 30.7 | 427,014/8,705 | 206 s | $0.33 | yes |
+| `anthropic/claude-opus-4.8` | 9/12 | 0/3 | 3/3 | 3/3 | 3/3 | 17.3 | 198,182/6,503 | 152 s | $1.15 | yes |
+| `google/gemini-3.5-flash` | 8/12 | 0/3 | 3/3 | 3/3 | 2/3 | 36.3 | 297,112/11,440 | 107 s | $0.33 | yes |
+| `mistralai/codestral-2508` | 6/12 | 0/3 | 0/3 | 3/3 | 3/3 | 16 | 75,432/1,387 | 24 s | $0.01 | yes |
+| `mistralai/mistral-medium-3-5` | 5/12 | 0/3 | 1/3 | 1/3 | 3/3 | 24 | 411,688/3,360 | 79 s | $0.64 | no (1 invented) |
+
+`mistral-large`'s upstream provider answered most of its calls with 429
+(temporarily rate-limited) during the eighteen-model run. Each task-run is
+independent, so its row is the first three *scored* runs of each task
+across three invocations of the same command; the rate-limited attempts
+were not run, never scored.
 
 ## Reading it
 
-**The two-hop task is the discriminator.** Every model that emits
-structured tool calls passed the single-entity tasks (lease, conflict, os)
-at one to a few cents; `mistral-small`'s one lease miss was a "no host
-held the IP" after reading only an expired lease. What separates the
-field is whether a model, told nothing but the server's instructions,
-reads `describe_namespace`, calls `ask_scope` with
-`expand_predicates=[runs_software, affects]`, and trusts the chain and
-the attributed advisory excerpt it gets back.
+**The two-hop task is the discriminator.** Of 54 exposure runs, 9 passed.
+The 45 misses, by first failing rule: 16 named fewer than half of the 32
+exposed CVEs (stopped reading the chain early), 13 added a CVE that is
+KEV-listed for another product or is not KEV-listed at all, 9 used all 20
+steps without answering, 5 named no CVE, and 2 named a CVE that is not in
+the store. The single-entity tasks — one ask, one conflict item — are
+solved by almost everything with working tool calls.
 
-**Faithfulness: 216 task-runs, two mangled ids, one invention.**
-`claude-sonnet-5` and `deepseek-v4-flash` each dropped one character
-while hand-copying a 32-hex observation id — an unverifiable citation,
-which the check rightly fails; packs now carry a 12-hex `cite` token so
-agents copy less. `z-ai/glm-5.3-flash` named `CVE-2023-38408` and
-`CVE-2024-6387`, real-world OpenSSH CVEs that are not in the store, from
-its own memory ("probe classic KEV entries"). Nothing else across the
-eighteen models invented an entity or a citation: the discipline is
-Loom's, not the model's — every item carries an id, so an assertion
-without one stands out.
+**Bigger is not better here.** `claude-opus-4.8` found the most (22 of
+32 in one run) but padded every answer with two or three CVEs the chain
+does not support — an HTTP/2 or Android-kernel KEV entry, an OpenSSL CVE
+that is not KEV-listed. `gpt-5.2` answered carefully and briefly: zero to
+two CVEs. What passes is reading the chain Loom returns and naming what
+it says, no more.
 
-**How the misses fail.** Never by running out of steps at the cap; by
-answering wrongly with room to spare. `gpt-5.4-nano` credited kernel CVEs
-from an `affects` list as KEV-listed in one run (2/3 — one flipped
-sample). `gemini-3.8-flash` hit a Google-side "corrupted thought
-signature" error on tool round-trips and answered nothing on three
-exposure runs — a provider compatibility problem with the OpenAI-style
-tool loop, not a retrieval one. `kimi-k2.6` ran out of steps three times
-without answering. A confident wrong "no" is the one failure citations
-cannot catch — a claim of absence cites nothing — which is why packs
-report partial coverage (`truncated`) and why a model's *rate* matters
-more than its best run.
+**This is the first table under the strict scorer.** The 2026-09-09
+table (commit history) passed the exposure task on naming *any one* KEV
+CVE; nine models were 12/12 then. The same corpus-and-task measured before
+D-061 (Loom's scope walk could not see most KEV edges on the kernel hub)
+gave one exposure pass in the fifteen models that ran; after D-061, nine.
+
+**Faithfulness: 216 task-runs, no unseen citation, two inventions.**
+`minimax-m2.7` named `CVE-2022-0586` and `mistral-medium-3-5` named
+`CVE-2024-6387` (a real-world OpenSSH CVE), neither in the store — from
+memory, and caught because every assertion Loom supports carries an id.
+A confident wrong "no" is the one failure citations cannot catch — a
+claim of absence cites nothing — which is why packs report partial
+coverage (`truncated`) and why a model's *rate* matters more than its
+best run.
 
 **Cost is dominated by what the agent reads, not what it writes.** Input
-tokens run 70k to 720k per four-task run because every tool result stays
-in context; that is why the agent-shaped pack view (items first, no
-nulls, subjects summarized) mattered more than any prompt change.
-Semantic ranking adds about 300 ms to the first ask of each question (one
-embedding call; repeats are cached); the times above include it.
+tokens run 25k to 470k per four-task run because every tool result stays
+in context; the agent-shaped, budget-honest pack view (D-058) is what
+keeps that down.
 
 ## Recommendation in full
 
-- **Default agent model for Loom demos and small teams:**
-  `google/gemini-3.5-flash-lite` — 12/12, two cents and about 25 seconds
-  per four-task run. `openai/gpt-5.6-luna` (12/12, three cents) if you
-  want OpenAI; `openai/gpt-5.4-nano` is a cent and 11/12.
-- **Open weights, self-hosted:** `qwen/qwen3.7-flash` is the cheapest
-  clean pass at two cents; `qwen3.7-plus`, `deepseek/deepseek-v4-pro` and
-  `z-ai/glm-5.2` are also 12/12 at nine to eleven cents.
-- **When the questions get harder:** `openai/gpt-5.6-sol` (12/12) or
-  `anthropic/claude-haiku-4.5` (12/12, 58 cents). `anthropic/claude-sonnet-5`
-  is 11/12 — one two-hop miss and one mangled id — and remains the demo
-  pick for how its answers read.
-- **Not for multi-hop on this evidence:** `z-ai/glm-5.3-flash` (0/3, and
-  the only model to invent entities), `moonshotai/kimi-k2.6` (0/3),
-  `google/gemini-3.8-flash` (provider errors in the tool loop),
-  `minimax/minimax-m3` (1/3). All fine for single-entity lookups.
-  `llama-4-maverick` cannot call tools via OpenRouter at all.
+- **Default agent model:** `mistralai/mistral-large` — 12/12, six cents
+  and 48 seconds per four-task run. Its provider rate-limits under load;
+  retry, or fall back to Sonnet.
+- **When answers matter or the demo is on stage:**
+  `anthropic/claude-sonnet-4.5` — 12/12, 81 cents, no provider trouble.
+- **Open weights:** `z-ai/glm-4.6v` (10/12, four cents). `qwen3-coder`,
+  `qwen3.5-plus` and `deepseek-chat-v3.1` are clean on single-entity
+  tasks only.
+- **Single-entity lookups on a budget:** `google/gemini-2.5-flash` — one
+  cent, 14 seconds, every single-entity task.
+- **Not on this evidence:** `mistralai/mistral-medium-3-5` and
+  `mistralai/codestral-2508`.
 - **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
   reader, not an agent: it needs no tool calling, so any model on this
   page works there.
 
-Three runs each; a single flipped task is within variance. Expect the
-table to age — five of these model ids did not exist three months ago.
-Re-run before quoting a number in a talk; the eighteen-model, three-run
-table cost about twelve dollars and two hours.
+Three runs each; a single flipped task is within variance. Re-run before
+quoting a number in a talk; this table took about three hours and $14.
 
 ## Retrieval, not models: the other scorecard
 
@@ -197,21 +176,23 @@ This page asks which models can drive Loom's tools. `docs/evaluation.md`
 asks the prior question with `python -m loom.retrieval_eval`: on the same
 store and the same generated questions, does a budgeted context pack beat
 handing the model everything, or cosine ranking or the newest facts at
-the same token budget — in accuracy, tokens, citation support and
-hallucination on questions that have no answer. Run it with the model chosen here before quoting either
-table.
+the same token budget? On this corpus, read by `deepseek-chat-v3.1`, it
+does at every budget (81 / 84 / 86 / 96 % against vector's 75 / 77 / 79 /
+87 % at 400 / 800 / 1,600 / 3,200 tokens).
 
 ## Re-running it
 
 ```bash
 docker compose exec --user 10001 loom python -m loom.agent_eval --db /data/loom.db \
-    --models google/gemini-3.5-flash-lite,anthropic/claude-sonnet-5 --repeat 3 --markdown /data/scorecard.md
+    --models mistralai/mistral-large,anthropic/claude-sonnet-4.5 --repeat 3 --markdown /data/scorecard.md
 ```
 
 Any OpenAI-compatible endpoint with tool calling works (`LOOM_LLM_*`;
 `LOOM_AGENT_MODEL` overrides the model), as does `LOOM_LLM_PROVIDER=anthropic`.
-Cost appears only where the provider reports it (OpenRouter does).
-`--repeat 3` gives pass rates instead of single samples; a full
-eighteen-model, three-run table takes about two hours — run it detached
-(`docker compose exec -d … > /data/scorecard.log`). `LOOM_AGENT_MAX_STEPS`
-raises the 20-step cap if a model needs more room to verify.
+The agent's MCP server needs the embedder the corpus was embedded with
+(`LOOM_EMBED_*`). Cost appears only where the provider reports it
+(OpenRouter does). `--repeat 3` gives pass rates instead of single
+samples; a full eighteen-model, three-run table takes about three hours —
+run it detached (`docker compose exec -d … > /data/scorecard.log`).
+`LOOM_AGENT_MAX_STEPS` raises the 20-step cap if a model needs more room
+to verify.

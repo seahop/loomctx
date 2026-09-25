@@ -1973,9 +1973,12 @@ condition to the same bar, and a row nobody answered is never a score.
   `--out` is rewritten atomically after each task.
 - **Consequence.** Every earlier table (the 2026-09-09 models table, D-053
   retrieval numbers) was scored under the old rules and is not comparable;
-  both are re-run on this build. On the seed, equal tokens change the
-  story: Loom leads clearly at 400–800 tokens and the vector baseline
-  catches up at 1,600+ — the docs say so.
+  both are re-run on this build. Equal tokens first narrowed the story
+  (on the seed, vector caught up at 1,600; on the real corpus it won at
+  400 and on multi-hop); D-061 and D-062 closed both gaps. Final, live,
+  real corpus: Loom 81 / 84 / 86 / 96 % against vector 75 / 77 / 79 / 87 %
+  at 400 / 800 / 1,600 / 3,200 tokens (`docs/evaluation.md`); agent
+  scorecard: two of eighteen models 12/12 (`docs/models.md`).
 
 ## D-058 · Read-path correctness and wire-honest budgets (2026-09-24)
 
