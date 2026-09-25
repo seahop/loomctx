@@ -629,7 +629,9 @@ def scorecard(runs: dict[str, list[RunResult]], repeat: int = 1) -> list[dict]:
             "invented": sum(len(r.score.get("invented_cves", [])) for r in results),
             "errors": [f"{r.task}: {r.error}" for r in results if r.error],
         })
-    rows.sort(key=lambda r: (-(r["passed"] / max(1, r["tasks"])), r["cost"]))
+    # a row with tasks the provider never ran is incomplete: it ranks after
+    # every complete row (7/7 of a partial run is not better than 12/12)
+    rows.sort(key=lambda r: (r["not_run"] > 0, -(r["passed"] / max(1, r["tasks"])), r["cost"]))
     return rows
 
 
@@ -658,7 +660,8 @@ def scorecard_markdown(rows: list[dict]) -> str:
     for r in rows:
         faithful = "yes" if r["unseen_citations"] == 0 and r["invented"] == 0 else \
             f"no ({r['unseen_citations']} unseen cites, {r['invented']} invented)"
-        body.append(f"| `{r['model']}` | {r['passed']}/{r['tasks']} | {r['exposure']} | {r['lease']} | "
+        partial = " (incomplete)" if r.get("not_run") else ""
+        body.append(f"| `{r['model']}` | {r['passed']}/{r['tasks']}{partial} | {r['exposure']} | {r['lease']} | "
                     f"{r['conflict']} | {r['os']} | {r['steps']:g} | {r['tokens_in']:,}/{r['tokens_out']:,} | "
                     f"{r['seconds']:.0f} s | ${r['cost']:.2f} | {faithful} | {r.get('not_run', 0)} |")
     note = ("\n\nNot run: tasks the provider failed (rate limit, 5xx, unreachable, an error "

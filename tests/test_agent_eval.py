@@ -359,6 +359,12 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
     [row] = ae.scorecard({"m": [r, ok]})
     assert row["passed"] == 1 and row["tasks"] == 1 and row["not_run"] == 1 and row["lease"] == "not run"
     assert ae.scorecard_markdown([row]).split("\n")[2].endswith("| 1 |")
+    assert "| 1/1 (incomplete) |" in ae.scorecard_markdown([row])
+    # an incomplete row never outranks a complete one, whatever its rate
+    full = [ae.RunResult(task=t, answer="", steps=1, score={"pass": t != "os"})
+            for t in ("exposure", "lease", "conflict", "os")]
+    rows = ae.scorecard({"partial": [r, ok], "complete": full})
+    assert [x["model"] for x in rows] == ["complete", "partial"]
     # a request the provider rejects outright (400) is the model's problem: scored
     assert not LLMError("provider returned 400: bad tool schema").transient
     # out of credit (402) is the account's problem: transient, never retried
