@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 
 
@@ -49,14 +50,18 @@ def ask_payloads(count: int, namespace: str) -> list[str]:
 
 
 async def run(url: str, count: int, concurrency: int, namespace: str,
-              mode: str = "ingest") -> None:
+              mode: str = "ingest", key: str | None = None) -> None:
     import httpx
 
     path = "/v1/ingest" if mode == "ingest" else "/v1/ask"
     bodies = payloads(count, namespace) if mode == "ingest" else ask_payloads(count, namespace)
     sem = asyncio.Semaphore(concurrency)
     outcomes = {"ok": 0, "err": 0}
+    statuses: dict[str, int] = {}     # non-2xx by code: a 401 storm reads as such
     latencies: list[float] = []
+    headers = {"content-type": "application/json"}
+    if key:
+        headers["X-Loom-Key"] = key   # a secured deployment refuses keyless requests
 
     async with httpx.AsyncClient(timeout=60) as client:
 
@@ -67,9 +72,12 @@ async def run(url: str, count: int, concurrency: int, namespace: str,
                     resp = await client.post(
                         url + path,
                         content=body,
-                        headers={"content-type": "application/json"},
+                        headers=headers,
                     )
-                    outcomes["ok" if resp.status_code in (200, 202) else "err"] += 1
+                    ok = resp.status_code in (200, 202)
+                    outcomes["ok" if ok else "err"] += 1
+                    if not ok:
+                        statuses[str(resp.status_code)] = statuses.get(str(resp.status_code), 0) + 1
                 except httpx.HTTPError:
                     outcomes["err"] += 1
                 latencies.append(time.perf_counter() - t0)
@@ -87,6 +95,7 @@ async def run(url: str, count: int, concurrency: int, namespace: str,
         f"p50={p50:.0f}ms p99={p99:.0f}ms "
         f"(ok={outcomes['ok']} err={outcomes['err']}, "
         f"concurrency={concurrency}, target={url})"
+        + (f" errors by status: {statuses}" if statuses else "")
     )
 
 
@@ -97,8 +106,10 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=32)
     parser.add_argument("--namespace", default="loadtest")
     parser.add_argument("--mode", choices=["ingest", "ask"], default="ingest")
+    parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"),
+                        help="API key sent as X-Loom-Key (default: LOOM_API_KEY)")
     args = parser.parse_args()
-    asyncio.run(run(args.url, args.count, args.concurrency, args.namespace, args.mode))
+    asyncio.run(run(args.url, args.count, args.concurrency, args.namespace, args.mode, args.key))
 
 
 if __name__ == "__main__":

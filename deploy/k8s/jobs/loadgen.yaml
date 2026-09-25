@@ -27,6 +27,11 @@ spec:
           image: ghcr.io/seahop/loom:latest
           command: ["python", "-m", "loom.loadgen"]
           args: ["--url", "http://loom-gateway", "--count", "5000", "--concurrency", "32", "--namespace", "loadtest"]
+          # with auth on (the loom-keys Secret), give the generator a key that
+          # may write (and read, for --mode ask) the loadtest namespace:
+          # env:
+          #   - name: LOOM_API_KEY
+          #     valueFrom: {secretKeyRef: {name: loom-loadgen-key, key: key}}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
