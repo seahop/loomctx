@@ -48,7 +48,7 @@ spec:
             # exists (deploy/README.md). Until then the engine runs in open
             # dev mode and logs a warning at startup.
             # - name: LOOM_AUTH_FILE
-            #   value: /etc/loom/keys.json
+            #   value: /etc/loom-keys/keys.json
             # - name: LOOM_HANDLE_SECRET
             #   valueFrom:
             #     secretKeyRef: {name: loom-keys, key: handle-secret}
@@ -58,7 +58,7 @@ spec:
             - name: tmp
               mountPath: /tmp
             # - name: keys
-            #   mountPath: /etc/loom
+            #   mountPath: /etc/loom-keys
             #   readOnly: true
           readinessProbe:
             httpGet:

@@ -53,10 +53,10 @@ spec:
             # uncomment once the `loom-keys` Secret exists (deploy/README.md).
             # Until then the gateway runs in open dev mode and logs it.
             # - name: LOOM_AUTH_FILE
-            #   value: /etc/loom/keys.json
+            #   value: /etc/loom-keys/keys.json
           # volumeMounts:
           #   - name: keys
-          #     mountPath: /etc/loom
+          #     mountPath: /etc/loom-keys   # not /etc/loom: that would hide the image's /etc/loom/schemas.json
           #     readOnly: true
           readinessProbe:
             httpGet:

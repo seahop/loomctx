@@ -49,10 +49,10 @@ spec:
             # (the gateway stamps the grant id on every message). Uncomment
             # with the gateway's block once the `loom-keys` Secret exists.
             # - name: LOOM_AUTH_FILE
-            #   value: /etc/loom/keys.json
+            #   value: /etc/loom-keys/keys.json
           volumeMounts:
             # - name: keys
-            #   mountPath: /etc/loom
+            #   mountPath: /etc/loom-keys
             #   readOnly: true
             - name: tmp
               mountPath: /tmp
