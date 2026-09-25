@@ -191,6 +191,20 @@ def _mentions(text: str, key: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + re.escape(key.lower()) + r"(?![a-z0-9])", text.lower()) is not None
 
 
+# words that mark a host as the lease's past, not its answer: "reassigned
+# from host:web-01 to host:laptop-17", "previously web-01"
+_HISTORY_MARK = re.compile(r"\b(?:from|previously|formerly|until|replacing|replaced|before)\W+(?:\w+:)?$")
+
+
+def _history_only(sentence: str, key: str) -> bool:
+    """Every mention of `key` in `sentence` is marked as history (S-43: a
+    correct answer that narrates the reassignment in its first sentence
+    was failed as naming the former holder)."""
+    text = sentence.lower()
+    spots = list(re.finditer(r"(?<![a-z0-9])" + re.escape(key.lower()) + r"(?![a-z0-9])", text))
+    return bool(spots) and all(_HISTORY_MARK.search(text[max(0, m.start() - 40):m.start()]) for m in spots)
+
+
 def _score_lease(answer: str, truth: dict, seen: set[str], store) -> dict:
     cites = _cited(answer, seen)
     # the sentence that answers must name the holder; a former holder may
@@ -200,7 +214,7 @@ def _score_lease(answer: str, truth: dict, seen: set[str], store) -> dict:
     asserted = _asserted(answer).strip().lower()
     first = _SENTENCE.split(asserted)[0]
     named = [h for h in truth["expect"] if _mentions(asserted, h)]
-    rejected = [h for h in truth["reject"] if _mentions(first, h)]
+    rejected = [h for h in truth["reject"] if _mentions(first, h) and not _history_only(first, h)]
     ok = bool(truth["expect"]) and len(named) == len(truth["expect"]) and not rejected
     return {"names_expected": named, "rejected_in_answer": rejected,
             "first_sentence": first[:120], **cites,

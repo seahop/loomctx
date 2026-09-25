@@ -398,3 +398,17 @@ def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retri
     ])
     r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0]
     assert r.error is None and r.score["pass"] and r.steps == 3
+
+
+def test_lease_history_in_the_first_sentence_is_not_an_assertion():
+    """S-43: 'reassigned on 2026-08-10 from host:web-01 to host:laptop-17'
+    narrates the past; asserting web-01 still fails."""
+    truth = {"expect": ["laptop-17"], "reject": ["web-01"]}
+    ok = ("Based on the results, 10.0.4.7 was reassigned on 2026-08-10 from host:web-01 to "
+          "host:laptop-17, so on 2026-08-20 it was held by host:laptop-17.")
+    assert ae._score_lease(ok, truth, set(), None)["rejected_in_answer"] == []
+    for bad in ("On 2026-08-20 the address was held by web-01 and laptop-17.",
+                "host:web-01 held 10.0.4.7 on that day, not laptop-17.",
+                "It moved from web-01 to laptop-17, but web-01 still held it on 2026-08-20."):
+        assert ae._score_lease(bad, truth, set(), None)["rejected_in_answer"] == ["web-01"], bad
+    assert ae._score_lease("Previously web-01; now host:laptop-17.", truth, set(), None)["rejected_in_answer"] == []
