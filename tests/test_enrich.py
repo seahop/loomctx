@@ -1453,3 +1453,34 @@ def test_extraction_stays_inside_the_uploaders_entity_types(tmp_path):
         text="web-01 rebooted; jdoe salary 90k", source="wiki2", observed_at=OBSERVED,
         attrs={"loom.uploader": {"grant": "admin"}}))
     assert extract_from_artifact(store, ScriptedLLM(reply), free) == 3
+
+
+def test_run_drains_a_vector_backlog_without_sleeping_between_batches(monkeypatch):
+    """D-063: the continuous worker slept the whole interval after every tick,
+    backlog or not — 128 embeddings per 30 s. A tick that embedded or chunked
+    runs again at once; LLM-only work and idle ticks still wait."""
+    import loom.enrich as en
+    ticks = iter([
+        {"embedded": 128, "chunked": 0, "dossiers": 0},
+        {"embedded": 40, "chunked": 3, "dossiers": 0},
+        {"embedded": 0, "chunked": 0, "dossiers": 4},   # LLM work: paced
+        {"embedded": 0, "chunked": 0, "dossiers": 0},   # idle: paced
+    ])
+    sleeps = []
+
+    class Done(Exception):
+        pass
+
+    def tick(store, embedder, llm):
+        try:
+            return next(ticks)
+        except StopIteration:
+            raise Done
+    monkeypatch.setattr(en, "tick", tick)
+    monkeypatch.setattr(en, "_open_store", lambda: type("S", (), {"close": lambda self: None})())
+    monkeypatch.setattr(en.time, "sleep", sleeps.append)
+    try:
+        en.run(once=False, interval=30.0)
+    except Done:
+        pass
+    assert sleeps == [30.0, 30.0]

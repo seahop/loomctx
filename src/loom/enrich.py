@@ -1341,6 +1341,11 @@ def _open_store(attempts: int = 6) -> GraphStore:
     raise RuntimeError("unreachable")
 
 
+# jobs whose progress means "more of the same is waiting": embedding and
+# chunking are bounded by the backlog and cost cents, never an LLM call
+_BACKLOG_JOBS = ("embedded", "indexed", "chunked")
+
+
 def run(once: bool, interval: float) -> None:
     store = _open_store()
     embedder = embedder_from_env()
@@ -1366,6 +1371,11 @@ def run(once: bool, interval: float) -> None:
                 if failures:
                     time.sleep(min(interval, 2.0 ** failures))  # back off, then retry
                 continue  # drain fully in --once mode
+            if any(counts.get(k, 0) > 0 for k in _BACKLOG_JOBS):
+                # a vector backlog drains at the embedder's pace, not one
+                # batch per interval (128 per 30 s was ~20 h for a 600k
+                # corpus, D-063); the LLM jobs keep the interval's pacing
+                continue
             time.sleep(interval)
     finally:
         store.close()
