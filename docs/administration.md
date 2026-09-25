@@ -330,6 +330,7 @@ not written down anywhere else. Unset means the default shown.
 | `LOOM_KAFKA_CONNECT_TIMEOUT` | `loom.kafka_consumer` | `120` | seconds to keep retrying the first broker connection before exiting |
 | `LOOM_WORKER_ID` | `loom.enrich` | hostname | worker identity recorded on leases |
 | `LOOM_WORKER_SHARD` | `loom.enrich` | unset | explicit embedding-backlog shard as `i/n`; overrides the StatefulSet-ordinal split driven by `LOOM_WORKER_COUNT` |
+| `LOOM_ENRICH_JOBS` | `loom.enrich run` (`--jobs`) | all | which jobs this worker runs: any of `extract, resolve, adjudicate, aliases, embed, index, chunk, dossiers`, or the groups `vectors` (embed, index, chunk — no LLM calls) and `llm` (extract, adjudicate, aliases, dossiers). Split a fleet into a `vectors` pool and an `llm,resolve` pool so a large backfill embeds at the embedder's pace instead of behind each extraction pass (D-063). A one-off backfill is `enrich run --once --jobs vectors` |
 | `LOOM_LEASE_SECONDS` | `loom.enrich` | `600` | how long an artifact or dossier lease lasts before another worker may take it over (renewed per extraction window) |
 | `LOOM_AGENT_THINKING` | `loom.agent_eval` | `adaptive` | `off` omits the thinking parameter on the Anthropic path |
 | `LOOM_GATEWAY_ADDR` | Go gateway | `:8080` | listen address |

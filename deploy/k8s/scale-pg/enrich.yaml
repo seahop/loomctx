@@ -60,6 +60,14 @@ spec:
             - name: LOOM_WORKER_COUNT
               value: "2"
             # - name: LOOM_LLM_MODEL ... / LOOM_EMBED_* from a Secret
+            # Split pools (D-063): one tick runs every job in turn, so a slow
+            # LLM pass holds up the embedding backlog. For a large backfill,
+            # copy this StatefulSet as loom-enrich-vectors with
+            # LOOM_ENRICH_JOBS=vectors (embed, index, chunk: no LLM calls)
+            # and set LOOM_ENRICH_JOBS=llm,resolve here; give each its own
+            # LOOM_WORKER_COUNT. Default: every job.
+            # - name: LOOM_ENRICH_JOBS
+            #   value: "llm,resolve"
           volumeMounts:
             - name: tmp
               mountPath: /tmp

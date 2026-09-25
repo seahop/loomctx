@@ -1307,22 +1307,62 @@ def once_should_stop(counts: dict[str, int], failures: int, max_failures: int = 
     return not any(v > 0 for v in counts.values()), 0
 
 
-def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None) -> dict[str, int]:
-    """One pass over every configured job. Resolution runs BEFORE embedding
-    and dossiers so merged entities are embedded and summarized once,
-    under their canonical identity."""
+# The jobs a worker can run, by the name `--jobs` / LOOM_ENRICH_JOBS takes,
+# with the key each reports its count under. A tick runs them in this order;
+# a worker given a subset runs only those, so one pool can drain vectors at
+# the embedder's pace while another does the paced LLM work (D-063).
+JOBS = {
+    "extract": "extracted", "resolve": "resolved", "adjudicate": "adjudicated",
+    "aliases": "aliases", "embed": "embedded", "index": "indexed", "chunk": "chunked",
+    "dossiers": "dossiers",
+}
+JOB_GROUPS = {
+    "all": tuple(JOBS),
+    "vectors": ("embed", "index", "chunk"),
+    "llm": ("extract", "adjudicate", "aliases", "dossiers"),
+}
+
+
+def parse_jobs(spec: str | None) -> frozenset[str]:
+    """`extract,resolve`, a group (`vectors`, `llm`, `all`), or a mix; empty
+    or None is every job. An unknown name is a configuration error."""
+    names: set[str] = set()
+    for part in (spec or "all").split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        if part in JOB_GROUPS:
+            names.update(JOB_GROUPS[part])
+        elif part in JOBS:
+            names.add(part)
+        else:
+            raise SystemExit(f"unknown enrichment job {part!r}; choose from "
+                             f"{', '.join([*JOBS, *JOB_GROUPS])}")
+    return frozenset(names or JOBS)
+
+
+def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None,
+         jobs: frozenset[str] | None = None) -> dict[str, int]:
+    """One pass over the configured jobs (all of them unless `jobs` narrows
+    it). Resolution runs BEFORE embedding and dossiers so, in one worker,
+    merged entities are embedded and summarized once, under their canonical
+    identity; split pools trade that ordering for throughput."""
+    on = jobs if jobs is not None else frozenset(JOBS)
     # each resolution job under its own key: summing FAILED (-1) into merge
     # counts hid a failed job from --once (D-039 again, one level down)
     return {
-        "extracted": _guarded("extraction", extract_pending, store, llm) if llm else 0,
-        "resolved": _guarded("resolution", resolve_entities, store, 50, llm),
-        "adjudicated": _guarded("adjudication", adjudicate_entities, store, llm) if llm else 0,
+        "extracted": _guarded("extraction", extract_pending, store, llm) if llm and "extract" in on else 0,
+        "resolved": _guarded("resolution", resolve_entities, store, 50, llm) if "resolve" in on else 0,
+        "adjudicated": (_guarded("adjudication", adjudicate_entities, store, llm)
+                        if llm and "adjudicate" in on else 0),
         "aliases": (_guarded("aliases", lambda s, l: adjudicate_aliases(s, l)["merged"], store, llm)
-                    if llm and ALIAS_TYPES else 0),
-        "embedded": _guarded("embedding", embed_pending, store, embedder, EMBED_BATCH) if embedder else 0,
-        "indexed": _guarded("vector-index", index_pending, store, embedder) if embedder else 0,
-        "chunked": _guarded("chunking", chunk_artifacts, store, embedder, CHUNK_LIMIT) if embedder else 0,
-        "dossiers": _guarded("dossiers", refresh_dossiers, store, llm) if llm else 0,
+                    if llm and ALIAS_TYPES and "aliases" in on else 0),
+        "embedded": (_guarded("embedding", embed_pending, store, embedder, EMBED_BATCH)
+                     if embedder and "embed" in on else 0),
+        "indexed": _guarded("vector-index", index_pending, store, embedder) if embedder and "index" in on else 0,
+        "chunked": (_guarded("chunking", chunk_artifacts, store, embedder, CHUNK_LIMIT)
+                    if embedder and "chunk" in on else 0),
+        "dossiers": _guarded("dossiers", refresh_dossiers, store, llm) if llm and "dossiers" in on else 0,
     }
 
 
@@ -1346,18 +1386,21 @@ def _open_store(attempts: int = 6) -> GraphStore:
 _BACKLOG_JOBS = ("embedded", "indexed", "chunked")
 
 
-def run(once: bool, interval: float) -> None:
+def run(once: bool, interval: float, jobs: frozenset[str] | None = None) -> None:
+    jobs = jobs if jobs is not None else frozenset(JOBS)
     store = _open_store()
     embedder = embedder_from_env()
     llm = llm_from_env()
-    if embedder is None:
+    if jobs != frozenset(JOBS):
+        log.info("jobs: %s", ",".join(j for j in JOBS if j in jobs))
+    if embedder is None and jobs & set(JOB_GROUPS["vectors"]):
         log.info("no embedder configured (LOOM_EMBED_*) — skipping embeddings")
-    if llm is None:
+    if llm is None and jobs & set(JOB_GROUPS["llm"]):
         log.info("no LLM configured (LOOM_LLM_*) — skipping extraction/dossiers")
     failures = 0
     try:
         while True:
-            counts = tick(store, embedder, llm)
+            counts = tick(store, embedder, llm, jobs)
             work = any(v > 0 for v in counts.values())
             if work or any(v == FAILED for v in counts.values()):
                 log.info(" ".join(f"{k}={'FAILED' if v == FAILED else v}" for k, v in counts.items()))
@@ -1390,6 +1433,9 @@ def main(argv: list[str] | None = None) -> None:
     p_run.add_argument("--once", action="store_true",
                        help="drain the backlog and exit (cron/k8s Job mode)")
     p_run.add_argument("--interval", type=float, default=30.0)
+    p_run.add_argument("--jobs", default=os.environ.get("LOOM_ENRICH_JOBS", ""),
+                       help="comma list of jobs (" + ", ".join(JOBS) + ") or groups "
+                            "(vectors, llm, all); default all, or $LOOM_ENRICH_JOBS")
     p_res = sub.add_parser("resolve", help="entity resolution only: spelling tiers + structural aliases (D-042)")
     p_res.add_argument("--namespace")
     p_res.add_argument("--types", default=",".join(ALIAS_TYPES) or "product",
@@ -1443,7 +1489,7 @@ def main(argv: list[str] | None = None) -> None:
         finally:
             store.close()
         return
-    run(once=args.once, interval=args.interval)
+    run(once=args.once, interval=args.interval, jobs=parse_jobs(args.jobs))
 
 
 if __name__ == "__main__":

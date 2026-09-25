@@ -1471,7 +1471,7 @@ def test_run_drains_a_vector_backlog_without_sleeping_between_batches(monkeypatc
     class Done(Exception):
         pass
 
-    def tick(store, embedder, llm):
+    def tick(store, embedder, llm, jobs=None):
         try:
             return next(ticks)
         except StopIteration:
@@ -1484,3 +1484,36 @@ def test_run_drains_a_vector_backlog_without_sleeping_between_batches(monkeypatc
     except Done:
         pass
     assert sleeps == [30.0, 30.0]
+
+
+def test_worker_pools_run_only_their_jobs(monkeypatch):
+    """D-063: a tick ran every job in sequence, so a slow LLM pass held up
+    the embedding backlog. `--jobs` / LOOM_ENRICH_JOBS picks a subset, so a
+    vectors pool and an LLM pool can run side by side."""
+    import pytest
+    import loom.enrich as en
+    assert en.parse_jobs(None) == frozenset(en.JOBS) == en.parse_jobs("all")
+    assert en.parse_jobs("vectors") == {"embed", "index", "chunk"}
+    assert en.parse_jobs("llm, resolve") == {"extract", "adjudicate", "aliases", "dossiers", "resolve"}
+    with pytest.raises(SystemExit, match="unknown enrichment job 'embeddings'"):
+        en.parse_jobs("embeddings")
+
+    called = []
+    for name, fn in (("extract_pending", "extract"), ("resolve_entities", "resolve"),
+                     ("adjudicate_entities", "adjudicate"), ("embed_pending", "embed"),
+                     ("index_pending", "index"), ("chunk_artifacts", "chunk"),
+                     ("refresh_dossiers", "dossiers")):
+        monkeypatch.setattr(en, name, lambda *a, _n=fn, **k: called.append(_n) or 1)
+    monkeypatch.setattr(en, "adjudicate_aliases", lambda *a, **k: called.append("aliases") or {"merged": 1})
+    monkeypatch.setattr(en, "ALIAS_TYPES", ("product",))
+    llm, embedder = object(), object()
+
+    counts = en.tick(None, embedder, llm, en.parse_jobs("vectors"))
+    assert called == ["embed", "index", "chunk"]
+    assert counts["embedded"] == 1 and counts["extracted"] == 0 and counts["dossiers"] == 0
+    called.clear()
+    en.tick(None, embedder, llm, en.parse_jobs("llm"))
+    assert called == ["extract", "adjudicate", "aliases", "dossiers"]
+    called.clear()
+    en.tick(None, embedder, llm)                                  # default: everything, in order
+    assert called == ["extract", "resolve", "adjudicate", "aliases", "embed", "index", "chunk", "dossiers"]
