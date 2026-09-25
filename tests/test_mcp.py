@@ -511,3 +511,21 @@ def test_instructions_and_descriptions_carry_the_agent_guidance(store):
     for word in ("stateless", "signed", "never expire", "TTL", "rotation", "budget"):
         assert word in tools["expand"].description, word
     assert "never inferred" in tools["record_claim"].description
+
+
+def test_main_closes_the_store_on_the_way_out(monkeypatch):
+    """D-063: a Postgres pool left to interpreter shutdown printed a
+    PythonFinalizationError after every stdio session; main() closes it,
+    also when the server exits with an error."""
+    import pytest
+    import loom.mcp_server as ms
+    closed = []
+    fake = type("S", (), {"close": lambda self: closed.append(True)})()
+
+    def boom():
+        ms._store = fake
+        raise KeyboardInterrupt
+    monkeypatch.setattr(ms, "_main", boom)
+    with pytest.raises(KeyboardInterrupt):
+        ms.main()
+    assert closed == [True] and ms._store is None

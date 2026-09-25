@@ -978,6 +978,23 @@ def build_http_app(transport: str, host: str, auth: AuthConfig):
 
 
 def main() -> None:
+    try:
+        _main()
+    finally:
+        _close_store()
+
+
+def _close_store() -> None:
+    """Close the lazily opened store on the way out: a Postgres pool left to
+    the interpreter's shutdown joins its worker threads too late and prints a
+    PythonFinalizationError (seen on every agent_eval run on GKE, D-063)."""
+    global _store
+    if _store is not None:
+        store, _store = _store, None
+        store.close()
+
+
+def _main() -> None:
     args = _arg_parser().parse_args()
     global _transport
     _transport = args.transport
