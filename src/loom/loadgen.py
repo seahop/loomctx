@@ -106,7 +106,7 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=32)
     parser.add_argument("--namespace", default="loadtest")
     parser.add_argument("--mode", choices=["ingest", "ask"], default="ingest")
-    parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"),
+    parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip,
                         help="API key sent as X-Loom-Key (default: LOOM_API_KEY)")
     args = parser.parse_args()
     asyncio.run(run(args.url, args.count, args.concurrency, args.namespace, args.mode, args.key))

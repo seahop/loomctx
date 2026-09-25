@@ -155,7 +155,7 @@ def main() -> None:
                                       "LOOM_SHARDS / LOOM_BLOB_* configure")
     parser.add_argument("--db", help="write directly to this explicit store URL/path; bypasses "
                                      "LOOM_SHARDS and LOOM_BLOB_*")
-    parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), help="API key (or $LOOM_API_KEY)")
+    parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip, help="API key (or $LOOM_API_KEY)")
     parser.add_argument("--batch", type=int, default=500)
     args = parser.parse_args()
     if args.url and args.db:

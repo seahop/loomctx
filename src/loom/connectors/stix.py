@@ -716,7 +716,7 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("bundle", help="STIX 2.1 bundle (JSON)")
     imp.add_argument("--url", help="engine or gateway base URL (default: write straight into the store)")
     imp.add_argument("--db", help="write straight into this explicit store URL/path")
-    imp.add_argument("--key", default=os.environ.get("LOOM_API_KEY"))
+    imp.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip)
     imp.add_argument("--source", default=SOURCE_DEFAULT,
                      help="source for objects with no created_by_ref identity")
     imp.add_argument("--batch", type=int, default=500)

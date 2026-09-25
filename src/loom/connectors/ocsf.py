@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("events", help="NDJSON / JSON array of OCSF events, or - for stdin")
     imp.add_argument("--url", help="engine or gateway base URL (default: write straight into the store)")
     imp.add_argument("--db", help="write straight into this explicit store URL/path")
-    imp.add_argument("--key", default=os.environ.get("LOOM_API_KEY"))
+    imp.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip)
     imp.add_argument("--source", help="override the source (default: metadata.product.name)")
     imp.add_argument("--batch", type=int, default=500)
     imp.add_argument("--no-schema", action="store_true", help="skip the registry registration")

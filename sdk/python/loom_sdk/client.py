@@ -42,7 +42,8 @@ class Loom:
         `api_key` still governs what data the answer may see."""
         self.base_url = base_url.rstrip("/")
         self.namespace = namespace
-        self.api_key = api_key
+        # a key read from a mounted file ends in a newline no header may carry
+        self.api_key = api_key.strip() if api_key else api_key
         self.timeout = timeout
         self.llm_key = llm_key
 

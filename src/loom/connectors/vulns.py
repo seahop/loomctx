@@ -805,7 +805,7 @@ def main(argv: list[str] | None = None) -> None:
                                     "store LOOM_DB / LOOM_SHARDS / LOOM_BLOB_* configure)")
     load.add_argument("--db", help="write straight into this explicit store URL/path; bypasses "
                                    "LOOM_SHARDS and LOOM_BLOB_*")
-    load.add_argument("--key", default=os.environ.get("LOOM_API_KEY"))
+    load.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip)
     load.add_argument("--batch", type=int, default=500)
     args = parser.parse_args(argv)
 
