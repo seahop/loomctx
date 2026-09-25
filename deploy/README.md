@@ -307,6 +307,55 @@ the images pinned by digest. The project had no `default` VPC any more
 | Node drain (a node without the primary) | 33 s; PDBs allowed one NATS pod and one Postgres replica at a time; `/readyz` stayed `ready` throughout; every pod rescheduled; `loom-pg-primary` shows 0 allowed disruptions — draining the primary's node needs a switchover first (`kubectl cnpg promote`), by design |
 | Enrichment workers without provider keys | idle with two log lines ("no embedder", "no LLM"), 0 restarts |
 
+### Re-validated on GKE with auth on and real data (2026-09-25, D-063)
+
+The 2026-09-24 review batch (D-057…D-062) on the same recipe — project
+`<PROJECT_ID>`, `3 × e2-standard-4`, Dataplane V2, CloudNativePG 1.26,
+`scale-pg-ha` — but this time the way a production deployment runs it:
+**auth on** (a keys file on engine, gateway and consumer), **signed
+handles** (`LOOM_HANDLE_SECRET`), provider keys on the engine and workers
+(OpenRouter: `deepseek-chat-v3.1`, `text-embedding-3-small` at 512
+dimensions), and the full vulnerability corpus loaded through the
+documented Jobs. Every finding below is fixed on `main`.
+
+| Check | Result |
+| --- | --- |
+| Browser guards and auth, in-cluster (engine and gateway) | foreign `Host` 400, foreign `Origin` 403, `text/plain` batch 415; in-cluster names (`loom`, `loom.loom.svc[.cluster.local]`) and kubelet probes served; no key 401, unknown key 403, reader write 403; a signed handle expands, a tampered one is refused |
+| Write gates | a host-scoped key cannot cite (403) or read an admin's document over HTTP; through gateway → NATS → consumer the same claim is **rejected by the consumer** (it resolves the gateway's `Loom-Principal` to the grant); a forged `loom.uploader` stamp is refused at the gateway (422) |
+| Gateway rate dials | `LOOM_RATE_PER_SEC=0.5`, burst 2: two 202s then 429s (was: unlimited); a batch over the burst is 413 |
+| Initial load (`vulns load --bridge-seed-hosts`, a Job, through the engine's batch API) | **605,803 envelopes at 435/s, 0 refused** (D-045: 421/s) |
+| Nightly refresh (the CronJob's own template, the source-pinned key) | **473,932 envelopes at 724/s, 0 refused, 0 new rows**: KEV unchanged, NVD replays deduplicated, the EPSS ledger held back 128,722 unchanged scores |
+| Enrichment, split pools (`LOOM_ENRICH_JOBS=vectors` × 2 at batch 512; `llm,resolve` × 2) | the whole corpus embedded (553,753 vectors) at ~50–120/s while the LLM pool adjudicated aliases and extracted KEV advisories; 0 restarts |
+| Ingest, lb → 2 gateways → JetStream ×3 → 2 consumers → Postgres | 5,000 single envelopes at concurrency 32: **178/s, p50 132 ms, p99 758 ms, 0 errors** (D-052: 174/s) |
+| Asks, engines on replicas, auth + signed handles + semantic ranking on | 3,000 at concurrency 16: **201/s, p50 65 ms, p99 202 ms, 0 errors** (HPA 2 → 8). D-052's 284/s ran with no auth and no embedder |
+| Primary deleted under a 2/s write probe through the engine | promoted in **12 s**; **0 of 235 writes failed**; 235/235 rows present |
+| Node drains | a node with engines, gateways, a NATS pod and a Postgres replica: 125 s, every pod rescheduled; a second one with a probe Job pinned elsewhere: 34 s, **470 `/readyz` checks, 0 not ready**; Postgres 3/3 throughout |
+| The demo's two-hop question on the cluster | `ask` with scope `host:web-01` over `runs_software, affects` at 3,200 tokens: 2.7 s, charged 3,148, 38 CVEs, the kernel hub's cut reported (`gather_limit`, 2,761) |
+| Retrieval scorecard on the cluster (`retrieval_eval`, 65 questions incl. the loadtest namespace, one run, DeepSeek reading, Postgres + real embedder) | Loom 69 / 83 / 83 / **92 %** at 400 / 800 / 1,600 / 3,200 tokens against token-matched vector 74 / 74 / 74 / 80 % and recency 58 / 74 / 75 / 83 %; multi-hop only Loom (4–5 of 6 from 800 up, every other condition 0); `full` 95 % on the 59 questions it could be sent. The 400-token gap is orderings (50 % vs 75 %) — the local frozen-corpus table (`docs/evaluation.md`) has Loom ahead at 400; this corpus differs (live enrichment, the loadtest namespace, Postgres ranking) |
+| Agents over the cluster's MCP surface, one run | `mistral-large` 4/4, `claude-sonnet-4.5` 3/4 (a correct lease answer failed the strict first-sentence rule, S-43). The exposure task's truth set was 4 CVEs, not the 32 of the frozen scorecard corpus: the LLM alias pass that connects `linux:kernel` to `linux:linux_kernel` (D-042) was still running — agent numbers here are not comparable to `docs/models.md` |
+
+**What the cluster found** (`docs/hardening.md` S-35…S-45): the
+documented nightly refresh could never run with its documented key
+(schema re-registration 403, then 41 % of NVD refused while the Job
+"succeeded"); the shipped auth blocks crashed the gateway; a key Secret
+created with `--from-file` broke every loader; the continuous worker
+embedded 128 rows per 30 s; one tick serialized LLM work in front of
+embedding; the load generator could not authenticate; the MCP server
+left its Postgres pool to interpreter shutdown; the retrieval scorecard printed the Postgres password; and a torn-down cluster
+had left 84 GB of disks billing, which filled the project's SSD quota.
+
+**Teardown — volumes first.** Deleting a GKE cluster does not delete the
+disks behind its PersistentVolumes. Delete the claims, wait for the disks
+to go, then the cluster, then check:
+
+```bash
+kubectl -n loom delete cluster loom-pg                     # the operator's PVCs
+kubectl -n loom delete pvc --all                           # NATS, feed cache
+gcloud compute disks list --filter="name~^pvc-"            # wait until empty
+gcloud container clusters delete loom-val --zone us-central1-a
+gcloud compute disks list                                  # nothing left behind
+```
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

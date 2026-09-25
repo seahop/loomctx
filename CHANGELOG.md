@@ -8,6 +8,25 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### GKE re-validation with auth on and real data (D-063)
+
+`docs/hardening.md` S-35…S-45; `deploy/README.md` has the run.
+
+- The nightly vulns refresh works with its documented, source-pinned key:
+  connectors register only what the registry lacks; source grants take
+  `:*` families (engine and gateway) — the key is
+  `nvd,nvd:*,cisa-kev,first-epss,cisa-adp`; a loader exits non-zero on any
+  refused envelope and only then keeps the EPSS ledger unadvanced
+- Enrichment worker pools: `loom.enrich run --jobs` / `LOOM_ENRICH_JOBS`
+  (`vectors`, `llm`, named jobs); a vector backlog drains without the
+  interval sleep
+- Keys mount at `/etc/loom-keys` in every shipped manifest (the old path
+  hid the gateway's schema); keys are stripped of a `--from-file` newline;
+  `loom.loadgen --key`
+- `retrieval_eval` redacts the store DSN's password; the MCP server closes
+  its store on exit
+- Teardown recipe deletes volumes before the cluster
+
 ### The 2026-09-24 review batch (D-057…D-062)
 
 Full list with statuses: `docs/hardening.md` §S.

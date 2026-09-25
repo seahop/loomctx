@@ -2177,6 +2177,47 @@ and one cost fault, each with a concrete question behind it:
   flat. Demo: web-01's `charged_tokens` 380 → 351 (the handle is 57 tokens,
   not 86), re-verified on a live engine.
 
+## D-063 · GKE with auth on and real data: what a production-shaped run found (2026-09-25)
+
+The D-057…D-062 batch re-validated on GKE (`deploy/README.md`) the way a
+production deployment runs it — keys on engine, gateway and consumer,
+signed handles, provider keys, the corpus loaded by the documented Jobs.
+Every earlier validation ran open, keyless and without an LLM, and that
+is where most of what broke was hiding. Choices made fixing it:
+
+- **The first load is an operator's; the refresh is a pinned key's.**
+  Connectors read the namespace registry and register only what is
+  missing (`merge_schema` is additive), so the nightly job never needs
+  registry rights (D-059 keeps those for ungated keys).
+- **Source grants take families**, `nvd:*`, with one rule in the engine
+  and the gateway: an exact name, or a `:*` suffix matching that prefix —
+  not bare globbing. NVD's per-scorer sources (D-035) made exact names
+  unusable for a feed key.
+- **A partial load is a failed load.** A loader exits non-zero when the
+  engine refuses any envelope, and advances the EPSS ledger only after a
+  load that landed whole — a refused row must be re-offered, never
+  recorded as sent.
+- **Worker pools.** `loom.enrich run --jobs` / `LOOM_ENRICH_JOBS`
+  (`vectors`, `llm`, or named jobs); a vector backlog drains without the
+  interval sleep; LLM work keeps its pacing. One tick running everything
+  in turn stays the default: split pools trade "embed after the merge" for
+  throughput.
+- **Mounts and inputs are forgiving where operators trip:** keys mount at
+  `/etc/loom-keys` (not over an image's files), keys are stripped
+  (`--from-file` newlines), the load generator takes a key.
+- **Nothing a scorecard or log prints carries a credential**
+  (`redact_dsn`), and the MCP server closes its store on exit.
+- **Teardown deletes volumes before the cluster** — six orphaned disks
+  (84 GB) from D-052 had filled the project's SSD quota.
+
+Measured (one cluster, one run each): load 605,803 envelopes at 435/s
+and a refresh at 724/s, both 0 refused; ingest 178/s; asks 201/s with
+auth, signing and semantic ranking on (D-052's 284/s had none of them);
+failover 12 s, 0 of 235 writes lost; drain 34 s, 0 of 470 readiness
+checks failed; retrieval on the cluster's corpus: Loom 69 / 83 / 83 /
+92 % against vector 74 / 74 / 74 / 80 % at 400 / 800 / 1,600 / 3,200.
+Findings: `docs/hardening.md` S-35…S-45.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
