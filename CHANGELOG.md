@@ -8,6 +8,25 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Raw LDAP / Active Directory connector (D-065)
+
+- `python -m loom.connectors.ldap import export.ldif --namespace ad`:
+  decodes an LDIF directory export into cited, time-stamped claims —
+  `member_of`, `trusts`, `has_ace` (from a hand-rolled Security
+  Descriptor / ACE parser), delegation edges and userAccountControl / SPN
+  attributes — keyed by objectSid, for object-level reachability questions
+  over `ask_scope`. Decodes facts only; no path computation or ranking.
+  Sessions and local admin are out of scope (not in the directory)
+
+### Agent ergonomics for scope asks (D-064)
+
+- `ask_scope` defaults to budget 3,000 (cap 4,000), measured on the
+  compact wire; an attribute in `expand_predicates` or a question in the
+  registry's words selects the scope topic; `ContextPack.notes`
+  (additive) reports unknown predicates with close matches, a scope a hop
+  short, unknown subjects; `describe_namespace` lists each type's links
+  and attributes; list arguments sent as JSON text are accepted
+
 ### GKE re-validation with auth on and real data (D-063)
 
 `docs/hardening.md` S-35…S-45; `deploy/README.md` has the run.

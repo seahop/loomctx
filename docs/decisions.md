@@ -2252,6 +2252,45 @@ mostly Loom's ergonomics, not the models' reasoning.
 The retrieval scorecard (scripted) and the seed demo numbers are
 unchanged; the agent scorecard is re-run on this build.
 
+## D-065 · A raw-LDAP / LDIF connector for object-level AD reachability (2026-09-25)
+
+`loom.connectors.ldap` decodes a raw Active Directory export (canonical
+input LDIF, RFC 2849) into typed, cited, time-stamped claims in an `ad`
+namespace, so an agent can ask "what rights, trust and membership path
+connects user:X to domain:B?" over the existing scope walk.
+
+- **Decode, don't compute.** The connector emits the direct directory
+  edges — `member_of`, `contains`, `trusts` (direction, transitive,
+  sid_filtering, forest_transitive), `has_ace` (GenericAll, GenericWrite,
+  WriteDacl, WriteOwner, ForceChangePassword, AddMember,
+  AllExtendedRights), `can_delegate_to`, `rbcd_from` — and
+  userAccountControl / SPN attributes. It does no transitive
+  effective-admin computation and no attack-path ranking: Loom carries
+  the evidence, the agent assembles the path, and group nesting is the
+  walk's job at depth N. That is the line against BloodHound, whose output
+  schema we chose not to track.
+- **Our schema, a stable input.** LDIF and the Windows attributes it
+  carries barely move; the mapping is ours. Entities are keyed by
+  objectSid (decoded to `S-1-5-…`), with DN and sAMAccountName carried
+  for entity resolution.
+- **A hand-rolled Security Descriptor / ACE parser** (the self-relative SD
+  layout is documented in MS-DTYP and stable) keeps `requirements.lock`
+  free of a heavy dependency. Allowed and object ACEs are decoded;
+  deny ACEs, the SACL and rights outside the table are skipped; a
+  malformed ACE ends the parse rather than raising.
+- **Object-level only, stated plainly.** Sessions and local admin on
+  member servers are not in the directory; they need host collection. If
+  loaded as their own claims, the same walk extends over them.
+- **Time and citations are the point.** Every claim cites the source
+  object's DN and the export, observed at the export's timestamp, so
+  `valid_at` answers "was this ACE or trust in place as of X?".
+  Re-import is idempotent; a later export is appended as history.
+  Cross-export supersession (auto-closing an ACE that was later removed)
+  is deferred.
+
+No core, contract or store changes. The connector reads a file and
+performs no directory operations.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
