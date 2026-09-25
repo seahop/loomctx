@@ -773,9 +773,31 @@ def register(reg: SchemaRegistration, url: str | None, db: str | None, key: str 
     headers = {"content-type": "application/json"}
     if key:
         headers["X-Loom-Key"] = key
+    if _registered_already(reg, url, headers):
+        # the nightly refresh re-runs with a source-pinned key, which may
+        # write claims but not the registry (D-059): nothing to add, so
+        # nothing to ask — the refresh used to die here with a 403 (D-063)
+        return
     # retried on 429/5xx like the batches that follow it (D-056)
     request_json(url.rstrip("/") + "/v1/schemas", reg.model_dump_json().encode(), headers,
                  timeout=30, what="schema registration")
+
+
+def _registered_already(reg: SchemaRegistration, url: str, headers: dict[str, str]) -> bool:
+    """The namespace registry already holds everything `reg` would add
+    (registration is additive, `common.merge_schema`). Any failure to read
+    it — no read permission, no registry yet — means "register"."""
+    import urllib.parse
+    from ..store.common import merge_schema
+    from ..ingest import request_json
+    try:
+        got = request_json(url.rstrip("/") + "/v1/schemas?namespace=" + urllib.parse.quote(reg.namespace),
+                           None, headers, method="GET", timeout=30, attempts=1,
+                           what="schema lookup")
+        existing = SchemaRegistration.model_validate(got)
+    except (SystemExit, ValueError):
+        return False
+    return merge_schema(existing, reg) == existing
 
 
 def main(argv: list[str] | None = None) -> None:

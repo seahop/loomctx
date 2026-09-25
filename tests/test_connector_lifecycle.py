@@ -543,3 +543,34 @@ def test_ocsf_export_of_a_loom_native_chain():
     history = ocsf.observations_to_findings(rows, "netsec", now=t[2], history=True)
     assert [(f["finding_info"]["uid"], f["device"]["hostname"], f["status_id"]) for f in history
             if f["finding_info"]["uid"] == "o3"] == [("o3", "web-02", 1), ("o3", "web-03", 1)]
+
+
+def test_a_source_pinned_refresh_key_skips_a_registration_it_cannot_make(tmp_path, monkeypatch):
+    """D-063: the nightly refresh (vulns-refresh.yaml) runs with a key pinned
+    to the feed sources; the engine refuses it the registry (D-059), and the
+    connector re-registered on every run — a 403 in the first two seconds.
+    It now reads the registry first and registers only what is missing."""
+    import hashlib
+    import pytest
+    from fastapi.testclient import TestClient
+    from loom.connectors import vulns
+    keys = tmp_path / "keys.json"
+    keys.write_text(json.dumps({"keys": [
+        {"sha256": hashlib.sha256(b"admin").hexdigest(), "id": "admin", "namespaces": ["*"], "perms": "rw"},
+        {"sha256": hashlib.sha256(b"refresh").hexdigest(), "id": "vulns-refresh", "namespaces": ["netsec"],
+         "perms": "rw", "sources": ["nvd", "cisa-kev", "first-epss"]}]}))
+    monkeypatch.setenv("LOOM_DB", str(tmp_path / "reg.db"))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
+    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    from loom.api.http import app
+    with TestClient(app) as client:
+        _route_urllib_to(client, monkeypatch)
+        reg = vulns.schema("netsec")
+        with pytest.raises(SystemExit, match="403"):
+            vulns.register(reg, "http://loom", None, "refresh")      # nothing registered yet: refused
+        vulns.register(reg, "http://loom", None, "admin")            # the first load, by an operator
+        vulns.register(reg, "http://loom", None, "refresh")          # nightly: nothing to add, no call
+        more = reg.model_copy(update={"predicates": [*reg.predicates,
+                                                     reg.predicates[0].model_copy(update={"name": "new_pred"})]})
+        with pytest.raises(SystemExit, match="403"):
+            vulns.register(more, "http://loom", None, "refresh")     # a real change still needs the operator

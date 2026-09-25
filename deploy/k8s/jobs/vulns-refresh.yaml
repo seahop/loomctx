@@ -9,6 +9,14 @@
 # ransomware flag flipped, a due date moved) is found by reading the CVE's
 # stored KEV rows first (S-29). A write-only key still loads, with a warning,
 # but cannot record those changes.
+#
+# The FIRST load is an operator's job, with a key that has no source or
+# entity-type gate: it registers the namespace schema (a pinned key may not)
+# and, with --bridge-seed-hosts, writes the asset-inventory bridge. Run it
+# once with that key (kubectl create job --from=... then patch the Secret
+# name, or `python -m loom.connectors.vulns load --url ... --key ...` from a
+# pod); every nightly run after it finds the schema registered and needs
+# only the pinned key (D-063).
 #   kubectl -n loom apply -f deploy/k8s/jobs/vulns-refresh.yaml
 #   kubectl -n loom create job --from=cronjob/loom-vulns-refresh vulns-now   # run once, now
 #
