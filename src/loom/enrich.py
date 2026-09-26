@@ -1064,6 +1064,16 @@ ALIAS_SYSTEM = ADJUDICATE_SYSTEM + (
 )
 
 
+# Catch-all / placeholder product tokens that appear under many vendors but
+# name no single product (KEV/NVD freehand): never a cross-vendor alias, no
+# matter how long the token is (D-069 review — the real corpus proposed
+# `<vendor>:multiple_products` against every other such vendor).
+_PLACEHOLDER_PRODUCTS = frozenset({
+    "multiple_products", "multiple", "various", "various_products", "unknown",
+    "n_a", "na", "none", "other", "products", "product",
+})
+
+
 def _cpe_variant(a: str, b: str) -> str | None:
     """The shared product stem of two CPE product tokens, or None. Equal
     tokens share themselves; otherwise the shorter is the stem when the
@@ -1084,6 +1094,10 @@ def _specific_stem(stem: str, by_vendor: dict[str, list[str]]) -> bool:
     itself used as a vendor somewhere (nginx:nginx, curl:curl) — the
     strongest signal a token is a canonical product name. Generic short
     tokens (agent, server-less 'desktop', 'calendar') are left alone."""
+    # a "multiple_*" / catch-all label names no single product, whatever its
+    # length (D-069 review: multiple_products / multiple_routers / …)
+    if stem in _PLACEHOLDER_PRODUCTS or stem.startswith("multiple_"):
+        return False
     return len(stem) >= 6 or stem in by_vendor
 
 
