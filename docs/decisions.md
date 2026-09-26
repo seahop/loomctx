@@ -2362,6 +2362,23 @@ reaches past a hub, `find_path` does not. Verified live on the vulns corpus
 (cited `host → product → cve` chains, with the hub cap honestly reported)
 and the AD fixture (`user → group → ACE → trust → domain`).
 
+
+**Review fixes (2026-09-26).** The MCP SDK calls a tool with its arguments
+keyed by alias, so `find_path` received `from=` and failed on every real
+call; tools are now registered through an alias-to-parameter mapper, and a
+test drives it over stdio. The search ran over paths, not entities, so a
+hub re-reached by many routes multiplied them (a 1,000-CVE hub at depth 3
+took 164 s and 2.2 GB); edge extensions are now capped at
+`LOOM_MAX_SCOPE_OBSERVATIONS` and reported as `scope_cap` (1.4 s, 42 MB),
+and the last hop only checks reachability. Completed paths' edges are
+checked with `corrections_of` as of `as_of`, so a correction the walk never
+gathered still retires its edge. A canonical entity of a gated type reached
+through a cross-type alias is treated as not found and the requested ref is
+echoed; the unknown-`via` vocabulary comes only from in-scope rows; a
+`depth` truncation is reported only when a path could still be extended,
+with `total` = paths found; a bare string argument is no longer
+comma-split.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
