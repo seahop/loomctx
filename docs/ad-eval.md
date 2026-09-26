@@ -117,3 +117,36 @@ observations) and builds in ~0.1–0.25 s. Every decoy is excludable because
 its disqualifying fact ships cited alongside the apparent path. This is
 retrieval only (no LLM); it says the evidence and citations are there for a
 reader to assemble and check the path — not how to use one.
+
+## Results — `large`, seed 7 (executed 2026-09-26)
+
+Directory: **13,529 objects** (10,017 users / 1,501 groups / 2,000
+computers, 10 DCs), **97,812 observations**, 28,311 raw edges. Same 11
+planted chains + 6 decoys. Ingest **6,348 obs/s**. SQLite, scripted reader.
+
+| Budget | All recall | Edge precision | Decoy excluded | Entities gathered / total | Truncated | Build p50/p95 ms | Pack tokens |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1500 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 198 / 398 | 2,377 |
+| 3000 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 277 / 341 | 4,140 |
+| 4000 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 258 / 449 | 5,307 |
+
+**Scaling.** The directory tripled (4.4k → 13.5k objects, 31k → 98k
+observations) but the targeted walk still pulls ~131 entities per chain —
+now **under 1 %** of the store — and build latency stays ~0.2–0.28 s. A
+scope walk that starts at the principal and follows named predicates does
+not get slower as the surrounding directory grows, only as the path
+lengthens; recall, precision and decoy-exclusion stay at 100 %.
+
+## A live reader (illustrative, not a headline)
+
+`--live` runs a cheap model over the packs to confirm the path is not just
+present but *assemblable*. On `large`, `google/gemini-2.5-flash` over 5
+cases assembled and cited the chain in **3 of 5** for $0.011. The two
+misses were a 2-hop and a 3-hop case (not the 4-hop ones): retrieval was
+perfect — the cited chain to the asked target was in every pack — but the
+model reported a path to a *different* reachable target than the one named
+in the question, stopping at the first high-value node it reached. That is
+a reader-following limitation on a busy directory, not a retrieval gap, and
+it tracks the agent scorecard (`docs/models.md`), where stronger models
+clear the analogous multi-hop task and cheaper ones vary. Five cases is a
+smoke, not a metric; the scripted tables above are the measured result.
