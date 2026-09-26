@@ -6,9 +6,25 @@
     python -m loom.connectors.ocsf emit findings.ndjson --namespace netsec > envelopes.jsonl
     python -m loom.connectors.ocsf schema --namespace netsec
 
+Import handles two shapes of OCSF finding (`docs/interop.md` has both tables):
+
+Detections (D-071) — a `detection_finding` (class 2004), `security_finding`
+(2001) or `incident_finding` (2005), the finding classes a SIEM / EDR / XDR
+emits, becomes a `finding:<uid>` entity that:
+  * carries its `title` (a scalar claim on the finding);
+  * relates to the host it concerns via `detected_on -> host:<key>`, the host
+    resolved from the OCSF device / endpoint / resource by the SAME hostname-
+    else-IP convention the seed and nmap connector use — so a detection on
+    `web-01` attaches to the same `host:web-01` the vuln / scan data uses;
+  * relates to each CVE it references via `references -> cve:<id>`, fusing on
+    the same `cve:` node NVD/KEV/OCSF-vuln/STIX/OSV write to;
+  * the edges carry status/severity in attrs and chain by `finding_uid`
+    (D-050/chain.py): a New->In Progress->Resolved transition supersedes the
+    prior state (not a conflict), and Resolved/Close sets `valid_to` while
+    Suppressed does NOT (a muted finding is still active).
+
 Import — one `vulnerability_finding` event (a scanner's, a cloud
-provider's, a SIEM's) becomes claims on the affected host and the CVE
-(`docs/interop.md` has the table):
+provider's, a SIEM's) becomes claims on the affected host and the CVE:
 
   * the host is `device.hostname` / `resources[].hostname|name|uid`
     (`host:<name>`); each `vulnerabilities[].cve.uid` is `cve:<id>` — the
@@ -67,6 +83,18 @@ PRODUCT_NAME = "Loom"
 PRED_AFFECTED = "affected_by"
 CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
+# The detection/finding classes a SIEM / EDR / XDR emits alongside vuln
+# findings (D-071). They share the base Finding fields (device, resources,
+# finding_info, status/status_id, activity_id, time) and detection_finding
+# carries an optional vulnerabilities[] block, so a detection lands as a
+# `finding:<uid>` entity related to the host it concerns and to any CVE it
+# references — in the SAME graph the vuln / scan data uses.
+DETECTION_CLASS = {2001: "Security Finding", 2004: "Detection Finding", 2005: "Incident Finding"}
+DETECTION_CLASS_UIDS = frozenset(DETECTION_CLASS)
+PRED_DETECTED_ON = "detected_on"     # finding -> the host it concerns (lifecycle carrier)
+PRED_REFERENCES = "references"       # finding -> a CVE it references (fuses on the cve node)
+PRED_TITLE = "title"                 # the finding's own title (scalar, on the finding entity)
+
 SEVERITY = {0: "unknown", 1: "informational", 2: "low", 3: "medium", 4: "high", 5: "critical",
             6: "fatal", 99: "other"}
 SEVERITY_ID = {"informational": 1, "info": 1, "low": 2, "medium": 3, "moderate": 3, "high": 4,
@@ -78,6 +106,7 @@ SEVERITY_ID = {"informational": 1, "info": 1, "low": 2, "medium": 3, "moderate":
 # housekeeping, not remediation.
 STATUS = {0: "unknown", 1: "new", 2: "in progress", 3: "suppressed", 4: "resolved",
           5: "archived", 6: "deleted", 99: "other"}
+STATUS_BY_NAME = {name: sid for sid, name in STATUS.items()}
 CLOSED_STATUS_IDS = {4}
 SUPPRESSED = 3
 ACTIVITY = {0: "unknown", 1: "create", 2: "update", 3: "close", 99: "other"}
@@ -115,8 +144,18 @@ def normalize_key(text: str) -> str:
 
 
 def host_of(event: dict) -> str | None:
+    """The host a finding concerns, keyed the SAME way the seed and the nmap
+    connector key hosts (hostname, else IP), so a detection on `web-01`
+    attaches to the same `host:web-01` the vuln / scan data uses. Resolves
+    the OCSF device / endpoint / resource objects in order — top-level
+    `device` then `endpoint`, the affected `resources[]`, an `evidences[]`
+    device/endpoint, and finally an IP — the first that names something."""
     device = event.get("device") or {}
     for value in (device.get("hostname"), device.get("name"), device.get("uid")):
+        if value:
+            return str(value)
+    endpoint = event.get("endpoint") or {}
+    for value in (endpoint.get("hostname"), endpoint.get("name"), endpoint.get("uid")):
         if value:
             return str(value)
     for res in event.get("resources") or []:
@@ -125,8 +164,34 @@ def host_of(event: dict) -> str | None:
         for value in (res.get("hostname"), res.get("name"), res.get("uid")):
             if value:
                 return str(value)
-    ip = device.get("ip")
-    return str(ip) if ip else None
+    for ev in event.get("evidences") or []:
+        if not isinstance(ev, dict):
+            continue
+        for obj in (ev.get("device"), ev.get("endpoint")):
+            if isinstance(obj, dict):
+                for value in (obj.get("hostname"), obj.get("name")):
+                    if value:
+                        return str(value)
+    for obj in (device, endpoint):
+        if obj.get("ip"):
+            return str(obj["ip"])
+    return None
+
+
+def _info_time(info: dict, base: str) -> datetime | None:
+    """A finding_info time by either its epoch (`first_seen_time`) or its
+    OCSF datetime-profile ISO twin (`first_seen_time_dt`)."""
+    return _epoch(info.get(base)) or _epoch(info.get(f"{base}_dt"))
+
+
+def status_id_of(event: dict) -> int:
+    """The finding's status id — from `status_id`, else resolved from the
+    `status` string (real SIEM/EDR events often send only the name)."""
+    sid = _int(event.get("status_id"))
+    if sid:
+        return sid
+    name = event.get("status")
+    return STATUS_BY_NAME.get(name.strip().lower(), 0) if isinstance(name, str) else 0
 
 
 def source_of(event: dict) -> str:
@@ -156,7 +221,13 @@ def _int(value: Any) -> int:
 
 
 def closes_exposure(event: dict) -> bool:
-    status_id = _int(event.get("status_id"))
+    """Whether this finding version CLOSES its edge (sets `valid_to`).
+    Resolved (status 4) or a Close activity does; Suppressed (status 3,
+    muted/accepted risk) NEVER does — the finding is still active, just
+    silenced (D-071 keeps Suppressed distinct from Resolved). Uses the
+    resolved status id, so an event that carries only `status: "Resolved"`
+    closes exactly like one with `status_id: 4`."""
+    status_id = status_id_of(event)
     if status_id == SUPPRESSED:
         return False
     return status_id in CLOSED_STATUS_IDS or _int(event.get("activity_id")) == ACTIVITY_CLOSE
@@ -174,6 +245,82 @@ def _float(value: Any) -> float | None:
 # ------------------------------------------------------------------- import #
 
 def event_to_envelopes(event: dict, namespace: str, source: str | None = None) -> Iterator[ClaimIn]:
+    """Claims for one OCSF finding event: a `vulnerability_finding` (class
+    2002) maps host<-affected_by->cve + CVE facts as before; a detection /
+    security / incident finding (classes 2004 / 2001 / 2005) maps to a
+    `finding:<uid>` entity related to the host it concerns and to any CVE it
+    references (D-071). Any other class yields nothing."""
+    cls = _int(event.get("class_uid"))
+    if cls == CLASS_UID:
+        yield from _vuln_finding_envelopes(event, namespace, source)
+    elif cls in DETECTION_CLASS_UIDS:
+        yield from _detection_envelopes(event, namespace, source)
+
+
+def _cve_refs(event: dict) -> list[str]:
+    """The CVE ids a finding references (upper-cased, de-duplicated), from
+    the OCSF `vulnerabilities[].cve.uid` block detection_finding carries."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for vuln in event.get("vulnerabilities") or []:
+        if not isinstance(vuln, dict):
+            continue
+        cid = str((vuln.get("cve") or {}).get("uid") or "").upper()
+        if CVE_RE.match(cid) and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
+def _detection_envelopes(event: dict, namespace: str, source: str | None = None) -> Iterator[ClaimIn]:
+    """Claims for one detection / security / incident finding (D-071): the
+    `finding:<uid>` entity's title, a `detected_on` edge to the host it
+    concerns (the lifecycle carrier — status/severity in attrs, `valid_to`
+    set when it Resolves/Closes but not when Suppressed), and a `references`
+    edge to each CVE it names (fusing on the shared `cve:` node like OSV).
+    Versions of one finding chain by `finding_uid` (D-050/chain.py), so a
+    New->In Progress->Resolved transition supersedes the prior state."""
+    cls = _int(event.get("class_uid"))
+    info = event.get("finding_info") or {}
+    observed = (_epoch(event.get("time")) or _info_time(info, "modified_time")
+                or _info_time(info, "created_time")
+                or _epoch((event.get("metadata") or {}).get("logged_time"))
+                or datetime.now(timezone.utc))
+    src = source or source_of(event)
+    uid = finding_uid(event)
+    prefix = f"ocsf:{uid}:{_stamp(observed)}"
+    finding = EntityRef(type="finding", key=uid)
+    host = host_of(event)
+    status_id = status_id_of(event)
+    severity_id = _int(event.get("severity_id"))
+    title = str(info.get("title") or info.get("desc") or DETECTION_CLASS.get(cls, "finding"))[:200]
+    first_seen = _info_time(info, "first_seen_time") or _info_time(info, "created_time")
+    last_seen = _info_time(info, "last_seen_time")
+    closed = closes_exposure(event)
+    valid_to = (last_seen or observed) if closed else None
+    base_attrs = {"finding_uid": uid, "ocsf_class_uid": cls}
+    # the transitional state rides on the edges (as vuln findings carry it on
+    # affected_by), so a status change supersedes the prior version's edge
+    state = {"title": title, "status": event.get("status") or STATUS.get(status_id, "unknown"),
+             "status_id": status_id, "severity": event.get("severity") or SEVERITY.get(severity_id, "unknown"),
+             "severity_id": severity_id}
+
+    def claim(subject: EntityRef, pred: str, obj, tag: str = "", **kw) -> ClaimIn:
+        attrs = {**base_attrs, **kw.pop("attrs", {})}
+        return ClaimIn(namespace=namespace, event_id=f"{prefix}:{pred}{tag}"[:128], subject=subject,
+                       predicate=pred, object=obj, observed_at=observed, source=src, attrs=attrs, **kw)
+
+    yield claim(finding, PRED_TITLE, title,
+                attrs={"class_uid": cls, "class_name": DETECTION_CLASS.get(cls, str(cls))})
+    if host:
+        yield claim(finding, PRED_DETECTED_ON, EntityRef(type="host", key=host),
+                    attrs=state, valid_from=first_seen, valid_to=valid_to)
+    for cid in _cve_refs(event):
+        yield claim(finding, PRED_REFERENCES, EntityRef(type="cve", key=cid), tag=f":{cid}",
+                    attrs=state, valid_from=first_seen, valid_to=valid_to)
+
+
+def _vuln_finding_envelopes(event: dict, namespace: str, source: str | None = None) -> Iterator[ClaimIn]:
     """Claims for one vulnerability_finding event. Other classes yield nothing."""
     if _int(event.get("class_uid")) != CLASS_UID:
         return
@@ -377,7 +524,11 @@ def observations_to_findings(observations: Iterable[Observation], namespace: str
     edges: dict[tuple[str, str], list[Observation]] = {}     # (finding uid, cve) -> its versions
 
     def is_edge(o: Observation) -> bool:
-        return isinstance(o.object, EntityRef) and o.object.type == "cve" and o.subject.type != "cve"
+        # a vulnerability_finding edge only: host <-affected_by-> cve. A
+        # detection's `finding <-references-> cve` (D-071) is NOT a vuln
+        # finding and must not export as one.
+        return (o.predicate == PRED_AFFECTED and isinstance(o.object, EntityRef)
+                and o.object.type == "cve" and o.subject.type != "cve")
 
     def finding_id(o: Observation) -> str:
         """What every version of o's finding shares: the imported finding
@@ -560,14 +711,23 @@ def schema(namespace: str) -> SchemaRegistration:
     return SchemaRegistration(
         namespace=namespace,
         entity_types=[
-            EntityTypeDef(name="host", description="an asset a finding names (device / resources)"),
+            EntityTypeDef(name="host", description="an asset a finding names (device / endpoint / resources)"),
             EntityTypeDef(name="cve", description="a CVE record (vulnerabilities[].cve.uid)"),
             EntityTypeDef(name="product", description="software, keyed vendor:product"),
+            EntityTypeDef(name="finding", description="a SIEM/EDR/XDR detection, security or incident "
+                          "finding (OCSF classes 2004 / 2001 / 2005), keyed by its finding uid"),
         ],
         predicates=[
             PredicateDef(name=PRED_AFFECTED, object_types=["cve"],
                          description="OCSF vulnerability_finding: the host has this CVE; attrs carry the "
                                      "finding uid, status and severity"),
+            PredicateDef(name=PRED_DETECTED_ON, object_types=["host"],
+                         description="a detection finding concerns this host (the lifecycle carrier; attrs "
+                                     "carry the finding title, status and severity, valid_to set on "
+                                     "Resolved/Close but not Suppressed)"),
+            PredicateDef(name=PRED_REFERENCES, object_types=["cve"],
+                         description="a detection finding references this CVE (fuses on the shared cve node)"),
+            PredicateDef(name=PRED_TITLE, description="a detection finding's title"),
             PredicateDef(name="cvss_score", description="CVSS base score; source names the scorer"),
             PredicateDef(name="has_severity", description="CVSS base severity (lowercase)"),
             PredicateDef(name="epss_score"), PredicateDef(name="epss_percentile"),
@@ -597,7 +757,8 @@ def main(argv: list[str] | None = None) -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--namespace", default="netsec")
     sub = parser.add_subparsers(dest="command", required=True)
-    imp = sub.add_parser("import", parents=[common], help="map vulnerability_finding events and ingest them")
+    imp = sub.add_parser("import", parents=[common],
+                         help="map vulnerability_finding and detection/security/incident findings, and ingest them")
     imp.add_argument("events", help="NDJSON / JSON array of OCSF events, or - for stdin")
     imp.add_argument("--url", help="engine or gateway base URL (default: write straight into the store)")
     imp.add_argument("--db", help="write straight into this explicit store URL/path")
@@ -647,9 +808,10 @@ def main(argv: list[str] | None = None) -> None:
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace), args.url, args.db, args.key)
-    # each finding's affected_by versions are chained by supersession, so
-    # a resolved finding closes the exposure (connectors/chain.py)
-    key = keyed_by("finding_uid", {PRED_AFFECTED})
+    # each finding's edge versions are chained by supersession, so a resolved
+    # finding closes its exposure / detection (connectors/chain.py): vuln
+    # findings on affected_by, detections on detected_on / references / title
+    key = keyed_by("finding_uid", {PRED_AFFECTED, PRED_DETECTED_ON, PRED_REFERENCES, PRED_TITLE})
     if args.url:
         totals = load_chained(envs, HttpSink(args.url, args.key), key, args.batch)
     else:
