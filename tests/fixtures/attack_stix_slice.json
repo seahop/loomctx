@@ -1,0 +1,428 @@
+{
+  "type": "bundle",
+  "id": "bundle--6198013c-6f02-42a4-9713-38ea1301a1aa",
+  "spec_version": "2.1",
+  "objects": [
+    {
+      "type": "intrusion-set",
+      "spec_version": "2.1",
+      "id": "intrusion-set--a0cb9370-e39b-44d5-9f50-ef78e412b973",
+      "created": "2017-05-31T21:31:45.629Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/groups/G0001",
+          "external_id": "G0001"
+        },
+        {
+          "source_name": "Group 72",
+          "description": "(Citation: Cisco Group 72)"
+        },
+        {
+          "source_name": "Axiom",
+          "description": "(Citation: Novetta-Axiom)"
+        },
+        {
+          "source_name": "Cisco Group 72",
+          "description": "Esler, J., Lee, M., and Williams, C. (2014, October 14). Threat Spotlight: Group 72. Retrieved January 14, 2016.",
+          "url": "http://blogs.cisco.com/security/talos/threat-spotlight-group-72"
+        },
+        {
+          "source_name": "Kaspersky Winnti April 2013",
+          "description": "Kaspersky Lab's Global Research and Analysis Team. (2013, April 11). Winnti. More than just a game. Retrieved February 8, 2017.",
+          "url": "https://securelist.com/winnti-more-than-just-a-game/37029/"
+        },
+        {
+          "source_name": "Novetta Winnti April 2015",
+          "description": "Novetta Threat Research Group. (2015, April 7). Winnti Analysis. Retrieved February 8, 2017.",
+          "url": "https://web.archive.org/web/20150412223949/http://www.novetta.com/wp-content/uploads/2015/04/novetta_winntianalysis.pdf"
+        },
+        {
+          "source_name": "Novetta-Axiom",
+          "description": "Novetta. (n.d.). Operation SMN: Axiom Threat Actor Group Report. Retrieved November 12, 2014.",
+          "url": "https://web.archive.org/web/20230115144216/http://www.novetta.com/wp-content/uploads/2014/11/Executive_Summary-Final_1.pdf"
+        },
+        {
+          "source_name": "Kaspersky Winnti June 2015",
+          "description": "Tarakanov, D. (2015, June 22). Games are over: Winnti is now targeting pharmaceutical companies. Retrieved January 14, 2016.",
+          "url": "https://securelist.com/games-are-over/70991/"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-07-31T18:48:11.488Z",
+      "name": "Axiom",
+      "description": "[Axiom](https://attack.mitre.org/groups/G0001) is a suspected Chinese cyber espionage group that has targeted the aerospace, defense, government, manufacturing, and media sectors since at least 2008. Some reporting suggests a degree of overlap between [Axiom](https://attack.mitre.org/groups/G0001) and [Winnti Group](https://attack.mitre.org/groups/G0044) but the two groups appear to be distinct based on differences in reporting on TTPs and targeting.(Citation: Kaspersky Winnti April 2013)(Citation: Kaspersky Winnti June 2015)(Citation: Novetta Winnti April 2015)",
+      "aliases": [
+        "Axiom",
+        "Group 72"
+      ],
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_version": "2.0",
+      "x_mitre_attack_spec_version": "3.3.0"
+    },
+    {
+      "type": "attack-pattern",
+      "spec_version": "2.1",
+      "id": "attack-pattern--3c4a2599-71ee-4405-ba1e-0e28414b4bc5",
+      "created": "2017-05-31T21:30:20.537Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1005",
+          "external_id": "T1005"
+        },
+        {
+          "source_name": "show_run_config_cmd_cisco",
+          "description": "Cisco. (2022, August 16). show running-config - Cisco IOS Configuration Fundamentals Command Reference . Retrieved July 13, 2022.",
+          "url": "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/fundamentals/command/cf_command_ref/show_protocols_through_showmon.html#wp2760878733"
+        },
+        {
+          "source_name": "Mandiant APT41 Global Intrusion ",
+          "description": "Gyler, C.,Perez D.,Jones, S.,Miller, S.. (2021, February 25). This is Not a Test: APT41 Initiates Global Intrusion Campaign Using Multiple Exploits. Retrieved February 17, 2022.",
+          "url": "https://www.mandiant.com/resources/apt41-initiates-global-intrusion-campaign-using-multiple-exploits"
+        },
+        {
+          "source_name": "US-CERT-TA18-106A",
+          "description": "US-CERT. (2018, April 20). Alert (TA18-106A) Russian State-Sponsored Cyber Actors Targeting Network Infrastructure Devices. Retrieved October 19, 2020.",
+          "url": "https://www.us-cert.gov/ncas/alerts/TA18-106A"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-05-12T15:12:00.628Z",
+      "name": "Data from Local System",
+      "description": "Adversaries may search local system sources, such as file systems, configuration files, local databases, virtual machine files, or process memory, to find files of interest and sensitive data prior to Exfiltration.\n\nAdversaries may do this using a [Command and Scripting Interpreter](https://attack.mitre.org/techniques/T1059), such as [cmd](https://attack.mitre.org/software/S0106) as well as a [Network Device CLI](https://attack.mitre.org/techniques/T1059/008), which have functionality to interact with the file system to gather information.(Citation: show_run_config_cmd_cisco) Adversaries may also use [Automated Collection](https://attack.mitre.org/techniques/T1119) on the local system.\n",
+      "kill_chain_phases": [
+        {
+          "kill_chain_name": "mitre-attack",
+          "phase_name": "collection"
+        }
+      ],
+      "x_mitre_attack_spec_version": "3.3.0",
+      "x_mitre_contributors": [
+        "William Cain",
+        "Austin Clark, @c2defense",
+        "Liran Ravich, CardinalOps"
+      ],
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_is_subtechnique": false,
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_platforms": [
+        "ESXi",
+        "Linux",
+        "macOS",
+        "Network Devices",
+        "Windows"
+      ],
+      "x_mitre_version": "1.8"
+    },
+    {
+      "type": "attack-pattern",
+      "spec_version": "2.1",
+      "id": "attack-pattern--53ac20cd-aca3-406e-9aa0-9fc7fdc60a5a",
+      "created": "2020-02-20T20:53:45.725Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1560",
+          "external_id": "T1560"
+        },
+        {
+          "source_name": "DOJ GRU Indictment Jul 2018",
+          "description": "Mueller, R. (2018, July 13). Indictment - United States of America vs. VIKTOR BORISOVICH NETYKSHO, et al. Retrieved November 17, 2024.",
+          "url": "https://cdn.cnn.com/cnn/2018/images/07/13/gru.indictment.pdf"
+        },
+        {
+          "source_name": "Wikipedia File Header Signatures",
+          "description": "Wikipedia. (2016, March 31). List of file signatures. Retrieved April 22, 2016.",
+          "url": "https://en.wikipedia.org/wiki/List_of_file_signatures"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-05-12T15:12:00.633Z",
+      "name": "Archive Collected Data",
+      "description": "An adversary may compress and/or encrypt data that is collected prior to exfiltration. Compressing the data can help to obfuscate the collected data and minimize the amount of data sent over the network.(Citation: DOJ GRU Indictment Jul 2018) Encryption can be used to hide information that is being exfiltrated from detection or make exfiltration less conspicuous upon inspection by a defender.\n\nBoth compression and encryption are done prior to exfiltration, and can be performed using a utility, 3rd party library, or custom method.",
+      "kill_chain_phases": [
+        {
+          "kill_chain_name": "mitre-attack",
+          "phase_name": "collection"
+        }
+      ],
+      "x_mitre_attack_spec_version": "3.3.0",
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_is_subtechnique": false,
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_platforms": [
+        "Linux",
+        "macOS",
+        "Windows"
+      ],
+      "x_mitre_version": "1.0"
+    },
+    {
+      "type": "malware",
+      "spec_version": "2.1",
+      "id": "malware--cfc75b0d-e579-40ae-ad07-a1ce00d49a6c",
+      "created": "2019-09-24T12:59:57.991Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/software/S0412",
+          "external_id": "S0412"
+        },
+        {
+          "source_name": "ZxShell",
+          "description": "(Citation: FireEye APT41 Aug 2019)(Citation: Talos ZxShell Oct 2014)"
+        },
+        {
+          "source_name": "Sensocode",
+          "description": "(Citation: Talos ZxShell Oct 2014)"
+        },
+        {
+          "source_name": "Talos ZxShell Oct 2014",
+          "description": "Allievi, A., et al. (2014, October 28). Threat Spotlight: Group 72, Opening the ZxShell. Retrieved September 24, 2019.",
+          "url": "https://blogs.cisco.com/security/talos/opening-zxshell"
+        },
+        {
+          "source_name": "FireEye APT41 Aug 2019",
+          "description": "Fraser, N., et al. (2019, August 7). Double DragonAPT41, a dual espionage and cyber crime operation APT41. Retrieved September 23, 2019.",
+          "url": "https://www.mandiant.com/sites/default/files/2022-02/rt-apt41-dual-operation.pdf"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2025-04-16T20:38:36.169Z",
+      "name": "ZxShell",
+      "description": "[ZxShell](https://attack.mitre.org/software/S0412) is a remote administration tool and backdoor that can be downloaded from the Internet, particularly from Chinese hacker websites. It has been used since at least 2004.(Citation: FireEye APT41 Aug 2019)(Citation: Talos ZxShell Oct 2014)",
+      "is_family": true,
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_platforms": [
+        "Windows"
+      ],
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_version": "1.2",
+      "x_mitre_attack_spec_version": "3.2.0",
+      "x_mitre_aliases": [
+        "ZxShell",
+        "Sensocode"
+      ]
+    },
+    {
+      "modified": "2024-12-10T19:10:54.180Z",
+      "name": "Data Loss Prevention",
+      "description": "Data Loss Prevention (DLP) involves implementing strategies and technologies to identify, categorize, monitor, and control the movement of sensitive data within an organization. This includes protecting data formats indicative of Personally Identifiable Information (PII), intellectual property, or financial data from unauthorized access, transmission, or exfiltration. DLP solutions integrate with network, endpoint, and cloud platforms to enforce security policies and prevent accidental or malicious data leaks. (Citation: PurpleSec Data Loss Prevention) This mitigation can be implemented through the following measures:\n\nSensitive Data Categorization:\n\n- Use Case: Identify and classify data based on sensitivity (e.g., PII, financial data, trade secrets).\n- Implementation: Use DLP solutions to scan and tag files containing sensitive information using predefined patterns, such as Social Security Numbers or credit card details.\n\nExfiltration Restrictions:\n\n- Use Case: Prevent unauthorized transmission of sensitive data.\n- Implementation: Enforce policies to block unapproved email attachments, unauthorized USB usage, or unencrypted data uploads to cloud storage.\n\nData-in-Transit Monitoring:\n\n- Use Case: Detect and prevent the transmission of sensitive data over unapproved channels.\n- Implementation: Deploy network-based DLP tools to inspect outbound traffic for sensitive content (e.g., financial records or PII) and block unapproved transmissions.\n\nEndpoint Data Protection:\n\n- Use Case: Monitor and control sensitive data usage on endpoints.\n- Implementation: Use endpoint-based DLP agents to block copy-paste actions of sensitive data and unauthorized printing or file sharing.\n\nCloud Data Security:\n\n- Use Case: Protect data stored in cloud platforms.\n- Implementation: Integrate DLP with cloud storage platforms like Google Drive, OneDrive, or AWS to monitor and restrict sensitive data sharing or downloads.",
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_version": "1.1",
+      "type": "course-of-action",
+      "spec_version": "2.1",
+      "id": "course-of-action--65401701-019d-44ff-b223-08d520bb0e7b",
+      "created": "2021-08-04T21:22:11.612Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/mitigations/M1057",
+          "external_id": "M1057"
+        },
+        {
+          "source_name": "PurpleSec Data Loss Prevention",
+          "description": "Michael Swanagan. (2020, October 24). 7 Data Loss Prevention Best Practices & Strategies. Retrieved August 30, 2021.",
+          "url": "https://purplesec.us/data-loss-prevention/"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "x_mitre_attack_spec_version": "3.2.0",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5"
+    },
+    {
+      "modified": "2024-09-05T18:27:09.070Z",
+      "name": "Collection",
+      "description": "The adversary is trying to gather data of interest to their goal.\n\nCollection consists of techniques adversaries may use to gather information and the sources information is collected from that are relevant to following through on the adversary's objectives. Frequently, the next goal after collecting data is to either steal (exfiltrate) the data or to use the data to gain more information about the target environment. Common target sources include various drive types, browsers, audio, video, and email. Common collection methods include capturing screenshots and keyboard input.",
+      "x_mitre_deprecated": false,
+      "x_mitre_domains": [
+        "enterprise-attack"
+      ],
+      "x_mitre_version": "1.1",
+      "x_mitre_shortname": "collection",
+      "type": "x-mitre-tactic",
+      "spec_version": "2.1",
+      "id": "x-mitre-tactic--d108ce10-2419-4cf9-a774-46161d6c6cfe",
+      "created": "2018-10-17T00:14:20.652Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/tactics/TA0009",
+          "external_id": "TA0009"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "x_mitre_attack_spec_version": "3.2.0",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--161c58eb-29d7-4de3-aca8-3bda085f19a3",
+      "created": "2022-04-15T15:46:02.250Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "Novetta-Axiom",
+          "description": "Novetta. (n.d.). Operation SMN: Axiom Threat Actor Group Report. Retrieved November 12, 2014.",
+          "url": "https://web.archive.org/web/20230115144216/http://www.novetta.com/wp-content/uploads/2014/11/Executive_Summary-Final_1.pdf"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-07-31T18:48:12.205Z",
+      "description": "[Axiom](https://attack.mitre.org/groups/G0001) has collected data from a compromised network.(Citation: Novetta-Axiom)",
+      "relationship_type": "uses",
+      "source_ref": "intrusion-set--a0cb9370-e39b-44d5-9f50-ef78e412b973",
+      "target_ref": "attack-pattern--3c4a2599-71ee-4405-ba1e-0e28414b4bc5",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_attack_spec_version": "3.3.0"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--2202d670-a6f3-42eb-ae1b-1ae615c3b620",
+      "created": "2022-01-07T16:19:16.964Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "Novetta-Axiom",
+          "description": "Novetta. (n.d.). Operation SMN: Axiom Threat Actor Group Report. Retrieved November 12, 2014.",
+          "url": "https://web.archive.org/web/20230115144216/http://www.novetta.com/wp-content/uploads/2014/11/Executive_Summary-Final_1.pdf"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-07-31T18:48:12.235Z",
+      "description": "[Axiom](https://attack.mitre.org/groups/G0001) has compressed and encrypted data prior to exfiltration.(Citation: Novetta-Axiom)",
+      "relationship_type": "uses",
+      "source_ref": "intrusion-set--a0cb9370-e39b-44d5-9f50-ef78e412b973",
+      "target_ref": "attack-pattern--53ac20cd-aca3-406e-9aa0-9fc7fdc60a5a",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_attack_spec_version": "3.3.0"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--1aee1049-89be-45b8-ae2f-83bf4e35d5a3",
+      "created": "2019-09-24T13:32:51.555Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "Talos ZxShell Oct 2014",
+          "description": "Allievi, A., et al. (2014, October 28). Threat Spotlight: Group 72, Opening the ZxShell. Retrieved September 24, 2019.",
+          "url": "https://blogs.cisco.com/security/talos/opening-zxshell"
+        },
+        {
+          "source_name": "Cisco Group 72",
+          "description": "Esler, J., Lee, M., and Williams, C. (2014, October 14). Threat Spotlight: Group 72. Retrieved January 14, 2016.",
+          "url": "http://blogs.cisco.com/security/talos/threat-spotlight-group-72"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-07-31T18:48:12.220Z",
+      "description": "(Citation: Talos ZxShell Oct 2014)(Citation: Cisco Group 72)",
+      "relationship_type": "uses",
+      "source_ref": "intrusion-set--a0cb9370-e39b-44d5-9f50-ef78e412b973",
+      "target_ref": "malware--cfc75b0d-e579-40ae-ad07-a1ce00d49a6c",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_attack_spec_version": "3.3.0"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--53e53569-4ae7-453c-953e-fc683e7794b0",
+      "created": "2021-09-29T12:14:55.235Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-04-29T14:23:06.040Z",
+      "description": "Data loss prevention can restrict access to sensitive data and detect sensitive data that is unencrypted.",
+      "relationship_type": "mitigates",
+      "source_ref": "course-of-action--65401701-019d-44ff-b223-08d520bb0e7b",
+      "target_ref": "attack-pattern--3c4a2599-71ee-4405-ba1e-0e28414b4bc5",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_attack_spec_version": "3.3.0"
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--5db19a58-c7ff-4de0-b9bd-9e3b247b2ff3",
+      "created": "2022-01-07T15:11:27.782Z",
+      "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "revoked": false,
+      "external_references": [
+        {
+          "source_name": "Talos ZxShell Oct 2014",
+          "description": "Allievi, A., et al. (2014, October 28). Threat Spotlight: Group 72, Opening the ZxShell. Retrieved September 24, 2019.",
+          "url": "https://blogs.cisco.com/security/talos/opening-zxshell"
+        }
+      ],
+      "object_marking_refs": [
+        "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+      ],
+      "modified": "2026-04-29T14:23:06.053Z",
+      "description": "[ZxShell](https://attack.mitre.org/software/S0412) can transfer files from a compromised host.(Citation: Talos ZxShell Oct 2014)",
+      "relationship_type": "uses",
+      "source_ref": "malware--cfc75b0d-e579-40ae-ad07-a1ce00d49a6c",
+      "target_ref": "attack-pattern--3c4a2599-71ee-4405-ba1e-0e28414b4bc5",
+      "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+      "x_mitre_deprecated": false,
+      "x_mitre_attack_spec_version": "3.3.0"
+    }
+  ]
+}
