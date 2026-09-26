@@ -147,9 +147,10 @@ tool-result limit, so the CLI spilled it to a file on disk and the agent
 spent 7 of its 26 calls running `grep` and `Read` over its own tool
 output (`demo/act3-after-aliases.md` shows them); the prompt then asked
 for budget 1500 — which, on the 2026-09-24 scorecard, is too small to
-carry web-01's 32 KEV CVEs. `ask_scope` now defaults to 3000 (~3.7k
+carry web-01's 32 KEV CVEs. `ask_scope` now defaults to 3000 (4,073 cl100k
 tokens on the wire, all 32 CVEs with their edges) and the server
-instructions cap it at 4000 (~4.7k). Rehearse without the sentence; if
+instructions cap it at 4000 (5,035) — measured on the current build on
+2026-09-26 (D-064's own measurement was 3,707 and 4,738). Rehearse without the sentence; if
 the agent still spills, say so on stage — *the pack was bigger than the
 agent's inbox, so it asked for less* — and move on.
 
@@ -214,8 +215,8 @@ its `cite` token. Transcript: `demo/act3-writeback-claude-code.json`.
 | The venue network is down | Acts 1 and 2 need no network. For Act 3 use the local Claude Code session if it is authenticated, else open `demo/act3-after-aliases.md` (the rehearsal, tool calls then the verbatim answer), `demo/act3-before-aliases.md` (the seam) or `demo/agent-transcript.json` (a Sonnet 5 `agent_eval` run) and walk through them |
 | The connector load was skipped | Act 2 falls back to the seed data: `initech` contract-owner conflict in `procurement`, and the incident report document `IR-4432` |
 | Claude Code misbehaves | `docker compose exec loom python -m loom.agent_eval --db /data/loom.db --tasks exposure` prints the same tool sequence and answer with the configured model in ~40 s |
-| Someone asks "what if the model lies?" | Every item carries an observation id; 216 of 216 task-runs across eighteen models cited only ids they had seen (`docs/models.md`). The one thing citations cannot catch is a confident "no" — which is why `truncated` exists |
-| Someone asks "how fast / how big?" | Single-entity ask 2–5 ms on 465k observations; two-hop scope over 1,077 entities 0.5 s; fresh clone to loaded real corpus in 142 s (all laptop, generator co-located; `docs/real-data.md`); real nodes: 421/s load, 202/s ingest, 186/s ask on GKE (`deploy/README.md`) |
+| Someone asks "what if the model lies?" | Every item carries an observation id, and the scorecard checks every cited id against what the model was shown: in 216 task-runs across eighteen models one answer cited an id it had never seen, and the check caught it and failed that run (`docs/models.md`). The one thing citations cannot catch is a confident "no" — which is why `truncated` exists |
+| Someone asks "how fast / how big?" | Single-entity ask 2–5 ms on 465k observations; two-hop scope over 1,077 entities 0.5 s; fresh clone to loaded real corpus in 142 s (all laptop, generator co-located; `docs/real-data.md`); real nodes: 435/s load, 178/s ingest, 201/s ask on GKE with auth on (D-063, `deploy/README.md`) |
 
 ## Rehearsal checklist
 

@@ -345,14 +345,20 @@ left its Postgres pool to interpreter shutdown; the retrieval scorecard printed 
 had left 84 GB of disks billing, which filled the project's SSD quota.
 
 **Teardown — volumes first.** Deleting a GKE cluster does not delete the
-disks behind its PersistentVolumes. Delete the claims, wait for the disks
-to go, then the cluster, then check:
+disks behind its PersistentVolumes. Delete the workloads, then their
+claims (a claim still mounted by a pod — the NATS StatefulSet's, say —
+stays `Terminating` under pvc-protection, so deleting claims first
+hangs), wait for the disks to go, then the cluster, then check:
 
 ```bash
-kubectl -n loom delete cluster loom-pg                     # the operator's PVCs
-kubectl -n loom delete pvc --all                           # NATS, feed cache
-gcloud compute disks list --filter="name~^pvc-"            # wait until empty
-gcloud container clusters delete loom-val --zone us-central1-a
+CLUSTER=loom-val          # your cluster name, e.g. loom-val
+ZONE=us-central1-a        # and its zone
+kubectl -n loom delete cluster loom-pg --wait              # CloudNativePG: its instances and their PVCs
+kubectl -n loom delete statefulsets,deployments,cronjobs,jobs --all --cascade=foreground
+kubectl -n loom delete pvc --all --wait                    # NATS, feed cache: nothing mounts them now
+# (or all three at once: kubectl delete namespace loom --wait)
+gcloud compute disks list --filter="name~^pvc-"            # repeat until empty
+gcloud container clusters delete "$CLUSTER" --zone "$ZONE"
 gcloud compute disks list                                  # nothing left behind
 ```
 

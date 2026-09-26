@@ -265,12 +265,14 @@ to an excerpt, or spend a third of its budget on one base64 handle.
 `vector@B` did not change between builds: its 74 / 77 / 79 / 86% before
 and 75 / 77 / 79 / 87% after are run-to-run variance.
 
-The 2026-09-26 rerun (after D-064 and D-065) reproduced this table within
-variance — `loom` 79 / 85 / 87 / 96%, multi-hop 15/18 at 3,200 — as
-expected: D-064 improved how an *agent* phrases a scope ask (its win is in
-the agent scorecard, `docs/models.md`: the exposure task went from 9 to 30
-passes across the eighteen models), which the rule-based retrieval reader
-here does not exercise.
+The 2026-09-26 rerun (after D-064 and D-065; same reader, seed and
+questions) reproduced this table within variance — `loom` 79 / 85 / 87 /
+96%, `vector` 75 / 76 / 78 / 86%, multi-hop 15/18 at 3,200 — as expected:
+D-064 improved how an *agent* phrases a scope ask (its win is in the agent
+scorecard, `docs/models.md`: the exposure task went from 9 to 30 passes
+across the eighteen models), and this scorecard never has an agent phrase
+one — the harness builds each pack itself and the live reader
+(`deepseek-chat-v3.1`) only reads it.
 
 ## Caveats
 
