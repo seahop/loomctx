@@ -9,10 +9,9 @@ trust** — does Loom's ordinary scope walk **surface the full chain with every
 edge cited**, and how much of the store does it have to sort through to do it?
 
 >
-> **Status (2026-09-26): experimental; these numbers are withdrawn pending a
-> blind re-measurement.** A review found the benchmark as run is not a fair
-> test and the connector has decoding gaps (below). Do not quote the tables
-> until this note is removed.
+> **Status (2026-09-26): numbers are withdrawn pending a blind
+> re-measurement (S-51).** The connector's decoding gaps (S-50) have been
+> fixed (D-074), but the benchmark itself is not a fair test:
 >
 > - **Recall is not blind.** The walk was given the planted chain's own
 >   `expand` predicates and its exact depth (`ad_eval.build_chain_packs`), so
@@ -25,8 +24,6 @@ edge cited**, and how much of the store does it have to sort through to do it?
 >   if a decoy leaked, which it could not.
 > - The **~2.5% / <1% "gathered"** figure reflects the generator's uniform
 >   density (no large hub groups), not hub pressure.
-> - The **connector is experimental** — see its known decoding limitations in
->   [interop.md](interop.md#raw-ldap--ldif-active-directory--loom).
 >
 
 It is **synthetic and object-level only**. `loom.connectors.ad_gen`

@@ -47,18 +47,22 @@ they name, so the edges connect the SID-keyed entities directly.
   * `member_of` from `member` / `memberOf` (DIRECT only; nesting is the
     walk's job).
   * `contains` from DN parentage (parent object -> child), containment.
-  * `trusts` from `trustedDomain` objects: attrs `direction` (from
-    trustDirection), `transitive` and `sid_filtering` (from trustAttributes),
-    `partner`.
+  * `trusts` from `trustedDomain` objects: `subject trusts object` means
+    "subject accepts credentials from object's principals." For inbound
+    trusts (trustDirection 1) the local domain is the subject; for outbound
+    (2) the partner is; bidirectional (3) emits both edges. Attrs:
+    `direction`, `transitive`, `sid_filtering`, `partner`.
   * `has_ace` from `nTSecurityDescriptor` (a base64 SD blob): the DACL is
     parsed into (trustee SID -> this object) claims, `attrs.right` decoded
     from the access mask and, for object ACEs, `attrs.object_type` the GUID.
-    Covered: GenericAll, GenericWrite, WriteDacl, WriteOwner,
-    ForceChangePassword (extended right 00299570-246d-11d0-a768-00aa006e0529),
-    AddMember (write-property to the member attribute
-    bf9679c0-0de6-11d0-a285-00aa003049e2), AllExtendedRights. ACEs granting
-    none of these are skipped. The SD/ACE parser is hand-rolled (see
-    `parse_security_descriptor`); no heavy dependency (no impacket).
+    Covered: GenericAll, GenericWrite (including the AD-mapped form 0x20028),
+    WriteDacl, WriteOwner, ForceChangePassword (extended right
+    00299570-246d-11d0-a768-00aa006e0529), AddMember (write-property to the
+    member attribute bf9679c0-0de6-11d0-a285-00aa003049e2), AllExtendedRights.
+    Inherit-only ACEs (flag 0x08) are skipped — they apply to children, not
+    the object itself. ACEs granting none of these are skipped. The SD/ACE
+    parser is hand-rolled (see `parse_security_descriptor`); no heavy
+    dependency (no impacket).
   * attrs from `userAccountControl` (bitmask): `enabled` (not 0x2),
     `unconstrained_delegation` (0x80000), `no_preauth` (0x400000, AS-REP
     roastable), `is_dc` (0x2000 SERVER_TRUST_ACCOUNT, or objectClass);
@@ -80,6 +84,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import os
 import struct
 import sys
@@ -127,10 +132,14 @@ WRITE_OWNER = 0x00080000
 GENERIC_WRITE = 0x40000000
 GENERIC_ALL = 0x10000000
 FULL_CONTROL = 0x000F01FF                   # the expanded GenericAll bitset AD writes
+GENERIC_WRITE_MAPPED = 0x00020028           # READ_CONTROL | DS_SELF | DS_WRITE_PROP
 
 # extended-right / attribute GUIDs (lower-case string form)
 GUID_FORCE_CHANGE_PASSWORD = "00299570-246d-11d0-a768-00aa006e0529"
 GUID_MEMBER_ATTR = "bf9679c0-0de6-11d0-a285-00aa003049e2"
+
+# ACE flags
+ACE_INHERIT_ONLY = 0x08                     # applies only to child objects, not this one
 
 # ACE types we read
 ACE_ACCESS_ALLOWED = 0x00
@@ -368,12 +377,15 @@ def parse_security_descriptor(blob: bytes) -> list[Ace]:
 
 def decode_rights(ace: Ace) -> list[str]:
     """The interesting rights an ACE's access mask grants (a decode table, not
-    reasoning). Empty when it grants none — that ACE is skipped."""
+    reasoning). Empty when it grants none — that ACE is skipped.
+    Inherit-only ACEs (flag 0x08) apply to children, not this object."""
+    if ace.flags & ACE_INHERIT_ONLY:
+        return []
     rights: list[str] = []
     mask = ace.mask
     if mask & GENERIC_ALL or (mask & FULL_CONTROL) == FULL_CONTROL:
         rights.append("GenericAll")
-    if mask & GENERIC_WRITE:
+    if mask & GENERIC_WRITE or (mask & GENERIC_WRITE_MAPPED) == GENERIC_WRITE_MAPPED:
         rights.append("GenericWrite")
     if mask & WRITE_DAC:
         rights.append("WriteDacl")
@@ -415,7 +427,7 @@ def entity_type_of(entry: LdifEntry) -> str:
 
 class Directory:
     """One export, indexed for resolution: DN (lower-cased) -> (sid, type),
-    and the export's observation time."""
+    SID -> (sid, type), and the export's observation time."""
 
     def __init__(self, entries: list[LdifEntry], observed_at: datetime,
                  export: str = SOURCE_DEFAULT):
@@ -423,10 +435,13 @@ class Directory:
         self.observed_at = observed_at
         self.export = export
         self.by_dn: dict[str, tuple[str, str]] = {}
+        self.by_sid: dict[str, str] = {}
         for e in entries:
             sid = _sid_from_entry(e)
             if sid and e.dn:
-                self.by_dn[e.dn.lower()] = (sid, entity_type_of(e))
+                etype = entity_type_of(e)
+                self.by_dn[e.dn.lower()] = (sid, etype)
+                self.by_sid[sid] = etype
 
     def ref_for_dn(self, dn: str | None) -> EntityRef | None:
         if not dn:
@@ -439,9 +454,9 @@ class Directory:
     def ref_for_sid(self, sid: str | None, default_type: str = "group") -> EntityRef | None:
         if not sid:
             return None
-        for _dn, (s, t) in self.by_dn.items():
-            if s == sid:
-                return EntityRef(type=t, key=sid)
+        etype = self.by_sid.get(sid)
+        if etype is not None:
+            return EntityRef(type=etype, key=sid)
         return EntityRef(type=default_type, key=sid)
 
 
@@ -449,6 +464,15 @@ class Directory:
 
 def _stamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
+def _eid(parts: str) -> str:
+    """Content-addressed event id: stable, unique, and always ≤128 chars."""
+    if len(parts) <= 128:
+        return parts
+    prefix = parts[:96]
+    suffix = hashlib.sha256(parts.encode("utf-8", "replace")).hexdigest()[:31]
+    return f"{prefix}:{suffix}"
 
 
 def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
@@ -475,7 +499,7 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
 
     def claim(pred: str, obj, tag: str = "", **kw) -> ClaimIn:
         attrs = {**base_attrs, **kw.pop("attrs", {})}
-        return ClaimIn(namespace=namespace, event_id=f"ldap:{sid}:{stamp}:{pred}{tag}"[:128],
+        return ClaimIn(namespace=namespace, event_id=_eid(f"ldap:{sid}:{stamp}:{pred}{tag}"),
                        subject=ref, predicate=pred, object=obj, observed_at=observed,
                        source=source, attrs=attrs, **kw)
 
@@ -519,7 +543,7 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
         m = directory.ref_for_dn(member_dn)
         if m is not None and (m.type, m.key) not in seen_edges:
             seen_edges.add((m.type, m.key))
-            yield ClaimIn(namespace=namespace, event_id=f"ldap:{m.key}:{stamp}:member_of:{sid}"[:128],
+            yield ClaimIn(namespace=namespace, event_id=_eid(f"ldap:{m.key}:{stamp}:member_of:{sid}"),
                           subject=m, predicate="member_of", object=ref, observed_at=observed,
                           source=source, attrs={"dn": member_dn, "via": dn, "export": directory.export})
     for group_dn in entry.texts("memberof"):
@@ -531,7 +555,7 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
     # DN parentage -> contains (parent object -> this)
     parent = directory.ref_for_dn(_parent_dn(dn))
     if parent is not None and (parent.type, parent.key) != (ref.type, ref.key):
-        yield ClaimIn(namespace=namespace, event_id=f"ldap:{parent.key}:{stamp}:contains:{sid}"[:128],
+        yield ClaimIn(namespace=namespace, event_id=_eid(f"ldap:{parent.key}:{stamp}:contains:{sid}"),
                       subject=parent, predicate="contains", object=ref, observed_at=observed,
                       source=source, attrs={"dn": parent.key, "child_dn": dn, "export": directory.export})
 
@@ -572,41 +596,51 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
                 if ace.object_type:
                     attrs["object_type"] = ace.object_type
                 yield ClaimIn(namespace=namespace,
-                              event_id=f"ldap:{ace.trustee}:{stamp}:has_ace:{sid}:{right}"[:128],
+                              event_id=_eid(f"ldap:{ace.trustee}:{stamp}:has_ace:{sid}:{right}"),
                               subject=trustee, predicate="has_ace", object=ref, observed_at=observed,
                               source=source, attrs=attrs)
 
 
 def _trust_envelopes(entry: LdifEntry, directory: Directory, namespace: str, source: str,
                      observed: datetime, stamp: str) -> Iterator[ClaimIn]:
-    partner = (entry.text("trustpartner") or entry.text("name")
-               or entry.text("cn") or entry.text("flatname"))
-    if not partner:
+    partner_name = (entry.text("trustpartner") or entry.text("name")
+                    or entry.text("cn") or entry.text("flatname"))
+    if not partner_name:
         return
-    partner = partner.lower()
-    # the trusting domain is the domain object holding this trust: the DC=...
-    # suffix of the trust's DN. Resolve it to that domain object's SID (so the
-    # trust edge shares the entity the domain object and its ACEs land on);
-    # fall back to the DNS name when the domain object is not in the export.
+    partner_name = partner_name.lower()
     low = entry.dn.lower()
     idx = low.find("dc=")
     dc_suffix = entry.dn[idx:] if idx != -1 else None
-    trusting = directory.ref_for_dn(dc_suffix) or EntityRef(
+    local = directory.ref_for_dn(dc_suffix) or EntityRef(
         type="domain", key=_dn_to_domain(dc_suffix) or "this-domain")
+    partner = EntityRef(type="domain", key=partner_name)
     direction = _int(entry.text("trustdirection"))
     attributes = _int(entry.text("trustattributes")) or 0
-    attrs = {
-        "partner": partner,
-        "direction": TRUST_DIRECTION.get(direction, "unknown") if direction is not None else "unknown",
+    base_attrs = {
+        "partner": partner_name,
         "transitive": not bool(attributes & TRUST_NON_TRANSITIVE),
         "sid_filtering": bool(attributes & TRUST_QUARANTINED_DOMAIN),
         "forest_transitive": bool(attributes & TRUST_FOREST_TRANSITIVE),
         "dn": entry.dn, "export": source,
     }
-    yield ClaimIn(namespace=namespace, event_id=f"ldap:trust:{trusting.key}:{partner}:{stamp}"[:128],
-                  subject=trusting, predicate="trusts",
-                  object=EntityRef(type="domain", key=partner), observed_at=observed,
-                  source=source, attrs=attrs)
+    raw_dir = TRUST_DIRECTION.get(direction, "unknown") if direction is not None else "unknown"
+
+    def _trust_edge(subj: EntityRef, obj: EntityRef, dir_label: str) -> ClaimIn:
+        return ClaimIn(
+            namespace=namespace,
+            event_id=_eid(f"ldap:trust:{subj.key}:{obj.key}:{stamp}"),
+            subject=subj, predicate="trusts", object=obj, observed_at=observed,
+            source=source, attrs={**base_attrs, "direction": dir_label})
+
+    if direction == 1:
+        yield _trust_edge(local, partner, "inbound")
+    elif direction == 2:
+        yield _trust_edge(partner, local, "outbound")
+    elif direction == 3:
+        yield _trust_edge(local, partner, "bidirectional")
+        yield _trust_edge(partner, local, "bidirectional")
+    else:
+        yield _trust_edge(local, partner, raw_dir)
 
 
 def _dn_to_domain(dn: str | None) -> str | None:

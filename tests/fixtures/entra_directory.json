@@ -1,0 +1,142 @@
+{
+  "users": [
+    {
+      "id": "u-001-alice",
+      "@odata.type": "#microsoft.graph.user",
+      "userPrincipalName": "alice@contoso.com",
+      "displayName": "Alice Zhao",
+      "mail": "alice@contoso.com",
+      "accountEnabled": true,
+      "userType": "Member",
+      "jobTitle": "Security Engineer",
+      "department": "InfoSec",
+      "passwordProfile": {"forceChangePasswordNextSignIn": false}
+    },
+    {
+      "id": "u-002-bob",
+      "@odata.type": "#microsoft.graph.user",
+      "userPrincipalName": "bob@contoso.com",
+      "displayName": "Bob Tran",
+      "mail": "bob@contoso.com",
+      "accountEnabled": true,
+      "userType": "Member",
+      "jobTitle": "IT Admin",
+      "department": "IT"
+    },
+    {
+      "id": "u-003-carol",
+      "@odata.type": "#microsoft.graph.user",
+      "userPrincipalName": "carol_ext@contoso.com",
+      "displayName": "Carol Wu",
+      "mail": "carol@partner.com",
+      "accountEnabled": false,
+      "userType": "Guest",
+      "jobTitle": "Consultant",
+      "department": "Vendor"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g-001-secops",
+      "@odata.type": "#microsoft.graph.group",
+      "displayName": "SecOps Team",
+      "securityEnabled": true,
+      "mailNickname": "secops",
+      "members": [
+        {"id": "u-001-alice", "@odata.type": "#microsoft.graph.user"},
+        {"id": "u-002-bob", "@odata.type": "#microsoft.graph.user"}
+      ],
+      "owners": [
+        {"id": "u-001-alice", "@odata.type": "#microsoft.graph.user"}
+      ]
+    },
+    {
+      "id": "g-002-allusers",
+      "@odata.type": "#microsoft.graph.group",
+      "displayName": "All Users",
+      "securityEnabled": false,
+      "mailNickname": "allusers",
+      "membershipRule": "user.userType -eq \"Member\"",
+      "members": [
+        {"id": "u-001-alice", "@odata.type": "#microsoft.graph.user"},
+        {"id": "u-002-bob", "@odata.type": "#microsoft.graph.user"}
+      ]
+    }
+  ],
+  "servicePrincipals": [
+    {
+      "id": "sp-001-sentinel",
+      "@odata.type": "#microsoft.graph.servicePrincipal",
+      "displayName": "Microsoft Sentinel",
+      "appId": "app-sentinel-0001",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "keyCredentials": [
+        {"displayName": "SentinelCert", "endDateTime": "2027-06-15T00:00:00Z"}
+      ],
+      "passwordCredentials": [
+        {"displayName": "SentinelSecret", "endDateTime": "2026-12-31T00:00:00Z"}
+      ],
+      "owners": [
+        {"id": "u-001-alice", "@odata.type": "#microsoft.graph.user"}
+      ]
+    }
+  ],
+  "appRegistrations": [
+    {
+      "id": "ar-001-internalapi",
+      "@odata.type": "#microsoft.graph.application",
+      "displayName": "Internal API",
+      "appId": "app-internal-0001",
+      "requiredResourceAccess": [
+        {
+          "resourceAppId": "00000003-0000-0000-c000-000000000000",
+          "resourceAccess": [
+            {"id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d", "type": "Scope"},
+            {"id": "df021288-bdef-4463-88db-98f22de89214", "type": "Role"}
+          ]
+        }
+      ]
+    }
+  ],
+  "directoryRoles": [
+    {
+      "id": "role-ga-instance",
+      "@odata.type": "#microsoft.graph.directoryRole",
+      "displayName": "Global Administrator",
+      "roleTemplateId": "62e90394-69f5-4237-9190-012177145e10",
+      "members": [
+        {"id": "u-002-bob", "@odata.type": "#microsoft.graph.user"}
+      ]
+    },
+    {
+      "id": "role-sa-instance",
+      "@odata.type": "#microsoft.graph.directoryRole",
+      "displayName": "Security Administrator",
+      "roleTemplateId": "194ae4cb-b126-40b2-bd5b-6091b380977d",
+      "members": [
+        {"id": "u-001-alice", "@odata.type": "#microsoft.graph.user"}
+      ]
+    }
+  ],
+  "appRoleAssignments": [
+    {
+      "id": "ara-001",
+      "principalId": "u-001-alice",
+      "principalType": "User",
+      "principalDisplayName": "Alice Zhao",
+      "resourceId": "sp-001-sentinel",
+      "resourceDisplayName": "Microsoft Sentinel",
+      "appRoleId": "role-sentinel-reader"
+    }
+  ],
+  "oauth2PermissionGrants": [
+    {
+      "id": "grant-001",
+      "clientId": "sp-001-sentinel",
+      "consentType": "AllPrincipals",
+      "resourceId": "graph-api-sp",
+      "scope": "User.Read Directory.Read.All"
+    }
+  ]
+}

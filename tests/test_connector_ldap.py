@@ -118,6 +118,41 @@ def test_security_descriptor_decodes_to_the_right_rights():
     assert fcp.object_type == ldap.GUID_FORCE_CHANGE_PASSWORD
 
 
+def test_mapped_generic_write_detected():
+    """S-50: AD stores GenericWrite as its mapped form (0x20028 =
+    READ_CONTROL | DS_SELF | DS_WRITE_PROP). The connector must detect it."""
+    trustee = DOMAIN_SID + "-1105"
+    sd = build_sd(allowed_ace(trustee, ldap.GENERIC_WRITE_MAPPED))
+    aces = ldap.parse_security_descriptor(sd)
+    rights = [r for ace in aces for r in ldap.decode_rights(ace)]
+    assert "GenericWrite" in rights
+
+
+def test_inherit_only_ace_skipped():
+    """S-50: an inherit-only ACE (flag 0x08) applies to children, not the
+    object itself. decode_rights must return [] for it."""
+    trustee = DOMAIN_SID + "-1105"
+    body = struct.pack("<I", ldap.GENERIC_ALL) + encode_sid(trustee)
+    ace_bytes = struct.pack("<BBH", ldap.ACE_ACCESS_ALLOWED, ldap.ACE_INHERIT_ONLY,
+                            4 + len(body)) + body
+    sd = build_sd(ace_bytes)
+    aces = ldap.parse_security_descriptor(sd)
+    assert len(aces) == 1
+    assert aces[0].flags & ldap.ACE_INHERIT_ONLY
+    assert ldap.decode_rights(aces[0]) == []
+
+
+def test_event_id_no_collision_on_long_sids():
+    """S-50: event ids must not collide when SIDs are long. Two ACEs with
+    different rights on the same long-SID pair must produce distinct ids."""
+    long_sid = "S-1-5-21-1234567890123-1234567890123-1234567890123-99999"
+    target_sid = "S-1-5-21-9876543210987-9876543210987-9876543210987-11111"
+    eid1 = ldap._eid(f"ldap:{long_sid}:20260920T090000:has_ace:{target_sid}:GenericAll")
+    eid2 = ldap._eid(f"ldap:{long_sid}:20260920T090000:has_ace:{target_sid}:WriteDacl")
+    assert eid1 != eid2
+    assert len(eid1) <= 128 and len(eid2) <= 128
+
+
 # ---------------------------------------------------------------------- UAC / trust #
 
 def _facts(store, ref):
@@ -143,22 +178,58 @@ def test_useraccountcontrol_bits_decode(tmp_path):
         store.close()
 
 
-def test_trust_direction_and_transitivity(tmp_path):
+def test_trust_bidirectional_emits_both_edges(tmp_path):
+    """S-50: bidirectional (trustDirection 3) emits two edges so the scope
+    walk / find_path can traverse in both directions."""
     db = str(tmp_path / "trust.db")
     ldap.main(["import", str(FIXTURE), "--namespace", "ad", "--db", db])
     store = SqliteStore(db)
     try:
-        rows = [o for o in store.observations_for("ad", EntityRef(type="domain", key=DOMAIN_SID))
-                if o.predicate == "trusts"]
-        assert len(rows) == 1
-        trust = rows[0]
-        assert trust.object == EntityRef(type="domain", key="dev.local")
-        assert trust.attrs["direction"] == "bidirectional"       # trustDirection 3
-        assert trust.attrs["transitive"] is True                 # trustAttributes 8, no NON_TRANSITIVE bit
-        assert trust.attrs["sid_filtering"] is False
-        assert trust.attrs["partner"] == "dev.local"
+        local_ref = EntityRef(type="domain", key=DOMAIN_SID)
+        partner_ref = EntityRef(type="domain", key="dev.local")
+        local_trusts = [o for o in store.observations_for("ad", local_ref)
+                        if o.predicate == "trusts" and o.subject == local_ref]
+        partner_trusts = [o for o in store.observations_for("ad", partner_ref)
+                          if o.predicate == "trusts" and o.subject == partner_ref]
+        assert len(local_trusts) == 1 and len(partner_trusts) == 1
+        assert local_trusts[0].object == partner_ref
+        assert partner_trusts[0].object == local_ref
+        for t in (local_trusts[0], partner_trusts[0]):
+            assert t.attrs["direction"] == "bidirectional"
+            assert t.attrs["transitive"] is True
+            assert t.attrs["sid_filtering"] is False
+            assert t.attrs["partner"] == "dev.local"
     finally:
         store.close()
+
+
+def test_trust_inbound_and_outbound_direction():
+    """S-50: inbound/outbound trust direction is correctly mapped to edge
+    direction. subject trusts object = subject accepts object's credentials."""
+    inbound_ldif = """# 2026-09-20T09:00:00Z
+dn: DC=corp,DC=local
+objectClass: domainDNS
+objectSid: S-1-5-21-111-222-333
+name: corp.local
+
+dn: CN=partner.local,CN=System,DC=corp,DC=local
+objectClass: trustedDomain
+trustPartner: partner.local
+trustDirection: 1
+trustAttributes: 0
+"""
+    outbound_ldif = inbound_ldif.replace("trustDirection: 1", "trustDirection: 2")
+    for ldif_text, expect_subj_key, expect_obj_key, expect_dir in [
+        (inbound_ldif, "S-1-5-21-111-222-333", "partner.local", "inbound"),
+        (outbound_ldif, "partner.local", "S-1-5-21-111-222-333", "outbound"),
+    ]:
+        envs = list(ldap.ldif_to_envelopes(ldif_text, "ad"))
+        trusts = [e for e in envs if e.predicate == "trusts"]
+        assert len(trusts) == 1, f"expected 1 trust edge for {expect_dir}"
+        t = trusts[0]
+        assert t.subject.key == expect_subj_key
+        assert t.object.key == expect_obj_key
+        assert t.attrs["direction"] == expect_dir
 
 
 def test_reimport_is_idempotent(tmp_path):

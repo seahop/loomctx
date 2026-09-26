@@ -1,9 +1,10 @@
-# Interop: STIX 2.1, OCSF and raw LDAP / LDIF
+# Interop: STIX 2.1, OCSF, LDAP, Entra ID, Okta
 
 Loom's own shapes are the contracts in `src/loom/contracts.py`; the world
-speaks STIX (threat intelligence), OCSF (security events) and, for Active
-Directory, raw LDAP. Connectors translate at the edges, so a TIP's bundle,
-a scanner's findings or a directory export land as cited, time-windowed
+speaks STIX (threat intelligence), OCSF (security events), raw LDAP, and
+cloud identity providers (Entra ID, Okta). Connectors translate at the
+edges, so a TIP's bundle, a scanner's findings, a directory export or an
+IdP's user/group/role JSON land as cited, time-windowed
 claims, and Loom's facts leave as records other tools accept. The engine
 learns nothing about any standard: the mapping is a connector plus a schema
 registration (hard constraint: domain specifics stay in the registry).
@@ -55,6 +56,18 @@ python -m loom.connectors.cloud schema --namespace cloud
 # MITRE ATT&CK taxonomy (the published mitre-attack STIX 2.1 bundle)
 python -m loom.connectors.attack import enterprise-attack.json --namespace attack
 python -m loom.connectors.attack schema --namespace attack
+
+# Entra ID / Azure AD (a Microsoft Graph API JSON export)
+python -m loom.connectors.entra import users.json groups.json --namespace iam
+python -m loom.connectors.entra import directory_export.json --namespace iam --url http://loom:8000 --key loomk_...
+python -m loom.connectors.entra emit users.json --namespace iam > envelopes.jsonl
+python -m loom.connectors.entra schema --namespace iam
+
+# Okta directory (an Okta API JSON export)
+python -m loom.connectors.okta import users.json groups.json --namespace iam
+python -m loom.connectors.okta import directory.json --namespace iam --url http://loom:8000 --key loomk_...
+python -m loom.connectors.okta emit users.json --namespace iam > envelopes.jsonl
+python -m loom.connectors.okta schema --namespace iam
 ```
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
@@ -326,16 +339,6 @@ Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
 `metadata.product.name Loom`.
 
 ## Raw LDAP / LDIF (Active Directory) → Loom
-
-> **Experimental (2026-09-26).** A review found decoding gaps that must be
-> fixed before this is used on real exports: mapped generic rights are not
-> recognised (an export that stores GenericWrite as `0x20028` reads as no
-> right); some ACL claim event ids collide and one is dropped; inherit-only
-> (`INHERIT_ONLY`) ACEs are wrongly attributed to the object itself; an
-> inbound `trustDirection` is emitted in the wrong direction; and large
-> imports scan the DN index per ACE (slow). Treat output as illustrative
-> until these land. The reachability benchmark's numbers are withdrawn
-> ([ad-eval.md](ad-eval.md)).
 
 `loom.connectors.ldap` decodes a raw directory export — object by object,
 deterministically — into typed, cited claims in an `ad` namespace, so an
@@ -712,6 +715,64 @@ use, and which mitigations address them?" as a cited scope walk / `path`.
 `attack` is its own namespace; a technique that names a CVE optionally links
 to the shared `cve:` node.
 
+## Entra ID / Azure AD → Loom
+
+`loom.connectors.entra` parses a JSON export of Microsoft Entra ID (Azure AD)
+objects — users, groups, service principals, app registrations, directory
+roles and role assignments — into cited identity / RBAC claims. It reads a
+FILE: it does not call the Graph API.
+
+Input is any JSON file whose top level is a Graph API collection (`value`
+array), a combined export with `users`/`groups`/`servicePrincipals`/
+`appRegistrations`/`directoryRoles`/`roleAssignments`/`appRoleAssignments`/
+`oauth2PermissionGrants` keys, a plain array of objects, or a single object.
+The connector detects the object type from `@odata.type`, `userPrincipalName`,
+`securityEnabled`, `appId`, `roleTemplateId`, or the assignment shape.
+
+| Object | Loom entity (key = Entra object id) |
+| --- | --- |
+| user | `user` |
+| group | `group` |
+| servicePrincipal | `service_principal` |
+| application | `app_registration` |
+| directoryRole | `directory_role` (keyed by `roleTemplateId`) |
+
+Edges: `member_of` (group / role membership), `owner_of`, `has_role`
+(directory role assignment, including privileged-role tagging), `has_app_role`
+(app role assignment on a service principal), `has_permission` (OAuth2 /
+delegated permission grant), `requires_permission` (API permissions an app
+registration requires), `reports_to` (manager). Service principals carry
+`key_credential` / `password_credential` with expiry dates for secret-sprawl
+detection.
+
+The `iam` namespace is shared with the Okta connector. Both register the
+same core predicates (`member_of`, `name`, `enabled`, `has_role`) so an
+environment with both IdPs lands in one walkable graph.
+
+## Okta directory → Loom
+
+`loom.connectors.okta` parses a JSON export of Okta directory objects —
+users, groups, applications and app-user assignments — into cited identity
+claims. It reads a FILE: it does not call the Okta API.
+
+Input is a JSON file with `users`/`groups`/`apps`/`appUsers`/
+`roleAssignments` keys, an array of objects, or a single object. The
+connector detects the object type from `profile.login`, `signOnMode`, the
+presence of `userId`+`appId`, or the admin-role shape.
+
+| Object | Loom entity (key = Okta object id) |
+| --- | --- |
+| user | `user` |
+| group | `group` |
+| application | `app` |
+| admin role | `admin_role` (keyed by role type name) |
+
+Edges: `member_of` (group membership, from user `_groupIds` or group
+`_members`), `assigned_to` (app-user assignment), `has_role` (admin role
+grant). Users carry `mfa_enrolled` / `mfa_factor` (from `_embedded.factors`),
+`credential_provider` (OKTA / ACTIVE_DIRECTORY), `status` and `last_login`
+for hygiene questions ("who has no MFA?", "which accounts are suspended?").
+
 ## Registering the names in the schema registry
 
 Every importer registers a non-strict schema for the namespace on
@@ -728,7 +789,11 @@ entity types are its own. The nmap connector's `runs_software` reuses that same
 `product` object type and CPE `vendor:product` keying, so a scanned host's
 software meets NVD/KEV at one node. The LDAP connector registers its own
 `ad` vocabulary (`member_of`, `has_ace`, `trusts`, …) — a separate domain,
-typically its own namespace. To pin a namespace to exactly these names:
+typically its own namespace. The Entra ID and Okta connectors share the `iam`
+namespace with overlapping predicates (`member_of`, `has_role`, `name`,
+`enabled`), so both IdPs' objects land in one walkable graph and entity
+resolution (D-042/D-060) can fold shared users across providers. To pin a
+namespace to exactly these names:
 
 ```bash
 python -m loom.connectors.stix schema --namespace netsec > stix.json

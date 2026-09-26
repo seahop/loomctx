@@ -8,6 +8,22 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Identity/IAM connectors and LDAP deep fix (D-074, D-075, D-076)
+
+- `python -m loom.connectors.entra import` parses Microsoft Graph API JSON
+  exports (users, groups, service principals, app registrations, directory
+  roles, role/app-role/OAuth2 assignments) into cited identity/RBAC claims
+  in the `iam` namespace; privileged-role tagging, credential-expiry
+  tracking, scope walk + find_path tested end to end (D-075)
+- `python -m loom.connectors.okta import` parses Okta API JSON exports
+  (users, groups, apps, app-user assignments) into the same `iam` namespace;
+  MFA enrollment, credential provider, admin-role grants; both IdPs share
+  overlapping predicates for cross-provider entity resolution (D-076)
+- LDAP connector S-50 deep fix (D-074): mapped GenericWrite (0x20028)
+  detection, content-addressed event ids (no collision on long SIDs),
+  inherit-only ACE filtering, bidirectional trusts emit both edges, O(1)
+  SID lookup via index; connector removed from experimental status
+
 ### Detections, cloud inventory, and the ATT&CK taxonomy (D-071, D-072, D-073)
 
 - OCSF connector also ingests detection/security/incident findings (classes

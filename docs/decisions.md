@@ -2513,6 +2513,51 @@ registration, no contract change. Import-only (no ATT&CK export). Real
 verbatim ATT&CK fixture; a walk test reaches a group's techniques and their
 mitigations, cited.
 
+## D-074 · LDAP connector S-50 deep fix (2026-09-26)
+
+Five decoding bugs in `loom.connectors.ldap` fixed (S-50 items from the
+2026-09-24 review):
+
+1. **Mapped GenericWrite**: AD stores GenericWrite as its mapped form
+   0x20028 (READ_CONTROL | DS_SELF | DS_WRITE_PROP), not the generic bit
+   0x40000000. Added the mapped form to `decode_rights`.
+2. **Event-id collision**: long SIDs pushed `has_ace` event ids past the
+   128-char cap, so `[:128]` truncated them into collisions and dropped
+   ACEs. Now uses a content-addressed hash suffix for over-length ids.
+3. **Inherit-only ACEs**: ACEs with INHERIT_ONLY flag (0x08) were
+   attributed to the object itself. Now skipped in `decode_rights`.
+4. **Trust direction**: bidirectional trusts (trustDirection 3) now emit
+   two edges (one per direction) so the scope walk / find_path traverses
+   both ways. Outbound (2) swaps subject/object so `subject trusts object`
+   always means "subject accepts credentials from object's principals."
+5. **O(n²) SID lookup**: `ref_for_sid` scanned the full DN index per
+   call. Added a `by_sid` dict alongside `by_dn` for O(1) lookups.
+
+No contract change. Connector removed from experimental status.
+
+## D-075 · Entra ID (Azure AD) connector (2026-09-26)
+
+`loom.connectors.entra` parses Microsoft Graph API JSON exports — users,
+groups, service principals, app registrations, directory roles, role
+assignments, app-role assignments and OAuth2 permission grants — into cited
+identity/RBAC claims in the `iam` namespace. Key edges: `member_of`,
+`has_role` (with privileged-role tagging for Global Admin and friends),
+`has_app_role`, `has_permission`, `owner_of`, `requires_permission`,
+`reports_to`. Service principals carry credential expiry (`key_credential`,
+`password_credential`) for secret-sprawl detection. Non-strict registration,
+no contract change. 26 tests including a scope walk + find_path round trip.
+
+## D-076 · Okta directory connector (2026-09-26)
+
+`loom.connectors.okta` parses Okta API JSON exports — users, groups,
+applications and app-user assignments — into cited identity claims in the
+same `iam` namespace as the Entra connector. Key edges: `member_of`,
+`assigned_to` (app-user), `has_role` (admin role). Users carry `mfa_enrolled`
+/ `mfa_factor`, `credential_provider`, `status` and `last_login` for
+hygiene questions. Both IdP connectors share overlapping predicates so entity
+resolution can fold a user present in both. Non-strict registration, no
+contract change.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
