@@ -238,8 +238,32 @@ def row_to_dossier(row: Mapping[str, Any]) -> dict:
 
 def redact_dsn(url: str) -> str:
     """A DSN is fine to show only without its password (operator-issued
-    credentials end up in pod logs and published scorecards otherwise)."""
-    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
+    credentials end up in pod logs and published scorecards otherwise).
+    Covers `user:pw@`, an empty user (`:pw@`), a raw `@` inside the password
+    (userinfo runs to the LAST `@` before the host), a `password=` query
+    parameter, and a libpq keyword DSN (`host=… password=…`). When in doubt
+    it redacts too much rather than too little."""
+    m = re.match(r"([A-Za-z][A-Za-z0-9+.\-]*://)(.*)", url, re.S)
+    if m is None:   # a path, or a libpq keyword/value DSN
+        return _PASSWORD_KV.sub(r"\1***", url)
+    scheme, rest = m.groups()
+    q = rest.find("?")
+    at = rest.rfind("@", 0, q) if q >= 0 else rest.rfind("@")
+    if at < 0 and q >= 0:
+        at = rest.rfind("@")   # a raw '?' inside the password: over-redact, never leak
+    if at >= 0:
+        userinfo, rest = rest[:at], rest[at:]
+        if ":" in userinfo:
+            userinfo = userinfo.split(":", 1)[0] + ":***"
+        elif "@" in userinfo:
+            userinfo = "***"
+        rest = userinfo + rest
+    return scheme + _PASSWORD_PARAM.sub(r"\1***", rest)
+
+
+# `?password=…` / `&sslpassword=…` in a URL; `password=…` in a keyword DSN
+_PASSWORD_PARAM = re.compile(r"([?&;](?:ssl)?password=)[^&#]*", re.I)
+_PASSWORD_KV = re.compile(r"(\b(?:ssl)?password\s*=\s*)(?:'(?:[^'\\]|\\.)*'|\S+)", re.I)
 
 
 def redacted_view(obs: Observation) -> Observation:

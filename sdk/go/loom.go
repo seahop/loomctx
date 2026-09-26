@@ -306,8 +306,8 @@ func (c *Client) Answer(ctx context.Context, question string, subject *EntityRef
 		body["valid_at"] = opts.ValidAt
 	}
 	headers := map[string]string{}
-	if c.LLMKey != "" {
-		headers["X-Loom-LLM-Key"] = c.LLMKey
+	if key := strings.TrimSpace(c.LLMKey); key != "" {
+		headers["X-Loom-LLM-Key"] = key
 	}
 	var out map[string]any
 	return out, c.post(ctx, "/v1/answer", body, headers, &out)
@@ -362,8 +362,10 @@ func orDefault(v, d int) int {
 func (c *Client) headers(req *http.Request, extra map[string]string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Loom-Namespace", c.Namespace)
-	if c.APIKey != "" {
-		req.Header.Set("X-Loom-Key", c.APIKey)
+	// a key read from a file or a k8s Secret often ends in a newline; the
+	// engine compares hashes of the exact bytes, so strip it (as the Python SDK does)
+	if key := strings.TrimSpace(c.APIKey); key != "" {
+		req.Header.Set("X-Loom-Key", key)
 	}
 	for k, v := range extra {
 		req.Header.Set(k, v)

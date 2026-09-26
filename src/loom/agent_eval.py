@@ -191,9 +191,29 @@ def _mentions(text: str, key: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + re.escape(key.lower()) + r"(?![a-z0-9])", text.lower()) is not None
 
 
-# words that mark a host as the lease's past, not its answer: "reassigned
-# from host:web-01 to host:laptop-17", "previously web-01"
-_HISTORY_MARK = re.compile(r"\b(?:from|previously|formerly|until|replacing|replaced|before)\W+(?:\w+:)?$")
+# a mention is the lease's past only in a clear past-transition pattern
+# (S-43): "reassigned/moved/transferred … from host:web-01", "previously /
+# formerly web-01", "replacing web-01", "web-01 until 2026-08-10". A bare
+# "from" or "before" is not enough — "held by laptop-17 before web-01 took
+# it back" asserts web-01 — and a negated move ("was never reassigned from
+# web-01") or a holder that "still holds" / "took it back" is never history.
+_TRANSITION = (r"(?:re-?assigned|re-?allocated|moved|transferred|migrated|switched|shifted|changed|"
+               r"passed|handed(?:\s+over)?|went|took\s+over|taken\s+over)")
+_HISTORY_BEFORE = re.compile(
+    rf"(?:\b{_TRANSITION}\b[^,;]{{0,40}}?\bfrom|\b(?:previously|formerly|originally)"
+    r"(?:\s+(?:held\s+by|assigned\s+to|was|on|at|with))?|\breplacing|\breplaced)\W+(?:\w+:)?$")
+_HISTORY_AFTER = re.compile(r"^\W{0,3}until\b")
+_STILL_HOLDER = re.compile(r"^\W*(?:still|now|currently|again|took|takes|retook|reclaimed|holds|has|kept|keeps)\b")
+_NEGATION = re.compile(r"\b(?:never|not|no)\b|n't\b")
+
+
+def _history_mention(text: str, start: int, end: int) -> bool:
+    """Is the mention text[start:end] marked as the lease's past?"""
+    clause = re.split(r"[,;]", text[:start])[-1][-80:]       # the clause leading up to it
+    after = re.split(r"[,;]", text[end:end + 40])[0]          # and the rest of it
+    if _NEGATION.search(clause) or _STILL_HOLDER.search(after):
+        return False
+    return bool(_HISTORY_BEFORE.search(clause) or _HISTORY_AFTER.search(after))
 
 
 def _history_only(sentence: str, key: str) -> bool:
@@ -202,7 +222,7 @@ def _history_only(sentence: str, key: str) -> bool:
     was failed as naming the former holder)."""
     text = sentence.lower()
     spots = list(re.finditer(r"(?<![a-z0-9])" + re.escape(key.lower()) + r"(?![a-z0-9])", text))
-    return bool(spots) and all(_HISTORY_MARK.search(text[max(0, m.start() - 40):m.start()]) for m in spots)
+    return bool(spots) and all(_history_mention(text, m.start(), m.end()) for m in spots)
 
 
 def _score_lease(answer: str, truth: dict, seen: set[str], store) -> dict:

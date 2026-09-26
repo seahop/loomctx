@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -124,5 +126,27 @@ func TestLiveRoundTrip(t *testing.T) {
 		if le, ok := err.(*Error); ok && le.Status != 403 && le.Status != 200 {
 			// auth may be disabled in the test engine; a 403 or success are both fine
 		}
+	}
+}
+
+// A key read from a file or a k8s Secret often ends in a newline; the client
+// strips it before sending, as the Python SDK does (review 2026-09-26).
+func TestAPIKeyIsTrimmed(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("X-Loom-Key"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "ns")
+	c.APIKey = "  s3cret\n"
+	if !c.Ready(context.Background()) {
+		t.Fatal("not ready")
+	}
+	c.APIKey = " \n"
+	c.Ready(context.Background())
+	if len(got) != 2 || got[0] != "s3cret" || got[1] != "" {
+		t.Fatalf("X-Loom-Key sent as %q", got)
 	}
 }

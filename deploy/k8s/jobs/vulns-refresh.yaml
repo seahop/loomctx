@@ -5,18 +5,28 @@
 #
 #   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # an rw key pinned to sources 'nvd,nvd:*,cisa-kev,first-epss,cisa-adp' (nvd:* = the per-scorer CVSS sources)
 #
-# The key needs `r` as well as `w` on the namespace: a changed KEV entry (a
-# ransomware flag flipped, a due date moved) is found by reading the CVE's
-# stored KEV rows first (S-29). A write-only key still loads, with a warning,
-# but cannot record those changes.
+# The key needs `r` as well as `w` (perms rw) on the namespace. The run
+# reads the registry first to see whether its schema is already there — a
+# key without `r` cannot, so it falls through to registering, which a pinned
+# key may not do: 403, and the run fails. It also reads the CVE's stored
+# KEV rows to find a changed KEV entry (a ransomware flag flipped, a due
+# date moved; S-29).
 #
 # The FIRST load is an operator's job, with a key that has no source or
 # entity-type gate: it registers the namespace schema (a pinned key may not)
 # and, with --bridge-seed-hosts, writes the asset-inventory bridge. Run it
-# once with that key (kubectl create job --from=... then patch the Secret
-# name, or `python -m loom.connectors.vulns load --url ... --key ...` from a
-# pod); every nightly run after it finds the schema registered and needs
-# only the pinned key (D-063).
+# once as a one-off pod (a Job's pod template is immutable, so a Job created
+# from this CronJob cannot be pointed at another Secret):
+#
+#   read -rs OPKEY   # the ungated operator key; kept out of shell history
+#   kubectl -n loom run vulns-first-load --rm -i --restart=Never \
+#     --image=ghcr.io/seahop/loom:latest --env="LOOM_API_KEY=$OPKEY" -- \
+#     python -m loom.connectors.vulns load --url http://loom --cache /tmp/feeds \
+#       --namespace netsec --bridge-seed-hosts
+#
+# (the key is in that pod's spec until --rm deletes it). Every nightly run
+# after it finds the schema registered and needs only the pinned key (D-063):
+#
 #   kubectl -n loom apply -f deploy/k8s/jobs/vulns-refresh.yaml
 #   kubectl -n loom create job --from=cronjob/loom-vulns-refresh vulns-now   # run once, now
 #

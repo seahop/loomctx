@@ -409,6 +409,16 @@ def test_lease_history_in_the_first_sentence_is_not_an_assertion():
     assert ae._score_lease(ok, truth, set(), None)["rejected_in_answer"] == []
     for bad in ("On 2026-08-20 the address was held by web-01 and laptop-17.",
                 "host:web-01 held 10.0.4.7 on that day, not laptop-17.",
-                "It moved from web-01 to laptop-17, but web-01 still held it on 2026-08-20."):
+                "It moved from web-01 to laptop-17, but web-01 still held it on 2026-08-20.",
+                # a bare "before"/"from" is not a history marker: these assert
+                # web-01 (review 2026-09-26)
+                "On 2026-08-20 it was held by laptop-17 before web-01 took it back.",
+                "10.0.4.7 was never reassigned from web-01 to laptop-17.",
+                "It was not moved from host:web-01, so laptop-17 never held it.",
+                "The lease came from web-01 on 2026-08-20, not laptop-17."):
         assert ae._score_lease(bad, truth, set(), None)["rejected_in_answer"] == ["web-01"], bad
     assert ae._score_lease("Previously web-01; now host:laptop-17.", truth, set(), None)["rejected_in_answer"] == []
+    for fine in ("It was transferred from web-01 to laptop-17 on 2026-08-10; laptop-17 held it on 2026-08-20.",
+                 "Formerly held by host:web-01, the address belonged to host:laptop-17 on 2026-08-20.",
+                 "host:web-01 until 2026-08-10, then host:laptop-17, which held it on 2026-08-20."):
+        assert ae._score_lease(fine, truth, set(), None)["rejected_in_answer"] == [], fine

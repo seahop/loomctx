@@ -18,7 +18,7 @@ ROWS = [
 def test_direct_load_is_batched_and_idempotent(tmp_path):
     lines = [json.dumps(r) + "\n" for r in ROWS] + ["{not json\n"]
     totals = load_direct(str(tmp_path / "d.db"), lines, size=3)
-    assert totals == {"recorded": 7, "accepted": 1, "skipped": 1}
+    assert totals == {"recorded": 7, "accepted": 1, "skipped": 1, "rejected": 0}
     totals = load_direct(str(tmp_path / "d.db"), (json.dumps(r) + "\n" for r in ROWS), size=3)
     assert totals["recorded"] == 7  # replayed, deduped by event_id
     store = SqliteStore(tmp_path / "d.db")
@@ -146,3 +146,41 @@ def test_http_load_gives_up_after_the_bound_and_never_retries_a_4xx(monkeypatch)
     with pytest.raises(SystemExit, match="HTTP 422"):
         post_batches("http://loom", (json.dumps(r) + "\n" for r in ROWS), size=50, key=None)
     assert calls == [422]
+
+
+def _strict(db, namespace="netsec"):
+    """A strict registry with nothing registered: every claim is refused."""
+    from loom.contracts import SchemaRegistration
+    store = SqliteStore(db)
+    try:
+        store.put_schema(SchemaRegistration(namespace=namespace, strict=True))
+    finally:
+        store.close()
+
+
+def test_the_loader_exits_non_zero_when_anything_is_refused(tmp_path, monkeypatch, capsys):
+    """D-063/S-36 said loaders exit non-zero on any refusal; only `vulns`
+    did — `python -m loom.ingest` printed its totals and exited 0 over a
+    hole. Now the totals still print, then the run fails, direct or HTTP."""
+    import pytest
+    from loom.ingest import main
+    src = tmp_path / "rows.jsonl"
+    src.write_text("".join(json.dumps(r) + "\n" for r in ROWS))
+    db = tmp_path / "strict.db"
+    _strict(db)
+    with pytest.raises(SystemExit, match="7 envelopes were refused by the store"):
+        main([str(src), "--db", str(db)])
+    assert json.loads(capsys.readouterr().out)["rejected"] == 7              # totals first
+
+    class Resp(_Resp):
+        def read(self):
+            return json.dumps({"total": self.n, "recorded": self.n - 1, "accepted": 0, "rejected": 1,
+                               "results": [{"index": 0, "status": "rejected", "detail": "no"}]}).encode()
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: Resp(req.data.decode().count("\n")))
+    with pytest.raises(SystemExit, match="1 envelopes were refused by the engine"):
+        main([str(src), "--url", "http://loom", "--batch", "50"])
+    assert json.loads(capsys.readouterr().out)["rejected"] == 1
+
+    ok = tmp_path / "ok.db"
+    main([str(src), "--db", str(ok)])                                         # nothing refused: exit 0
+    assert json.loads(capsys.readouterr().out)["rejected"] == 0

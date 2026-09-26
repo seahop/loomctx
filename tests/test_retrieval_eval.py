@@ -466,6 +466,21 @@ def test_the_scorecard_never_prints_a_dsn_password():
     assert redact_dsn("postgresql://loom:s3cret@loom-pg-rw.loom:5432/loom") == \
         "postgresql://loom:***@loom-pg-rw.loom:5432/loom"
     assert redact_dsn("/data/loom.db") == "/data/loom.db"
+    # review 2026-09-26: a query-param password, an empty user and a raw '@'
+    # in the password all leaked
+    for dsn, want in (
+            ("postgresql://loom@host/db?password=x", "postgresql://loom@host/db?password=***"),
+            ("postgresql://loom@host/db?sslmode=require&password=x&x=1",
+             "postgresql://loom@host/db?sslmode=require&password=***&x=1"),
+            ("postgresql://:pw@host:5432/db", "postgresql://:***@host:5432/db"),
+            ("postgresql://loom:p@ss@w0rd@host/db", "postgresql://loom:***@host/db"),
+            ("postgresql://loom:pa/ss?@host/db", "postgresql://loom:***@host/db"),
+            ("host=pg user=loom password='s e@cret' dbname=loom", "host=pg user=loom password=*** dbname=loom"),
+            ("postgresql://host/db", "postgresql://host/db"),
+            ("postgresql://loom@host/db", "postgresql://loom@host/db"),
+            ("sqlite:///data/loom.db", "sqlite:///data/loom.db")):
+        assert redact_dsn(dsn) == want, dsn
+        assert not any(s in redact_dsn(dsn) for s in ("pw", "p@ss", "w0rd", "e@cret", "=x", "pa/ss"))
     import inspect
     import loom.retrieval_eval as re_
     assert "redact_dsn(args.db" in inspect.getsource(re_.main)

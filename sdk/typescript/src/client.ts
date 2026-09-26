@@ -108,8 +108,10 @@ export class Loom {
   constructor(baseUrl: string, opts: LoomOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.namespace = opts.namespace ?? "default";
-    this.apiKey = opts.apiKey;
-    this.llmKey = opts.llmKey;
+    // a key read from a file or a k8s Secret often ends in a newline; the
+    // engine compares hashes of the exact bytes, so strip it (as the Python SDK does)
+    this.apiKey = opts.apiKey?.trim() || undefined;
+    this.llmKey = opts.llmKey?.trim() || undefined;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.fetchImpl = opts.fetch ?? fetch;
   }

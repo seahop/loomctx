@@ -135,7 +135,7 @@ def load_direct(db: str | None, lines: Iterable[str], size: int) -> dict[str, in
     from .store.factory import store_from_env, store_from_url
 
     store = store_from_url(db) if db else store_from_env()
-    totals = {"recorded": 0, "accepted": 0, "skipped": 0}
+    totals = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
     try:
         for batch in _batches(lines, size):
             counts = handle_batch(store, [b.encode() for b in batch])
@@ -146,7 +146,18 @@ def load_direct(db: str | None, lines: Iterable[str], size: int) -> dict[str, in
     return totals
 
 
-def main() -> None:
+def fail_on_refusals(totals: dict, noun: str = "envelopes", remote: bool = True) -> None:
+    """Call after printing a load's totals: any refused envelope makes the
+    loader exit non-zero. A scheduled load must fail visibly, not "succeed"
+    with a hole in it — 193k of 474k refused on GKE by a mis-scoped key went
+    unnoticed until the log was read (D-063, S-36)."""
+    rejected = int(totals.get("rejected", 0) or 0)
+    if rejected:
+        by = "the engine" if remote else "the store"
+        raise SystemExit(f"{rejected} {noun} were refused by {by} (see the lines above)")
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="loom.ingest", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="NDJSON files, or - for stdin")
@@ -157,13 +168,14 @@ def main() -> None:
                                      "LOOM_SHARDS and LOOM_BLOB_*")
     parser.add_argument("--key", default=os.environ.get("LOOM_API_KEY"), type=str.strip, help="API key (or $LOOM_API_KEY)")
     parser.add_argument("--batch", type=int, default=500)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.url and args.db:
         parser.error("give --url or --db, not both")
     lines = _lines(args.paths)
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
     print(json.dumps(totals))
+    fail_on_refusals(totals, remote=bool(args.url))
 
 
 if __name__ == "__main__":
