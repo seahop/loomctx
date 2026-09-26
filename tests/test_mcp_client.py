@@ -121,3 +121,24 @@ def test_tool_errors_are_reported_not_fatal(seeded_db):
         return True
 
     assert asyncio.run(_session(seeded_db, run))
+
+
+def test_find_path_over_stdio(seeded_db):
+    """find_path publishes its start as `from` (a Python keyword, so the
+    parameter is `from_` with an alias). The SDK calls the tool with its
+    arguments keyed by alias; before the fix every real tools/call failed
+    with an opaque TypeError."""
+    async def run(session):
+        tools = {t.name: t for t in (await session.list_tools()).tools}
+        assert "from" in tools["find_path"].input_schema["properties"]
+        res = await session.call_tool("find_path", {
+            "from": "alert:AL-2291", "to": "domain:corp.local",
+            "via": ["triggered_on", "member_of"], "depth": 2, "namespace": "netsec"})
+        assert not res.is_error, res.content
+        view = _payload(res)
+        assert view["from"] == {"type": "alert", "key": "AL-2291"}
+        assert view["paths"] and "host:web-01" in view["paths"][0]["text"]
+        assert all(view["paths"][0]["cites"])
+        return True
+
+    assert asyncio.run(_session(seeded_db, run))

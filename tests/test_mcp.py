@@ -61,6 +61,22 @@ def test_find_path_connects_user_to_domain(store):
     assert view2["paths"]
 
 
+def test_find_path_through_the_tool_manager(store):
+    """The SDK dumps a tool's arguments keyed by alias, so find_path is
+    invoked with from=... — a real tools/call must reach it (it raised an
+    opaque TypeError on every call before the alias was mapped back)."""
+    async def call(args):
+        return await mcp_server.mcp._tool_manager.call_tool(
+            "find_path", args, context=None, convert_result=True)
+
+    res = asyncio.run(call({"from": "user:jdoe", "to": "domain:corp.local",
+                            "via": ["logged_in_by", "member_of"], "depth": 2}))
+    assert not res.is_error, res.content
+    view = res.structured_content
+    assert view["from"] == {"type": "user", "key": "jdoe"} and view["paths"]
+    assert view["paths"][0]["text"].startswith("user:jdoe")
+
+
 def test_find_entity_returns_handles(store):
     matches = mcp_server.find_entity("web-01")
     assert matches[0]["handle"] == "host:web-01"
@@ -497,13 +513,16 @@ def test_every_tool_publishes_an_output_schema_title_and_annotations(store):
 def test_ask_scope_reads_a_list_sent_as_text(store):
     """D-064 smoke run: qwen3-coder sent expand_predicates="['runs_software']"
     and the schema refused it twice. Through the MCP layer (the SDK
-    validates arguments), list text — JSON, Python-style, or comma
-    separated — is the list it spells."""
+    validates arguments), bracketed list text — JSON, Python-style, or
+    unquoted — is the list it spells; a bare string is one item."""
     from loom.mcp_server import _listed
     assert _listed("['runs_software', 'affects']") == ["runs_software", "affects"]
     assert _listed('["member_of"]') == ["member_of"]
-    assert _listed("member_of, logged_in_by") == ["member_of", "logged_in_by"]
+    assert _listed("[member_of, logged_in_by]") == ["member_of", "logged_in_by"]
     assert _listed(None) == [] and _listed(["a"]) == ["a"] and _listed("[]") == []
+    # a bare string is never comma-split: a key may hold commas (an LDAP DN)
+    assert _listed("user:CN=Bob,OU=Staff,DC=corp") == ["user:CN=Bob,OU=Staff,DC=corp"]
+    assert _listed("member_of") == ["member_of"] and _listed("  ") == []
 
     async def call(args):
         return await mcp_server.mcp._tool_manager.call_tool("ask_scope", args, context=None, convert_result=True)
