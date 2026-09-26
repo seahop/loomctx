@@ -40,6 +40,12 @@ python -m loom.connectors.nmap import report.xml --namespace netsec             
 python -m loom.connectors.nmap import report.xml --namespace netsec --url http://loom:8000 --key loomk_...
 python -m loom.connectors.nmap emit report.xml --namespace netsec > envelopes.jsonl
 python -m loom.connectors.nmap schema --namespace netsec [--as-of 2026-09-26T15:00:00Z]
+
+# OSV / GHSA advisories (an OSV-schema JSON file, or a directory of them)
+python -m loom.connectors.osv import advisory.json --namespace netsec         # or a directory of *.json
+python -m loom.connectors.osv import ./osv-db --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.osv emit advisory.json --namespace netsec > envelopes.jsonl
+python -m loom.connectors.osv schema --namespace netsec
 ```
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
@@ -562,14 +568,86 @@ port, a changed version, a new OS guess) as history, not duplicates. A host
 that cannot be parsed is counted `host_invalid` and skipped, not the whole
 report; source label `nmap`.
 
+## OSV / GHSA advisories → Loom
+
+`loom.connectors.osv` parses records in the public **OSV schema**
+(<https://ossf.github.io/osv-schema/>) — the format osv.dev, the GitHub
+Advisory Database (`GHSA-…`), the PyPI Advisory Database (`PYSEC-…`), the Go
+vuln DB (`GO-…`), npm and others all publish. It reads a **file or a
+directory of files** (and stdin, an osv.dev `{"vulns": […]}` query response,
+or a batch `{"results": […]}`); it **fetches nothing and talks to no
+service** — a parser, exactly like the STIX / OCSF / vulns connectors. It
+extends the vuln picture beyond NVD/KEV/EPSS, into the CVE picture the
+package ecosystems keep.
+
+### The fusion is by CVE id, not by product
+
+An OSV record has its own `id` (`GHSA-…`, `PYSEC-…`, `GO-…`, `MAL-…`) and an
+`aliases` list that usually contains the `CVE-…` id. When a CVE alias is
+present the advisory is keyed to the **same `cve:<id>` node** the vulns
+connector, the OCSF importer and a STIX `vulnerability` already write to — so
+OSV **corroborates or conflicts with NVD/KEV on one entity** (D-035), not a
+duplicate node — and the OSV id and every alias ride in `attrs`. With no CVE
+alias (a malware advisory, a reserved GHSA) the record is keyed by its own id
+on an `advisory:<OSV-id>` node.
+
+| OSV | Loom |
+| --- | --- |
+| the first `CVE-…` in `aliases` | the subject `cve:<CVE-…>` (the shared node); `attrs.osv_id` + `attrs.aliases` keep the OSV/GHSA id and every alias |
+| no CVE alias | the subject `advisory:<OSV-id>` |
+| `severity[]` CVSS vector | `cvss_score` (a float) **computed from the vector** + `has_severity` (band), `source` = `ghsa` (a `GHSA-…` id) or `osv` — so it sits beside NVD's `cvss_score` and can disagree (D-035). CVSS **v3.0 / v3.1 and v2.0** vectors are scored (temporal/environmental metrics ignored); a **v4.0-only** vector keeps its string in `attrs` (v4 base scoring, which needs lookup tables, is not implemented) and `has_severity` falls back to the record's `database_specific.severity` band |
+| `summary` | `summary` on the subject (trimmed), **and** the advisory as a **document** (`summary` + `details`) that every claim cites (D-039), so its own words rank as excerpts |
+| `published` / `modified` | `valid_from` / `observed_at` (the assertion time of the version being imported) |
+| `affected[].package` `{ecosystem, name}` | `affects → package:<ecosystem>:<name>` — see the seam below; version ranges (`ranges[]`, `versions[]`, `purl`) ride in `attrs`, merged across the record's `affected[]` entries for one package |
+
+### The package-key seam (left for D-042)
+
+OSV keys the affected software by **ecosystem + package name**
+(`PyPI:django`, `npm:eslint-scope`, `Maven:org.apache.logging.log4j:log4j-core`,
+`Go:…`) — a `purl`-shaped namespace, **not** a CPE. The connector emits an
+`affects` edge to a new, non-strict `package` entity type keyed exactly that
+way, and deliberately does **not** try to fold a `package` onto NVD's CPE
+`product` node (`vendor:product`). Vendor/name reconciliation across those two
+namespaces is **entity-resolution's job** (D-042), the same seam KEV's
+freehand names and nmap's service-DB vendors show; forcing it here would be
+wrong. So on one CVE an OSV `affects → package:PyPI:django` and an NVD
+`affects → product:djangoproject:django` sit side by side as two honest,
+un-reconciled edges — surfaced, not hidden. (`affects` is registered for
+**both** `product` and `package` object types, because registration overrides
+object types by name; see below.)
+
+### Severity conflict with NVD, cited
+
+Because a CVE-aliased advisory lands on the existing `cve:` node, an OSV/GHSA
+CVSS score becomes a **cross-source conflict** next to NVD's whenever they
+differ: a pack or `ask` on that CVE shows *"cvss_score: ghsa says '9.1', …
+nvd:nvd@nist.gov says '7.5'"*, each side cited to its observation, exactly as
+the NVD-vs-CNA-vs-CISA disagreement does (D-035) — no new scorer, the ordinary
+walk/conflict machinery.
+
+### Provenance & time
+
+`observed_at` is the record's `modified` stamp and every event id embeds it,
+so re-importing a file is a no-op and a **revised** record (a later `modified`)
+records a new observation — history, not overwrite. One advisory document is
+emitted first and every claim cites it (`provenance.artifact_event_id`, D-039).
+Source label `ghsa` / `osv` (`--source` overrides); a malformed record is
+counted `invalid` and skipped, not the end of a directory of thousands; the
+loader fails on refusals (D-063).
+
 ## Registering the names in the schema registry
 
 Every importer registers a non-strict schema for the namespace on
 `import` (`--no-schema` skips it); `schema` prints it. The CVE predicate
-names deliberately coincide across the vulns connector, the OCSF importer
-and a STIX `vulnerability` (`cvss_score`, `has_severity`, `epss_score`,
-`summary`, `affects`), so one CVE's record reads as one record whatever
-produced it. The nmap connector's `runs_software` reuses that same
+names deliberately coincide across the vulns connector, the OCSF importer,
+a STIX `vulnerability` and the OSV/GHSA connector (`cvss_score`,
+`has_severity`, `epss_score`, `summary`, `affects`), so one CVE's record
+reads as one record whatever produced it — an OSV advisory keyed by its CVE
+alias corroborates or conflicts with NVD on the same node (D-035). The
+OSV connector's `affects` is registered for both the NVD `product` and its
+own `package` object type (registration overrides object types by name, so
+the OSV registration carries the superset); its `package` and `advisory`
+entity types are its own. The nmap connector's `runs_software` reuses that same
 `product` object type and CPE `vendor:product` keying, so a scanned host's
 software meets NVD/KEV at one node. The LDAP connector registers its own
 `ad` vocabulary (`member_of`, `has_ace`, `trusts`, …) — a separate domain,
