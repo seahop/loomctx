@@ -12,7 +12,7 @@ tag is v0.1.0).
 
 - `POST /v1/path`, MCP `find_path`, SDK `path()` return cited, time-scoped reachability edge sequences between two entities along named predicates — the connecting chain directly, instead of an agent reassembling a scope pack. Contract `PathRequest`/`PathPack`/`PathEdge` (additive); a bounded shortest-first BFS reusing the scope walk, honest about hub limits via `truncated`
 
-### AD reachability capability benchmark (D-066)
+### AD reachability capability benchmark (D-066) — experimental; numbers withdrawn
 
 - `python -m loom.connectors.ad_gen` — a deterministic synthetic directory
   generator (LDIF the connector parses; planted 2/3/4-hop reachability
@@ -21,7 +21,7 @@ tag is v0.1.0).
   `docs/ad-eval.md`. Medium run: 100% recall and decoy-exclusion, ~2.5% of
   the store walked per chain
 
-### Raw LDAP / Active Directory connector (D-065)
+### Raw LDAP / Active Directory connector (D-065) — experimental
 
 - `python -m loom.connectors.ldap import export.ldif --namespace ad`:
   decodes an LDIF directory export into cited, time-stamped claims —

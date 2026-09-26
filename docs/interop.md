@@ -306,6 +306,16 @@ Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
 
 ## Raw LDAP / LDIF (Active Directory) → Loom
 
+> **Experimental (2026-09-26).** A review found decoding gaps that must be
+> fixed before this is used on real exports: mapped generic rights are not
+> recognised (an export that stores GenericWrite as `0x20028` reads as no
+> right); some ACL claim event ids collide and one is dropped; inherit-only
+> (`INHERIT_ONLY`) ACEs are wrongly attributed to the object itself; an
+> inbound `trustDirection` is emitted in the wrong direction; and large
+> imports scan the DN index per ACE (slow). Treat output as illustrative
+> until these land. The reachability benchmark's numbers are withdrawn
+> ([ad-eval.md](ad-eval.md)).
+
 `loom.connectors.ldap` decodes a raw directory export — object by object,
 deterministically — into typed, cited claims in an `ad` namespace, so an
 agent can ask **object-level reachability** questions over the ordinary

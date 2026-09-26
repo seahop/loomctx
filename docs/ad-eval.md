@@ -8,6 +8,27 @@ principal to a high-value target, threading **membership → ACL → (cross-doma
 trust** — does Loom's ordinary scope walk **surface the full chain with every
 edge cited**, and how much of the store does it have to sort through to do it?
 
+>
+> **Status (2026-09-26): experimental; these numbers are withdrawn pending a
+> blind re-measurement.** A review found the benchmark as run is not a fair
+> test and the connector has decoding gaps (below). Do not quote the tables
+> until this note is removed.
+>
+> - **Recall is not blind.** The walk was given the planted chain's own
+>   `expand` predicates and its exact depth (`ad_eval.build_chain_packs`), so
+>   the 100% recall overstates what a blind walk (a fixed generic predicate
+>   set, the standard depth cap) would find.
+> - **Decoy-exclusion and edge-precision are tautological as computed** and
+>   are **withdrawn**: a trust edge always carries its `transitive` /
+>   `sid_filtering` attrs, so "disqualifier cited" was always true, a walk
+>   that found nothing also scored "excluded", and precision could only drop
+>   if a decoy leaked, which it could not.
+> - The **~2.5% / <1% "gathered"** figure reflects the generator's uniform
+>   density (no large hub groups), not hub pressure.
+> - The **connector is experimental** — see its known decoding limitations in
+>   [interop.md](interop.md#raw-ldap--ldif-active-directory--loom).
+>
+
 It is **synthetic and object-level only**. `loom.connectors.ad_gen`
 generates a directory, plants known chains, and buries them in dense benign
 noise; `loom.ad_eval` loads it through the connector and scores retrieval

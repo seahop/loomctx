@@ -2262,6 +2262,14 @@ unchanged; the agent scorecard is re-run on this build.
 
 ## D-065 · A raw-LDAP / LDIF connector for object-level AD reachability (2026-09-25)
 
+> **Experimental — review 2026-09-26.** Decoding gaps to fix before real
+> use: mapped generic rights (e.g. GenericWrite stored as `0x20028`) are not
+> recognised; some `has_ace` event ids collide and drop; inherit-only ACEs
+> are attributed to the object itself; an inbound trust is emitted reversed;
+> large imports scan the DN index per ACE. Kept on `main` as experimental;
+> the fixes were deferred out of this session. The DSN-redaction and
+> exit-code fixes (af65b92) did land.
+
 `loom.connectors.ldap` decodes a raw Active Directory export (canonical
 input LDIF, RFC 2849) into typed, cited, time-stamped claims in an `ad`
 namespace, so an agent can ask "what rights, trust and membership path
@@ -2300,6 +2308,13 @@ No core, contract or store changes. The connector reads a file and
 performs no directory operations.
 
 ## D-066 · An object-level AD reachability capability benchmark (2026-09-26)
+
+> **Numbers withdrawn — review 2026-09-26.** The published 100% recall is
+> not a blind result (the walk was handed the planted chain's predicates and
+> depth), and the decoy-exclusion and edge-precision metrics are tautological
+> as computed and are withdrawn; the "gathered" fraction reflects the
+> generator's uniform density, not hub pressure. A blind re-measurement is
+> deferred. See the banner in [ad-eval.md](ad-eval.md).
 
 `loom.connectors.ad_gen` + `loom.ad_eval` are the AD analogue of the KEV
 retrieval benchmark (D-053/D-061). A deterministic synthetic directory
