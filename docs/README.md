@@ -27,6 +27,11 @@ Read in this order depending on why you're here.
   store-derived questions (lease at T, conflicts, multi-hop, abstention,
   numeric, ordering), rule-scored, with the command that reproduces the
   talk table.
+- **[ad-eval.md](ad-eval.md)** — the AD reachability capability benchmark:
+  a synthetic directory generator (`loom.connectors.ad_gen`) plants known
+  membership → ACL → trust chains and decoy dead-ends in dense noise, and
+  `loom.ad_eval` scores whether Loom's scope walk surfaces the full cited
+  chain (scripted reader, no LLM). Synthetic, object-level only.
 - **[interop.md](interop.md)** — standards at the edges: STIX 2.1 and OCSF
   connectors (import and export, mapping tables, what is not mapped,
   `examples/stix_import.py`), and the raw LDAP / LDIF connector for

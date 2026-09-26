@@ -428,6 +428,20 @@ supersession shows an ACL that was tightened between two exports, and each
 step of the answer points at the directory fact it came from — auditable,
 not a black-box path.
 
+### Measuring AD reachability
+
+Whether the scope walk actually surfaces the **full cited chain** — and how
+much of a realistically-sized directory it sorts through to do it — is a
+benchmark of its own: [ad-eval.md](ad-eval.md). `loom.connectors.ad_gen`
+generates a synthetic directory at scale, plants known 2/3/4-hop chains
+(and decoys that dead-end at a non-transitive / SID-filtered trust or a
+disabled account) and buries them in benign noise; `loom.ad_eval` loads it
+through this connector and scores retrieval with a scripted reader (no LLM).
+On a `medium` directory (4,429 objects, 31k observations) Loom recovers and
+cites 100% of the planted chains while the walk pulls ~2.5% of the store's
+entities. It is synthetic and object-level only, and measures retrieval, not
+attack-path ranking.
+
 ## Registering the names in the schema registry
 
 Every importer registers a non-strict schema for the namespace on

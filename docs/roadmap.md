@@ -255,6 +255,15 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   transitive effective-admin, no path ranking; nesting is the walk's job).
   Object-level only: sessions / local-admin need host collection. GitHub
   issues/PRs is still the obvious non-security third one.
+- ✅ AD reachability capability benchmark (2026-09-26, D-066): a synthetic
+  directory generator (`loom.connectors.ad_gen`, deterministic by seed,
+  small/medium/large) plants known 2/3/4-hop membership → ACL → trust chains
+  and decoy dead-ends (non-transitive / SID-filtered trust, disabled account)
+  in dense benign noise; `loom.ad_eval` scores whether the scope walk
+  surfaces the full **cited** chain (scripted reader, no LLM). Medium run:
+  100% path-recall + decoy-exclusion, ~2.5% of the store gathered per chain
+  ([docs/ad-eval.md](ad-eval.md)). AD analogue of the KEV retrieval
+  benchmark; no core/contract/store change.
 
 ## Deployment & CI (2026-09-03)
 
