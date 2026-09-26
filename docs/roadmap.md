@@ -264,6 +264,12 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   100% path-recall + decoy-exclusion, ~2.5% of the store gathered per chain
   ([docs/ad-eval.md](ad-eval.md)). AD analogue of the KEV retrieval
   benchmark; no core/contract/store change.
+- ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
+  `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
+  connecting two entities along named predicates — the reachability chain
+  directly, not reassembled from a pack. Additive contract
+  (`PathRequest`/`PathPack`); a bounded shortest-first BFS reusing the scope
+  walk, honest about hub limits via `truncated`.
 
 ## Deployment & CI (2026-09-03)
 

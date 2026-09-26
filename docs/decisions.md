@@ -2322,6 +2322,38 @@ walking outward from the start, not by scanning. The scripted number is
 retrieval alone; a live reader assembling it from the pack is an optional
 `--live` smoke. No core, contract or store change.
 
+## D-067 · A first-class `path` answer type (2026-09-26)
+
+Reachability ("what connects A to B?") was answered by an agent reassembling
+a scope pack. The `path` type returns the connecting edge sequence(s)
+directly: `PathRequest` / `PathPack` (with `Path` = ordered `list[PathEdge]`,
+each edge `subject`/`predicate`/`object`/`cite`/`valid_from`/`valid_to`/
+`source`), `POST /v1/path`, MCP `find_path`, and `path()` in the Python, TS
+and Go SDKs. Additive: no existing shape changed; `ScopeTruncation.reason`
+gained `max_paths` and `depth`. Contract artifacts (`schemas.json`,
+`openapi.json`, the TS types) regenerated and drift-clean; the Go gateway
+forwards ingest only, so reads reach the engine unchanged.
+
+`context.find_paths` is a bounded, shortest-first BFS over the **same**
+gather/walk machinery `build_pack`/`resolve_scope` use: `via` edges followed
+both directions (an `affects` edge stored cve→product is walked
+product→cve), simple paths only, capped by `depth` (≤ the scope cap 3, a
+longer request clamped and noted), `max_paths`, the token `budget` (charged
+per edge via `item_tokens`, like a pack) and `LOOM_MAX_SCOPE_*`. Endpoints
+are alias-resolved (D-058); `as_of`/`valid_at` filter every edge and a
+superseded edge (D-050) never appears; a path through a type-gated entity is
+dropped. Cuts are reported in `truncated`, advice in `notes` (D-064).
+
+Honest and domain-agnostic: it enumerates paths that EXIST along the named
+predicates — the KEV `host → product → cve` chain and the AD
+`user → group → (ACE) → domain` chain alike — and does no ranking, scoring
+or exploitability weighting. It explores the gathered neighborhood, so a
+"no path" with a `gather_limit` truncation means none within a hub's newest
+gathered edges, not none at all; `ask_scope`'s topic completion (D-064)
+reaches past a hub, `find_path` does not. Verified live on the vulns corpus
+(cited `host → product → cve` chains, with the hub cap honestly reported)
+and the AD fixture (`user → group → ACE → trust → domain`).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

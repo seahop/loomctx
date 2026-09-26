@@ -460,7 +460,13 @@ It stays **honest and domain-agnostic**: it enumerates paths that EXIST in
 the data along the named predicates (the KEV `host → product → cve` chain
 and this AD `user → group → (ACE) → domain` chain alike) — it does **not**
 rank, score, or weight edges by exploitability, and emits no such guidance.
-The reachability benchmark below measures `ask_scope`; `find_path` walks the
+Because `find_path` explores the gathered neighborhood, a "no path" that
+comes with a `gather_limit` truncation means *no path within the newest
+edges gathered at a hub*, not "none exists": a busy hub (a product with
+thousands of `affects` edges, a group with thousands of members) can put a
+specific far node beyond the per-entity window. `ask_scope` reaches those
+via the attribute the question names (D-064 topic completion); `find_path`
+does not, so widen there or read the truncation. The reachability benchmark below measures `ask_scope`; `find_path` walks the
 identical edges.
 
 ### Measuring AD reachability

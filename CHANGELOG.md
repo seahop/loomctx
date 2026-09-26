@@ -8,6 +8,10 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### A `path` answer type (D-067)
+
+- `POST /v1/path`, MCP `find_path`, SDK `path()` return cited, time-scoped reachability edge sequences between two entities along named predicates — the connecting chain directly, instead of an agent reassembling a scope pack. Contract `PathRequest`/`PathPack`/`PathEdge` (additive); a bounded shortest-first BFS reusing the scope walk, honest about hub limits via `truncated`
+
 ### AD reachability capability benchmark (D-066)
 
 - `python -m loom.connectors.ad_gen` — a deterministic synthetic directory
