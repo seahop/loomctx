@@ -47,13 +47,19 @@ tag is v0.1.0).
 - The nightly vulns refresh works with its documented, source-pinned key:
   connectors register only what the registry lacks; source grants take
   `:*` families (engine and gateway) — the key is
-  `nvd,nvd:*,cisa-kev,first-epss,cisa-adp`; a loader exits non-zero on any
-  refused envelope and only then keeps the EPSS ledger unadvanced
+  `nvd,nvd:*,cisa-kev,first-epss,cisa-adp`; every loader (`loom.ingest`,
+  `vulns`, `stix`, `ocsf`, `ldap`) prints its totals and exits non-zero on
+  any refused envelope, direct or via the engine, and the EPSS ledger
+  advances only after a load that landed whole
 - Enrichment worker pools: `loom.enrich run --jobs` / `LOOM_ENRICH_JOBS`
   (`vectors`, `llm`, named jobs); a vector backlog drains without the
-  interval sleep
+  interval sleep — during a drain only the vector jobs run, while
+  extraction, resolution, adjudication, aliases and dossiers keep the
+  interval's pacing; a failing job backs off (one interval, doubling,
+  10-minute cap)
 - Keys mount at `/etc/loom-keys` in every shipped manifest (the old path
-  hid the gateway's schema); keys are stripped of a `--from-file` newline;
+  hid the gateway's schema); keys are stripped of a `--from-file` newline
+  (loaders and the Python, TypeScript and Go SDKs);
   `loom.loadgen --key`
 - `retrieval_eval` redacts the store DSN's password; the MCP server closes
   its store on exit

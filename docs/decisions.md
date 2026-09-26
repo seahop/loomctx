@@ -2218,6 +2218,14 @@ checks failed; retrieval on the cluster's corpus: Loom 69 / 83 / 83 /
 92 % against vector 74 / 74 / 74 / 80 % at 400 / 800 / 1,600 / 3,200.
 Findings: `docs/hardening.md` S-35…S-45.
 
+**Review 2026-09-26.** As first shipped, skipping the sleep re-ran every
+job on each drain iteration, and only `vulns` exited non-zero on refusals.
+Now a `Pacer` restricts drain ticks to the vector jobs until `interval` has
+elapsed since the last full tick and backs off a failed job (one interval,
+doubling, 10-minute cap); `ingest.fail_on_refusals` makes every loader
+(`loom.ingest`, `vulns`, `stix`, `ocsf`, `ldap`) fail on a refusal, and
+`load_direct` counts store-side refusals.
+
 ## D-064 · Scope asks the agents actually make (2026-09-25)
 
 The 2026-09-24 agent scorecard's transcripts, not its pass counts, set
