@@ -784,6 +784,101 @@ def test_adjudication_declines_persist_across_workers(tmp_path):
     store.close()
 
 
+# ---------------------------------------------------- D-069: cross-vendor same product #
+
+def _nginx_store(tmp_path):
+    """A scanned host running nginx keyed by nmap's CPE vendor, while NVD/KEV
+    key the same product under two other vendors — the product node that
+    never fused (D-068 found this)."""
+    store = SqliteStore(tmp_path / "nginx.db")
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    def prod(k): return EntityRef(type="product", key=k)
+    def cve(k): return EntityRef(type="cve", key=k)
+    claims = [
+        # nmap: the scanned host runs nginx under igor_sysoev:nginx
+        ClaimIn(namespace="ns", subject=EntityRef(type="host", key="scan-01"),
+                predicate="runs_software", object=prod("igor_sysoev:nginx"), source="nmap", observed_at=t),
+        # NVD: cve:X affects nginx:nginx ; a KEV signal on the same CVE
+        ClaimIn(namespace="ns", subject=cve("CVE-2026-1"), predicate="affects",
+                object=prod("nginx:nginx"), source="nvd", observed_at=t),
+        ClaimIn(namespace="ns", subject=cve("CVE-2026-1"), predicate="exploited_in_wild",
+                object=True, source="cisa-kev", observed_at=t),
+        # NVD: a second CVE affects the CPE edition variant f5:nginx_open_source
+        ClaimIn(namespace="ns", subject=cve("CVE-2026-2"), predicate="affects",
+                object=prod("f5:nginx_open_source"), source="nvd", observed_at=t),
+        # a genuinely different Apache product sharing a vendor — must NOT merge
+        ClaimIn(namespace="ns", subject=cve("CVE-2026-3"), predicate="affects",
+                object=prod("apache:http_server"), source="nvd", observed_at=t),
+        ClaimIn(namespace="ns", subject=cve("CVE-2026-4"), predicate="affects",
+                object=prod("apache:tomcat"), source="nvd", observed_at=t),
+    ]
+    store.record_claims(claims)
+    return store
+
+
+def test_cross_vendor_same_product_is_proposed_but_siblings_are_not(tmp_path):
+    """D-069: the three nginx variants become alias candidates (exact token
+    across vendors, and the nginx_open_source CPE edition variant); two
+    different Apache products that only share a vendor never do."""
+    from loom.enrich import alias_candidates
+    store = _nginx_store(tmp_path)
+    pairs = {tuple(sorted((a.key, b.key))) for a, b in alias_candidates(store, "ns", "product")}
+    assert ("igor_sysoev:nginx", "nginx:nginx") in pairs             # same token, different vendor
+    assert ("f5:nginx_open_source", "igor_sysoev:nginx") in pairs    # CPE edition variant
+    assert ("f5:nginx_open_source", "nginx:nginx") in pairs
+    # same vendor, different products: never proposed by the cross-vendor rule
+    assert not any("tomcat" in a or "tomcat" in b for a, b in pairs)
+    assert ("apache:http_server", "apache:tomcat") not in pairs
+    store.close()
+
+
+def test_cross_vendor_alias_merge_fuses_host_to_cve(tmp_path):
+    """D-069 fusion: with a 'same product' verdict the three nginx nodes
+    collapse into one, their affects edges are preserved, and a path from the
+    scanned host to the KEV CVE — absent while the product nodes were split —
+    now exists (find_path, D-067)."""
+    from loom import enrich
+    from loom.enrich import adjudicate_aliases
+    from loom.context import find_paths
+    from loom.contracts import PathRequest
+
+    store = _nginx_store(tmp_path)
+
+    def path_exists():
+        req = PathRequest(namespace="ns", **{"from": EntityRef(type="host", key="scan-01")},
+                          to=EntityRef(type="cve", key="CVE-2026-1"),
+                          via=["runs_software", "affects"], depth=2)
+        return len(find_paths(store, req).paths)
+
+    assert path_exists() == 0                                        # split product nodes: no path
+
+    class Judge:
+        model = "fake"
+        def complete(self, system, user, max_tokens=200):
+            # any two product records offered here are "the same product"
+            return json.dumps({"same": True, "confidence": 0.95, "reason": "same nginx"})
+
+    enrich._declined_cache.clear()
+    counts = adjudicate_aliases(store, Judge(), "ns", ("product",), limit=50)
+    assert counts["candidates"] == 3 and counts["merged"] == 2 and counts["declined"] == 0
+
+    # all three nginx keys now resolve to one canonical entity
+    refs = [EntityRef(type="product", key=k) for k in
+            ("igor_sysoev:nginx", "nginx:nginx", "f5:nginx_open_source")]
+    resolved = store.resolve_refs("ns", refs)
+    ids = {store.get_entity("ns", resolved[(r.type, r.key)]).id for r in refs}
+    assert len(ids) == 1
+
+    # both affects edges are preserved on the fused node
+    canonical = resolved[("product", "nginx:nginx")]
+    affects = {o.subject.key for o in store.observations_for("ns", canonical, limit=100)
+               if o.predicate == "affects"}
+    assert {"CVE-2026-1", "CVE-2026-2"} <= affects
+
+    assert path_exists() >= 1                                        # the merge reconnects host -> cve
+    store.close()
+
+
 def test_extraction_adopts_registered_types_and_strict_drops_the_rest(tmp_path):
     """D-044: the extractor said ip_address:10.0.4.7; the registry knows ip
     and ip:10.0.4.7 exists, so the claim lands on the structured key. A

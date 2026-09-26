@@ -1057,10 +1057,34 @@ _VERSIONISH = re.compile(r"^(v?\d|server_?\d|\d{4}|[a-z]{1,2}\d)")
 ALIAS_SYSTEM = ADJUDICATE_SYSTEM + (
     " Keys follow vendor:product (CPE 2.3 style). A freehand or differently "
     "vendored key for the SAME product line (linux:kernel and "
-    "linux:linux_kernel; haxx:curl and curl:curl) is the same thing. A "
+    "linux:linux_kernel; haxx:curl and curl:curl; igor_sysoev:nginx, "
+    "nginx:nginx and f5:nginx_open_source) is the same thing. A "
     "different edition, version line or sibling product (ios vs ios_xe, "
     "windows vs windows_10, confluence vs confluence_data_center) is NOT."
 )
+
+
+def _cpe_variant(a: str, b: str) -> str | None:
+    """The shared product stem of two CPE product tokens, or None. Equal
+    tokens share themselves; otherwise the shorter is the stem when the
+    longer is it plus a non-version `_suffix` (nginx / nginx_open_source —
+    same product, different packaging), which excludes a version line
+    (windows / windows_10) the same way R3 does."""
+    if a == b:
+        return a
+    lo, hi = (a, b) if len(a) < len(b) else (b, a)
+    if hi.startswith(lo + "_") and not _VERSIONISH.match(hi[len(lo) + 1:]):
+        return lo
+    return None
+
+
+def _specific_stem(stem: str, by_vendor: dict[str, list[str]]) -> bool:
+    """Whether a product token is distinctive enough to key a cross-vendor
+    candidate on: long enough to be unlikely to collide by accident, or
+    itself used as a vendor somewhere (nginx:nginx, curl:curl) — the
+    strongest signal a token is a canonical product name. Generic short
+    tokens (agent, server-less 'desktop', 'calendar') are left alone."""
+    return len(stem) >= 6 or stem in by_vendor
 
 
 # High-water mark of entity creation per (namespace, type) after a
@@ -1090,12 +1114,15 @@ def alias_candidates(store: GraphStore, namespace: str, entity_type: str,
                      since: datetime | None = None) -> list[tuple[EntityRef, EntityRef]]:
     """(stray, candidate) pairs of vendor:product keys that look like the
     same product under a different key — same vendor with the vendor name
-    repeated in the product, the same product token under another vendor,
-    or a bare family name with exactly one longer key of its vendor. Only
-    pairs with a single plausible counterpart are offered: ambiguity is
-    left alone, never guessed. Measured on the KEV↔NVD join (D-042).
-    With `since`, only pairs where at least one key was created after it
-    are offered (the others were offered by an earlier pass)."""
+    repeated in the product (R1), the same product or a CPE edition variant
+    of it under a DIFFERENT vendor (R2, D-069), or a bare family name with
+    exactly one longer key of its vendor (R3). R1/R3 offer only an
+    unambiguous single counterpart; R2 proposes cross-vendor matches
+    broadly (a shared product token can be a coincidence) and leaves the
+    ruling to the adjudicator, which sees both records' facts. Measured on
+    the KEV↔NVD join (D-042). With `since`, only pairs where at least one
+    key was created after it are offered (the others were offered by an
+    earlier pass)."""
     if since is not None:
         new = _entities_since(store, namespace, since)
         if new is not None and not any(e.type == entity_type and e.key.count(":") == 1 for e in new):
@@ -1112,6 +1139,7 @@ def alias_candidates(store: GraphStore, namespace: str, entity_type: str,
         v, _, p = k.partition(":")
         by_product.setdefault(p, []).append(k)
         by_vendor.setdefault(v, []).append(k)
+    tokens = list(by_product)
     pairs: list[tuple[EntityRef, EntityRef]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -1131,13 +1159,25 @@ def alias_candidates(store: GraphStore, namespace: str, entity_type: str,
             offer(k, f"{v}:{v}_{p}")
         if p.startswith(v + "_") and f"{v}:{p[len(v) + 1:]}" in have:
             offer(k, f"{v}:{p[len(v) + 1:]}")
-        # R2: same product token under exactly one other vendor — and the
-        # token is specific enough to mean something ("desktop", "agent",
-        # "calendar" collide across unrelated vendors), or one vendor IS
-        # the product (curl:curl ~ haxx:curl)
-        others = [o for o in by_product.get(p, []) if o != k]
-        if len(others) == 1 and (len(p) >= 6 or v == p or others[0].startswith(p + ":")):
-            offer(k, others[0])
+        # R2 (D-069): the same product keyed under a DIFFERENT CPE vendor.
+        # Two vendors' keys whose product tokens are the same
+        # (igor_sysoev:nginx ~ nginx:nginx) or a CPE edition variant — one
+        # token is the other plus a non-version `_suffix`
+        # (nginx ~ nginx_open_source) — are proposed when the shared stem is
+        # specific enough to name a product ("desktop", "agent", "calendar"
+        # collide across unrelated vendors, so a stem must be >= 6 chars or
+        # itself used as a vendor: nginx:nginx, curl:curl). Same-vendor pairs
+        # are R1/R3's job and are never proposed here, so apache:http_server
+        # never meets apache:tomcat. Broad on purpose (a shared token can be
+        # a coincidence): the adjudicator sees both records' facts and
+        # declines a false match at the confidence gate.
+        for p2 in tokens:
+            stem = _cpe_variant(p, p2)
+            if stem is None or not _specific_stem(stem, by_vendor):
+                continue
+            for o in by_product[p2]:
+                if o.partition(":")[0] != v:      # cross-vendor only
+                    offer(k, o)
         # R3: bare family name with exactly one longer key of the same
         # vendor, and the remainder is not a version or edition marker
         longer = [o for o in by_vendor.get(v, []) if o.startswith(k + "_")]
