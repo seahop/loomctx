@@ -8,6 +8,18 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### OSV / GHSA advisories + cross-vendor product resolution (D-069, D-070)
+
+- `python -m loom.connectors.osv import` parses OSV-schema advisories
+  (GHSA/PyPI/Go/npm) and fuses them to the shared `cve:` node by CVE alias,
+  so an OSV CVSS shows as a corroboration/conflict next to NVD's; affected
+  packages become `package:<ecosystem>:<name>` (not forced onto CPE)
+- Entity resolution now proposes cross-vendor same-product aliases
+  (nmap's `igor_sysoev:nginx` <-> NVD's `nginx:nginx` / `f5:nginx_open_source`)
+  for adjudication, so a scanned host reaches its KEV CVEs even when sources
+  disagree on the vendor; catch-all tokens (`multiple_products`, `multiple_*`)
+  are excluded
+
 ### Scan inventory: nmap connector (D-068)
 
 - `python -m loom.connectors.nmap import report.xml` parses an nmap `-oX`

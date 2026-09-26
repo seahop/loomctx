@@ -2417,6 +2417,54 @@ differ from NVD's (nginx: `igor_sysoev` vs `nginx` / `f5`), so those don't
 fuse until entity resolution reconciles them (D-042) — surfaced, not
 special-cased.
 
+## D-069 · Entity resolution: cross-vendor same-product aliases (2026-09-26)
+
+The nmap connector (D-068) surfaced a seam D-042 left open: different CPE
+vendors key one real product under different `product` entities that never
+fuse — nmap's `igor_sysoev:nginx`, NVD's `nginx:nginx`, F5's
+`nginx_open_source` — so KEV reachability missed a scanned host's CVEs
+purely because the product node did not merge.
+
+- **Candidate generation now proposes cross-vendor matches; the adjudicator
+  still rules.** Two `product` keys of *different* vendors are proposed when
+  their product tokens are equal, or one is the other plus a non-version
+  `_suffix` (a CPE edition variant, `nginx` vs `nginx_open_source`), and the
+  shared stem is specific (>= 6 chars, or itself used as a vendor). No
+  hard-coded synonym table — the adjudicator judges with both records' facts
+  and the 0.8 confidence gate decides; a wrong merge reverses via
+  unmerge->decline (D-060).
+- **Same-vendor pairs are never proposed by this rule** (R1/R3's job), so
+  `apache:http_server` and `apache:tomcat` are never offered.
+- **Catch-all tokens excluded regardless of length** (`multiple_products`,
+  the `multiple_*` family, `unknown`, `various`): a first draft proposed
+  `<vendor>:multiple_products` against every other such vendor on the real
+  corpus (624 candidates, placeholder-dominated); the guard brings it to 464
+  real cross-vendor pairs.
+- Tier-1/2 spelling and the KEV<->NVD rules R1/R3 are unchanged.
+
+**Live-corpus precision (real judge, 2026-09-26):** 200 of the 464 candidates asked (deepseek-chat-v3.1 judge on a copy of the real corpus): **12 merged, 188 declined (94% decline rate)** — the judge is conservative, and generic tokens it could have merged (`connect`, `server`) were declined. The target case merged (`nginx:nginx` ↔ `f5:nginx_open_source`, 1.00), as did `google:android`↔`android:android_os`, `mesa3d`↔`mesa_project`, Ubiquiti UniFi, DNN, October CMS. No cross-family false merge in the sample. **Known imprecision:** a few combined/bundle CPE product names (e.g. Trend Micro `apex_one_and_worry_free_business_security`, a cpanel bundle) were merged into a component on a shared CVE — same-vendor and reversible (unmerge→decline, D-060), not distinct-product errors, but a bundle node collapsing onto one member is imprecise and left as a known limitation.
+
+## D-070 · OSV / GHSA advisory connector (2026-09-26)
+
+`loom.connectors.osv` parses OSV-schema JSON (osv.dev / GHSA / PyPI / Go /
+npm; a file, a directory, stdin, or a query/batch response — it fetches
+nothing) into cited, timestamped claims in `netsec`. **Fusion is by CVE id,
+not product:** a record whose `aliases` carry a CVE is keyed to the shared
+`cve:` node NVD/KEV/OCSF/STIX already write to (OSV id + aliases in attrs),
+so an OSV/GHSA CVSS score corroborates or conflicts with NVD's on one entity
+(D-035); with no CVE alias it keys `advisory:<OSV-id>`. Per record:
+`cvss_score` from the `severity[]` CVSS v3/v2 vector (v4-only keeps the
+string, band from `database_specific.severity`) + `has_severity`, source
+`ghsa`/`osv`; the summary+details as a cited document (D-039);
+`affects -> package:<ecosystem>:<name>` (a new non-strict `package` type)
+with version ranges in attrs. The package key is OSV's `ecosystem:name`,
+**not** a CPE `product` — folding the two is entity resolution's job
+(D-042/D-069), surfaced not hidden. Content-addressed event ids embedding
+`modified` -> idempotent, a revision is history; the loader fails on
+refusals (D-063). Genuine osv.dev fixtures (Log4Shell, the eslint-scope npm
+compromise) + a fusion test asserting the cited cross-source CVSS conflict.
+Deferred: CVSS v4.0 base scoring and CWE emission.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
