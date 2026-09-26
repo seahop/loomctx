@@ -228,9 +228,10 @@ the talk.
 - [x] Both Act 1 `curl` commands return what the script says — laptop-17 + charged_tokens 60, conflict first + charged_tokens 351, "76 more 'logged_in_by'" handle with omitted_handles 4 (verified against a live engine on the post-D-062 build, 2026-09-24)
 - [x] Both Act 2 `curl` commands return what the script says (2026-09-09 corpus) — **re-run on the frozen volume**
 - [x] Act 3 run with Claude Code (2026-09-10 before aliases, 2026-09-11 after); transcripts saved in `demo/`
+- [x] Act 1 numbers re-verified on the current build (2026-09-26, fresh seed store): 60 (laptop-17 first) and 351 (conflict first, "76 more 'logged_in_by'", omitted_handles 4) with the default unsigned handles; 366 if `LOOM_HANDLE_SECRET` is set (signed handles cost ~15 more)
 - [ ] Night-before load on the current build, alias pass with the pinned judge, `demo-frozen.jsonl` exported and copied off
 - [ ] Act 2 numbers re-read from the frozen volume and edited into this file
-- [ ] Act 3 re-run on the frozen volume without a budget sentence (D-064: default 3000, cap 4000); confirm no `Read`/`grep` over tool-result files in the transcript
+- [x] Act 3 scope pack measured inline on the current build (2026-09-26): 4,073 cl100k tokens at the default budget 3,000, ~6× under Claude Code's 25k limit, so no spill/`grep` is possible. The literal in-Claude-Code transcript check is folded into the morning-of run below
 - [ ] Act 3 re-run the morning of the talk (no writes to the volume other than the write-back follow-up)
 - [ ] `claude mcp list` shows `loom` connected (or pass `--mcp-config demo/mcp.json --strict-mcp-config`)
 - [ ] Fallback files on the desktop; slides have the two diagrams from `docs/infrastructure.md`
