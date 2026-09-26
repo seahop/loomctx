@@ -264,6 +264,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   100% path-recall + decoy-exclusion, ~2.5% of the store gathered per chain
   ([docs/ad-eval.md](ad-eval.md)). AD analogue of the KEV retrieval
   benchmark; no core/contract/store change.
+- ✅ Scan inventory (2026-09-26, D-068): nmap `-oX` reports →
+  `runs_software`/`runs_service`/`runs_os` claims that fuse with the vuln
+  graph's `product` node, so a scanned host reaches its KEV CVEs via the
+  scope walk / `find_path`. Inventory only; genuine nmap fixtures + a blind
+  fusion test. (nmap-vs-NVD vendor-key mismatch left to D-042.)
 - ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
   `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
   connecting two entities along named predicates — the reachability chain

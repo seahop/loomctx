@@ -8,6 +8,16 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Scan inventory: nmap connector (D-068)
+
+- `python -m loom.connectors.nmap import report.xml` parses an nmap `-oX`
+  report (a file; no scanning) into `host` / `listens_on_port` /
+  `runs_service` / `runs_software` / `runs_os` claims. `runs_software`
+  keys products through the shared CPE parser, so a scanned host fuses
+  with the NVD/KEV `product ← affects ← cve` graph and reaches its
+  exploited-in-the-wild CVEs via `find_path`. Inventory only; genuine
+  nmap fixtures; blind fusion test
+
 ### A `path` answer type (D-067)
 
 - `POST /v1/path`, MCP `find_path`, SDK `path()` return cited, time-scoped reachability edge sequences between two entities along named predicates — the connecting chain directly, instead of an agent reassembling a scope pack. Contract `PathRequest`/`PathPack`/`PathEdge` (additive); a bounded shortest-first BFS reusing the scope walk, honest about hub limits via `truncated`

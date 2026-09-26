@@ -2394,6 +2394,29 @@ echoed; the unknown-`via` vocabulary comes only from in-scope rows; a
 with `total` = paths found; a bare string argument is no longer
 comma-split.
 
+## D-068 · nmap scan-inventory connector (2026-09-26)
+
+`loom.connectors.nmap` parses an operator's `nmap -oX` XML report (a file;
+the connector performs no scanning and no probing) into cited, timestamped
+inventory claims in `netsec`: a `host` keyed by hostname-else-IP (the seed
+convention), `listens_on_port` / `runs_service` per open port, and
+`runs_software → product:<vendor>:<product>` keyed through the shared
+`vulns.parse_cpe` (nmap's 2.2 CPE URI normalized to 2.3) so a scanned host
+lands on the exact `product` node NVD/KEV/OCSF/STIX populate — a scan then
+fuses into the `product ← affects ← cve` chain and `find_path`/`ask_scope`
+walk straight from a scanned host to its exploited-in-the-wild CVEs. `runs_os`
+is a lower-confidence guess (min(0.9, accuracy/100)) that conflicts honestly
+with an authoritative inventory (D-035). One scan-report document is cited by
+every claim (D-039); content-addressed event ids make re-import idempotent
+and a later scan history. Strictly inventory — no exploitation logic, no
+attack-path scoring; reachability stays the scope walk / `find_path` (D-067),
+and the loader fails on refusals (D-063). Fixtures are genuine nmap 7.98
+output; a blind `find_path` test confirms a scanned host reaches its
+product's KEV CVE, cited. Honest seam: nmap's service-DB CPE vendor can
+differ from NVD's (nginx: `igor_sysoev` vs `nginx` / `f5`), so those don't
+fuse until entity resolution reconciles them (D-042) — surfaced, not
+special-cased.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
