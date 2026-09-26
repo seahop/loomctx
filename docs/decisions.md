@@ -2558,6 +2558,67 @@ hygiene questions. Both IdP connectors share overlapping predicates so entity
 resolution can fold a user present in both. Non-strict registration, no
 contract change.
 
+## D-077 · Identity connectors checked at scale; four defects fixed (2026-09-26)
+
+D-075/D-076 were tested only on hand-written fixtures (three users each).
+`loom.connectors.iam_gen` now writes seeded Entra + Okta exports in the
+shapes the real APIs return, up to 60,000 users with an every-user hub
+group, and `loom.iam_eval` checks every implied edge against the store.
+Run on SQLite locally and on GKE through lb → gateways → NATS →
+consumers → Postgres (`deploy/README.md`), it found four defects:
+
+1. **Per-user OAuth2 consents collided** (S-52). The event id omitted the
+   consenting user, so one (client, resource, scope) kept only its first
+   user: 323 of 357 grants lost at 2,000 users. The principal is now part of
+   the id; the client id rides as an attr.
+2. **Role holders typed as users** (S-53). A role assignment to a
+   role-assignable group or a service principal became `user:<id>`, so the
+   group → Global Administrator path never connected. The holder's type
+   comes from `$expand=principal`, else the export's own objects.
+3. **Okta role assignments dropped** (S-54). `/users|groups/{id}/roles`
+   name the holder only in `_links.assignee.href`; every such object
+   yielded nothing, silently. Now parsed (user or group holder), and any
+   object that yields no claims is counted `empty` in the import stats.
+4. **Shared predicates clobbered each other** (S-55). Registration merges
+   by predicate name, later wins; Entra declared `has_role → directory_role`
+   and Okta `has_role → admin_role`, so whichever registered last made the
+   registry reject the other's role claims on its next import (the
+   overlapping nightly refresh). `member_of` / `has_role` are now declared
+   once in `loom.connectors.iam_schema` and used by both.
+
+After the fixes: every edge stored once (0 missing, 0 extra) at 2k, 20k
+and 60k users; re-import adds 0 rows; all planted role paths come back
+cited from find_path and a blind scope walk. No contract change. Still open:
+scope walks through the hub groups (S-57).
+
+## D-078 · Blind AD re-measurement (2026-09-26)
+
+S-51: the D-066 benchmark handed the walk the planted chain's predicates,
+depth and interior anchors. `loom.ad_eval --blind` knows only the two
+endpoints the question names: one ask anchored at each over the fixed
+predicate set (`member_of, has_ace, trusts, contains, can_delegate_to,
+rbcd_from`) at the depth cap, an account-status ask on the start, and
+find_path between them at the default depth. Decoys now land in one of
+three outcomes — *evidenced* (the apparent path and its disqualifier both
+cited), *not surfaced*, *leaked* — instead of "excluded", which a walk that
+found nothing also scored. Edge precision is no longer reported. The blind
+numbers replace the withdrawn ones in `docs/ad-eval.md`: recall holds, the
+cost does not (about half the directory gathered, seconds per ask), and
+find_path misses 4-hop chains (depth cap 3, S-58).
+
+## D-079 · Lazy-greedy fact selection (2026-09-26)
+
+`_select_facts` rescanned the whole candidate pool every round; once the
+diversity factor applied, its early exit stopped helping, so a pack cost
+rounds × pool (35k candidates on an identity hub: 3 s of a 4.5 s ask). A
+candidate's value only falls (density is fixed; the factor drops once), so
+a heap of upper bounds picks the same fact each round — a popped candidate
+still at the top is the best, ties to the earlier pool position as the scan
+did — in O(n log n). The one difference: a candidate is checked for
+affordability when it reaches the top rather than on every scan. Every
+existing pack test, including the exact charged-token ones, is unchanged.
+On the hub walk: 3.1 s → 1.2 s in selection.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -65,6 +65,7 @@ from typing import Any, Iterable, Iterator
 
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
+from .iam_schema import SHARED_PREDICATES
 
 SOURCE_DEFAULT = "entra-export"
 NAMESPACE_DEFAULT = "iam"
@@ -382,15 +383,22 @@ def _role_envelopes(obj: dict, ns: str, source: str, observed: datetime,
 
 
 def _role_assignment_envelopes(obj: dict, ns: str, source: str, observed: datetime,
-                               stamp: str) -> Iterator[ClaimIn]:
+                               stamp: str, known: dict[str, str] | None = None
+                               ) -> Iterator[ClaimIn]:
     principal = obj.get("principalId")
     role_def = obj.get("roleDefinitionId")
     if not principal or not role_def:
         return
+    # a role may be held by a user, a role-assignable group or a service
+    # principal: take the type from `$expand=principal`, else from the same
+    # export's objects, else assume a user
+    expanded = obj.get("principal")
+    ptype = (_detect_type(expanded) if isinstance(expanded, dict) else None) \
+        or (known or {}).get(principal) or "user"
     scope = obj.get("directoryScopeId", "/")
     yield ClaimIn(namespace=ns,
-                  event_id=_eid(f"entra:{principal}:{stamp}:has_role:{role_def}"),
-                  subject=_ref("user", principal), predicate="has_role",
+                  event_id=_eid(f"entra:{principal}:{stamp}:has_role:{role_def}:{scope}"),
+                  subject=_ref(ptype, principal), predicate="has_role",
                   object=_ref("directory_role", role_def),
                   observed_at=observed, source=source,
                   attrs={"export": source, "scope": scope,
@@ -425,14 +433,18 @@ def _oauth2_grant_envelopes(obj: dict, ns: str, source: str, observed: datetime,
     resource = obj.get("resourceId", "unknown")
     consent = obj.get("consentType", "")
     principal = obj.get("principalId")
-    for i, scope in enumerate(scopes.split()):
-        subj = _ref("user", principal) if principal and consent == "Principal" else _ref("service_principal", client)
+    per_user = bool(principal) and consent == "Principal"
+    subj = _ref("user", principal) if per_user else _ref("service_principal", client)
+    for scope in scopes.split():
+        # per-user consents repeat client/resource/scope across users: the
+        # consenting principal is part of the fact's identity
         yield ClaimIn(namespace=ns,
-                      event_id=_eid(f"entra:{client}:{stamp}:has_permission:{resource}:{scope}"),
+                      event_id=_eid(f"entra:{client}:{principal if per_user else 'all'}:{stamp}"
+                                    f":has_permission:{resource}:{scope}"),
                       subject=subj, predicate="has_permission",
                       object=_ref("api_permission", f"{resource}:{scope}"),
                       observed_at=observed, source=source,
-                      attrs={"export": source, "consent_type": consent,
+                      attrs={"export": source, "consent_type": consent, "client_id": client,
                              "scope": scope, "resource_id": resource})
 
 
@@ -468,6 +480,15 @@ def entra_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
         "oauth2_grant": _oauth2_grant_envelopes,
     }
 
+    known: dict[str, str] = {}
+    for key, items in buckets.items():
+        for obj in items:
+            if key in ("users", "groups", "servicePrincipals", "auto") and obj.get("id"):
+                t = {"users": "user", "groups": "group",
+                     "servicePrincipals": "service_principal"}.get(key) or _detect_type(obj)
+                if t in ("user", "group", "service_principal"):
+                    known[obj["id"]] = t
+
     for key, items in buckets.items():
         forced = {"users": "user", "groups": "group",
                   "servicePrincipals": "service_principal",
@@ -484,10 +505,13 @@ def entra_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
                 continue
             try:
                 n = 0
-                for env in handler(obj, namespace, source, observed, stamp):
+                extra = {"known": known} if otype == "role_assignment" else {}
+                for env in handler(obj, namespace, source, observed, stamp, **extra):
                     n += 1
                     yield env
                 stats["object"] = stats.get("object", 0) + 1
+                if n == 0:
+                    stats["empty"] = stats.get("empty", 0) + 1
             except (ValueError, TypeError, KeyError) as exc:
                 stats["invalid"] = stats.get("invalid", 0) + 1
                 print(f"entra object {obj.get('id', '?')}: skipped: "
@@ -510,13 +534,9 @@ def schema(namespace: str) -> SchemaRegistration:
                           description="an API permission scope or app role"),
         ],
         predicates=[
-            PredicateDef(name="member_of", object_types=["group", "directory_role"],
-                         containment=True,
-                         description="direct group or role membership"),
+            *SHARED_PREDICATES,
             PredicateDef(name="owner_of",
                          description="owner relationship (group owner, app owner)"),
-            PredicateDef(name="has_role", object_types=["directory_role"],
-                         description="directory role assignment"),
             PredicateDef(name="has_app_role", object_types=["service_principal"],
                          description="app role assignment on a service principal"),
             PredicateDef(name="has_permission", object_types=["api_permission"],

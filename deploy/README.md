@@ -362,6 +362,49 @@ gcloud container clusters delete "$CLUSTER" --zone "$ZONE"
 gcloud compute disks list                                  # nothing left behind
 ```
 
+### Identity connectors at scale on GKE (2026-09-26, D-077/D-078)
+
+Same recipe (`3 × e2-standard-4`, Dataplane V2, CloudNativePG 1.26,
+`scale-pg-ha`, auth on, signed handles; no provider keys — nothing here
+calls a model), images built from the D-077…D-079 working tree. A toolbox
+pod generated `loom.connectors.iam_gen` exports, registered both schemas at
+the engine, imported them with the connectors' own `import --url
+http://loom-gateway --no-schema` (lb → gateways → JetStream ×3 → 2
+consumers → Postgres), waited for the queue to drain, and ran
+`loom.iam_eval --no-load` against the Postgres store and over HTTP.
+
+| Scale | Envelopes | Refused | Ingest, end to end | Re-import adds | Edges missing / extra | Planted role paths (find_path, cited) |
+| --- | --- | --- | --- | --- | --- | --- |
+| small: 2,000 + 1,368 users | 48,621 | 0 | 121 s, 402/s | 0 | 0 / 0 | 4 / 4 |
+| medium: 20,000 + 13,964 users | 465,652 | 0 | 874 s, 533/s | 0 | 0 / 0 | 4 / 4 |
+| large: 60,000 + 41,973 users | 1,381,619 | 0 | 3,174 s, 435/s (gateway HPA 2 → 8) | not run | 0 / 0 | 4 / 4 |
+
+(Medium ran into the namespace the small run had loaded: 465,639 rows were
+added, the 13 short being the directory roles' `name` / `privileged` facts,
+identical event ids in both exports, already stored. Large ran in its own
+namespace: rows added = envelopes.)
+
+Scope walks from random users over the generic identity predicates at
+4,000 tokens, read from Postgres (40 probes per depth):
+
+| Scale | Depth 1 p50 | Depth 2 p50 / p95 | Depth 3 p50 / p95 | Entities gathered at depth 3 |
+| --- | --- | --- | --- | --- |
+| small | 146 ms | 1.9 s / 2.1 s | 2.6 s / 3.2 s | 1,365 |
+| medium | 159 ms | 2.1 s / 2.5 s | 6.2 s / 7.1 s (scope cap) | 1,994 |
+| large | 197 ms | 2.4 s / 2.8 s | 8.0 s / 8.7 s (scope cap) | 2,000 |
+
+**What it found** (`docs/hardening.md` S-52…S-57): before D-077 the
+per-user OAuth2 consents collided, role holders that were groups or
+service principals became users, Okta role assignments in the API's own
+shape were dropped and the two connectors' schemas clobbered each other —
+all fixed and exact above. Still open (S-57): a user's walk climbs to the
+every-user group and back down to its members, so any ask of depth 2+
+costs ~2 s and depth 3 hits the scope cap; over HTTP the 3-hop
+user → group → role-assignable group → Global Administrator path took
+9.2 s by `/v1/path` and 10.8 s by `/v1/ask` at 60,000 users, while paths
+that avoid the hub stay at 30–60 ms / 0.2–2.9 s. Postgres stayed under
+620 MiB of its 1 GiB limit; no pod restarted during the loads.
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

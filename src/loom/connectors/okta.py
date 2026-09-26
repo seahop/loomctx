@@ -56,6 +56,7 @@ from typing import Any, Iterable, Iterator
 
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
+from .iam_schema import SHARED_PREDICATES
 
 SOURCE_DEFAULT = "okta-export"
 NAMESPACE_DEFAULT = "iam"
@@ -124,7 +125,7 @@ def _detect_type(obj: dict) -> str | None:
     if "userId" in obj and "appId" in obj:
         return "app_user"
 
-    if "type" in obj and obj["type"] in ADMIN_ROLES:
+    if obj.get("type") in ADMIN_ROLES or (obj.get("type") == "CUSTOM" and "role" in obj):
         return "role_assignment"
 
     return None
@@ -300,13 +301,27 @@ def _app_user_envelopes(obj: dict, ns: str, source: str, observed: datetime,
 
 def _role_assignment_envelopes(obj: dict, ns: str, source: str, observed: datetime,
                                stamp: str) -> Iterator[ClaimIn]:
-    uid = obj.get("assignee", {}).get("id") if isinstance(obj.get("assignee"), dict) else obj.get("userId")
+    # `/users/{id}/roles` and `/groups/{id}/roles` carry the holder only in
+    # `_links.assignee.href` (.../users/<id> or .../groups/<id>)
+    kind, uid = "user", None
+    if isinstance(obj.get("assignee"), dict):
+        uid = obj["assignee"].get("id")
+    uid = uid or obj.get("userId")
+    if not uid and obj.get("groupId"):
+        kind, uid = "group", obj["groupId"]
+    if not uid:
+        href = ((obj.get("_links") or {}).get("assignee") or {}).get("href", "")
+        parts = href.rstrip("/").rsplit("/", 2)
+        if len(parts) == 3 and parts[1] in ("users", "groups"):
+            kind, uid = parts[1][:-1], parts[2]
+    if obj.get("assignmentType") == "GROUP":
+        kind = "group"
     role_type = obj.get("type") or obj.get("role")
     if not uid or not role_type:
         return
     yield ClaimIn(namespace=ns,
                   event_id=_eid(f"okta:{uid}:{stamp}:has_role:{role_type}"),
-                  subject=_ref("user", uid), predicate="has_role",
+                  subject=_ref(kind, uid), predicate="has_role",
                   object=_ref("admin_role", role_type),
                   observed_at=observed, source=source,
                   attrs={"export": source, "role_type": role_type,
@@ -356,6 +371,8 @@ def okta_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
                     n += 1
                     yield env
                 stats["object"] = stats.get("object", 0) + 1
+                if n == 0:
+                    stats["empty"] = stats.get("empty", 0) + 1
             except (ValueError, TypeError, KeyError) as exc:
                 stats["invalid"] = stats.get("invalid", 0) + 1
                 print(f"okta object {obj.get('id', '?')}: skipped: "
@@ -373,13 +390,9 @@ def schema(namespace: str) -> SchemaRegistration:
                           description="an Okta admin role (SUPER_ADMIN, etc.)"),
         ],
         predicates=[
-            PredicateDef(name="member_of", object_types=["group"],
-                         containment=True,
-                         description="direct group membership"),
+            *SHARED_PREDICATES,
             PredicateDef(name="assigned_to", object_types=["app"],
                          description="app-user assignment"),
-            PredicateDef(name="has_role", object_types=["admin_role"],
-                         description="admin role grant"),
             PredicateDef(name="enabled", description="account is active"),
             PredicateDef(name="status", description="Okta user status"),
             PredicateDef(name="login", description="Okta login (email)"),

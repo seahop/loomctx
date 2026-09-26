@@ -140,3 +140,23 @@ def test_cli_report_redacts_a_store_dsn_password(monkeypatch, tmp_path):
                   "--budgets", "1500", "--quiet", "--out", str(tmp_path / "r.md")])
     assert "s3cret" not in captured["meta"]["store"]
     assert "s3cret" not in (tmp_path / "r.md").read_text()
+
+
+def test_blind_mode_knows_only_the_endpoints(loaded):
+    """S-51: the blind walk is anchored only at the two named endpoints over
+    the fixed predicate set; decoys land in exactly one of three outcomes
+    (a walk that surfaced nothing no longer counts as 'excluded')."""
+    store, truth, index, _ = loaded
+    results = ad_eval.evaluate(store, "ad", truth, (3000,), index, blind=True)
+    b = results[3000]
+    assert len(b.path_rows) == len(truth["chains"]) + len(truth["decoys"])
+    summary = ad_eval.summarize(results, index)
+    top = summary["per_budget"][3000]
+    assert sum(top["decoy_outcomes"].values()) == len(truth["decoys"])
+    assert sum(top["find_path"]["decoys"].values()) == len(truth["decoys"])
+    got, total = top["find_path"]["all"]
+    assert total == len(truth["chains"]) and got > 0
+    table = ad_eval.markdown_blind(summary, {"date": "2026-09-26", "namespace": "ad",
+                                             "scale": "small", "seed": 7,
+                                             "counts": truth["counts"]})
+    assert "Blind" in table and "find_path" in table and "| Edge precision |" not in table

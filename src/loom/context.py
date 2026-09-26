@@ -40,6 +40,7 @@ from __future__ import annotations
 import base64
 import logging
 import hashlib
+import heapq
 import hmac
 import json
 import math
@@ -2638,37 +2639,41 @@ def _select_facts(
         return group, edge, chunk, add
 
     dead: set[str] = set()  # chosen, shipped as an edge, or unaffordable for good
-    while True:
-        best = None
-        best_val = -1.0
-        for density, score, cost, obs, text, path in pool:
-            if obs.id in dead:
-                continue
-            if best is not None and density <= best_val:
-                break  # sorted by density: nothing further can beat the pick
-            if obs.id in included:
-                dead.add(obs.id)
-                continue  # already shipped as part of another fact's path
-            member = grouped(obs)
-            if member is not None:
-                chain = [by_id[pid] for pid in member[0].prefix if pid not in included]
-                cost_here = member[3]
-            else:
-                chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
-                cost_here = cost
-            chain_cost = sum(edge_cost(p) for p in chain)
-            if cost_here + chain_cost > remaining:
-                dead.add(obs.id)
-                skip(obs)
-                continue
-            value = density * (_DIVERSITY_LAMBDA
-                               if per_predicate[obs.predicate] >= _DIVERSITY_AFTER
-                               and obs.predicate not in focus else 1.0)
-            if value > best_val:
-                best, best_val = (score, cost_here, obs, text, chain, chain_cost, member), value
-        if best is None:
-            break
-        score, cost, obs, text, chain, chain_cost, member = best
+    # Lazy greedy: a candidate's value only falls (density is fixed; the
+    # diversity factor drops once), so the heap holds an upper bound per
+    # candidate and one popped still at the top is the round's best — ties
+    # to the earlier (denser) pool position, as a front-to-back scan picks.
+    # Rescanning the pool every round was rounds x pool (35k facts over an
+    # identity hub: seconds per pack).
+    heap = [(-entry[0], i) for i, entry in enumerate(pool)]
+    heapq.heapify(heap)
+    while heap:
+        _, i = heapq.heappop(heap)
+        density, score, cost, obs, text, path = pool[i]
+        if obs.id in dead:
+            continue
+        if obs.id in included:
+            dead.add(obs.id)
+            continue  # already shipped as part of another fact's path
+        member = grouped(obs)
+        if member is not None:
+            chain = [by_id[pid] for pid in member[0].prefix if pid not in included]
+            cost_here = member[3]
+        else:
+            chain = [by_id[pid] for pid in path if pid not in included and pid != obs.id]
+            cost_here = cost
+        chain_cost = sum(edge_cost(p) for p in chain)
+        if cost_here + chain_cost > remaining:
+            dead.add(obs.id)
+            skip(obs)
+            continue
+        value = density * (_DIVERSITY_LAMBDA
+                           if per_predicate[obs.predicate] >= _DIVERSITY_AFTER
+                           and obs.predicate not in focus else 1.0)
+        if heap and (-value, i) > heap[0]:
+            heapq.heappush(heap, (-value, i))
+            continue
+        cost = cost_here
         for edge in chain:
             items.append(ContextItem(
                 kind="relation", text=_render_fact(edge),

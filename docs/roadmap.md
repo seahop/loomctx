@@ -23,6 +23,7 @@ presentable.
 | 2026-09-24 | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23, D-050…D-056): recorded supersession + PROV-O export, honest budget (`charged_tokens`) + BM25/rank fusion + value-per-token packing, retrieval scorecard with baselines (`docs/evaluation.md`), schema v6 store work, MCP 2026-07-28 alignment, engine-side rate limiting, STIX/OCSF connectors; GKE re-validation including an in-place v5→v6 migration (D-052) |
 | 2026-09-24 | Whole-project review (`docs/hardening.md` §S, D-057…D-062): eval harness validity (equal-token baselines, graded answers, unsent rows excluded), read-path conflict/brief/alias/scope fixes and a wire-honest MCP budget, browser-facing guards and write-side citation gates, sticky resolution and bounded adjudication, multihop over hub entities in one ask (D-061), small-budget packing (D-062), release fixes (fresh-clone test run, Go SDK CI); scorecards re-run on this build |
 | 2026-09-25 | GKE re-validation with auth on, signed handles, provider keys and the real corpus loaded by the documented Jobs (D-063): ten deployment-path bugs found and fixed (nightly refresh key, source families, worker pools, keys mount, DSN in scorecards…); failover 12 s / 0 lost writes, drain 0 not-ready, load 435/s |
+| 2026-09-26 | Identity connectors checked at scale (D-077…D-079): Entra/Okta generator + harness, four connector defects fixed (S-52…S-55), blind AD re-measurement (S-51), lazy-greedy pack selection; validated on GKE through the gateway path to 1.38M observations; open: identity-hub walk cost (S-57), find_path depth/status (S-58); 738 tests pass |
 | 2026-09-26 | Identity/IAM connectors (D-074…D-076): LDAP deep fix (S-50), Entra ID (Azure AD) connector, Okta connector; both IdPs in the shared `iam` namespace with overlapping predicates for cross-provider walks; 732 tests pass |
 | early Oct | Freeze features; night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist); presentation materials |
 | ~2026-10-13 | **Conference** (moved up from end of October) |
@@ -296,6 +297,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   principals, app registrations, directory roles, role/app-role/OAuth2
   assignments, credential expiry, privileged-role tagging. Scope walk +
   find_path tested.
+- ✅ Identity connectors at scale (2026-09-26, D-077): `loom.connectors.iam_gen` + `loom.iam_eval`; GKE numbers in deploy/README.md.
 - ✅ Okta connector (2026-09-26, D-076): Okta API JSON → identity claims in
   the same `iam` namespace — users, groups, apps, app-user assignments, MFA
   factors, admin roles. Both IdPs share predicates for cross-provider entity

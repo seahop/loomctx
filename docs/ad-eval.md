@@ -8,23 +8,11 @@ principal to a high-value target, threading **membership → ACL → (cross-doma
 trust** — does Loom's ordinary scope walk **surface the full chain with every
 edge cited**, and how much of the store does it have to sort through to do it?
 
->
-> **Status (2026-09-26): numbers are withdrawn pending a blind
-> re-measurement (S-51).** The connector's decoding gaps (S-50) have been
-> fixed (D-074), but the benchmark itself is not a fair test:
->
-> - **Recall is not blind.** The walk was given the planted chain's own
->   `expand` predicates and its exact depth (`ad_eval.build_chain_packs`), so
->   the 100% recall overstates what a blind walk (a fixed generic predicate
->   set, the standard depth cap) would find.
-> - **Decoy-exclusion and edge-precision are tautological as computed** and
->   are **withdrawn**: a trust edge always carries its `transitive` /
->   `sid_filtering` attrs, so "disqualifier cited" was always true, a walk
->   that found nothing also scored "excluded", and precision could only drop
->   if a decoy leaked, which it could not.
-> - The **~2.5% / <1% "gathered"** figure reflects the generator's uniform
->   density (no large hub groups), not hub pressure.
->
+> **Status (2026-09-26): measured blind (D-078, closes S-51).** The first
+> run (D-066) handed the walk each planted chain's predicates, depth and
+> interior anchors, and scored decoys in a way a walk that found nothing
+> also passed; those numbers are withdrawn. The tables below are blind: the
+> walk knows only the start and the target the question names.
 
 It is **synthetic and object-level only**. `loom.connectors.ad_gen`
 generates a directory, plants known chains, and buries them in dense benign
@@ -48,6 +36,9 @@ python -m loom.ad_eval --db /data/ad.db --truth corp.truth.json --namespace ad
 
 # or all three in one shot into a scratch store
 python -m loom.ad_eval --db /data/ad.db --generate --scale medium --seed 7
+
+# blind (the headline): only the two named endpoints are known
+python -m loom.ad_eval --db /data/ad.db --generate --scale medium --seed 7 --blind
 ```
 
 An optional `--live` runs a cheap model (`--model`, e.g. a
@@ -88,74 +79,75 @@ answer must exclude them: a **non-transitive** trust, a **SID-filtered**
 trust, and a **disabled** start account. Each decoy's truth record names its
 disqualifying fact.
 
-## The metrics
+## The metrics (blind)
 
-Scored per hop-length bucket and per token budget (1500 / 3000 / 4000):
+Scored per hop-length bucket and per token budget (1500 / 3000 / 4000).
+Every walk knows only the start and the target:
 
-- **path-recall** — planted chains whose *every* edge is present in the pack
-  **and cited** (a citation with a real observation id). The headline.
-- **edge-precision** — of the edges in a "connects" verdict, the fraction on
-  a genuine chain; a decoy wrongly reported connecting drops it.
-- **decoy-exclusion** — the dead-end's disqualifying fact (the trust's
-  `transitive` / `sid_filtering` attr, or the start's `enabled = false`) was
-  itself surfaced and cited, so a reader has the evidence to reject it.
-- **entities gathered vs total** — the mean entities the scope walk pulled
-  per chain against the whole store: the "sorted through this much" number.
-- **truncated** — walks the D-058 scope cap / D-061 hub completion touched.
-- **build_pack latency** p50/p95, and **pack tokens** charged.
+- **scope walk** — one ask anchored at each endpoint over the fixed
+  predicate set `member_of, has_ace, trusts, contains, can_delegate_to,
+  rbcd_from` at the depth cap (3), plus an account-status ask on the start.
+- **find_path** — start → target over the same set at the default depth.
+- **recall** — planted chains whose *every* edge came back **cited** (a
+  citation with a real observation id).
+- **decoys** — each lands in one outcome: *evidenced* (the apparent path
+  and its disqualifying fact — the trust's `transitive` / `sid_filtering`
+  attr, or the start's `enabled = false` — both came back cited, so a
+  reader can reject it), *not surfaced*, or *leaked* (the path without its
+  disqualifier). A trust edge always carries its attrs, so for trust decoys
+  evidenced == surfaced: a property of the connector's data model, not a
+  retrieval score. No precision figure is given.
+- **entities gathered vs total**, **truncated** walks, **build latency**
+  p50/p95 and **pack tokens**.
 
-A 4-hop chain is walked in two asks re-anchored at the deepest chain node
-the first reached (`ScopeSpec.depth` caps at 3, D-046) — what an agent does
-following a pack's reached entities. Node account-status is a subject-scoped
-ask per principal (a broad path walk ranks that scalar out), the way a
-reader validates that each account on a lead is live.
+## Results — blind, seed 7 (2026-09-26)
 
-## Results — `medium`, seed 7 (executed 2026-09-26)
+Scope walk:
 
-Directory: 4,429 objects (3,017 users / 601 groups / 800 computers, 4 DCs),
-**31,430 observations**, 4,429 entities, 8,702 raw membership+ACL edges.
-Planted: 11 chains + 6 decoys. Ingest through the connector: 31,430
-observations in 2.9 s = **10,683 obs/s** (1,505 objects/s). SQLite store,
-scripted reader.
+| Scale / store | Observations | Budget | Recall 2 / 3 / 4-hop | Decoys evidenced / not surfaced / leaked | Entities gathered / total | Build p50 / p95 |
+| --- | --- | --- | --- | --- | --- | --- |
+| medium, SQLite (laptop) | 31,433 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,108 / 4,429 | 4.2 s / 8.8 s |
+| medium, SQLite (laptop) | 31,433 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,108 / 4,429 | 5.9 s / 10.7 s |
+| large, SQLite (laptop) | 97,815 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,497 / 13,529 | 6.3 s / 7.2 s |
+| large, SQLite (laptop) | 97,815 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,497 / 13,529 | 7.5 s / 9.0 s |
+| medium, Postgres (GKE) | 31,433 | 1500 | 4/4 · 4/4 · **0/3** | 6 / 0 / 0 | 2,273 / 4,429 | 6.3 s / 6.8 s |
+| medium, Postgres (GKE) | 31,433 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,273 / 4,429 | 6.4 s / 6.9 s |
+| large, Postgres (GKE) | 97,815 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,517 / 13,529 | 10.0 s / 10.8 s |
+| large, Postgres (GKE) | 97,815 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,517 / 13,529 | 10.8 s / 11.5 s |
 
-| Budget | 2-hop recall | 3-hop recall | 4-hop recall | All recall | Edge precision | Decoy excluded | Entities gathered / total | Truncated | Build p50/p95 ms | Pack tokens |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1500 | 100% (4/4) | 100% (4/4) | 100% (3/3) | 100% (11/11) | 100% | 100% (6/6) | 113 / 4,429 | 0 | 130 / 218 | 2,387 |
-| 3000 | 100% (4/4) | 100% (4/4) | 100% (3/3) | 100% (11/11) | 100% | 100% (6/6) | 113 / 4,429 | 0 | 122 / 201 | 4,159 |
-| 4000 | 100% (4/4) | 100% (4/4) | 100% (3/3) | 100% (11/11) | 100% | 100% (6/6) | 113 / 4,429 | 0 | 151 / 241 | 5,317 |
+find_path (the same at every budget):
 
-Decoy exclusion by dead-end kind (disqualifier surfaced + cited): 100% (2/2)
-for each of `disabled_principal`, `non_transitive_trust`,
-`sid_filtered_trust` at every budget.
+| Scale | Recall 2 / 3 / 4-hop | Decoys evidenced / not surfaced / leaked | p50 |
+| --- | --- | --- | --- |
+| medium, SQLite | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.0–1.2 s |
+| large, SQLite | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.2–1.3 s |
+| medium, Postgres (GKE) | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.2–1.3 s |
+| large, Postgres (GKE) | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.1–1.8 s |
 
-**Reading it.** Loom surfaces and cites the whole chain for every planted
-lead — 2-, 3- and 4-hop, single- and cross-domain — while the walk pulls
-~113 of 4,429 entities (≈2.5% of the store, a small fraction of the 31k
-observations) and builds in ~0.1–0.25 s. Every decoy is excludable because
-its disqualifying fact ships cited alongside the apparent path. This is
-retrieval only (no LLM); it says the evidence and citations are there for a
-reader to assemble and check the path — not how to use one.
+(Laptop timings were taken under heavy unrelated host load. The GKE rows
+ran from a toolbox pod against the `scale-pg-ha` Postgres (3 instances,
+1 GiB each), the engine's own read path; the store was loaded directly, not
+through the gateway.)
 
-## Results — `large`, seed 7 (executed 2026-09-26)
-
-Directory: **13,529 objects** (10,017 users / 1,501 groups / 2,000
-computers, 10 DCs), **97,812 observations**, 28,311 raw edges. Same 11
-planted chains + 6 decoys. Ingest **6,348 obs/s**. SQLite, scripted reader.
-
-| Budget | All recall | Edge precision | Decoy excluded | Entities gathered / total | Truncated | Build p50/p95 ms | Pack tokens |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1500 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 198 / 398 | 2,377 |
-| 3000 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 277 / 341 | 4,140 |
-| 4000 | 100% (11/11) | 100% | 100% (6/6) | 131 / 13,529 | 0 | 258 / 449 | 5,307 |
-
-**Scaling.** The directory tripled (4.4k → 13.5k objects, 31k → 98k
-observations) but the targeted walk still pulls ~131 entities per chain —
-now **under 1 %** of the store — and build latency stays ~0.2–0.28 s. A
-scope walk that starts at the principal and follows named predicates does
-not get slower as the surrounding directory grows, only as the path
-lengthens; recall, precision and decoy-exclusion stay at 100 %.
+**Reading it.** Recall survives blinding — every planted chain, including
+the cross-domain 4-hop ones, comes back fully cited from the two endpoint
+asks — but the cost does not. With `contains` in a generic predicate set
+the walk climbs to the OU / domain and back down, gathering about half the
+directory (2,108 of 4,429 entities; 2,497 of 13,529 at large, where the
+scope cap stops it) at several seconds per ask — 6 s on the medium directory and 10–11 s on the
+large one against Postgres. On Postgres at 1,500 tokens the medium
+directory's 4-hop chains did not fit (0/3; 3/3 from 3,000 up): the budget,
+not the walk, is the limit there. The D-066 figure of ~2.5 %
+gathered in ~0.2 s was a product of being told the chain. find_path finds
+every 2- and 3-hop chain but no 4-hop one (its depth is capped at 3,
+S-58), and returns the disabled-account decoys' paths without the
+`enabled = false` that disqualifies them (the scope walk's account-status
+ask does surface it). Trust decoys come back with their `transitive` /
+`sid_filtering` attrs on the cited edge either way.
 
 ## A live reader (illustrative, not a headline)
+
+(Run on the D-066 non-blind packs; not re-run blind.)
 
 `--live` runs a cheap model over the packs to confirm the path is not just
 present but *assemblable*. On `large`, `google/gemini-2.5-flash` over 5
@@ -167,4 +159,4 @@ in the question, stopping at the first high-value node it reached. That is
 a reader-following limitation on a busy directory, not a retrieval gap, and
 it tracks the agent scorecard (`docs/models.md`), where stronger models
 clear the analogous multi-hop task and cheaper ones vary. Five cases is a
-smoke, not a metric; the scripted tables above are the measured result.
+smoke, not a metric; the blind scripted tables above are the measured result.

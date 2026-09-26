@@ -8,6 +8,28 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Identity connectors at scale, blind AD benchmark, faster pack selection (D-077, D-078, D-079)
+
+- `loom.connectors.iam_gen` + `loom.iam_eval`: seeded Entra + Okta exports
+  in the real APIs' shapes (up to 60,000 users, every-user hub groups) and a
+  check of every implied edge, idempotent re-import, planted role paths and
+  hub-walk cost; run locally and on GKE through the gateway path up to
+  1.38M observations (deploy/README.md)
+- Fixed what it found (D-077): Entra per-user OAuth2 consents collided on
+  one event id (323 of 357 lost); role holders that are groups or service
+  principals were stored as users; Okta role assignments in the
+  `_links.assignee` shape were dropped; Entra and Okta clobbered each
+  other's `has_role` / `member_of` registration (now one shared definition,
+  `connectors/iam_schema.py`). Objects that yield no claims are counted
+  `empty` in import stats
+- `ad_eval --blind` (D-078, closes S-51): the walk knows only the two named
+  endpoints; decoys score evidenced / not surfaced / leaked; blind numbers
+  replace the withdrawn ones in docs/ad-eval.md
+- Pack fact selection is lazy-greedy (D-079): same picks, O(n log n) instead
+  of rounds × pool — 3.1 s → 1.2 s on an identity-hub ask
+- Open: scope walks through every-user groups cost 2–8 s (S-57); find_path
+  cannot return 4-hop chains and omits account status (S-58)
+
 ### Identity/IAM connectors and LDAP deep fix (D-074, D-075, D-076)
 
 - `python -m loom.connectors.entra import` parses Microsoft Graph API JSON

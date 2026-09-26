@@ -745,9 +745,20 @@ registration requires), `reports_to` (manager). Service principals carry
 `key_credential` / `password_credential` with expiry dates for secret-sprawl
 detection.
 
-The `iam` namespace is shared with the Okta connector. Both register the
-same core predicates (`member_of`, `name`, `enabled`, `has_role`) so an
-environment with both IdPs lands in one walkable graph.
+A role may be held by a user, a role-assignable group or a service
+principal. Export role assignments with
+`GET /roleManagement/directory/roleAssignments?$expand=principal`: the
+connector types the holder from the expanded principal, else from the
+export's own `users`/`groups`/`servicePrincipals`, else as a user. Per-user
+OAuth2 consents (`consentType: Principal`) are one fact per consenting
+user; the client id rides as an attr.
+
+The `iam` namespace is shared with the Okta connector. The two predicates
+that carry object types, `member_of` and `has_role`, are declared once in
+`loom.connectors.iam_schema` and used by both: registration merges by
+predicate name with the later definition winning, so two different
+declarations would make each connector's registration reject the other's
+role claims.
 
 ## Okta directory → Loom
 
@@ -768,10 +779,29 @@ presence of `userId`+`appId`, or the admin-role shape.
 | admin role | `admin_role` (keyed by role type name) |
 
 Edges: `member_of` (group membership, from user `_groupIds` or group
-`_members`), `assigned_to` (app-user assignment), `has_role` (admin role
-grant). Users carry `mfa_enrolled` / `mfa_factor` (from `_embedded.factors`),
+`_members`), `assigned_to` (app-user assignment; the app id from `appId` or,
+as `/apps/{id}/users` returns it, `_links.app.href`), `has_role` (admin role
+grant to a user or group; `/users/{id}/roles` and `/groups/{id}/roles` name
+the holder only in `_links.assignee.href`, which the connector reads). An
+object that yields no claims is counted `empty` in the import's envelope
+stats rather than dropped silently. Users carry `mfa_enrolled` / `mfa_factor` (from `_embedded.factors`),
 `credential_provider` (OKTA / ACTIVE_DIRECTORY), `status` and `last_login`
 for hygiene questions ("who has no MFA?", "which accounts are suspended?").
+
+### Checking the identity connectors at scale
+
+`loom.connectors.iam_gen` writes a seeded Entra + Okta export pair in the
+shapes the real APIs return (tiny / small / medium / large: 300 to 60,000
+users, an "All Staff" / "Everyone" hub group holding every user) with a
+truth sidecar; `loom.iam_eval` imports both into one namespace and checks
+every implied edge is stored once with the right types, that a re-import
+adds nothing, that the planted role paths come back cited, and how scope
+walks behave through the hubs. Results: `docs/hardening.md` S-52…S-57,
+`deploy/README.md` (GKE, 2026-09-26).
+
+```bash
+python -m loom.iam_eval --db /data/iam.db --generate --scale medium
+```
 
 ## Registering the names in the schema registry
 
@@ -791,7 +821,7 @@ software meets NVD/KEV at one node. The LDAP connector registers its own
 `ad` vocabulary (`member_of`, `has_ace`, `trusts`, …) — a separate domain,
 typically its own namespace. The Entra ID and Okta connectors share the `iam`
 namespace with overlapping predicates (`member_of`, `has_role`, `name`,
-`enabled`), so both IdPs' objects land in one walkable graph and entity
+`enabled`; the typed two declared once in `iam_schema`), so both IdPs' objects land in one walkable graph and entity
 resolution (D-042/D-060) can fold shared users across providers. To pin a
 namespace to exactly these names:
 

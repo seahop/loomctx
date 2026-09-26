@@ -218,6 +218,55 @@ def build_chain_packs(store, namespace: str, record: dict, budget: int) -> WalkR
     return WalkResult(cited, subjects, total_ms, tokens, truncated, calls, scope_calls)
 
 
+def build_chain_packs_blind(store, namespace: str, record: dict, budget: int) -> WalkResult:
+    """The walk an agent could make knowing only the question: its two named
+    endpoints. One ask anchored at each (a fixed generic predicate set, the
+    standard depth cap) and an account-status ask on the start — nothing
+    derived from the planted chain's predicates, depth or interior nodes."""
+    from .context import build_pack
+    start, tgt = record["start"], record["target"]
+    question = (f"what rights, trust and membership path connects {start['type']}:{start['key']} "
+                f"to {tgt['type']}:{tgt['key']}?")
+    cited: set[str] = set()
+    subjects: set[tuple[str, str]] = set()
+    total_ms, tokens, truncated, calls = 0.0, 0, False, 0
+    asks = [AskRequest(namespace=namespace, budget=budget, question=question,
+                       scope=ScopeSpec(subjects=[_ref(anchor)], expand=list(CHAIN_PREDICATES),
+                                       depth=SCOPE_DEPTH_CAP))
+            for anchor in (start, tgt)]
+    if start["type"] in ("user", "computer"):
+        asks.append(AskRequest(namespace=namespace, subject=_ref(start), budget=NODE_PROP_BUDGET,
+                               question=f"account status of {start['type']}:{start['key']}: "
+                                        "is it enabled?"))
+    for req in asks:
+        t0 = time.monotonic()
+        pack = build_pack(store, req)
+        total_ms += (time.monotonic() - t0) * 1000
+        cited |= _cited_ids(pack)
+        subjects |= {(s.type, s.key) for s in pack.subjects}
+        tokens += pack.charged_tokens
+        truncated = truncated or bool(pack.truncated)
+        calls += 1
+    return WalkResult(cited, subjects, total_ms, tokens, truncated, calls, 2)
+
+
+def find_path_blind(store, namespace: str, record: dict, budget: int) -> dict:
+    """find_path between the two named endpoints over the generic predicate
+    set at the default depth: did it return the planted chain, every edge
+    cited? `paths` counts what it returned at all."""
+    from .context import find_paths
+    from .contracts import PathRequest
+    req = PathRequest(namespace=namespace, to=_ref(record["target"]),
+                      via=list(CHAIN_PREDICATES), max_paths=8, budget=budget,
+                      **{"from": _ref(record["start"])})
+    t0 = time.monotonic()
+    pack = find_paths(store, req)
+    ms = (time.monotonic() - t0) * 1000
+    cited = {e.cite.observation_id for p in pack.paths for e in p if e.cite.observation_id}
+    return {"cited": cited, "paths": len(pack.paths), "ms": ms,
+            "truncated": bool(pack.truncated), "tokens": pack.charged_tokens}
+
+
 # --------------------------------------------------------------- scoring #
 
 def score_chain(record: dict, walk: WalkResult, index: Index) -> dict:
@@ -270,10 +319,14 @@ def score_decoy(record: dict, walk: WalkResult, index: Index) -> dict:
     # the scripted reader connects a decoy only if the path is present AND it
     # never saw the disqualifier; excluded otherwise
     wrongly_connects = apparent and not disqualified
+    # three outcomes, not two: a walk that surfaced nothing did not "exclude"
+    # the decoy, it never saw it (S-51)
+    outcome = ("leaked" if wrongly_connects else
+               "evidenced" if apparent else "not_surfaced")
     return {"id": record["id"], "hops": len(record["edges"]), "kind": "decoy",
             "reason": record["reason"], "apparent": apparent,
             "disqualifier_cited": disqualified, "connects": wrongly_connects,
-            "excluded": not wrongly_connects}
+            "excluded": not wrongly_connects, "outcome": outcome}
 
 
 # --------------------------------------------------------------- run #
@@ -288,15 +341,24 @@ class Budgeted:
     gathered: list[int] = field(default_factory=list)
     truncated: int = 0
     calls: list[int] = field(default_factory=list)
+    path_rows: list[dict] = field(default_factory=list)
 
 
 def evaluate(store, namespace: str, truth: dict, budgets: tuple[int, ...],
-             index: Index, progress=None) -> dict[int, Budgeted]:
+             index: Index, progress=None, blind: bool = False) -> dict[int, Budgeted]:
+    walker = build_chain_packs_blind if blind else build_chain_packs
     out: dict[int, Budgeted] = {}
     for budget in budgets:
         b = Budgeted(budget)
         for record in truth["chains"]:
-            walk = build_chain_packs(store, namespace, record, budget)
+            walk = walker(store, namespace, record, budget)
+            if blind:
+                fp = find_path_blind(store, namespace, record, budget)
+                b.path_rows.append({"kind": "chain", "hops": record["hops"],
+                                    "found": score_chain(record, WalkResult(
+                                        fp["cited"], set(), 0, 0, False, 0), index)["connects"],
+                                    "paths": fp["paths"], "ms": fp["ms"],
+                                    "truncated": fp["truncated"]})
             row = score_chain(record, walk, index)
             b.chain_rows.append(row)
             b.build_ms.append(walk.build_ms)
@@ -310,7 +372,13 @@ def evaluate(store, namespace: str, truth: dict, budgets: tuple[int, ...],
                          f"gathered {len(walk.subjects):>5}/{index.total_entities} "
                          f"{walk.tokens:>5}tok {walk.build_ms:.0f}ms")
         for record in truth["decoys"]:
-            walk = build_chain_packs(store, namespace, record, budget)
+            walk = walker(store, namespace, record, budget)
+            if blind:
+                fp = find_path_blind(store, namespace, record, budget)
+                dq = score_decoy(record, WalkResult(fp["cited"], set(), 0, 0, False, 0), index)
+                b.path_rows.append({"kind": "decoy", "reason": record["reason"],
+                                    "outcome": dq["outcome"], "paths": fp["paths"],
+                                    "ms": fp["ms"], "truncated": fp["truncated"]})
             row = score_decoy(record, walk, index)
             b.decoy_rows.append(row)
             b.build_ms.append(walk.build_ms)
@@ -371,9 +439,97 @@ def summarize(results: dict[int, Budgeted], index: Index) -> dict:
             "build_p50": _percentile(b.build_ms, 50),
             "build_p95": _percentile(b.build_ms, 95),
             "tokens_mean": statistics.mean(b.tokens) if b.tokens else 0.0,
+            "decoy_outcomes": {k: sum(r["outcome"] == k for r in b.decoy_rows)
+                               for k in ("evidenced", "not_surfaced", "leaked")},
+            "decoy_outcomes_by_reason": {
+                reason: {k: sum(r["outcome"] == k for r in b.decoy_rows if r["reason"] == reason)
+                         for k in ("evidenced", "not_surfaced", "leaked")}
+                for reason in sorted({r["reason"] for r in b.decoy_rows})},
+            "find_path": _path_summary(b.path_rows, buckets) if b.path_rows else None,
         }
     return {"buckets": buckets, "per_budget": per_budget,
             "total_entities": index.total_entities, "total_observations": index.total_observations}
+
+
+def _path_summary(rows: list[dict], buckets: list[int]) -> dict:
+    chains = [r for r in rows if r["kind"] == "chain"]
+    decoys = [r for r in rows if r["kind"] == "decoy"]
+    ms = [r["ms"] for r in rows]
+    return {"by_hop": {h: (sum(r["found"] for r in chains if r["hops"] == h),
+                           sum(1 for r in chains if r["hops"] == h)) for h in buckets},
+            "all": (sum(r["found"] for r in chains), len(chains)),
+            "decoys": {k: sum(r["outcome"] == k for r in decoys)
+                       for k in ("evidenced", "not_surfaced", "leaked")},
+            "decoys_by_reason": {reason: {k: sum(r["outcome"] == k for r in decoys
+                                                 if r["reason"] == reason)
+                                          for k in ("evidenced", "not_surfaced", "leaked")}
+                                 for reason in sorted({r["reason"] for r in decoys})},
+            "truncated": sum(r["truncated"] for r in rows),
+            "p50": _percentile(ms, 50), "p95": _percentile(ms, 95)}
+
+
+def _outcomes(d: dict) -> str:
+    return f"{d['evidenced']} / {d['not_surfaced']} / {d['leaked']}"
+
+
+def markdown_blind(summary: dict, meta: dict) -> str:
+    """The S-51 blind report: the walk knew only the two endpoints."""
+    buckets = summary["buckets"]
+    c = meta.get("counts", {})
+    lines = [f"# AD reachability benchmark (blind) — {meta.get('date', '')}", "",
+             f"Store: `{meta.get('store', '?')}` · namespace: `{meta.get('namespace')}` · "
+             f"scale: **{meta.get('scale', '?')}** · seed: {meta.get('seed', '?')} · "
+             f"{summary['total_observations']:,} observations, "
+             f"{summary['total_entities']:,} entities; planted {c.get('planted_chains')} "
+             f"chains + {c.get('decoys')} decoys.", ""]
+    ing = meta.get("ingest")
+    if ing:
+        lines += [f"Ingest: {ing['observations']:,} observations in {ing['seconds']}s = "
+                  f"{ing['obs_per_sec']:,} obs/s.", ""]
+    lines += ["**Blind**: every walk knows only the start and target the question names. "
+              f"Scope walk = one ask anchored at each endpoint over the fixed predicate set "
+              f"`{', '.join(CHAIN_PREDICATES)}` at depth {SCOPE_DEPTH_CAP}, plus an "
+              "account-status ask on the start. find_path = start -> target over the same "
+              "set at the default depth. No planted predicate, depth or interior node is "
+              "used.", "",
+              "## Scope walk (ask)", ""]
+    hop_cols = " | ".join(f"{h}-hop recall" for h in buckets)
+    lines += [f"| Budget | {hop_cols} | All recall | Decoys evidenced / not surfaced / leaked | "
+              "Entities gathered / total | Truncated | Build p50/p95 ms | Pack tokens |",
+              "| --- |" + " --- |" * (len(buckets) + 6)]
+    for budget in sorted(summary["per_budget"]):
+        s = summary["per_budget"][budget]
+        hop_cells = " | ".join(_pct(*s["path_recall"][h]) for h in buckets)
+        lines.append(
+            f"| {budget} | {hop_cells} | {_pct(*s['path_recall_all'])} | "
+            f"{_outcomes(s['decoy_outcomes'])} | "
+            f"{s['gathered_mean']:.0f} / {summary['total_entities']:,} | {s['truncated']} | "
+            f"{s['build_p50']:.0f} / {s['build_p95']:.0f} | {s['tokens_mean']:.0f} |")
+    lines += ["", "## find_path", ""]
+    lines += [f"| Budget | {hop_cols} | All recall | Decoys evidenced / not surfaced / leaked | "
+              "Truncated | p50/p95 ms |", "| --- |" + " --- |" * (len(buckets) + 5)]
+    for budget in sorted(summary["per_budget"]):
+        fp = summary["per_budget"][budget]["find_path"]
+        hop_cells = " | ".join(_pct(*fp["by_hop"][h]) for h in buckets)
+        lines.append(f"| {budget} | {hop_cells} | {_pct(*fp['all'])} | "
+                     f"{_outcomes(fp['decoys'])} | {fp['truncated']} | "
+                     f"{fp['p50']:.0f} / {fp['p95']:.0f} |")
+    top = summary["per_budget"][max(summary["per_budget"])]
+    lines += ["", f"Decoys by dead-end kind at budget {max(summary['per_budget'])} "
+              "(evidenced / not surfaced / leaked):", "",
+              "| Kind | Scope walk | find_path |", "| --- | --- | --- |"]
+    for reason, d in top["decoy_outcomes_by_reason"].items():
+        lines.append(f"| {reason} | {_outcomes(d)} | "
+                     f"{_outcomes(top['find_path']['decoys_by_reason'][reason])} |")
+    lines += ["", "recall: planted chains whose every edge came back cited. Decoys: "
+              "*evidenced* = the apparent path AND its disqualifying fact both came back "
+              "cited (a reader can reject it); *not surfaced* = the apparent path did not "
+              "come back at all; *leaked* = the apparent path came back without its "
+              "disqualifier. A trust edge always carries its transitive / sid_filtering "
+              "attrs, so for trust decoys evidenced == surfaced; that is a property of the "
+              "connector's data model, not a retrieval score. No precision figure is "
+              "given: it could only drop through a leak, which the decoy column shows."]
+    return "\n".join(lines) + "\n"
 
 
 def markdown(summary: dict, meta: dict) -> str:
@@ -505,6 +661,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-cost", type=float, default=1.0)
     parser.add_argument("--out", help="Markdown report path (default eval/ad-<date>.md)")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--blind", action="store_true",
+                        help="walk knowing only the two named endpoints (S-51): a fixed "
+                             "generic predicate set, the standard depth cap, plus find_path")
     args = parser.parse_args(argv)
 
     from .store.factory import store_from_env, store_from_url
@@ -525,7 +684,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"namespace {args.namespace!r} is empty — import the LDIF first "
                              "(or pass --generate)")
         progress = None if args.quiet else (lambda line: print(line, flush=True))
-        results = evaluate(store, args.namespace, truth, budgets, index, progress)
+        results = evaluate(store, args.namespace, truth, budgets, index, progress,
+                           blind=args.blind)
         summary = summarize(results, index)
         meta = {"date": datetime.now(timezone.utc).date().isoformat(),
                 "store": redact_dsn(args.db or os.environ.get("LOOM_DB", "loom.db")),
@@ -537,7 +697,7 @@ def main(argv: list[str] | None = None) -> None:
                                       max(budgets), args.max_cost, args.live_cases)
     finally:
         store.close()
-    table = markdown(summary, meta)
+    table = (markdown_blind if args.blind else markdown)(summary, meta)
     print("\n" + table)
     out = Path(args.out or f"eval/ad-{meta['date']}.md")
     out.parent.mkdir(parents=True, exist_ok=True)

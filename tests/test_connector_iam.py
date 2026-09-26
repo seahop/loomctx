@@ -316,3 +316,114 @@ def test_entra_and_okta_in_same_namespace_with_scope_walk(tmp_path):
         assert entra_count > 0 and okta_count > 0
     finally:
         store.close()
+
+
+# --------------------------------------- shapes real exports use (scale run) #
+
+def _envs(mod, doc):
+    import json
+    fn = entra.entra_to_envelopes if mod is entra else okta.okta_to_envelopes
+    stats: dict[str, int] = {}
+    return list(fn(json.dumps(doc), "iam", stats=stats)), stats
+
+
+def test_entra_per_user_consents_do_not_collide():
+    """Many users consenting to the same client/resource/scope are distinct
+    facts; one event id per (client, resource, scope) kept only the first."""
+    grants = [{"id": f"g{i}", "clientId": "sp-client", "consentType": "Principal",
+               "principalId": f"u{i}", "resourceId": "sp-graph", "scope": "User.Read Mail.Read"}
+              for i in range(5)]
+    envs, _ = _envs(entra, {"oauth2PermissionGrants": grants})
+    assert len(envs) == 10
+    assert len({e.event_id for e in envs}) == 10
+    assert {e.subject.key for e in envs} == {f"u{i}" for i in range(5)}
+
+
+def test_entra_role_assignment_types_its_principal():
+    """A role held by a role-assignable group or a service principal is not a
+    user: the type comes from $expand=principal, else from the export."""
+    doc = {"groups": [{"id": "grp-1", "displayName": "Tier0", "securityEnabled": True,
+                       "mailNickname": "t0"}],
+           "roleAssignments": [
+               {"id": "ra1", "principalId": "grp-1", "roleDefinitionId": "role-ga",
+                "directoryScopeId": "/"},
+               {"id": "ra2", "principalId": "sp-9", "roleDefinitionId": "role-pra",
+                "directoryScopeId": "/",
+                "principal": {"@odata.type": "#microsoft.graph.servicePrincipal", "id": "sp-9"}},
+               {"id": "ra3", "principalId": "u-1", "roleDefinitionId": "role-ga",
+                "directoryScopeId": "/"}]}
+    envs, _ = _envs(entra, doc)
+    held = {(e.subject.type, e.subject.key) for e in envs if e.predicate == "has_role"}
+    assert held == {("group", "grp-1"), ("service_principal", "sp-9"), ("user", "u-1")}
+
+
+def test_okta_role_assignment_from_links_assignee():
+    """`/users/{id}/roles` and `/groups/{id}/roles` name the holder only in
+    _links.assignee.href; those objects used to yield nothing."""
+    base = "https://example.okta.com/api/v1"
+    doc = {"roleAssignments": [
+        {"id": "ra1", "type": "SUPER_ADMIN", "status": "ACTIVE", "assignmentType": "USER",
+         "_links": {"assignee": {"href": f"{base}/users/00u1"}}},
+        {"id": "ra2", "type": "APP_ADMIN", "status": "ACTIVE", "assignmentType": "GROUP",
+         "_links": {"assignee": {"href": f"{base}/groups/00g1"}}},
+        {"id": "ra3", "type": "ORG_ADMIN", "status": "ACTIVE"}]}
+    envs, stats = _envs(okta, doc)
+    held = {(e.subject.type, e.subject.key, e.object.key) for e in envs}
+    assert held == {("user", "00u1", "SUPER_ADMIN"), ("group", "00g1", "APP_ADMIN")}
+    assert stats.get("empty") == 1          # the holder-less one is counted, not silent
+
+
+def test_shared_predicates_survive_both_registrations(tmp_path):
+    """Registration merges by name, last writer wins: with both schemas
+    registered (overlapping nightly refreshes), each connector's role claims
+    must still validate."""
+    from loom.consumer import handle_batch
+    from loom.registry import RegistryCache
+    store = SqliteStore(str(tmp_path / "reg.db"))
+    try:
+        for order in ((entra, okta), (okta, entra)):
+            for mod in order:
+                store.put_schema(mod.schema("iam"))
+            e_envs, _ = _envs(entra, {"roleAssignments": [
+                {"id": "ra", "principalId": "u-1", "roleDefinitionId": "role-ga"}]})
+            o_envs, _ = _envs(okta, {"roleAssignments": [
+                {"id": "ra", "type": "SUPER_ADMIN",
+                 "_links": {"assignee": {"href": "https://x/api/v1/users/00u1"}}}]})
+            counts = handle_batch(store, [e.model_dump_json().encode() for e in e_envs + o_envs],
+                                  RegistryCache(store))
+            assert counts["rejected"] == 0, (order, counts)
+    finally:
+        store.close()
+
+
+def test_generated_exports_round_trip_every_edge(tmp_path):
+    """iam_gen's realistic exports through both connectors into one store:
+    every implied edge stored once with the right types, a re-import adds
+    nothing, and every planted path comes back cited from find_path."""
+    import json
+    from datetime import datetime
+
+    from loom import iam_eval
+    from loom.connectors import iam_gen
+    e_doc, o_doc, truth = iam_gen.generate(7, "tiny")
+    as_of = datetime.fromisoformat(truth["export_date"].replace("Z", "+00:00"))
+    store = SqliteStore(str(tmp_path / "gen.db"))
+    try:
+        for kind, doc in (("entra", e_doc), ("okta", o_doc)):
+            store.put_schema((entra if kind == "entra" else okta).schema("iam"))
+            envs = list(iam_eval._envelopes(kind, json.dumps(doc), "iam", as_of, {}))
+            assert iam_eval.event_id_conflicts(envs) == 0
+            assert iam_eval.load(store, envs)["rejected"] == 0
+            before = iam_eval.visible_observations(store, "iam")
+            iam_eval.load(store, envs)
+            assert iam_eval.visible_observations(store, "iam") == before
+        got = iam_eval.stored_edges(store, "iam")
+        for kind in ("entra", "okta"):
+            for pred, row in iam_eval.fidelity(truth[f"{kind}_edges"],
+                                               got[iam_eval.SOURCES[kind]]).items():
+                assert row["missing"] == 0 and row["extra"] == 0, (kind, pred, row)
+        for path in truth["paths"]:
+            row = iam_eval.check_path(store, "iam", path, 4000)
+            assert row["edges_stored"] and row["find_path"], row
+    finally:
+        store.close()
