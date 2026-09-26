@@ -8,6 +8,21 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Detections, cloud inventory, and the ATT&CK taxonomy (D-071, D-072, D-073)
+
+- OCSF connector also ingests detection/security/incident findings (classes
+  2004/2001/2005) as a cited `finding` graph — `detected_on` a host,
+  `references` a CVE (shared node), status-transition supersession with
+  Suppressed != Resolved (D-071)
+- `python -m loom.connectors.cloud import` parses a `terraform show -json` /
+  `.tfstate` or an AWS Config snapshot into cited inventory claims
+  (resource/vpc/subnet/security_group/cloud_account) with containment and
+  reference edges; drift over snapshots is history (D-072)
+- `python -m loom.connectors.attack import` parses the published MITRE ATT&CK
+  STIX bundle into a cited `attack` taxonomy (technique/tactic/group/
+  software/mitigation; `in_tactic`/`uses`/`mitigates`), catalog-level only —
+  no procedure detail (D-073)
+
 ### OSV / GHSA advisories + cross-vendor product resolution (D-069, D-070)
 
 - `python -m loom.connectors.osv import` parses OSV-schema advisories

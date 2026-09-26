@@ -277,6 +277,15 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   base scores computed from the vector; genuine osv.dev fixtures (Log4Shell +
   the eslint-scope malware advisory) + a fusion test asserting the cited
   cross-source conflict.
+- ✅ OCSF detections (2026-09-26, D-071): the OCSF connector also ingests
+  detection/security/incident findings as a cited `finding` graph tied to the
+  host and CVE, with status-transition supersession (Suppressed != Resolved).
+- ✅ Cloud inventory / config (2026-09-26, D-072): terraform state / AWS Config
+  snapshots -> resource/vpc/subnet/security_group claims with containment
+  edges; drift over snapshots is history.
+- ✅ MITRE ATT&CK taxonomy (2026-09-26, D-073): the published ATT&CK STIX
+  bundle -> a cited technique/tactic/group/software/mitigation catalog
+  (`in_tactic`/`uses`/`mitigates`), catalog-level only.
 - ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
   `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
   connecting two entities along named predicates — the reachability chain

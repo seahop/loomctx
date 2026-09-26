@@ -46,6 +46,15 @@ python -m loom.connectors.osv import advisory.json --namespace netsec         # 
 python -m loom.connectors.osv import ./osv-db --namespace netsec --url http://loom:8000 --key loomk_...
 python -m loom.connectors.osv emit advisory.json --namespace netsec > envelopes.jsonl
 python -m loom.connectors.osv schema --namespace netsec
+
+# cloud inventory / config (terraform show -json / .tfstate, or an AWS Config snapshot)
+python -m loom.connectors.cloud import state.json --format terraform --namespace cloud
+python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace cloud --url http://loom:8000 --key loomk_...
+python -m loom.connectors.cloud schema --namespace cloud
+
+# MITRE ATT&CK taxonomy (the published mitre-attack STIX 2.1 bundle)
+python -m loom.connectors.attack import enterprise-attack.json --namespace attack
+python -m loom.connectors.attack schema --namespace attack
 ```
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
@@ -634,6 +643,74 @@ emitted first and every claim cites it (`provenance.artifact_event_id`, D-039).
 Source label `ghsa` / `osv` (`--source` overrides); a malformed record is
 counted `invalid` and skipped, not the end of a directory of thousands; the
 loader fails on refusals (D-063).
+
+## OCSF detections (`detection_finding` and friends) → Loom
+
+Beyond `vulnerability_finding` (class 2002), the connector ingests the
+detection classes a SIEM / EDR / XDR emits — `detection_finding` (2004),
+`security_finding` (2001), `incident_finding` (2005) — as a cited `finding`
+graph:
+
+| OCSF field | Loom claim |
+| --- | --- |
+| `finding_info.uid` | `finding:<uid>` entity |
+| `finding_info.title` / `desc` | `finding -title-> <text>` |
+| `device` / `endpoint` / `resources[]` / `evidences[].device` (hostname else IP) | `finding -detected_on-> host:<key>` |
+| `vulnerabilities[].cve.uid` | `finding -references-> cve:<id>` (the shared CVE node) |
+| `severity(_id)`, `status(_id)` | attrs on the `detected_on` / `references` edges |
+
+`observed_at` is the event `time` (else `finding_info.modified/created`);
+versions of one finding chain by `finding_uid` (D-050), so a
+New -> In Progress -> Resolved transition **supersedes** the prior state
+rather than reading as a conflict. Resolved / a Close activity sets
+`valid_to`; **Suppressed does not** (a muted finding is still active). The
+detection fuses onto the same `host:` and `cve:` nodes as the vuln and scan
+data, so a host's pack shows its detections beside its exposure. Import
+only; export stays `vulnerability_finding`.
+
+## Cloud inventory / config → Loom
+
+`loom.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
+AWS Config `configurationItems` snapshot (a file; it calls no cloud API)
+into cited, timestamped inventory claims in a `cloud` namespace — strictly
+inventory/config-as-facts, so an analyst can ask "what changed", "what is
+exposed", "what is in this subnet" over the scope walk / `find_path`.
+
+- **Entities** (small, generic): `resource`, and `vpc` / `subnet` /
+  `security_group` / `cloud_account` for the shapes that get typed edges.
+- **Edges:** terraform `depends_on` -> `depends_on`; an attribute equal to
+  another resource's id/arn -> `in_subnet` / `in_vpc` / `attached_to` by the
+  target's type, else `references`. AWS Config `relationships[]` ->
+  `in_subnet` / `in_vpc` / `attached_to` / `member_of` / `in_account`; a
+  security group's `ipPermissions[]` -> `allows_ingress proto/port`.
+- **Time / drift:** `observed_at` = the snapshot's capture time; content-
+  addressed event ids make re-import a no-op, and a later snapshot records
+  drift (an opened port, an appeared/vanished resource) as history, queryable
+  by `as_of` — never an overwrite.
+
+## MITRE ATT&CK taxonomy → Loom
+
+`loom.connectors.attack` parses the public `mitre-attack` STIX 2.1 bundles
+(enterprise / mobile / ICS) into a cited, queryable catalog in the `attack`
+namespace. It is **defensive reference data** — names, ids, descriptions and
+the relationships MITRE publishes — kept strictly at the catalog level; the
+per-relationship procedure prose ATT&CK attaches is **not** imported.
+
+| STIX object | Loom entity (key) |
+| --- | --- |
+| attack-pattern | `technique:Txxxx` (sub-techniques included) |
+| x-mitre-tactic | `tactic:TAxxxx` |
+| intrusion-set | `group:Gxxxx` |
+| malware / tool | `software:Sxxxx` |
+| course-of-action | `mitigation:Mxxxx` |
+
+Edges: `technique in_tactic tactic`, `group uses technique|software`,
+`software uses technique`, `mitigation mitigates technique`. Revoked /
+deprecated objects are skipped; `observed_at` = `modified`, so a later ATT&CK
+release is history. An analyst can then ask "which techniques does group G
+use, and which mitigations address them?" as a cited scope walk / `path`.
+`attack` is its own namespace; a technique that names a CVE optionally links
+to the shared `cve:` node.
 
 ## Registering the names in the schema registry
 

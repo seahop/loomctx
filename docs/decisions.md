@@ -2465,6 +2465,54 @@ refusals (D-063). Genuine osv.dev fixtures (Log4Shell, the eslint-scope npm
 compromise) + a fusion test asserting the cited cross-source CVSS conflict.
 Deferred: CVSS v4.0 base scoring and CWE emission.
 
+## D-071 · OCSF connector ingests detection findings, not just vuln findings (2026-09-26)
+
+The OCSF connector maps `detection_finding` (2004), `security_finding`
+(2001) and `incident_finding` (2005) to a `finding:<uid>` entity related to
+the host it concerns (`detected_on`, host keyed hostname-else-IP as the seed
+and nmap do) and to any CVE it references (`references`, fusing on the shared
+`cve:` node like OSV). Severity/status ride on the edges; versions chain by
+`finding_uid` (D-050) so a status transition supersedes rather than
+conflicts, and Suppressed is kept distinct from Resolved (muted != remediated).
+A detection thus surfaces on a host's pack beside its exposure. New `finding`
+type + `detected_on`/`references`/`title` predicates are non-strict
+registrations, not a contract change; vuln import and export are preserved,
+export stays vuln-only. Real GuardDuty->OCSF fixture from the ocsf/examples
+repo; a fusion test confirms the cited detection on the same host+cve nodes.
+
+## D-072 · Cloud inventory / config connector (terraform + AWS Config) (2026-09-26)
+
+`loom.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
+AWS Config `configurationItems` snapshot (a file; no cloud API) into cited,
+timestamped inventory claims in a non-strict `cloud` namespace: a small
+generic vocabulary (`resource`, `vpc`, `subnet`, `security_group`,
+`cloud_account`) with `in_subnet`/`in_vpc`/`in_account`/`member_of`
+(containment), `attached_to`, `depends_on`, `references`, `allows_ingress`
+edges. A resolved-reference predicate follows the *target* entity type so a
+type-constrained `in_subnet`/`in_vpc` never points at a generic resource.
+Content-addressed event ids + snapshot-time `observed_at` -> idempotent
+re-import and drift-as-history (a later snapshot's opened port is a new
+observation, not an overwrite). Strictly inventory/config-as-facts:
+reachability stays the scope walk / `find_path`, no attack-path scoring. Real
+terraform (1.9, null/random/local providers) + AWS Config fixtures; a walk
+test reaches a vpc from an instance through `in_subnet`/`in_vpc`, cited. No
+contract or store change.
+
+## D-073 · MITRE ATT&CK taxonomy connector (2026-09-26)
+
+Loom ingests the published MITRE ATT&CK knowledge base (STIX 2.1) as a cited
+taxonomy in the `attack` namespace: technique/tactic/group/software/mitigation
+entities keyed by ATT&CK external id, and the catalog relationships MITRE
+publishes (`in_tactic`, `uses`, `mitigates`). **Scope is deliberately the
+catalog level only** — names, ids, descriptions, edges — with no operational
+how-to: the per-relationship procedure descriptions are dropped, and
+`detects`/`subtechnique-of` are out of scope. Defensive reference data, held
+like the vuln corpus as a queryable, cited graph. Content-addressed (event id
+embeds `modified`): re-import idempotent, a version bump is history. Non-strict
+registration, no contract change. Import-only (no ATT&CK export). Real
+verbatim ATT&CK fixture; a walk test reaches a group's techniques and their
+mitigations, cited.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
