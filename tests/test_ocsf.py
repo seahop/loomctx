@@ -1,16 +1,22 @@
-"""OCSF interop (R-8): vulnerability_finding events -> claims -> findings.
+"""OCSF interop (R-8): vulnerability_finding events -> claims -> findings, and
+OCSF detection/security/incident findings -> a cited finding graph (D-071).
 
-Fixture events are trimmed real-shape records (a scanner's finding with
+Vuln fixture events are trimmed real-shape records (a scanner's finding with
 CVSS/EPSS/packages, a resolved one, and a non-finding class that must be
-ignored)."""
+ignored). The detection tests use a constructed real-shape detection_finding
+plus a GENUINE detection_finding sample (AWS Security Hub GuardDuty, class
+2004) vendored under tests/fixtures/ — see the detection section below."""
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from loom.connectors import ocsf
-from loom.contracts import ClaimIn, EntityRef, Observation
+from loom.connectors.chain import supersession
+from loom.context import build_pack
+from loom.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
 from loom.ingest import load_direct
 from loom.store.sqlite import SqliteStore
 
@@ -41,7 +47,9 @@ RESOLVED = {
     "vulnerabilities": [{"cve": {"uid": "CVE-2026-1337"}, "last_seen_time": T0 + 1_800_000},
                         {"cve": {"uid": "not-a-cve"}}],
 }
-OTHER_CLASS = {"class_uid": 2004, "time": T0, "finding_info": {"uid": "x"},
+# a genuinely non-finding class (Network Activity, 4001) — never mapped, by
+# either the vuln or the detection path
+OTHER_CLASS = {"class_uid": 4001, "time": T0, "finding_info": {"uid": "x"},
                "vulnerabilities": [{"cve": {"uid": "CVE-2026-9999"}}]}
 
 
@@ -274,3 +282,220 @@ def test_cli_import_exits_non_zero_when_anything_is_refused(tmp_path, capsys):
     with pytest.raises(SystemExit, match="envelopes were refused by the store"):
         ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db), "--no-schema"])
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["rejected"] > 0
+
+
+# =============================================================== detections #
+# OCSF detection / security / incident findings (D-071). REAL sample below:
+FIX = Path(__file__).parent / "fixtures"
+# tests/fixtures/ocsf_detection_finding_guardduty.json is a GENUINE OCSF
+# detection_finding (class 2004): the AWS Security Hub -> OCSF v1.1.0 GuardDuty
+# mapping sample published by the OCSF project at github.com/ocsf/examples
+# (mappings/.../Security Hub/Detection Finding/samples/sechub-guardduty.ocsf),
+# verbatim. It exercises the OCSF datetime profile (*_time_dt ISO strings), a
+# status name with no status_id, and a finding with no device and no CVE (a
+# cloud-resource target).
+GUARDDUTY = FIX / "ocsf_detection_finding_guardduty.json"
+
+# A constructed real-shape detection_finding on a host, referencing a CVE — the
+# fields (class_uid 2004, device, status_id, vulnerabilities[].cve) are all
+# standard OCSF Finding / Detection Finding attributes.
+DETECTION = {
+    "class_uid": 2004, "category_uid": 2, "class_name": "Detection Finding", "activity_id": 1,
+    "type_uid": 200401, "time": T0, "severity_id": 4, "severity": "High", "status_id": 1, "status": "New",
+    "is_alert": True,
+    "metadata": {"version": "1.3.0", "product": {"name": "Acme XDR", "vendor_name": "Acme"}},
+    "device": {"hostname": "web-01", "ip": "10.0.4.7", "type_id": 1},
+    "evidences": [{"src_endpoint": {"ip": "203.0.113.9"}}],
+    "finding_info": {"uid": "det-5001", "title": "Suspicious OpenSSL exploitation attempt",
+                     "first_seen_time": T0 - 86_400_000, "last_seen_time": T0},
+    "vulnerabilities": [{"cve": {"uid": "cve-2014-0160"}, "title": "Heartbleed"}],
+}
+
+
+def _det(**over):
+    """A DETECTION variant with top-level overrides (status/time/activity...)."""
+    return {**DETECTION, **over}
+
+
+def test_detection_finding_maps_to_finding_host_and_cve():
+    by = _by_pred(ocsf.event_to_envelopes(DETECTION, "netsec"))
+    finding = EntityRef(type="finding", key="det-5001")
+
+    title = by["title"][0]
+    assert title.subject == finding and title.object == "Suspicious OpenSSL exploitation attempt"
+    assert title.attrs["class_uid"] == 2004 and title.attrs["class_name"] == "Detection Finding"
+    assert title.observed_at == datetime(2025, 9, 1, 12, tzinfo=timezone.utc)   # time (epoch ms)
+
+    edge = by["detected_on"][0]
+    assert edge.subject == finding and edge.object == EntityRef(type="host", key="web-01")
+    assert edge.source == "acme_xdr"                                            # metadata.product.name
+    assert edge.attrs["finding_uid"] == "det-5001" and edge.attrs["status"] == "New"
+    assert edge.attrs["status_id"] == 1 and edge.attrs["severity_id"] == 4
+    assert edge.valid_from == datetime(2025, 8, 31, 12, tzinfo=timezone.utc)    # first_seen
+    assert edge.valid_to is None                                               # New: still active
+
+    ref = by["references"][0]
+    assert ref.subject == finding and ref.object == EntityRef(type="cve", key="CVE-2014-0160")
+    assert ref.attrs["severity"] == "High"
+    assert {c.attrs["finding_uid"] for c in by["title"] + by["detected_on"] + by["references"]} == {"det-5001"}
+
+
+def test_real_guardduty_detection_finding_parses():
+    """The genuine OCSF GuardDuty sample: parsed for title/severity/status, its
+    resource resolved as the host it concerns, and no CVE reference."""
+    event = json.loads(GUARDDUTY.read_text())
+    by = _by_pred(ocsf.event_to_envelopes(event, "netsec"))
+    uid = event["finding_info"]["uid"]
+    finding = EntityRef(type="finding", key=uid)
+
+    assert by["title"][0].subject == finding
+    assert by["title"][0].object == event["finding_info"]["title"]
+    edge = by["detected_on"][0]
+    assert edge.source == "guardduty"                                          # metadata.product.name
+    # no device/endpoint: the affected resource's uid is the host key
+    assert edge.object == EntityRef(type="host", key=event["resources"][0]["uid"])
+    assert edge.attrs["severity"] == "Low" and edge.attrs["severity_id"] == 2
+    # status_id is absent in the real event; it is resolved from status "New"
+    assert edge.attrs["status"] == "New" and edge.attrs["status_id"] == 1
+    assert edge.valid_to is None                                               # New: still active
+    # *_time_dt (OCSF datetime profile) parsed for first_seen
+    assert edge.valid_from == datetime(2023, 9, 19, 14, 55, 9, tzinfo=timezone.utc)
+    assert "references" not in by                                              # no CVE named
+
+
+def test_detection_without_a_device_maps_finding_and_cve_only():
+    event = _det(evidences=[], vulnerabilities=[{"cve": {"uid": "CVE-2021-44228"}}])
+    del event["device"]
+    by = _by_pred(ocsf.event_to_envelopes(event, "netsec"))
+    assert "detected_on" not in by                                             # no host to attach to
+    assert by["title"] and by["references"][0].object == EntityRef(type="cve", key="CVE-2021-44228")
+
+
+def test_suppressed_is_not_treated_as_resolved():
+    resolved = _det(status="Resolved", status_id=4, activity_id=2)
+    suppressed = _det(status="Suppressed", status_id=3, activity_id=2)
+    assert ocsf.closes_exposure(resolved) is True and ocsf.closes_exposure(suppressed) is False
+    # a status-only event (no status_id) still closes / stays open correctly
+    assert ocsf.closes_exposure(_det(status="Resolved", status_id=None)) is True
+    assert ocsf.closes_exposure(_det(status="Suppressed", status_id=None)) is False
+
+    res_edge = [c for c in ocsf.event_to_envelopes(resolved, "netsec") if c.predicate == "detected_on"][0]
+    sup_edge = [c for c in ocsf.event_to_envelopes(suppressed, "netsec") if c.predicate == "detected_on"][0]
+    assert res_edge.valid_to == datetime(2025, 9, 1, 12, tzinfo=timezone.utc)   # closed at last_seen
+    assert sup_edge.valid_to is None                                           # muted, still active
+
+
+def test_status_transition_supersedes_the_prior_state(tmp_path):
+    """New -> In Progress -> Resolved for one finding: the store chains the
+    detected_on versions (D-050), so only the resolved one is current and it
+    closes the edge — not three open detections side by side."""
+    db = tmp_path / "life.db"
+    hour = 3_600_000
+    events = tmp_path / "life.ndjson"
+    events.write_text("\n".join(json.dumps(e) for e in (
+        _det(time=T0, status="New", status_id=1, activity_id=1),
+        _det(time=T0 + hour, status="In Progress", status_id=2, activity_id=2),
+        _det(time=T0 + 2 * hour, status="Resolved", status_id=4, activity_id=2,
+             finding_info={"uid": "det-5001", "title": "Suspicious OpenSSL exploitation attempt",
+                           "first_seen_time": T0 - 86_400_000, "last_seen_time": T0 + 2 * hour}),
+    )) + "\n")
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db)])
+
+    store = SqliteStore(db)
+    try:
+        obs = [o for o in store.observations_for("netsec", EntityRef(type="finding", key="det-5001"))
+               if o.predicate == "detected_on"]
+        assert len(obs) == 3
+        superseded = supersession(obs)
+        current = [o for o in obs if o.id not in superseded]
+        assert len(current) == 1                                               # only one live version
+        assert current[0].attrs["status"] == "Resolved" and current[0].attrs["status_id"] == 4
+        assert current[0].valid_to == datetime(2025, 9, 1, 14, tzinfo=timezone.utc)   # closed at last_seen
+        assert {o.attrs["status"] for o in obs if o.id in superseded} == {"New", "In Progress"}
+    finally:
+        store.close()
+
+
+def test_detection_import_is_idempotent(tmp_path):
+    db = tmp_path / "idem.db"
+    events = tmp_path / "det.ndjson"
+    events.write_text(json.dumps(DETECTION) + "\n")
+
+    def count():
+        store = SqliteStore(db)
+        try:
+            return sum(1 for _ in store.iter_observations("netsec"))
+        finally:
+            store.close()
+
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db)])
+    before = count()
+    assert before > 0
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db)])   # replay
+    assert count() == before
+
+
+def test_vuln_and_detection_import_together_and_vuln_export_is_unaffected(tmp_path):
+    """A detection and a vulnerability_finding land in one store; the detection's
+    `references` edge does NOT export as a bogus vulnerability_finding."""
+    db = tmp_path / "mixed.db"
+    events = tmp_path / "mixed.ndjson"
+    events.write_text("\n".join(json.dumps(e) for e in (FINDING, DETECTION)) + "\n")
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db)])
+    store = SqliteStore(db)
+    try:
+        findings = ocsf.observations_to_findings(list(store.iter_observations("netsec")), "netsec")
+    finally:
+        store.close()
+    keyed = {(r.get("device", {}).get("hostname"), r["vulnerabilities"][0]["cve"]["uid"]) for r in findings}
+    assert keyed == {("web-01", "CVE-2014-0160")}
+
+
+# ---------------------------------------------------- fusion (reuse the walk) #
+
+def test_detection_fuses_onto_the_host_alongside_its_exposure(tmp_path):
+    """The point of D-071: a detection on web-01 referencing a CVE lands on the
+    SAME host node the vuln/scan data uses and fuses on the SAME cve node. Seed
+    web-01 running a product a CVE affects (its exposure), import a
+    detection_finding on web-01 referencing that CVE, and assert an ask_scope
+    walk from web-01 surfaces the detection cited alongside the exposure."""
+    db = tmp_path / "fusion.db"
+    web = EntityRef(type="host", key="web-01")
+    product = EntityRef(type="product", key="openssl:openssl")
+    cve = EntityRef(type="cve", key="CVE-2014-0160")
+    store = SqliteStore(db)
+    at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    # exposure: web-01 runs a product a CVE affects (as nmap + NVD would land it)
+    store.record_claims([
+        ClaimIn(namespace="netsec", subject=web, predicate="runs_software", object=product,
+                observed_at=at, source="nmap"),
+        ClaimIn(namespace="netsec", subject=cve, predicate="affects", object=product,
+                observed_at=at, source="nvd"),
+    ])
+    store.close()
+
+    events = tmp_path / "det.ndjson"
+    events.write_text(json.dumps(DETECTION) + "\n")
+    ocsf.main(["import", str(events), "--namespace", "netsec", "--db", str(db)])
+
+    store = SqliteStore(db)
+    try:
+        det = list(store.observations_for("netsec", EntityRef(type="finding", key="det-5001")))
+        detected_on = next(o for o in det if o.predicate == "detected_on")
+        references = next(o for o in det if o.predicate == "references")
+        assert detected_on.object == web and references.object == cve
+
+        pack = build_pack(store, AskRequest(
+            namespace="netsec", question="what is going on with web-01 and is it exposed?",
+            scope=ScopeSpec(subjects=[web], depth=3,
+                            expand=["detected_on", "references", "runs_software", "affects"]),
+            budget=4000))
+        reached = {(s.type, s.key) for s in pack.subjects}
+        assert {("finding", "det-5001"), ("product", "openssl:openssl"),
+                ("cve", "CVE-2014-0160")} <= reached
+        cited = {c.observation_id for item in pack.items for c in item.citations}
+        assert detected_on.id in cited                       # the detection is surfaced, cited ...
+        assert references.id in cited                        # ... on the same cve node as its exposure
+        assert all(item.citations for item in pack.items)    # hard constraint: everything cited
+    finally:
+        store.close()
