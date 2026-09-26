@@ -780,23 +780,27 @@ def _listed(value: list[str] | str | None) -> list[str]:
     """A list argument, also when a model sends it as text: qwen3-coder
     passed expand_predicates="['runs_software']" on the D-064 smoke run,
     was refused twice by the schema, and fell back to one ask per product.
-    JSON or Python-style list text, or a comma-separated string, is read
-    as the list it spells."""
+    JSON or Python-style list text (bracketed) is read as the list it
+    spells. A bare string is ONE item — never comma-split: a key may hold
+    commas (an LDAP DN, "user:CN=Bob,OU=Staff,DC=corp"), and splitting it
+    asked about entities nobody named."""
     if value is None:
         return []
     if not isinstance(value, str):
         return list(value)
     text = value.strip()
-    if text.startswith("["):
-        import ast
-        import json
-        for parse in (json.loads, ast.literal_eval):
-            try:
-                parsed = parse(text)
-            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-                continue
-            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                return parsed
+    if not (text.startswith("[") and text.endswith("]")):
+        return [text] if text else []
+    import ast
+    import json
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(text)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            continue
+        if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            return parsed
+    # bracketed but unquoted ("[member_of, affects]"): clearly a list
     parts = (p.strip().strip("'\"").strip() for p in text.strip("[]").split(","))
     return [p for p in parts if p]
 
@@ -1208,10 +1212,40 @@ def _compact_text(fn):
     return wrapped
 
 
+def _accept_aliases(fn):
+    """A parameter published under an alias (find_path's `from_` is `from`
+    on the wire — `from` is a Python keyword) reaches the function under
+    that alias: the SDK's ArgModelBase.model_dump_one_level() keys the call's
+    kwargs by alias, so find_path was called with from=... and failed every
+    real tools/call with an opaque TypeError. Map each alias back to its
+    parameter name; the schema (built from the signature) is unchanged."""
+    import functools
+    import typing
+
+    renames = {
+        alias: name
+        for name, hint in typing.get_type_hints(fn, include_extras=True).items()
+        for meta in getattr(hint, "__metadata__", ())
+        if isinstance(alias := getattr(meta, "alias", None), str) and alias != name
+    }
+    if not renames:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        for alias, name in renames.items():
+            if alias in kwargs:
+                kwargs[name] = kwargs.pop(alias)
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
 _PACK_TOOLS = ("ask", "ask_scope", "find_path", "expand", "answer")
 
 for _fn in TOOLS:
-    _impl = _compact_text(_fn) if _fn.__name__ in _PACK_TOOLS else _fn
+    _impl = _accept_aliases(_fn)
+    _impl = _compact_text(_impl) if _fn.__name__ in _PACK_TOOLS else _impl
     mcp.tool(name=_fn.__name__, title=TOOL_META[_fn.__name__][0],
              annotations=_annotations(_fn.__name__))(_surface_errors(_impl))
 

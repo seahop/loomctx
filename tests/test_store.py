@@ -560,6 +560,25 @@ def test_a_restored_tombstone_drops_briefs_citing_it(store):
     assert store.observations_for("default", host) == []
 
 
+def test_find_paths_drops_an_edge_superseded_off_its_walk(store):
+    """D-067 on every backend: walked from its object side, a retired edge's
+    correction (same subject, other object) is never gathered — find_paths
+    looks the path's edge ids up with corrections_of before returning."""
+    from loom.context import find_paths
+    from loom.contracts import PathRequest
+    b, c = EntityRef(type="host", key="b"), EntityRef(type="host", key="c")
+    x = store.record_claim(ClaimIn(subject=b, predicate="link", object=c,
+                                   observed_at=OBSERVED, source="g"))
+    req = PathRequest(**{"from": c}, to=b, via=["link"], depth=1)
+    assert len(find_paths(store, req).paths) == 1
+    store.record_claim(ClaimIn(subject=b, predicate="link", object=EntityRef(type="host", key="c2"),
+                               observed_at=OBSERVED.replace(day=5), source="g", supersedes=x.id))
+    assert find_paths(store, req).paths == []
+    # as of before the correction, the edge is current again
+    early = find_paths(store, req.model_copy(update={"as_of": OBSERVED.replace(day=2)}))
+    assert [e.cite.observation_id for e in early.paths[0]] == [x.id]
+
+
 def test_resolve_refs_and_corrections_of(store):
     """D-058: the read path resolves its subjects to canonical entities
     (a merged-away name included) and finds the corrections of rows

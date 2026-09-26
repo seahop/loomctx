@@ -122,6 +122,71 @@ def test_depth_cap_blocks_a_longer_path(tmp_path):
     assert any("no path found" in n for n in pack.notes)
 
 
+def test_depth_cut_only_reported_when_the_frontier_can_extend(tmp_path):
+    """A depth-length path ending at a dead end cut nothing: no depth
+    truncation. One whose far end has an edge off the path did — reported,
+    with `total` the paths actually found (no invented count)."""
+    store = SqliteStore(tmp_path / "dead.db")
+    _edge(store, "net", ("n", "a"), ("n", "b"))
+    _edge(store, "net", ("n", "b"), ("n", "t"))
+    _edge(store, "net", ("n", "b"), ("n", "d"))     # d: a dead end
+    req = _req(**{"from": _n("a")}, to=_n("t"), via=["link"], depth=2)
+    pack = find_paths(store, req)
+    assert len(pack.paths) == 1
+    assert not [t for t in pack.truncated if t.reason == "depth"], pack.truncated
+    assert not any("frontier" in n for n in pack.notes)
+    _edge(store, "net", ("n", "d"), ("n", "e"))     # now d leads on
+    pack = find_paths(store, req)
+    cut = [t for t in pack.truncated if t.reason == "depth"]
+    assert cut and cut[0].gathered == 1 and cut[0].total == 1
+    assert any("raise depth" in n for n in pack.notes)
+    store.close()
+
+
+def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
+    """The BFS is over paths: from a product with many CVEs that also affect
+    a few shared products, every shared product is re-reached through each
+    CVE and the last hop fans back out through every CVE — 300 x 5 x 300 =
+    450k extensions unbounded. The work is capped at
+    LOOM_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
+    import time
+    store = SqliteStore(tmp_path / "hub.db")
+    shared = [f"q{i}" for i in range(5)]
+    claims = []
+    for i in range(300):
+        for prod in ["hub", *shared]:
+            claims.append(ClaimIn(namespace="net", subject=EntityRef(type="cve", key=f"CVE-{i}"),
+                                  predicate="affects", object=EntityRef(type="product", key=prod),
+                                  observed_at=_at(1), source="nvd"))
+    claims.append(ClaimIn(namespace="net", subject=EntityRef(type="product", key="far"),
+                          predicate="affects", object=EntityRef(type="product", key="farther"),
+                          observed_at=_at(1), source="nvd"))
+    store.record_claims(claims)
+    req = _req(**{"from": EntityRef(type="product", key="hub")},
+               to=EntityRef(type="product", key="far"), via=["affects"], depth=3)
+
+    monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "20000")
+    stats: dict = {}
+    start = time.monotonic()
+    pack = find_paths(store, req, stats=stats)
+    assert time.monotonic() - start < 10
+    assert stats["work"] <= 20_000 + 1 and stats["partials"] <= 20_000
+    assert pack.paths == []
+    assert any(t.reason == "scope_cap" for t in pack.truncated)
+    assert any("edge extensions" in n for n in pack.notes)
+
+    # the default bound holds too, and the last hop materializes nothing:
+    # the partial paths held are the hop-2 ones only (300 CVEs x 5 shared)
+    monkeypatch.delenv("LOOM_MAX_SCOPE_OBSERVATIONS")
+    stats = {}
+    start = time.monotonic()
+    pack = find_paths(store, req, stats=stats)
+    assert time.monotonic() - start < 20
+    assert stats["work"] <= 100_000 + 1 and stats["partials"] <= 300 + 300 * 5
+    assert any("edge extensions" in n for n in pack.notes)
+    store.close()
+
+
 def test_depth_over_cap_is_clamped_and_noted(tmp_path):
     store = SqliteStore(tmp_path / "clamp.db")
     _edge(store, "net", ("n", "a"), ("n", "b"))
@@ -175,6 +240,25 @@ def test_superseded_edge_excluded(tmp_path):
     assert len(to_c2.paths) == 1
 
 
+def test_superseded_edge_excluded_walked_from_its_object_side(tmp_path):
+    """The correction Y (b -> c2) shares the retired X's subject, not its
+    object: walked from c, b's rows (and Y) are never gathered before X is
+    taken — the edge ids are looked up for corrections before returning."""
+    store = SqliteStore(tmp_path / "suprev.db")
+    _edge(store, "net", ("n", "a"), ("n", "b"))
+    bc = _edge(store, "net", ("n", "b"), ("n", "c"), day=2)
+    _edge(store, "net", ("n", "b"), ("n", "c2"), day=9, supersedes=bc.id)
+    one = find_paths(store, _req(**{"from": _n("c")}, to=_n("b"), via=["link"], depth=1))
+    assert one.paths == [], "c -> b rides the superseded b -> c edge"
+    two = find_paths(store, _req(**{"from": _n("c")}, to=_n("a"), via=["link"], depth=2))
+    assert two.paths == [], "the path's first hop is the superseded edge"
+    # as of before the correction was observed, the edge is current again
+    early = find_paths(store, _req(**{"from": _n("c")}, to=_n("b"), via=["link"], depth=1,
+                                   as_of=_at(5)))
+    assert len(early.paths) == 1 and early.paths[0][0].cite.observation_id == bc.id
+    store.close()
+
+
 # --------------------------------------------------------------- scoping #
 
 def test_type_scoped_grant_cannot_see_path_through_a_gated_type(tmp_path):
@@ -192,6 +276,78 @@ def test_type_scoped_grant_cannot_see_path_through_a_gated_type(tmp_path):
                                     to=EntityRef(type="host", key="c"), via=["link"], depth=2),
                         allowed_types=("host",))
     assert scoped.paths == [], "a path through the gated 'secret' hop is not returned"
+
+
+def test_gated_predicate_names_do_not_leak_through_notes(tmp_path):
+    """The 'unknown via' note's vocabulary is built from rows the caller may
+    see: a predicate carried only by edges into a gated type is not named."""
+    store = SqliteStore(tmp_path / "leak.db")
+    store.record_claim(ClaimIn(namespace="net", subject=EntityRef(type="host", key="a"),
+                               predicate="stores_secret", object=EntityRef(type="secret", key="m"),
+                               observed_at=_at(1), source="g"))
+    _edge(store, "net", ("host", "a"), ("host", "b"), pred="link")
+    req = _req(**{"from": EntityRef(type="host", key="a")},
+               to=EntityRef(type="host", key="b"), via=["stores_secrets"], depth=1)
+    def named(pack):   # the notes, minus the asked-for name itself
+        return " ".join(pack.notes).replace("stores_secrets", "")
+    assert "closest: stores_secret" in named(find_paths(store, req))
+    scoped = find_paths(store, req, allowed_types=("host",))
+    assert any("stores_secrets" in n for n in scoped.notes)   # still told it is unknown
+    assert "stores_secret" not in named(scoped)
+    store.close()
+
+
+def _keyed_path_client(tmp_path, monkeypatch, db):
+    import hashlib
+    import json
+
+    from fastapi.testclient import TestClient
+    keys = tmp_path / "keys.json"
+    keys.write_text(json.dumps({"keys": [
+        {"sha256": hashlib.sha256(b"admin-key").hexdigest(), "id": "admin",
+         "namespaces": ["net"], "perms": "r"},
+        {"sha256": hashlib.sha256(b"host-key").hexdigest(), "id": "hosts",
+         "namespaces": ["net"], "perms": "r", "entity_types": ["host"]}]}))
+    monkeypatch.setenv("LOOM_DB", str(db))
+    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
+    for var in ("LOOM_API_KEYS", "LOOM_ALLOWED_HOSTS", "LOOM_ALLOWED_ORIGINS"):
+        monkeypatch.delenv(var, raising=False)
+    from loom.api.http import app
+    return TestClient(app)
+
+
+def test_type_scoped_key_does_not_learn_a_gated_canonical_through_an_alias(tmp_path, monkeypatch):
+    """/v1/path gates the requested types; a cross-type alias (host:shadow ->
+    secret:m) must not echo the gated canonical back, nor search from it."""
+    db = tmp_path / "alias.db"
+    store = SqliteStore(db)
+    store.record_claim(ClaimIn(namespace="net", subject=EntityRef(type="secret", key="m"),
+                               predicate="link", object=EntityRef(type="host", key="b"),
+                               observed_at=_at(1), source="g"))
+    store.add_alias("net", EntityRef(type="host", key="shadow"), EntityRef(type="secret", key="m"))
+    store.close()
+    body = {"namespace": "net", "from": {"type": "host", "key": "shadow"},
+            "to": {"type": "host", "key": "b"}, "via": ["link"], "depth": 1}
+    with _keyed_path_client(tmp_path, monkeypatch, db) as client:
+        admin = client.post("/v1/path", json=body, headers={"x-loom-key": "admin-key"})
+        assert admin.status_code == 200
+        assert admin.json()["from"] == {"type": "secret", "key": "m"} and admin.json()["paths"]
+        # the scoped key asked about a host it may see; the name resolves to
+        # a gated secret, which is not there for it
+        scoped = client.post("/v1/path", json=body, headers={"x-loom-key": "host-key"})
+        assert scoped.status_code == 200
+        out = scoped.json()
+        assert out["from"] == {"type": "host", "key": "shadow"} and out["paths"] == []
+        assert "secret" not in json_text(out)
+        # asking for the gated type directly is refused outright
+        direct = client.post("/v1/path", json={**body, "from": {"type": "secret", "key": "m"}},
+                             headers={"x-loom-key": "host-key"})
+        assert direct.status_code == 403
+
+
+def json_text(value) -> str:
+    import json
+    return json.dumps(value)
 
 
 # --------------------------------------------------------------- budget #
