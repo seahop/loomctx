@@ -34,6 +34,12 @@ python -m loom.connectors.ldap import export.ldif --namespace ad                
 python -m loom.connectors.ldap import export.ldif --namespace ad --url http://loom:8000 --key loomk_...
 python -m loom.connectors.ldap emit export.ldif --namespace ad > envelopes.jsonl
 python -m loom.connectors.ldap schema --namespace ad [--as-of 2026-09-20T09:00:00Z]
+
+# nmap scan inventory (an `nmap -oX` XML report an operator already produced)
+python -m loom.connectors.nmap import report.xml --namespace netsec                   # into the LOOM_DB store
+python -m loom.connectors.nmap import report.xml --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.nmap emit report.xml --namespace netsec > envelopes.jsonl
+python -m loom.connectors.nmap schema --namespace netsec [--as-of 2026-09-26T15:00:00Z]
 ```
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
@@ -493,6 +499,69 @@ cites 100% of the planted chains while the walk pulls ~2.5% of the store's
 entities. It is synthetic and object-level only, and measures retrieval, not
 attack-path ranking.
 
+## Scan inventory (nmap) → Loom
+
+`loom.connectors.nmap` parses the XML report an operator already produced
+with `nmap -oX` on authorized scope into cited, timestamped inventory
+claims in the `netsec` namespace (to line up with the vulns data). It reads
+a **file**: it performs **no scanning** and issues **no network probing** —
+it is a parser, exactly like the STIX / OCSF / vulns connectors. It stays
+strictly inventory/asset parsing: what hosts, ports, services and
+product/versions a scan report lists, as facts over time. **No exploitation
+logic, no attack-path scoring, no exposure ranking** — Loom carries the
+evidence (this host runs this software, this port is open, this OS was
+guessed) and reachability is the ordinary scope walk / `find_path` (D-067).
+
+### The claim mapping
+
+Per `<host>` in the report:
+
+| nmap | Loom claim |
+| --- | --- |
+| the target: `<hostnames><hostname>` (user, else PTR), else `<address addrtype="ipv4">`, else `ipv6` | the host entity `host:<key>` (the seed's `host:web-01` convention); both IP and hostname (and mac, extra hostnames) ride in `attrs` |
+| each `<port>` with `<state state="open">` (or `open\|filtered`) | `listens_on_port <portid>` (a scalar int — the seed's own nmap port fact) **and** `runs_service tcp/<portid>` with attrs `port` / `protocol` / `state` / `service` / `product` |
+| a service's application CPE (`cpe:/a:vendor:product:…`) | `runs_software → product:<vendor>:<product>`, keyed the **same** way the vulns connector keys products (see below); attrs carry the `cpe` and the raw `version` banner |
+| the best `<osmatch>` (highest accuracy) | `runs_os <name>` (e.g. `Linux 4.15 - 5.19`) at **lower confidence** than an authoritative inventory (scaled from nmap's accuracy, capped at 0.9), so it conflicts honestly with an asset-inventory OS record (D-035); attrs carry `accuracy`, the osclass `cpe` / `os_vendor` / `osfamily` / `osgen` |
+
+A closed or filtered-only port yields no service; a host that is `down` or
+carries no address yields nothing (counted `host_empty`). OS CPEs
+(`cpe:/o:…`) are **not** turned into `runs_software`: the OS is a guess and
+stays a `runs_os` claim only.
+
+### The product-key fusion with the vuln graph
+
+This is the point of the connector. The vulns connector keys a `product`
+entity `vendor:product` from a CVE's CPE 2.3 (`vulns.parse_cpe`); the OCSF
+and STIX importers write to the same node. nmap emits the **2.2 URI** CPE
+form (`cpe:/a:openbsd:openssh:10.3`), so the connector normalizes it to 2.3
+and hands it to that **same** `vulns.parse_cpe` — a scanned `runs_software`
+edge therefore lands on the **identical** `product` node NVD/KEV populate.
+So a scanned host reaches its software's KEV CVEs over the existing
+`host → product ← cve` chain: `find_path(from=host:…, to=cve:…,
+via=["runs_software", "affects"])` returns the cited edge sequence (the
+`affects` edge is stored cve→product and walked product→cve, D-067). The
+`runs_software` predicate is registered with `object_types=["product"]` and
+`containment=true`, exactly like the vulns bridge, so scope walks follow it.
+
+nmap's service DB does not always use NVD's CPE vendor: it keys nginx as
+`igor_sysoev:nginx`, where NVD uses `nginx:nginx` / `f5:nginx_open_source`
+— the same freehand entity-resolution seam KEV shows, surfaced honestly and
+left for D-042 to resolve, not hidden. `openbsd:openssh` and
+`postgresql:postgresql` match NVD directly and fuse with no help.
+
+### Provenance & time
+
+One synthetic scan-report **document** is emitted first (scanner, args,
+start, host/service summary) with a content-addressed event id, and every
+claim cites it (`provenance.artifact_event_id`, D-039). `observed_at` is the
+scan's `@start` / `@startstr` time (then `--as-of`, then the file mtime), so
+`valid_at` / `as_of` work. Event ids are content-addressed — the report id
+digests the scan's args + start — so re-importing the same file is a no-op,
+and a **later** scan of the same host records new observations (a closed
+port, a changed version, a new OS guess) as history, not duplicates. A host
+that cannot be parsed is counted `host_invalid` and skipped, not the whole
+report; source label `nmap`.
+
 ## Registering the names in the schema registry
 
 Every importer registers a non-strict schema for the namespace on
@@ -500,9 +569,11 @@ Every importer registers a non-strict schema for the namespace on
 names deliberately coincide across the vulns connector, the OCSF importer
 and a STIX `vulnerability` (`cvss_score`, `has_severity`, `epss_score`,
 `summary`, `affects`), so one CVE's record reads as one record whatever
-produced it. The LDAP connector registers its own `ad` vocabulary
-(`member_of`, `has_ace`, `trusts`, …) — a separate domain, typically its own
-namespace. To pin a namespace to exactly these names:
+produced it. The nmap connector's `runs_software` reuses that same
+`product` object type and CPE `vendor:product` keying, so a scanned host's
+software meets NVD/KEV at one node. The LDAP connector registers its own
+`ad` vocabulary (`member_of`, `has_ace`, `trusts`, …) — a separate domain,
+typically its own namespace. To pin a namespace to exactly these names:
 
 ```bash
 python -m loom.connectors.stix schema --namespace netsec > stix.json

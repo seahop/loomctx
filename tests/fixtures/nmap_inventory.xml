@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.98 scan initiated Sat Sep 26 15:28:53 2026 as: /usr/bin/nmap -sV -Pn -p 80,2222,5432 -oX - loomnm-nginx loomnm-ssh loomnm-pg -->
+<nmaprun scanner="nmap" args="/usr/bin/nmap -sV -Pn -p 80,2222,5432 -oX - loomnm-nginx loomnm-ssh loomnm-pg" start="1790436533" startstr="Sat Sep 26 15:28:53 2026" version="7.98" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="3" services="80,2222,5432"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.3" addrtype="ipv4"/>
+<address addr="EA:91:07:FC:7B:0B" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-pg" type="user"/>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.4" addrtype="ipv4"/>
+<address addr="D6:52:FA:37:AB:DD" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-ssh" type="user"/>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.2" addrtype="ipv4"/>
+<address addr="DE:C9:F9:4B:54:C7" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-nginx" type="user"/>
+</hostnames>
+</hosthint>
+<host starttime="1790436535" endtime="1790436541"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.2" addrtype="ipv4"/>
+<address addr="DE:C9:F9:4B:54:C7" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-nginx" type="user"/>
+<hostname name="loomnm-nginx.loomnm-net" type="PTR"/>
+</hostnames>
+<ports><port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http" product="nginx" version="1.27.5" method="probed" conf="10"><cpe>cpe:/a:igor_sysoev:nginx:1.27.5</cpe></service></port>
+<port protocol="tcp" portid="2222"><state state="closed" reason="reset" reason_ttl="64"/><service name="EtherNetIP-1" method="table" conf="3"/></port>
+<port protocol="tcp" portid="5432"><state state="closed" reason="reset" reason_ttl="64"/><service name="postgresql" method="table" conf="3"/></port>
+</ports>
+<times srtt="6" rttvar="2112" to="100000"/>
+</host>
+<host starttime="1790436535" endtime="1790436541"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.4" addrtype="ipv4"/>
+<address addr="D6:52:FA:37:AB:DD" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-ssh" type="user"/>
+<hostname name="loomnm-ssh.loomnm-net" type="PTR"/>
+</hostnames>
+<ports><port protocol="tcp" portid="80"><state state="closed" reason="reset" reason_ttl="64"/><service name="http" method="table" conf="3"/></port>
+<port protocol="tcp" portid="2222"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="ssh" product="OpenSSH" version="10.3" extrainfo="protocol 2.0" method="probed" conf="10"><cpe>cpe:/a:openbsd:openssh:10.3</cpe></service></port>
+<port protocol="tcp" portid="5432"><state state="closed" reason="reset" reason_ttl="64"/><service name="postgresql" method="table" conf="3"/></port>
+</ports>
+<times srtt="5" rttvar="2111" to="100000"/>
+</host>
+<host starttime="1790436535" endtime="1790436541"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.18.0.3" addrtype="ipv4"/>
+<address addr="EA:91:07:FC:7B:0B" addrtype="mac"/>
+<hostnames>
+<hostname name="loomnm-pg" type="user"/>
+<hostname name="loomnm-pg.loomnm-net" type="PTR"/>
+</hostnames>
+<ports><port protocol="tcp" portid="80"><state state="closed" reason="reset" reason_ttl="64"/><service name="http" method="table" conf="3"/></port>
+<port protocol="tcp" portid="2222"><state state="closed" reason="reset" reason_ttl="64"/><service name="EtherNetIP-1" method="table" conf="3"/></port>
+<port protocol="tcp" portid="5432"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="postgresql" product="PostgreSQL DB" version="9.6.0 or later" method="probed" conf="10"><cpe>cpe:/a:postgresql:postgresql</cpe></service></port>
+</ports>
+<times srtt="42" rttvar="2129" to="100000"/>
+</host>
+<runstats><finished time="1790436541" timestr="Sat Sep 26 15:29:01 2026" summary="Nmap done at Sat Sep 26 15:29:01 2026; 3 IP addresses (3 hosts up) scanned in 7.76 seconds" elapsed="7.76" exit="success"/><hosts up="3" down="0" total="3"/>
+</runstats>
+</nmaprun>
