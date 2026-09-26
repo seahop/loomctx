@@ -2291,6 +2291,37 @@ connects user:X to domain:B?" over the existing scope walk.
 No core, contract or store changes. The connector reads a file and
 performs no directory operations.
 
+## D-066 · An object-level AD reachability capability benchmark (2026-09-26)
+
+`loom.connectors.ad_gen` + `loom.ad_eval` are the AD analogue of the KEV
+retrieval benchmark (D-053/D-061). A deterministic synthetic directory
+(`corp.local` root + a bidirectional-transitive `dev.local` child + a
+non-transitive `partner.local` and a SID-filtered `fabrikam.local` used
+only by decoys) plants known 2/3/4-hop membership → ACL → trust chains and
+decoy dead-ends (a non-transitive trust, a SID-filtered trust, a disabled
+start account) under dense benign noise, all recorded to a truth sidecar.
+The generator emits real self-relative SD/ACE bytes and reuses the raw-LDAP
+connector's own right/GUID/UAC/trust constants, so it exercises the
+shipped parser, not a mock.
+
+The harness loads through that connector and scores with a scripted reader
+(no LLM): path-recall (every edge of a planted chain present **and cited**),
+edge-precision, decoy-exclusion (the dead-end's disqualifying fact is
+itself surfaced and cited, so a reader can reject it), entities-gathered
+vs total (how much of the directory the walk touched), truncation, build
+latency and pack tokens. A chain longer than three hops is walked in
+re-anchored asks (ScopeSpec.depth ≤ 3, D-046); node account-status is a
+subject-scoped ask (a broad path walk ranks that scalar out).
+
+Analysis only: it validates that pre-planted edges are present and cited,
+computes no path ranking and emits no tradecraft. Medium run (seed 7,
+4,429 objects, 31,430 observations, 8,702 raw edges): 100% path-recall and
+100% decoy-exclusion at budgets 1,500/3,000/4,000, gathering ~2.5% of the
+store per chain, build p50 ≈ 150 ms — the scope walk finds the chain by
+walking outward from the start, not by scanning. The scripted number is
+retrieval alone; a live reader assembling it from the pack is an optional
+`--live` smoke. No core, contract or store change.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

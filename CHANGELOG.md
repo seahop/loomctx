@@ -8,6 +8,15 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### AD reachability capability benchmark (D-066)
+
+- `python -m loom.connectors.ad_gen` — a deterministic synthetic directory
+  generator (LDIF the connector parses; planted 2/3/4-hop reachability
+  chains + decoy dead-ends under dense noise) — and `python -m loom.ad_eval`,
+  a scripted path-recall / decoy-exclusion / entities-gathered scorer.
+  `docs/ad-eval.md`. Medium run: 100% recall and decoy-exclusion, ~2.5% of
+  the store walked per chain
+
 ### Raw LDAP / Active Directory connector (D-065)
 
 - `python -m loom.connectors.ldap import export.ldif --namespace ad`:
