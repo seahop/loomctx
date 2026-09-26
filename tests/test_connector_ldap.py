@@ -218,6 +218,38 @@ def test_import_then_ask_scope_returns_the_cited_chain(tmp_path):
         store.close()
 
 
+def test_find_path_user_to_domain_returns_the_cited_chain(tmp_path):
+    """find_path (D-067) over the same corpus: svc-sql -member_of-> Domain
+    Admins -has_ace-> corp.local -trusts-> dev.local, each hop cited. The
+    connector carries the evidence; find_path enumerates the connecting edge
+    sequence — it does not rank or score it."""
+    from loom.context import find_paths
+    from loom.contracts import PathRequest
+
+    ldif = tmp_path / "corp-with-acls.ldif"
+    ldif.write_text(_roundtrip_ldif())
+    db = str(tmp_path / "path.db")
+    ldap.main(["import", str(ldif), "--namespace", "ad", "--db", db])
+    store = SqliteStore(db)
+    try:
+        pack = find_paths(store, PathRequest(
+            namespace="ad", **{"from": EntityRef(type="user", key=DOMAIN_SID + "-1106")},
+            to=EntityRef(type="domain", key="dev.local"),
+            via=["member_of", "has_ace", "trusts"], depth=3, max_paths=8))
+        assert pack.paths, "svc-sql reaches dev.local across member_of -> has_ace -> trusts"
+        best = pack.paths[0]
+        assert [e.predicate for e in best] == ["member_of", "has_ace", "trusts"]
+        # every hop is cited (hard constraint 3)
+        assert all(e.cite.observation_id for e in best)
+        assert pack.to == EntityRef(type="domain", key="dev.local")
+        keys = {(e.subject.type, e.subject.key) for e in best} | {
+            (e.object.type, e.object.key) for e in best if isinstance(e.object, EntityRef)}
+        assert ("group", DOMAIN_SID + "-512") in keys   # Domain Admins
+        assert ("domain", DOMAIN_SID) in keys           # corp.local
+    finally:
+        store.close()
+
+
 def test_schema_registers_the_object_level_predicates():
     reg = ldap.schema("ad")
     preds = {p.name for p in reg.predicates}

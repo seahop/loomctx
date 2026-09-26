@@ -65,6 +65,7 @@ from .contracts import (
     SemanticSearchResponse,
 )
 from .contracts import ExpansionHandle
+from .contracts import MAX_PATH_DEPTH, PathEdge, PathPack, PathRequest
 from .store.base import GraphStore
 
 # Token accounting (D-051, D-058). The charged form is the compact rendering
@@ -1589,6 +1590,208 @@ def semantic_search(
         namespace=namespace, question=question,
         matches=[SemanticMatch(entity=ref, score=score, evidence=item) for score, ref, item in ranked],
     )
+
+
+_PATH_ENUM_CAP = 256   # complete paths enumerated before the search stops (D-067)
+
+
+def _path_edge(obs: Observation) -> PathEdge:
+    """A stored observation as one edge of a path — never re-oriented."""
+    return PathEdge(subject=obs.subject, predicate=obs.predicate, object=obs.object,
+                    cite=_citation(obs), valid_from=obs.valid_from, valid_to=obs.valid_to,
+                    source=obs.source)
+
+
+def _path_cost(edges: list[Observation]) -> int:
+    """What a path charges: every edge's rendered fact plus its citation,
+    summed — the same accounting a pack uses (D-051, D-067)."""
+    return sum(item_tokens(ContextItem(kind="relation", text=_render_fact(e), score=1.0,
+                                       citations=[_citation(e)])) for e in edges)
+
+
+def find_paths(
+    store: GraphStore,
+    req: PathRequest,
+    allowed_types: tuple[str, ...] | None = None,
+) -> PathPack:
+    """Enumerate the edge sequence(s) that already EXIST between two entities
+    along the `via` predicates (D-067). A bounded, shortest-first BFS over the
+    SAME gather/walk machinery build_pack/resolve_scope use: it follows `via`
+    edges in both directions (an `affects` edge is cve -> product, walked
+    product -> cve, mirroring the scope walk), simple paths only (a cycle
+    never loops), capped by `depth`, `max_paths`, the token `budget`, and the
+    LOOM_MAX_SCOPE_* caps. Endpoints resolve to their canonical entities
+    (alias-following, D-058); each edge passes the walk's own rules — visible,
+    observed at or before `as_of`, covering `valid_at`, not superseded
+    (D-050), not extracted from a document (D-023), and inside `allowed_types`
+    (a path through a gated entity is not returned, D-021). It reports what
+    exists; it never ranks, scores, or weights edges by exploitability."""
+    from .config import max_budget, max_scope_entities, max_scope_observations
+    from .registry import containment_predicates
+
+    ns = req.namespace
+    notes: list[str] = []
+    truncated: Truncations = {}
+
+    # endpoints, canonical (a merged-away alias asks about the entity it
+    # became, D-058); absence from the mapping means the name is unknown
+    mapping = store.resolve_refs(ns, [req.from_, req.to])
+    src = mapping.get((req.from_.type, req.from_.key), req.from_)
+    dst = mapping.get((req.to.type, req.to.key), req.to)
+    src_key, dst_key = (src.type, src.key), (dst.type, dst.key)
+
+    # via: the named predicates, or the registry's containment predicates
+    # when none are named (the scope-walk default, D-024)
+    via = list(dict.fromkeys(req.via))
+    if not via:
+        via = list(containment_predicates(_schema(store, ns)))
+    via_set = set(via)
+
+    depth = min(req.depth, MAX_PATH_DEPTH)
+    if req.depth > depth:
+        notes.append(f"depth {req.depth} exceeds the cap; clamped to {depth}")
+
+    endpoints_ok = allowed_types is None or (
+        src.type in allowed_types and dst.type in allowed_types)
+    complete: list[list[Observation]] = []
+    seen_preds: set[str] = set()
+    hit_depth_frontier = False
+
+    if via_set and endpoints_ok and src_key != dst_key:
+        cap, row_cap = max_scope_entities(), max_scope_observations()
+        gathered: dict[tuple[str, str], list[Observation]] = {}
+        entities_seen: set[tuple[str, str]] = {src_key}
+        held = 0
+        cut_at: EntityRef | None = None
+        partials: list[tuple[EntityRef, list[Observation], frozenset]] = [
+            (src, [], frozenset({src_key}))]
+        for _hop in range(depth):
+            if not partials or cut_at is not None:
+                break
+            need, need_seen = [], set()
+            for node, _, _ in partials:
+                k = (node.type, node.key)
+                if k not in gathered and k not in need_seen:
+                    need_seen.add(k)
+                    need.append(node)
+            for start in range(0, len(need), _SCOPE_CHUNK):
+                if held >= row_cap:
+                    cut_at = cut_at or need[start]
+                    break
+                chunk = need[start:start + _SCOPE_CHUNK]
+                got = _gather_many(store, ns, chunk, truncated, req.as_of, allowed_types)
+                held += sum(len(r) for r in got.values())
+                gathered.update(got)
+                for c in chunk:  # gathered, even when it has no rows
+                    gathered.setdefault((c.type, c.key), [])
+                seen_preds.update(o.predicate for rows in got.values() for o in rows)
+            retired = _supersession([o for rows in gathered.values() for o in rows
+                                     if _in_scope(o, allowed_types)])
+
+            def walkable(obs: Observation) -> bool:
+                return (obs.predicate in via_set and obs.id not in retired
+                        and _in_scope(obs, allowed_types)
+                        and (req.valid_at is None or covers_valid_at(obs, req.valid_at))
+                        and not _is_extracted(obs))
+
+            next_partials: list[tuple[EntityRef, list[Observation], frozenset]] = []
+            for node, edges, visited in partials:
+                if cut_at is not None:
+                    break
+                for obs in gathered.get((node.type, node.key), []):
+                    if not walkable(obs):
+                        continue
+                    for end in (obs.subject, obs.object):
+                        if not isinstance(end, EntityRef):
+                            continue
+                        ekey = (end.type, end.key)
+                        if ekey == (node.type, node.key) or ekey in visited:
+                            continue   # self-loop or already on this path (no cycles)
+                        new_edges = edges + [obs]
+                        if ekey == dst_key:
+                            if len(complete) < _PATH_ENUM_CAP:
+                                complete.append(new_edges)
+                            continue   # reached the target; do not walk past it
+                        if ekey not in entities_seen:
+                            if len(entities_seen) >= cap:
+                                cut_at = cut_at or end
+                                continue
+                            entities_seen.add(ekey)
+                        next_partials.append((end, new_edges, visited | {ekey}))
+            partials = next_partials
+        hit_depth_frontier = bool(partials) and cut_at is None
+        if cut_at is not None:
+            _record_scope_cap(truncated, cut_at, len(entities_seen), len(entities_seen) + 1)
+
+    # shortest first, then a stable order by the edges' ids
+    complete.sort(key=lambda edges: (len(edges), tuple(e.id for e in edges)))
+    budget = min(req.budget, max_budget())
+    returned: list[list[Observation]] = []
+    charged = 0
+    dropped_budget = 0
+    for edges in complete:
+        if len(returned) >= req.max_paths:
+            break
+        cost = _path_cost(edges)
+        if charged + cost > budget:
+            dropped_budget += 1
+            continue   # a later, cheaper path may still fit
+        returned.append(edges)
+        charged += cost
+
+    # more paths existed than were returned: the max_paths cap or the budget
+    # cut them — reported, never silently dropped
+    enum_capped = len(complete) >= _PATH_ENUM_CAP
+    if len(returned) < len(complete) or enum_capped:
+        total = len(complete) + (1 if enum_capped else 0)
+        truncated[("", "max_paths")] = ScopeTruncation(
+            entity=dst, gathered=len(returned), total=max(total, len(returned) + 1),
+            reason="max_paths")
+        if dropped_budget:
+            notes.append(f"{dropped_budget} more path(s) were found but dropped to fit the "
+                         "token budget; raise budget or max_paths")
+    if hit_depth_frontier:
+        truncated[("", "depth")] = ScopeTruncation(
+            entity=dst, gathered=len(returned), total=len(returned) + 1, reason="depth")
+        if depth < MAX_PATH_DEPTH:
+            notes.append(f"the depth {depth} frontier was not exhausted; {dst.type}:{dst.key} "
+                         "may be reachable along a longer path — raise depth")
+        else:
+            notes.append(f"the search stopped at the depth cap {depth} with the frontier still "
+                         "open; a longer path may exist but was not explored")
+    if not returned and endpoints_ok and via_set and src_key != dst_key:
+        notes.append(f"no path found from {src.type}:{src.key} to {dst.type}:{dst.key} within "
+                     f"depth {depth} along {', '.join(sorted(via_set))}")
+    if not via_set:
+        notes.append(f"namespace '{ns}' registers no containment predicates and none were named "
+                     "in 'via', so there was nothing to traverse")
+
+    # request notes (D-064): an unknown via predicate, an unknown endpoint
+    schema = _schema(store, ns)
+    definitions = [d for d in (schema.predicates if schema is not None else [])
+                   if allowed_types is None or not d.object_types
+                   or set(d.object_types) & set(allowed_types)]
+    vocabulary = {d.name for d in definitions} | seen_preds
+    if req.via:
+        for p in dict.fromkeys(req.via):
+            if p not in vocabulary:
+                close = _close_predicates(p, definitions, vocabulary)
+                notes.append(f"via predicate '{p}' is not registered in namespace '{ns}' and "
+                             "nothing reached carries it, so it was not traversed"
+                             + (f"; closest: {', '.join(close)}" if close else ""))
+    for label, named in (("from", req.from_), ("to", req.to)):
+        if (named.type, named.key) not in mapping and (
+                allowed_types is None or named.type in allowed_types):
+            similar = [f"{e.type}:{e.key}" for e in store.search_entities(
+                ns, named.key, limit=_MAX_SUGGESTIONS, types=allowed_types)]
+            notes.append(f"the {label} entity '{named.type}:{named.key}' is not in namespace "
+                         f"'{ns}'" + (f"; entities with that key: {', '.join(similar)}"
+                                      if similar else ""))
+
+    return PathPack(
+        namespace=ns, from_=src, to=dst,
+        paths=[[_path_edge(e) for e in edges] for edges in returned],
+        charged_tokens=charged, truncated=list(truncated.values()), notes=notes)
 
 
 def expand_pack(

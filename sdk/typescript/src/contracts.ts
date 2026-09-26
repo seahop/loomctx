@@ -17,6 +17,8 @@ export interface LoomContracts {
   AskRequest?: AskRequest;
   ExpandRequest?: ExpandRequest;
   ContextPack?: ContextPack;
+  PathRequest?: PathRequest;
+  PathPack?: PathPack;
   AnswerRequest?: AnswerRequest;
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
@@ -312,9 +314,92 @@ export interface ScopeTruncation {
   gathered: number;
   total: number;
   /**
-   * gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` — `gathered` entities are in the pack of at least `total` reached (D-058)
+   * gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` — `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned — `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)
    */
-  reason?: "gather_limit" | "scope_cap";
+  reason?: "gather_limit" | "scope_cap" | "max_paths" | "depth";
+}
+/**
+ * "What connects A to B?" — enumerate the edge sequence(s) that already
+ * exist in the data between two entities along the named predicates (D-067).
+ * Domain-agnostic (the KEV host -> product -> cve chain, the AD user ->
+ * group -> domain chain alike). It reports paths that EXIST; it does not
+ * rank, score, or weight edges by exploitability, and emits no such advice.
+ * `as_of` / `valid_at` carry the two time axes of AskRequest.
+ */
+export interface PathRequest {
+  namespace?: string;
+  from: EntityRef1;
+  to: EntityRef;
+  /**
+   * predicates to traverse (both directions where the edge is naturally reversible, mirroring the scope walk); empty = the namespace's registered containment predicates, like a scope
+   */
+  via?: string[];
+  /**
+   * the most edges a path may hold; clamped to the scope depth cap (3) and noted when a longer one is asked
+   */
+  depth?: number;
+  /**
+   * the most paths to return, shortest first; more found than this is reported in `truncated` (reason max_paths)
+   */
+  max_paths?: number;
+  /**
+   * token budget, charged on the rendered path text plus citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)
+   */
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+/**
+ * Address of an entity by natural key, e.g. host:web-01.
+ */
+export interface EntityRef1 {
+  type: string;
+  key: string;
+}
+/**
+ * The connecting edge sequences a PathRequest found, shortest first. Each
+ * edge is cited (hard constraint 3) and time-scoped; a superseded edge
+ * (D-050) never appears and `as_of` / `valid_at` filter every edge. `notes`
+ * carry the same request advice a pack does (D-064): an unknown `via`
+ * predicate with close matches, an unknown from/to entity, "no path found
+ * within depth N", a `to` a longer depth might reach.
+ */
+export interface PathPack {
+  namespace: string;
+  from: EntityRef;
+  to: EntityRef;
+  paths?: PathEdge[][];
+  /**
+   * what the returned paths charged against `budget`: every edge's rendered text plus its citation, summed (D-067)
+   */
+  charged_tokens?: number;
+  /**
+   * what the search could not fully return: a hub whose edges the gather cap only partly examined (gather_limit), the walk cut at the entity/observation cap (scope_cap), more paths than max_paths or the budget allowed (max_paths), or the depth cap reached with the frontier still open (depth)
+   */
+  truncated?: ScopeTruncation[];
+  /**
+   * what the search could not do as asked, and what it did instead — advice about the request, not evidence: not cited, not charged against the budget (D-064, D-067)
+   */
+  notes?: string[];
+}
+/**
+ * One edge of a path, exactly as it is stored (never re-oriented): the
+ * observation's `subject` `predicate` `object`, cited and time-scoped. The
+ * traversal direction is implied by the edge's place in the sequence — an
+ * `affects` edge (cve -> product) walked product -> cve still renders
+ * cve affects product, so the reader sees the fact as recorded (D-067).
+ *
+ * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * via the `definition` "PathEdge".
+ */
+export interface PathEdge {
+  subject: EntityRef;
+  predicate: string;
+  object: EntityRef | string | number | boolean;
+  cite: Citation;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  source: string;
 }
 /**
  * Ask + synthesize: retrieve a context pack, then have the configured

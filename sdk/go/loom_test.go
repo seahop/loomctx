@@ -101,6 +101,18 @@ func TestLiveRoundTrip(t *testing.T) {
 	if err != nil || len(pack.Items) == 0 || len(pack.Items[0].Citations) == 0 {
 		t.Fatalf("ask: %+v err=%v", pack, err)
 	}
+	if _, err := c.Claim(ctx, Claim{Subject: EntityRef{"host", "web 01/a"}, Predicate: "member_of",
+		Object: EntityRef{"domain", "corp.local"}, ObservedAt: when, Source: "inv", EventID: "go-m1"}); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := c.Path(ctx, EntityRef{"user", "j&d"}, EntityRef{"domain", "corp.local"},
+		PathOptions{Via: []string{"logged_in_by", "member_of"}, Depth: 2, Budget: 2000})
+	if err != nil || len(paths.Paths) == 0 || paths.From.Key != "j&d" {
+		t.Fatalf("path: %+v err=%v", paths, err)
+	}
+	if paths.Paths[0][0].Cite.Source == "" {
+		t.Fatalf("path edge not cited: %+v", paths.Paths[0][0])
+	}
 	if _, err := c.Artifact(ctx, "missing"); err == nil {
 		t.Fatal("expected an error for a missing artifact")
 	} else if le, ok := err.(*Error); !ok || le.Status != 404 {

@@ -13,6 +13,8 @@ import type {
   EntityRef,
   IngestBatchResponse,
   Observation,
+  PathPack,
+  PathRequest,
   SchemaRegistration,
   SemanticSearchResponse,
 } from "./contracts.js";
@@ -69,6 +71,16 @@ export interface AskOptions {
   /** what was TRUE at T (ISO timestamp) */
   valid_at?: string | null;
   scope?: AskRequest["scope"];
+}
+
+export interface PathOptions {
+  /** predicates to traverse (both directions); empty = containment predicates */
+  via?: string[];
+  depth?: number;
+  max_paths?: number;
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
 }
 
 export interface ObservationsResponse {
@@ -173,6 +185,27 @@ export class Loom {
 
   expand(handleId: string, budget = 800): Promise<ContextPack> {
     return this.post("/v1/expand", { handle: handleId, budget });
+  }
+
+  /**
+   * The edge sequence(s) that connect two entities along `opts.via`
+   * predicates (D-067) — "what connects A to B?". Empty `via` follows the
+   * namespace's containment predicates. Reports paths that EXIST, each hop
+   * cited; it does not rank or score them.
+   */
+  path(from: EntityTuple, to: EntityTuple, opts: PathOptions = {}): Promise<PathPack> {
+    const body: PathRequest = {
+      namespace: this.namespace,
+      from: ref(from),
+      to: ref(to),
+      via: opts.via ?? [],
+      depth: opts.depth ?? 3,
+      max_paths: opts.max_paths ?? 8,
+      budget: opts.budget ?? 800,
+      as_of: opts.as_of ?? null,
+      valid_at: opts.valid_at ?? null,
+    };
+    return this.post("/v1/path", body);
   }
 
   answer(

@@ -28,6 +28,8 @@ from .contracts import (
     IngestBatchResponse,
     IngestEnvelope,
     Observation,
+    PathPack,
+    PathRequest,
     SchemaRegistration,
     SemanticSearchResponse,
 )
@@ -40,6 +42,8 @@ ROOTS = {
     "AskRequest": AskRequest.model_json_schema,
     "ExpandRequest": ExpandRequest.model_json_schema,
     "ContextPack": ContextPack.model_json_schema,
+    "PathRequest": PathRequest.model_json_schema,
+    "PathPack": PathPack.model_json_schema,
     "AnswerRequest": AnswerRequest.model_json_schema,
     "AnswerResponse": AnswerResponse.model_json_schema,
     "SemanticSearchResponse": SemanticSearchResponse.model_json_schema,

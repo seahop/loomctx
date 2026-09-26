@@ -182,6 +182,7 @@ Neither framing is baked into Loom; both are just questions over the graph.
 
 Point any MCP-capable agent at Loom and it gets `list_namespaces`,
 `describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
+`find_path` (the connecting edge sequence(s) between two entities, D-067),
 `expand`, `record_claim`, `get_observations`, `answer` — scoped to whatever
 the agent's API key allows:
 

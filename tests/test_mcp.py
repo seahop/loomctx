@@ -34,8 +34,31 @@ def store(tmp_path):
 
 def test_all_tools_are_registered(store):
     names = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert {"find_entity", "ask", "ask_scope", "expand", "record_claim",
+    assert {"find_entity", "ask", "ask_scope", "find_path", "expand", "record_claim",
             "get_observations", "answer"} <= names
+
+
+def test_find_path_input_schema_exposes_from(store):
+    tool = next(t for t in asyncio.run(mcp_server.mcp.list_tools()) if t.name == "find_path")
+    schema = getattr(tool, "input_schema", None) or tool.inputSchema
+    props = schema["properties"]
+    assert "from" in props and "to" in props and "from_" not in props
+
+
+def test_find_path_connects_user_to_domain(store):
+    view = mcp_server.find_path(
+        from_="user:jdoe", to="domain:corp.local",
+        via=["logged_in_by", "member_of"], depth=2, budget=2000)
+    assert view["paths"], view
+    arrow = view["paths"][0]["text"]
+    assert arrow.startswith("user:jdoe") and "domain:corp.local" in arrow
+    assert view["paths"][0]["cites"]
+    assert view["from"]["key"] == "jdoe" and view["to"]["key"] == "corp.local"
+    # list-args-as-text tolerance (D-064): a stringified list is read as a list
+    view2 = mcp_server.find_path(
+        from_="user:jdoe", to="domain:corp.local",
+        via="['logged_in_by', 'member_of']", depth=2, budget=2000)
+    assert view2["paths"]
 
 
 def test_find_entity_returns_handles(store):

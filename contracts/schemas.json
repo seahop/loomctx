@@ -1044,10 +1044,12 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
-              "scope_cap"
+              "scope_cap",
+              "max_paths",
+              "depth"
             ],
             "title": "Reason",
             "type": "string"
@@ -1185,6 +1187,363 @@
       "budget"
     ],
     "title": "ContextPack",
+    "type": "object"
+  },
+  "PathRequest": {
+    "$defs": {
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      }
+    },
+    "description": "\"What connects A to B?\" \u2014 enumerate the edge sequence(s) that already\nexist in the data between two entities along the named predicates (D-067).\nDomain-agnostic (the KEV host -> product -> cve chain, the AD user ->\ngroup -> domain chain alike). It reports paths that EXIST; it does not\nrank, score, or weight edges by exploitability, and emits no such advice.\n`as_of` / `valid_at` carry the two time axes of AskRequest.",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "from": {
+        "$ref": "#/$defs/EntityRef",
+        "description": "the entity the path starts at (serialized as 'from')"
+      },
+      "to": {
+        "$ref": "#/$defs/EntityRef"
+      },
+      "via": {
+        "description": "predicates to traverse (both directions where the edge is naturally reversible, mirroring the scope walk); empty = the namespace's registered containment predicates, like a scope",
+        "items": {
+          "type": "string"
+        },
+        "title": "Via",
+        "type": "array"
+      },
+      "depth": {
+        "default": 3,
+        "description": "the most edges a path may hold; clamped to the scope depth cap (3) and noted when a longer one is asked",
+        "maximum": 32,
+        "minimum": 1,
+        "title": "Depth",
+        "type": "integer"
+      },
+      "max_paths": {
+        "default": 8,
+        "description": "the most paths to return, shortest first; more found than this is reported in `truncated` (reason max_paths)",
+        "exclusiveMinimum": 0,
+        "maximum": 100,
+        "title": "Max Paths",
+        "type": "integer"
+      },
+      "budget": {
+        "default": 800,
+        "description": "token budget, charged on the rendered path text plus citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "As Of"
+      },
+      "valid_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid At"
+      }
+    },
+    "required": [
+      "from",
+      "to"
+    ],
+    "title": "PathRequest",
+    "type": "object"
+  },
+  "PathPack": {
+    "$defs": {
+      "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
+        "properties": {
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      },
+      "PathEdge": {
+        "description": "One edge of a path, exactly as it is stored (never re-oriented): the\nobservation's `subject` `predicate` `object`, cited and time-scoped. The\ntraversal direction is implied by the edge's place in the sequence \u2014 an\n`affects` edge (cve -> product) walked product -> cve still renders\ncve affects product, so the reader sees the fact as recorded (D-067).",
+        "properties": {
+          "subject": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "object": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntityRef"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Object"
+          },
+          "cite": {
+            "$ref": "#/$defs/Citation"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid To"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "predicate",
+          "object",
+          "cite",
+          "source"
+        ],
+        "title": "PathEdge",
+        "type": "object"
+      },
+      "ScopeTruncation": {
+        "description": "Partial coverage a reader must know about. An entity whose\nobservations exceeded the gather limit: only the newest `gathered` of\n`total` were examined. A reader must not conclude absence about it \u2014\n\"no KEV fact among the kernel's CVEs\" means nothing when 1,740 of 2,740\nwere never looked at (D-038). A scope walk cut by the entity cap is\nreported the same way, with reason `scope_cap` (D-058).",
+        "properties": {
+          "entity": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "gathered": {
+            "minimum": 0,
+            "title": "Gathered",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "gather_limit",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
+            "enum": [
+              "gather_limit",
+              "scope_cap",
+              "max_paths",
+              "depth"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "gathered",
+          "total"
+        ],
+        "title": "ScopeTruncation",
+        "type": "object"
+      }
+    },
+    "description": "The connecting edge sequences a PathRequest found, shortest first. Each\nedge is cited (hard constraint 3) and time-scoped; a superseded edge\n(D-050) never appears and `as_of` / `valid_at` filter every edge. `notes`\ncarry the same request advice a pack does (D-064): an unknown `via`\npredicate with close matches, an unknown from/to entity, \"no path found\nwithin depth N\", a `to` a longer depth might reach.",
+    "properties": {
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "from": {
+        "$ref": "#/$defs/EntityRef"
+      },
+      "to": {
+        "$ref": "#/$defs/EntityRef"
+      },
+      "paths": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PathEdge"
+          },
+          "type": "array"
+        },
+        "title": "Paths",
+        "type": "array"
+      },
+      "charged_tokens": {
+        "default": 0,
+        "description": "what the returned paths charged against `budget`: every edge's rendered text plus its citation, summed (D-067)",
+        "minimum": 0,
+        "title": "Charged Tokens",
+        "type": "integer"
+      },
+      "truncated": {
+        "description": "what the search could not fully return: a hub whose edges the gather cap only partly examined (gather_limit), the walk cut at the entity/observation cap (scope_cap), more paths than max_paths or the budget allowed (max_paths), or the depth cap reached with the frontier still open (depth)",
+        "items": {
+          "$ref": "#/$defs/ScopeTruncation"
+        },
+        "title": "Truncated",
+        "type": "array"
+      },
+      "notes": {
+        "description": "what the search could not do as asked, and what it did instead \u2014 advice about the request, not evidence: not cited, not charged against the budget (D-064, D-067)",
+        "items": {
+          "type": "string"
+        },
+        "title": "Notes",
+        "type": "array"
+      }
+    },
+    "required": [
+      "namespace",
+      "from",
+      "to"
+    ],
+    "title": "PathPack",
     "type": "object"
   },
   "AnswerRequest": {
@@ -1646,10 +2005,12 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
-              "scope_cap"
+              "scope_cap",
+              "max_paths",
+              "depth"
             ],
             "title": "Reason",
             "type": "string"

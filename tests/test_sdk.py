@@ -61,6 +61,13 @@ def test_sdk_round_trip_with_awkward_keys(engine_url):
     pack = loom.ask(("host", "web 01/a"), "who logged in?", budget=400)
     assert pack["items"] and pack["items"][0]["citations"]
 
+    loom.claim(("host", "web 01/a"), "member_of", ("domain", "corp.local"),
+               observed_at=OBSERVED, source="inv", event_id="m1")
+    paths = loom.path(("user", "j&d"), ("domain", "corp.local"),
+                      via=["logged_in_by", "member_of"], depth=2, budget=2000)
+    assert paths["from"]["key"] == "j&d" and paths["to"]["key"] == "corp.local"
+    assert paths["paths"] and all(e["cite"] for p in paths["paths"] for e in p)
+
     doc = loom.document(text="report body", source="ir", observed_at=OBSERVED,
                         filename="ir.txt", event_id="d1")
     assert doc["status"] == "accepted"

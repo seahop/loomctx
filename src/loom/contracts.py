@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_NAMESPACE = "default"
 MAX_DOCUMENT_CHARS = 1_000_000          # ~1 MB of text per document envelope
@@ -314,14 +314,19 @@ class ScopeTruncation(BaseModel):
     entity: EntityRef
     gathered: int = Field(ge=0)
     total: int = Field(ge=0)
-    reason: Literal["gather_limit", "scope_cap"] = Field(
+    reason: Literal["gather_limit", "scope_cap", "max_paths", "depth"] = Field(
         default="gather_limit",
         description="gather_limit: only the newest `gathered` of the `total` "
         "observations about `entity` that this caller may see were examined "
         "(D-038). scope_cap: the scope walk stopped at the entity cap "
         "(LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while "
         "expanding `entity` — `gathered` entities are in the pack of at "
-        "least `total` reached (D-058)",
+        "least `total` reached (D-058). max_paths: a path search found more "
+        "connecting paths to `entity` (the `to` endpoint) than were returned "
+        "— `gathered` of at least `total` (the cap, or the token budget, cut "
+        "the rest, D-067). depth: the search reached the depth cap while the "
+        "frontier still had unexplored entities, so a longer path may exist "
+        "(D-067)",
     )
 
 
@@ -417,6 +422,111 @@ class AnswerResponse(BaseModel):
     answer: str
     model: str
     pack: ContextPack
+
+
+# --------------------------------------------------------------------------- #
+# Reachability — connecting edge sequences between two entities (D-067)       #
+# --------------------------------------------------------------------------- #
+# Longest edge sequence a `path` search walks. The scope walk caps depth at 3
+# (ScopeSpec.depth); a path request may ask for more but is clamped to this
+# and told so in a note.
+MAX_PATH_DEPTH = 3
+
+
+class PathEdge(BaseModel):
+    """One edge of a path, exactly as it is stored (never re-oriented): the
+    observation's `subject` `predicate` `object`, cited and time-scoped. The
+    traversal direction is implied by the edge's place in the sequence — an
+    `affects` edge (cve -> product) walked product -> cve still renders
+    cve affects product, so the reader sees the fact as recorded (D-067)."""
+
+    subject: EntityRef
+    predicate: str
+    object: ObjectValue
+    cite: Citation
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    source: str
+
+
+# A path is an ordered edge sequence connecting `from` to `to`.
+Path = list[PathEdge]
+
+
+class PathRequest(BaseModel):
+    """"What connects A to B?" — enumerate the edge sequence(s) that already
+    exist in the data between two entities along the named predicates (D-067).
+    Domain-agnostic (the KEV host -> product -> cve chain, the AD user ->
+    group -> domain chain alike). It reports paths that EXIST; it does not
+    rank, score, or weight edges by exploitability, and emits no such advice.
+    `as_of` / `valid_at` carry the two time axes of AskRequest."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    namespace: str = DEFAULT_NAMESPACE
+    from_: EntityRef = Field(
+        alias="from",
+        description="the entity the path starts at (serialized as 'from')",
+    )
+    to: EntityRef
+    via: list[str] = Field(
+        default_factory=list,
+        description="predicates to traverse (both directions where the edge "
+        "is naturally reversible, mirroring the scope walk); empty = the "
+        "namespace's registered containment predicates, like a scope",
+    )
+    depth: int = Field(
+        default=MAX_PATH_DEPTH, ge=1, le=32,
+        description="the most edges a path may hold; clamped to the scope "
+        f"depth cap ({MAX_PATH_DEPTH}) and noted when a longer one is asked",
+    )
+    max_paths: int = Field(
+        default=8, gt=0, le=100,
+        description="the most paths to return, shortest first; more found "
+        "than this is reported in `truncated` (reason max_paths)",
+    )
+    budget: int = Field(
+        default=800, gt=0, le=1_000_000,
+        description="token budget, charged on the rendered path text plus "
+        "citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)",
+    )
+    as_of: datetime | None = None
+    valid_at: datetime | None = None
+
+
+class PathPack(BaseModel):
+    """The connecting edge sequences a PathRequest found, shortest first. Each
+    edge is cited (hard constraint 3) and time-scoped; a superseded edge
+    (D-050) never appears and `as_of` / `valid_at` filter every edge. `notes`
+    carry the same request advice a pack does (D-064): an unknown `via`
+    predicate with close matches, an unknown from/to entity, "no path found
+    within depth N", a `to` a longer depth might reach."""
+
+    namespace: str
+    from_: EntityRef = Field(alias="from", serialization_alias="from")
+    to: EntityRef
+    paths: list[Path] = Field(default_factory=list)
+    charged_tokens: int = Field(
+        default=0, ge=0,
+        description="what the returned paths charged against `budget`: every "
+        "edge's rendered text plus its citation, summed (D-067)",
+    )
+    truncated: list[ScopeTruncation] = Field(
+        default_factory=list,
+        description="what the search could not fully return: a hub whose "
+        "edges the gather cap only partly examined (gather_limit), the walk "
+        "cut at the entity/observation cap (scope_cap), more paths than "
+        "max_paths or the budget allowed (max_paths), or the depth cap "
+        "reached with the frontier still open (depth)",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="what the search could not do as asked, and what it did "
+        "instead — advice about the request, not evidence: not cited, not "
+        "charged against the budget (D-064, D-067)",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 # --------------------------------------------------------------------------- #

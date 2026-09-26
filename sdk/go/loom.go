@@ -101,6 +101,41 @@ type ContextPack struct {
 	Handles   []ExpansionHandle `json:"handles"`
 }
 
+// PathEdge is one hop of a path, exactly as stored (subject predicate object),
+// cited and time-scoped (D-067).
+type PathEdge struct {
+	Subject   EntityRef  `json:"subject"`
+	Predicate string     `json:"predicate"`
+	Object    any        `json:"object"` // EntityRef or a scalar
+	Cite      Citation   `json:"cite"`
+	ValidFrom *time.Time `json:"valid_from,omitempty"`
+	ValidTo   *time.Time `json:"valid_to,omitempty"`
+	Source    string     `json:"source"`
+}
+
+// PathPack is the connecting edge sequence(s) between two entities, shortest
+// first (D-067). It reports paths that exist; it does not rank them.
+type PathPack struct {
+	Namespace     string       `json:"namespace"`
+	From          EntityRef    `json:"from"`
+	To            EntityRef    `json:"to"`
+	Paths         [][]PathEdge `json:"paths"`
+	ChargedTokens int          `json:"charged_tokens"`
+	Truncated     []any        `json:"truncated,omitempty"`
+	Notes         []string     `json:"notes,omitempty"`
+}
+
+// PathOptions: Via = predicates to traverse (both directions; empty follows
+// the namespace's containment predicates). AsOf/ValidAt as in AskOptions.
+type PathOptions struct {
+	Via      []string
+	Depth    int
+	MaxPaths int
+	Budget   int
+	AsOf     *time.Time
+	ValidAt  *time.Time
+}
+
 type IngestResult struct {
 	Status        string `json:"status"`
 	ObservationID string `json:"observation_id,omitempty"`
@@ -237,6 +272,27 @@ func (c *Client) Ask(ctx context.Context, subject *EntityRef, question string, o
 func (c *Client) Expand(ctx context.Context, handle string, budget int) (*ContextPack, error) {
 	var out ContextPack
 	return &out, c.post(ctx, "/v1/expand", map[string]any{"handle": handle, "budget": orDefault(budget, 800)}, nil, &out)
+}
+
+// Path enumerates the edge sequence(s) that connect from to to along the
+// opts.Via predicates (D-067) — "what connects A to B?". It reports paths that
+// exist, each hop cited; it does not rank or score them.
+func (c *Client) Path(ctx context.Context, from, to EntityRef, opts PathOptions) (*PathPack, error) {
+	via := opts.Via
+	if via == nil {
+		via = []string{}
+	}
+	body := map[string]any{"namespace": c.Namespace, "from": from, "to": to, "via": via,
+		"depth": orDefault(opts.Depth, 3), "max_paths": orDefault(opts.MaxPaths, 8),
+		"budget": orDefault(opts.Budget, 800)}
+	if opts.AsOf != nil {
+		body["as_of"] = opts.AsOf
+	}
+	if opts.ValidAt != nil {
+		body["valid_at"] = opts.ValidAt
+	}
+	var out PathPack
+	return &out, c.post(ctx, "/v1/path", body, nil, &out)
 }
 
 // Answer: retrieval-grounded LLM answer; nil subject = auto-resolve from the question.

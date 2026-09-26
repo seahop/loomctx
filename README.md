@@ -189,7 +189,8 @@ PROV-O export, honest budgets and hybrid ranking, schema v6, rate limiting,
 STIX/OCSF/LDAP connectors). Working end to end: contracts,
 SQLite/Postgres stores, claim + document ingestion (single, batch, Go
 gateway, Kafka, shippers), context packs with scopes, relation chains and
-coverage reporting (`/v1/ask`, `/v1/expand`), provider-flexible answering
+coverage reporting (`/v1/ask`, `/v1/expand`), cited reachability paths
+(`/v1/path`, D-067), provider-flexible answering
 (`/v1/answer`), an MCP server for agents, async enrichment, opt-in
 Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV, NVD,
 EPSS — `docs/real-data.md`) and with eighteen LLM agents over MCP
