@@ -782,6 +782,8 @@ def main(argv: list[str] | None = None) -> None:
             store.close()
     print(json.dumps({**totals, "envelopes": stats, **({"dropped_no_prior": stats.pop("dropped_no_prior")}
                                                         if "dropped_no_prior" in stats else {})}))
+    from ..ingest import fail_on_refusals
+    fail_on_refusals(totals, remote=bool(args.url))   # a refusal fails the load (D-063, S-36)
 
 
 if __name__ == "__main__":

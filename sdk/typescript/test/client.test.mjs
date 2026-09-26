@@ -55,3 +55,16 @@ test("typescript sdk round trip", { skip: !url && "LOOM_URL not set" }, async ()
   );
   await assert.rejects(loom.artifact("missing"), (e) => e instanceof LoomError && e.status === 404);
 });
+
+// A key read from a file or a k8s Secret often ends in a newline; the client
+// strips it before sending, as the Python SDK does (review 2026-09-26).
+test("api key is trimmed", async () => {
+  const sent = [];
+  const fetch = async (_url, init) => {
+    sent.push(init.headers["X-Loom-Key"]);
+    return new Response(JSON.stringify({ status: "ready" }), { status: 200 });
+  };
+  assert.equal(await new Loom("http://loom", { apiKey: "  s3cret\n", fetch }).ready(), true);
+  await new Loom("http://loom", { apiKey: " \n", fetch }).ready();
+  assert.deepEqual(sent, ["s3cret", undefined]);
+});

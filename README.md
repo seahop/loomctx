@@ -44,7 +44,7 @@ without touching Loom's code.
 | Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
 | A graph database | traversal power, but the agent talks to the graph and gets whatever the query returns | the graph is the index, not the payload: the agent gets a question-scoped pack, and a multi-hop question is one `ask_scope` call |
 | SIEM search | fast search over events; entities are a pivot, not a memory | entity-centric memory across sources with provenance, conflict detection and time travel built into every read |
-| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — measured 216 of 216 task-runs across eighteen models with no invented citation (`docs/models.md`) |
+| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that catches an invented one: one unseen citation in 216 task-runs across eighteen models, caught and failed (`docs/models.md`) |
 
 ## Repository layout
 
@@ -197,7 +197,8 @@ EPSS — `docs/real-data.md`) and with eighteen LLM agents over MCP
 (`docs/models.md`). Measured (laptop, generator co-located): 511k
 envelopes loaded in 81 s to SQLite, single-entity ask 2–5 ms at 465k
 observations, two-hop scope over 1,077 entities in 0.5 s; on GKE with
-real nodes 421/s load, 202/s ingest, 186/s ask (`deploy/README.md`).
+real nodes, auth on and real data, 435/s load, 178/s ingest, 201/s ask
+(D-063, `deploy/README.md`).
 Demo script: `docs/demo.md`. Milestones: `docs/roadmap.md` (conference:
 mid-October 2026).
 

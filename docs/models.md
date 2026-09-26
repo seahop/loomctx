@@ -21,13 +21,17 @@ instructions.
   `anthropic/claude-haiku-4.5`, `anthropic/claude-sonnet-4.5` and
   `anthropic/claude-opus-4.8`.
 - **The two-hop question is still the discriminator, but a solved one.**
-  Every model passes the three single-entity tasks at least two runs in
-  three; the two-hop exposure task went from 9 passes in 54 runs to 30
+  Sixteen of eighteen models pass each of the three single-entity tasks
+  at least two runs in three (the exceptions: `mistral-large`, conflict
+  1/3, right values but uncited; `mistral-medium-3-5`, conflict 0/3 and
+  os 2/3); the two-hop exposure task went from 9 passes in 54 runs to 30
   once the scope-ask ergonomics were fixed (D-064: the default budget
   carries the whole answer, and an attribute the agent names selects the
   topic). The remaining misses are the model's, not the tool's.
-- **Faithfulness holds:** no model cited an id it had not been shown; the
-  check still catches the occasional CVE named from memory. A correct
+- **The faithfulness check works:** one unseen citation in 216
+  task-runs — `minimax-m2.7` cited an id it had never been shown, once —
+  and the check caught it and failed that run; it also catches the
+  occasional CVE named from memory. A correct
   answer with no citation fails on purpose (Mistral did this on the
   conflict task).
 - **Cost is what the agent reads**: 34k to 770k input tokens per run.
@@ -122,7 +126,8 @@ from 9 of 54 exposure runs to 30 once the scope-ask ergonomics were fixed
 carried only 17 of the 32 CVEs, and the multi-hop topic completion fired
 only for one exact phrasing. With the budget re-derived (default 3,000)
 and an attribute the agent names selecting the topic, seven models pass
-every run and every model passes the single-entity tasks.
+every run, and all but the two Mistral general models pass each
+single-entity task at least two runs in three.
 
 **What the remaining misses are.** The four 9/12 models (both Qwen, the
 larger Gemini Flash, `gpt-5.2`) stop the chain early or name a CVE from an
@@ -137,8 +142,10 @@ D-061 (the scope walk could not see the kernel hub's KEV edges), 9 after
 D-061, and 30 after D-064 fixed how agents ask. Each step was a fix in
 Loom, not a change to the grading.
 
-**Faithfulness holds.** No model cited an id it had not been shown. The
-check still catches a CVE named from memory, and a correct answer with no
+**The faithfulness check catches what it should.** In 216 task-runs one
+answer cited an id the model had never been shown (`minimax-m2.7`, the
+"no (1 unseen cite)" row); the check caught it and failed that run. It
+also catches a CVE named from memory, and a correct answer with no
 citation fails on purpose (`mistral-large` did this on the conflict task —
 right values, no id). A confident wrong "no" is the one failure citations
 cannot catch — a claim of absence cites nothing — which is why packs
@@ -176,8 +183,10 @@ asks the prior question with `python -m loom.retrieval_eval`: on the same
 store and the same generated questions, does a budgeted context pack beat
 handing the model everything, or cosine ranking or the newest facts at
 the same token budget? On this corpus, read by `deepseek-chat-v3.1`, it
-does at every budget (79 / 85 / 87 / 96 % against vector's 75 / 76 / 78 /
-86 % at 400 / 800 / 1,600 / 3,200 tokens).
+does at every budget: 79 / 85 / 87 / 96 % against vector's 75 / 76 / 78 /
+86 % at 400 / 800 / 1,600 / 3,200 tokens in the 2026-09-26 rerun on the
+current build (the 2026-09-24 table in `docs/evaluation.md` has vector at
+75 / 77 / 79 / 87 %; both runs are recorded there).
 
 ## Re-running it
 

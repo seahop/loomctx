@@ -26,8 +26,13 @@ Run once (cron/k8s Job) or as a loop (compose profile `enrich`):
 
 Embeddings need LOOM_EMBED_*; extraction and dossiers need LOOM_LLM_*.
 Whatever isn't configured is skipped with a log line — never an error. A
-failing job (provider down, database locked) is logged and retried on the
-next tick; nothing takes the worker process down (H-D1).
+failing job (provider down, database locked) is logged and retried —
+after a backoff of one interval, doubling per consecutive failure, in the
+continuous loop — and nothing takes the worker process down (H-D1).
+
+The continuous loop paces LLM work by `--interval` even while it drains a
+vector backlog tick after tick: during a drain only embed/index/chunk run
+until the interval has elapsed since the last full tick (D-063, S-39).
 """
 
 from __future__ import annotations
@@ -1292,7 +1297,7 @@ def _guarded(name: str, fn, *args) -> int:
     try:
         return fn(*args)
     except Exception:  # noqa: BLE001 — the loop must survive anything
-        log.exception("%s failed; will retry next tick", name)
+        log.exception("%s failed; will retry", name)
         return FAILED
 
 
@@ -1383,7 +1388,64 @@ def _open_store(attempts: int = 6) -> GraphStore:
 
 # jobs whose progress means "more of the same is waiting": embedding and
 # chunking are bounded by the backlog and cost cents, never an LLM call
-_BACKLOG_JOBS = ("embedded", "indexed", "chunked")
+_VECTOR_JOBS = frozenset(JOB_GROUPS["vectors"])
+_MAX_BACKOFF = 600.0   # a failing job is retried at least this often
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+class Pacer:
+    """Continuous-mode scheduling (D-063, S-39). While a vector backlog is
+    draining, ticks run back to back — but only the vector jobs; the rest
+    (extraction, resolution, adjudication, aliases, dossiers) still run at
+    most once per `interval`, exactly as with no backlog. A job that FAILED
+    is benched with exponential backoff (interval, 2x, 4x … capped), so a
+    provider 401/429/out-of-credit is not retried on every iteration of a
+    drain. `clock` is injectable so the schedule is testable without sleeping."""
+
+    def __init__(self, jobs: frozenset[str], interval: float, clock=None,
+                 max_backoff: float = _MAX_BACKOFF) -> None:
+        self.jobs = jobs
+        self.interval = interval
+        self.clock = clock or _clock
+        self.max_backoff = max(interval, max_backoff)
+        self.last_full: float | None = None   # start of the last full tick
+        self.full = False                     # is the current tick a full one?
+        self.failures: dict[str, int] = {}    # job -> consecutive failures
+        self.retry_at: dict[str, float] = {}  # job -> earliest next attempt
+
+    def next_jobs(self) -> frozenset[str]:
+        """The jobs the next tick runs."""
+        now = self.clock()
+        self.full = self.last_full is None or now - self.last_full >= self.interval
+        if self.full:
+            self.last_full = now
+        pool = self.jobs if self.full else self.jobs & _VECTOR_JOBS
+        return frozenset(j for j in pool if self.retry_at.get(j, now) <= now)
+
+    def record(self, ran: frozenset[str], counts: dict[str, int]) -> float:
+        """Note a tick's outcome; return how long to sleep before the next."""
+        now = self.clock()
+        for job in ran:
+            if counts.get(JOBS[job], 0) == FAILED:
+                n = self.failures.get(job, 0) + 1
+                self.failures[job] = n
+                delay = min(self.interval * 2 ** (n - 1), self.max_backoff)
+                self.retry_at[job] = now + delay
+                log.warning("%s failed %d time(s) in a row; next attempt in %.0fs", job, n, delay)
+            else:
+                self.failures.pop(job, None)
+                self.retry_at.pop(job, None)
+        if any(counts.get(JOBS[j], 0) > 0 for j in ran & _VECTOR_JOBS):
+            # a vector backlog drains at the embedder's pace, not one batch
+            # per interval (128 per 30 s was ~20 h for a 600k corpus, D-063)
+            return 0.0
+        if self.full or self.last_full is None:
+            return self.interval
+        # a drain just ran dry: wait out what is left of the interval
+        return max(0.0, self.last_full + self.interval - now)
 
 
 def run(once: bool, interval: float, jobs: frozenset[str] | None = None) -> None:
@@ -1393,14 +1455,16 @@ def run(once: bool, interval: float, jobs: frozenset[str] | None = None) -> None
     llm = llm_from_env()
     if jobs != frozenset(JOBS):
         log.info("jobs: %s", ",".join(j for j in JOBS if j in jobs))
-    if embedder is None and jobs & set(JOB_GROUPS["vectors"]):
+    if embedder is None and jobs & _VECTOR_JOBS:
         log.info("no embedder configured (LOOM_EMBED_*) — skipping embeddings")
     if llm is None and jobs & set(JOB_GROUPS["llm"]):
         log.info("no LLM configured (LOOM_LLM_*) — skipping extraction/dossiers")
     failures = 0
+    pacer = Pacer(jobs, interval)
     try:
         while True:
-            counts = tick(store, embedder, llm, jobs)
+            ran = jobs if once else pacer.next_jobs()
+            counts = tick(store, embedder, llm, ran)
             work = any(v > 0 for v in counts.values())
             if work or any(v == FAILED for v in counts.values()):
                 log.info(" ".join(f"{k}={'FAILED' if v == FAILED else v}" for k, v in counts.items()))
@@ -1414,12 +1478,9 @@ def run(once: bool, interval: float, jobs: frozenset[str] | None = None) -> None
                 if failures:
                     time.sleep(min(interval, 2.0 ** failures))  # back off, then retry
                 continue  # drain fully in --once mode
-            if any(counts.get(k, 0) > 0 for k in _BACKLOG_JOBS):
-                # a vector backlog drains at the embedder's pace, not one
-                # batch per interval (128 per 30 s was ~20 h for a 600k
-                # corpus, D-063); the LLM jobs keep the interval's pacing
-                continue
-            time.sleep(interval)
+            delay = pacer.record(ran, counts)
+            if delay > 0:
+                time.sleep(delay)
     finally:
         store.close()
 

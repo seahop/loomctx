@@ -406,3 +406,19 @@ def test_cli_import_export_emit_schema(tmp_path, capsys):
 
     with pytest.raises(SystemExit):
         stix.main(["import", str(bundle_path), "--db", str(db), "--url", "http://x"])
+
+
+def test_cli_import_exits_non_zero_when_anything_is_refused(tmp_path, capsys):
+    """D-063/S-36: a refused envelope fails the load (after the totals print)."""
+    from loom.contracts import SchemaRegistration
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps(BUNDLE))
+    db = tmp_path / "strict.db"
+    store = SqliteStore(db)
+    try:
+        store.put_schema(SchemaRegistration(namespace="netsec", strict=True))   # nothing registered
+    finally:
+        store.close()
+    with pytest.raises(SystemExit, match="envelopes were refused by the store"):
+        stix.main(["import", str(bundle_path), "--namespace", "netsec", "--db", str(db), "--no-schema"])
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["rejected"] > 0

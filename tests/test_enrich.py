@@ -1463,27 +1463,110 @@ def test_run_drains_a_vector_backlog_without_sleeping_between_batches(monkeypatc
     ticks = iter([
         {"embedded": 128, "chunked": 0, "dossiers": 0},
         {"embedded": 40, "chunked": 3, "dossiers": 0},
-        {"embedded": 0, "chunked": 0, "dossiers": 4},   # LLM work: paced
-        {"embedded": 0, "chunked": 0, "dossiers": 0},   # idle: paced
+        {"embedded": 0, "chunked": 0, "dossiers": 4},   # drain ran dry: wait out the interval
+        {"embedded": 0, "chunked": 0, "dossiers": 0},   # idle full tick: paced
     ])
-    sleeps = []
+    sleeps, jobs_run = _drive_run(monkeypatch, en, lambda jobs: next(ticks), interval=30.0,
+                                  tick_cost=1.0)
+    assert sleeps == [27.0, 30.0]                       # 30 s since the full tick at t=0
+    assert jobs_run[0] == frozenset(en.JOBS)             # the first tick is a full one
+    assert jobs_run[1] == jobs_run[2] == {"embed", "index", "chunk"}   # the drain: vectors only
+    assert jobs_run[3] == frozenset(en.JOBS)             # the interval elapsed: full again
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def _drive_run(monkeypatch, en, counts_for, interval, tick_cost=0.0, max_ticks=None):
+    """Run the continuous loop against a fake clock: each tick costs
+    `tick_cost` seconds and each sleep advances the clock. `counts_for(jobs)`
+    returns a tick's counts; StopIteration (or max_ticks) ends the run."""
+    clock, sleeps, jobs_run = _FakeClock(), [], []
 
     class Done(Exception):
         pass
 
     def tick(store, embedder, llm, jobs=None):
+        if max_ticks is not None and len(jobs_run) >= max_ticks:
+            raise Done
+        jobs_run.append(frozenset(jobs))
+        clock.now += tick_cost
         try:
-            return next(ticks)
+            counts = dict(counts_for(frozenset(jobs)))
         except StopIteration:
             raise Done
+        return {k: counts.get(k, 0) for k in en.JOBS.values()}
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
     monkeypatch.setattr(en, "tick", tick)
+    monkeypatch.setattr(en, "_clock", clock)
     monkeypatch.setattr(en, "_open_store", lambda: type("S", (), {"close": lambda self: None})())
-    monkeypatch.setattr(en.time, "sleep", sleeps.append)
+    monkeypatch.setattr(en, "embedder_from_env", lambda: None)
+    monkeypatch.setattr(en, "llm_from_env", lambda: None)
+    monkeypatch.setattr(en.time, "sleep", sleep)
     try:
-        en.run(once=False, interval=30.0)
+        en.run(once=False, interval=interval)
     except Done:
         pass
-    assert sleeps == [30.0, 30.0]
+    return sleeps, jobs_run
+
+
+def test_a_vector_drain_keeps_llm_jobs_at_the_interval_pace(monkeypatch):
+    """S-39 follow-up: skipping the sleep after vector progress also ran the
+    LLM jobs (extract, adjudicate, aliases, dossiers) on every iteration of a
+    drain in the default all-jobs worker. During a drain only the vector jobs
+    run until `interval` has passed since the last full tick."""
+    import loom.enrich as en
+    llm = set(en.JOB_GROUPS["llm"]) | {"resolve"}
+    # a long backlog: every tick embeds 128 rows, each tick costs 2 s
+    sleeps, jobs_run = _drive_run(monkeypatch, en, lambda jobs: {"embedded": 128}
+                                  if "embed" in jobs else {}, interval=30.0,
+                                  tick_cost=2.0, max_ticks=40)
+    assert sleeps == []                                   # the drain never sleeps
+    full = [i for i, j in enumerate(jobs_run) if j & llm]
+    # 40 ticks x 2 s = 80 s of draining: LLM jobs ran at t=0, 30, 60 — not 40 times
+    assert full == [0, 15, 30]
+    assert all(jobs_run[i] == frozenset(en.JOBS) for i in full)
+    assert all(j == {"embed", "index", "chunk"} for i, j in enumerate(jobs_run) if i not in full)
+
+
+def test_a_failing_job_backs_off_instead_of_retrying_every_iteration(monkeypatch):
+    """A provider 401/429/out-of-credit made the continuous loop retry the
+    failing job on every drain iteration. A FAILED job is benched for one
+    interval, doubling per consecutive failure (capped); success resets it."""
+    import loom.enrich as en
+    attempts = []
+
+    def counts_for(jobs):
+        out = {"embedded": 128}                    # a steady vector backlog
+        if "chunk" in jobs:
+            attempts.append(en._clock())
+            out["chunked"] = en.FAILED             # the chunker's provider is down
+        return out
+    sleeps, jobs_run = _drive_run(monkeypatch, en, counts_for, interval=10.0,
+                                  tick_cost=1.0, max_ticks=200)
+    # tried at t=1, then after 10, 20, 40, 80 s of backoff (+1 s per tick) — not 200 times
+    assert len(attempts) == 5
+    gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+    assert gaps == [11.0, 21.0, 41.0, 81.0]
+    assert sleeps == []                                 # the drain itself never paused
+
+    pacer = en.Pacer(frozenset({"embed"}), 30.0, clock=_FakeClock(), max_backoff=100.0)
+    for n in range(6):
+        pacer.record(frozenset({"embed"}), {"embedded": en.FAILED})
+    assert pacer.retry_at["embed"] == 100.0             # capped
+    assert pacer.next_jobs() == frozenset()             # benched
+    pacer.clock.now = 100.0
+    assert pacer.next_jobs() == {"embed"}
+    pacer.record(frozenset({"embed"}), {"embedded": 3})
+    assert pacer.failures == {} and pacer.retry_at == {}  # success resets the backoff
 
 
 def test_worker_pools_run_only_their_jobs(monkeypatch):

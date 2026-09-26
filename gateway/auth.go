@@ -3,9 +3,9 @@ package main
 // API keys with scoping gates (docs/decisions.md D-013/D-013a) — parses the
 // SAME configuration the Python engine does, so one Secret configures both:
 //
-//   LOOM_AUTH_FILE=/etc/loom/keys.json   preferred: hashed keys + gates,
-//                                        hot-reloaded on mtime change
-//   LOOM_API_KEYS="key:ns:perms,..."     legacy plaintext (hashed in memory)
+//   LOOM_AUTH_FILE=/etc/loom-keys/keys.json   preferred: hashed keys + gates,
+//                                             hot-reloaded on mtime change
+//   LOOM_API_KEYS="key:ns:perms,..."          legacy plaintext (hashed in memory)
 //
 // Both unset => auth disabled (open dev mode).
 
