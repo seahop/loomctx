@@ -269,6 +269,14 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   graph's `product` node, so a scanned host reaches its KEV CVEs via the
   scope walk / `find_path`. Inventory only; genuine nmap fixtures + a blind
   fusion test. (nmap-vs-NVD vendor-key mismatch left to D-042.)
+- ✅ OSV / GHSA advisory connector (2026-09-26, D-070): parses OSV-schema
+  JSON (GHSA / PyPI / Go / npm feeds) into cited claims, keying a CVE-aliased
+  advisory to the SHARED `cve:` node so an OSV CVSS score conflicts with NVD's
+  on one entity (D-035), and affected software to a new `package:<ecosystem>:<name>`
+  entity (NOT a CPE — the package↔product seam stays for D-042). CVSS v3/v2
+  base scores computed from the vector; genuine osv.dev fixtures (Log4Shell +
+  the eslint-scope malware advisory) + a fusion test asserting the cited
+  cross-source conflict.
 - ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
   `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
   connecting two entities along named predicates — the reachability chain
