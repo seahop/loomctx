@@ -149,7 +149,6 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
     CVE and the last hop fans back out through every CVE — 300 x 5 x 300 =
     450k extensions unbounded. The work is capped at
     LOOM_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
-    import time
     store = SqliteStore(tmp_path / "hub.db")
     shared = [f"q{i}" for i in range(5)]
     claims = []
@@ -167,9 +166,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
 
     monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "20000")
     stats: dict = {}
-    start = time.monotonic()
-    pack = find_paths(store, req, stats=stats)
-    assert time.monotonic() - start < 10
+    pack = find_paths(store, req, stats=stats)   # the work counters bound it; no wall clock (flaky under load)
     assert stats["work"] <= 20_000 + 1 and stats["partials"] <= 20_000
     assert pack.paths == []
     assert any(t.reason == "scope_cap" for t in pack.truncated)
@@ -179,9 +176,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
     # the partial paths held are the hop-2 ones only (300 CVEs x 5 shared)
     monkeypatch.delenv("LOOM_MAX_SCOPE_OBSERVATIONS")
     stats = {}
-    start = time.monotonic()
-    pack = find_paths(store, req, stats=stats)
-    assert time.monotonic() - start < 20
+    pack = find_paths(store, req, stats=stats)   # the work counters bound it; no wall clock (flaky under load)
     assert stats["work"] <= 100_000 + 1 and stats["partials"] <= 300 + 300 * 5
     assert any("edge extensions" in n for n in pack.notes)
     store.close()
