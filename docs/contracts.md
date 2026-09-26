@@ -86,7 +86,7 @@ verbatim content at `GET /v1/artifacts/{id}`. Artifacts carry an
 worker advances as it mines claims out of the text (blank artifacts are
 `skipped`; a persistently failing one backs off and ends `failed`).
 
-## Read side (live: /v1/ask and /v1/expand)
+## Read side (live: /v1/ask, /v1/path and /v1/expand)
 
 **AskRequest:** `{namespace, subject | scope, question, budget (tokens,
 mandatory), as_of?, valid_at?}` — exactly one of `subject` (one entity) or
@@ -222,6 +222,34 @@ a hop of a scope, or under an expanded handle. Partial coverage is a fact
 the reader needs — an agent must not conclude absence there (D-038). The
 MCP view renders it as a `coverage_warning`; the answering prompt as a
 `coverage:` line.
+
+## Path: connecting two entities (D-067)
+
+**PathRequest:** `{namespace, from (EntityRef, serialized as `from`), to
+(EntityRef), via (list of predicates to traverse; empty = the namespace's
+containment predicates), depth (max edges, clamped to the scope cap 3),
+max_paths (default 8), budget (tokens), as_of?, valid_at?}`. **PathPack:**
+`{namespace, from, to, paths: [[PathEdge]] (each an ordered edge sequence,
+shortest first), charged_tokens, truncated, notes}`, where a **PathEdge** is
+`{subject, predicate, object, cite, valid_from?, valid_to?, source}` — the
+observation exactly as stored, never re-oriented.
+
+`POST /v1/path` answers "what connects A to B?" — the KEV `host → product →
+cve` chain, the AD `user → group → (ACE) → domain` chain — with the
+connecting edge sequence(s) directly, instead of leaving an agent to
+reassemble them from a scope pack. A bounded, shortest-first BFS over the
+same gather/walk machinery `build_pack`/`resolve_scope` use: it follows `via`
+edges in **both** directions (`affects` is stored cve→product but walked
+product→cve), simple paths only (a cycle never loops), capped by `depth`,
+`max_paths`, `budget` (charged on the rendered path text + citations, like a
+pack) and the `LOOM_MAX_SCOPE_*` caps. Every edge is **cited** (hard
+constraint 3) and time-scoped; `as_of`/`valid_at` filter each edge and a
+superseded one (D-050) never appears; a path through a type-gated entity is
+not returned. Cuts land in `truncated` (`max_paths`/`depth`/`scope_cap`/
+`gather_limit`), request advice in `notes` (an unknown `via` with close
+matches, an unknown endpoint, "no path found within depth N"). It is
+domain-agnostic and honest: it enumerates paths that EXIST along the named
+predicates — it does **not** rank, score, or weight edges by exploitability.
 
 ## Provenance: a claim that cites a document
 

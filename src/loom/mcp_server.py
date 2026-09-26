@@ -41,11 +41,11 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import RootModel
+from pydantic import Field, RootModel
 
 try:  # the SDK moved the wire types into their own package in 2.x
     from mcp_types import CallToolResult, TextContent, ToolAnnotations
@@ -54,9 +54,10 @@ except ImportError:  # pragma: no cover - older SDK layout
 
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
-from .context import build_pack, cite_text, decode_handle, expand_pack, semantic_search
+from .context import (build_pack, cite_text, decode_handle, expand_pack, find_paths,
+                     semantic_search)
 from .contracts import (AnswerRequest, AskRequest, ClaimIn, EntityRef, ExpansionHandle,
-                        Observation, PredicateDef, ScopeSpec, ScopeTruncation,
+                        Observation, PathRequest, PredicateDef, ScopeSpec, ScopeTruncation,
                         SemanticSearchResponse)
 from .gates import check_supersedes, scope_counts, scope_schema
 from .llm import LLMError, embedder_from_env, llm_from_env
@@ -252,8 +253,11 @@ INSTRUCTIONS = (
     f"handles a pack returns. ask_scope's default budget ({SCOPE_BUDGET_DEFAULT}) "
     "carries ~30 facts with the links that reached them; keep it at "
     f"budget<={SCOPE_BUDGET_HINT} and expand handles for more — a bigger "
-    "pack overflows client tool-result limits. Every pack tool takes "
-    "format='concise' (default: "
+    "pack overflows client tool-result limits. find_path returns the edge "
+    "sequence(s) that connect two entities along named predicates "
+    "(reachability: host->product->cve, user->group->domain), each hop "
+    "cited — it reports the paths that exist, it does not rank them. Every "
+    "pack tool takes format='concise' (default: "
     "12-hex `cite` tokens, subjects summarized) or 'detailed' (full 32-hex "
     "observation ids next to each cite, every reached subject listed). "
     "Cite facts by their 12-hex `cite` token (the first word of each entry "
@@ -394,6 +398,40 @@ class AgentPack(TypedDict):
     coverage_warning: NotRequired[str]
     withheld_briefs: NotRequired[int]
     notes: NotRequired[list[str]]
+
+
+class AgentPathEdge(TypedDict):
+    """One hop of a path in the concise view: the edge as stored
+    (`subject predicate object`) and its compact citation (12-hex cite token,
+    source, date). format='detailed' carries the full PathEdge instead."""
+    text: str
+    cite: str
+
+
+class AgentPath(TypedDict):
+    """A path an agent reads: the traversal rendered `A -pred-> B -pred-> C`
+    and one compact citation per hop (D-067)."""
+    text: str
+    hops: int
+    cites: list[str]
+
+
+# A PathPack as an agent reads it: connecting paths shortest-first, each an
+# arrow string with per-hop cites; `truncated`/coverage_warning say what the
+# search could not fully return, `notes` carry request advice. It reports
+# paths that EXIST — no ranking, scoring, or exploitability. Functional
+# TypedDict because 'from' (the start entity) is a Python keyword (D-067).
+PathView = TypedDict("PathView", {
+    "namespace": str,
+    "from": EntityRef,
+    "to": EntityRef,
+    "charged_tokens": int,
+    "format": Format,
+    "paths": list[AgentPath],
+    "notes": NotRequired[list[str]],
+    "truncated": NotRequired[list[ScopeTruncation]],
+    "coverage_warning": NotRequired[str],
+})
 
 
 class ObservationList(TypedDict):
@@ -809,6 +847,101 @@ def ask_scope(
         _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)), format)
 
 
+def _path_arrow(pack, edges) -> str:
+    """One path rendered in traversal order: `from -pred-> B -pred-> to`. The
+    edge is stored either way round; the arrow follows the walk from `from`,
+    so the reader sees the reachability direction (D-067)."""
+    cur = (pack.from_.type, pack.from_.key)
+    parts = [f"{pack.from_.type}:{pack.from_.key}"]
+    for edge in edges:
+        a = (edge.subject.type, edge.subject.key)
+        if isinstance(edge.object, EntityRef):
+            b = (edge.object.type, edge.object.key)
+        else:
+            b = None
+        nxt = b if (a == cur and b is not None) else a
+        label = f"{nxt[0]}:{nxt[1]}" if isinstance(edge.object, EntityRef) else str(edge.object)
+        parts.append(f"-{edge.predicate}-> {label}")
+        cur = nxt if b is not None else cur
+    return " ".join(parts)
+
+
+def _path_view(pack, fmt: Format = "concise") -> PathView:
+    """A PathPack as an agent should read it (D-067): each path an arrow
+    string with one compact citation per hop; 'detailed' keeps full PathEdge
+    objects. Presentation only — the HTTP surface serializes PathPack."""
+    if fmt not in ("concise", "detailed"):
+        raise ValueError(f"format must be 'concise' or 'detailed', got {fmt!r}")
+    d = pack.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if fmt == "detailed":
+        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges), "edges": dp}
+                 for edges, dp in zip(pack.paths, d.get("paths", []))]
+    else:
+        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges),
+                  "cites": [cite_text(e.cite) for e in edges]} for edges in pack.paths]
+    view: dict[str, Any] = {
+        "namespace": d.get("namespace"), "from": d.get("from"), "to": d.get("to"),
+        "charged_tokens": d.get("charged_tokens", 0),
+        "format": fmt, "paths": paths,
+    }
+    if d.get("notes"):
+        view = {"namespace": view["namespace"], "notes": d["notes"],
+                **{k: v for k, v in view.items() if k != "namespace"}}
+    if d.get("truncated"):
+        view["truncated"] = d["truncated"]
+        view["coverage_warning"] = "; ".join(
+            f"more than {t['gathered']} connecting path(s) exist (at least {t['total']}); "
+            "raise max_paths or budget" if t.get("reason") == "max_paths" else
+            "the search stopped at the depth cap while more of the graph was unexplored"
+            if t.get("reason") == "depth" else
+            f"the walk was cut at {t['gathered']:,} entities while expanding "
+            f"{t['entity']['type']}:{t['entity']['key']}" if t.get("reason") == "scope_cap" else
+            f"{t['entity']['type']}:{t['entity']['key']}: only the newest {t['gathered']:,} of "
+            f"{t['total']:,} observations were examined"
+            for t in d["truncated"]
+        ) + " — the paths shown are those found within these limits, not necessarily all that exist"
+    return view  # type: ignore[return-value]
+
+
+def find_path(
+    from_: Annotated[str, Field(alias="from")],
+    to: str,
+    via: list[str] | str | None = None,
+    depth: int = 3,
+    max_paths: int = 8,
+    budget: int = 2000,
+    namespace: str = _DEFAULT_NS,
+    as_of: str | None = None,
+    valid_at: str | None = None,
+    format: Format = "concise",
+    ctx: Context = None,
+) -> PathView:
+    """Enumerate the edge sequence(s) that CONNECT one entity to another along
+    named relations — "what connects A to B?" (the KEV host -> product -> cve
+    chain, the AD user -> group -> domain chain). `from` and `to` are
+    'type:key' handles; `via` names the predicates to traverse, in both
+    directions (omit it to follow the namespace's containment predicates);
+    `depth` bounds the hops (capped at 3); `max_paths` bounds how many paths
+    come back, shortest first. Each hop is cited and time-scoped; as_of = what
+    was KNOWN at T, valid_at = what was TRUE at T. This reports paths that
+    EXIST in the data — it does NOT rank, score, or weight edges by
+    exploitability. `notes` say what it could not do (an unknown `via`, an
+    unknown endpoint); `truncated` says when more paths, more depth, or a
+    larger scope was cut. Keep budget modest and raise max_paths for more.
+    format='concise' (default) renders each path `A -pred-> B` with cites."""
+    grant = _grant(ctx, namespace, "r")
+    src, dst = _parse_ref(from_), _parse_ref(to)
+    _gate_type(grant, src.type)
+    _gate_type(grant, dst.type)
+    _known_namespace(namespace, grant)
+    req = PathRequest(
+        namespace=namespace, **{"from": src}, to=dst,
+        via=_listed(via), depth=depth, max_paths=max_paths, budget=budget,
+        as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
+    )
+    return _path_view(find_paths(_get_store(), req, allowed_types=_allowed(grant)), format)
+
+
 def _observation_view(namespace: str, grant: Grant | None, obs) -> ObservationList:
     """One raw observation, gated like get_observations."""
     if grant is not None and not (
@@ -1011,6 +1144,7 @@ TOOL_META: dict[str, tuple[str, bool, bool]] = {
     "find_related": ("Find entities by meaning", True, True),
     "ask": ("Ask about one entity", True, True),
     "ask_scope": ("Ask about a scope", True, True),
+    "find_path": ("Find paths between two entities", True, True),
     "expand": ("Expand a handle", True, True),
     "record_claim": ("Record a claim", False, True),
     "get_observations": ("Get raw observations", True, True),
@@ -1024,6 +1158,7 @@ TOOLS = (
     find_related,
     ask,
     ask_scope,
+    find_path,
     expand,
     record_claim,
     get_observations,
@@ -1073,7 +1208,7 @@ def _compact_text(fn):
     return wrapped
 
 
-_PACK_TOOLS = ("ask", "ask_scope", "expand", "answer")
+_PACK_TOOLS = ("ask", "ask_scope", "find_path", "expand", "answer")
 
 for _fn in TOOLS:
     _impl = _compact_text(_fn) if _fn.__name__ in _PACK_TOOLS else _fn

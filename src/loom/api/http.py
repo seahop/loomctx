@@ -28,6 +28,7 @@ from ..context import (
     covers_valid_at,
     decode_handle,
     expand_pack,
+    find_paths,
     semantic_search,
 )
 from ..contracts import (
@@ -39,6 +40,8 @@ from ..contracts import (
     EntityRef,
     ExpandRequest,
     IngestEnvelope,
+    PathPack,
+    PathRequest,
 )
 from ..contracts import (
     MAX_BATCH_ITEMS,
@@ -585,6 +588,19 @@ def ask(req: AskRequest, request: Request) -> ContextPack:
             embedder=request.app.state.embedder,
             allowed_types=_allowed_types(grant),
         )
+
+
+@app.post("/v1/path", response_model=PathPack)
+def path(req: PathRequest, request: Request) -> PathPack:
+    """Enumerate the edge sequence(s) that connect `from` to `to` along the
+    `via` predicates (D-067). A read endpoint, gated exactly like /v1/ask: the
+    namespace grant, then both endpoints' entity types. Reads reach the engine
+    directly (the Go gateway forwards ingest only), so no gateway change."""
+    grant = _authorize(request, req.namespace, "r")
+    _gate_entity_type(grant, req.from_.type)
+    _gate_entity_type(grant, req.to.type)
+    with metrics.PACK_SECONDS.time():
+        return find_paths(request.app.state.store, req, allowed_types=_allowed_types(grant))
 
 
 @app.post("/v1/expand", response_model=ContextPack)

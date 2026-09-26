@@ -18,6 +18,7 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `find_related(question)` | Entities related by meaning — over facts *and* the passages of documents that claims cite — each with the fact or passage that matched, cited (needs `LOOM_EMBED_*`; D-040) |
 | `ask(subject, question, budget, as_of?, valid_at?, format?)` | Budgeted, cited context on **one** entity (`as_of` = known at T, `valid_at` = true at T) |
 | `ask_scope(subjects, question, expand_predicates?, depth?, budget?, format?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve; an attribute in `expand_predicates` is the question's topic; default budget 3000 |
+| `find_path(from, to, via?, depth?, max_paths?, budget?, as_of?, valid_at?, format?)` | The connecting **edge sequence(s)** between two entities along `via`, shortest first, each hop cited (host→product→cve, user→group→domain); reports paths that EXIST, does not rank or score them (D-067) |
 | `expand(handle, budget, format?)` | Progressive disclosure — pull one thread deeper; a `cite` token returns that one observation |
 | `record_claim(subject, predicate, ..., object_ref \| object_value, supersedes?, event_id?)` | Agents write back facts they learn; `supersedes` records a correction of an earlier observation |
 | `get_observations(subject)` | Raw audit view (an entity, or a `cite` token / observation id) |
@@ -39,7 +40,7 @@ false`). The pack tools' schema is the *agent view* of `ContextPack`
 (items first, compact citations, reached subjects summarized); the HTTP
 surface still serializes the contract itself.
 
-- `format: "concise" | "detailed"` on `ask`, `ask_scope`, `expand`.
+- `format: "concise" | "detailed"` on `ask`, `ask_scope`, `find_path`, `expand`.
   Concise (default) is what an agent carries in context, and what the
   budget charges: each item is `kind`, `text` and `cites` — one
   `"<cite> <source> <date>"` string per citation, the 12-hex `cite` token
@@ -119,6 +120,7 @@ GET  /v1/entities/search?q=                      # resolve names to entities
 GET  /v1/entities/semantic?q=                    # entities by MEANING, each with a cited fact (needs an embedder, D-025)
 GET  /v1/artifacts/{id}                          # stored document, verbatim
 POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
+POST /v1/path                                    # PathRequest (from, to, via) -> PathPack: connecting edge sequences, cited (D-067)
 POST /v1/expand                                  # ExpandRequest -> ContextPack
 POST /v1/answer                                  # retrieval-grounded LLM answer (503 until an LLM is configured, D-012)
 POST /v1/schemas, GET /v1/schemas                # per-namespace registry: entity types, predicates, strictness (D-024)

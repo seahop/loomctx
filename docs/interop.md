@@ -428,6 +428,41 @@ supersession shows an ACL that was tightened between two exports, and each
 step of the answer points at the directory fact it came from — auditable,
 not a black-box path.
 
+### Finding a path (D-067)
+
+`ask_scope` hands back the *pack* the reader reassembles the chain from.
+When the question is reachability itself — "what connects A to B?" — the
+`path` type returns the connecting **edge sequence(s)** directly, so the
+answer is explicit instead of reconstructed:
+
+```python
+find_path(from="user:S-1-5-21-…-1106",              # svc-sql
+          to="domain:dev.local",
+          via=["member_of", "has_ace", "trusts"], depth=3)
+# POST /v1/path {"from": …, "to": …, "via": […], "depth": 3, "budget": 800}
+```
+
+It is a bounded, shortest-first BFS over the **same** gather/walk machinery
+`ask_scope` uses, following `via` edges in both directions (an `affects`
+edge is stored cve→product but walked product→cve), simple paths only (a
+cycle never loops), capped by `depth` (≤ 3, the scope cap; a longer request
+is clamped and noted), `max_paths`, the token `budget`, and the
+`LOOM_MAX_SCOPE_*` caps. Each returned `PathEdge` is **cited** and carries
+its `valid_from`/`valid_to`; `as_of`/`valid_at` filter every edge and a
+superseded one (D-050) never appears; a path through an entity outside a
+type-scoped grant is not returned. A cut — more paths than `max_paths` or
+the budget allowed, the depth cap, the entity cap, a hub's gather limit — is
+reported in `truncated` (never silently dropped), and `notes` carry the same
+request advice a pack does (an unknown `via` predicate with close matches,
+an unknown endpoint, "no path found within depth N").
+
+It stays **honest and domain-agnostic**: it enumerates paths that EXIST in
+the data along the named predicates (the KEV `host → product → cve` chain
+and this AD `user → group → (ACE) → domain` chain alike) — it does **not**
+rank, score, or weight edges by exploitability, and emits no such guidance.
+The reachability benchmark below measures `ask_scope`; `find_path` walks the
+identical edges.
+
 ### Measuring AD reachability
 
 Whether the scope walk actually surfaces the **full cited chain** — and how

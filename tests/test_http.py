@@ -34,6 +34,33 @@ def test_ingest_claim_then_read(tmp_path, monkeypatch):
         assert body["observations"][0]["source"] == "auth-log"
 
 
+def test_path_endpoint_returns_cited_edges(tmp_path, monkeypatch):
+    with make_client(tmp_path, monkeypatch) as client:
+        for subj, pred, obj in [
+            ({"type": "ip", "key": "10.0.4.7"}, "assigned_to",
+             {"type": "host", "key": "web-01"}),
+            ({"type": "host", "key": "web-01"}, "member_of",
+             {"type": "domain", "key": "corp.local"}),
+        ]:
+            r = client.post("/v1/ingest", json={
+                "kind": "claim", "subject": subj, "predicate": pred, "object": obj,
+                "observed_at": "2026-08-01T00:00:00Z", "source": "inv"})
+            assert r.status_code == 200
+        r = client.post("/v1/path", json={
+            "from": {"type": "ip", "key": "10.0.4.7"},
+            "to": {"type": "domain", "key": "corp.local"},
+            "via": ["assigned_to", "member_of"], "depth": 2, "budget": 2000})
+        assert r.status_code == 200
+        pp = r.json()
+        # the response serializes the endpoint under 'from' (alias)
+        assert pp["from"]["key"] == "10.0.4.7" and pp["to"]["key"] == "corp.local"
+        assert pp["paths"], "ip -> host -> domain is a connecting path"
+        path = pp["paths"][0]
+        assert [e["predicate"] for e in path] == ["assigned_to", "member_of"]
+        assert all(e["cite"]["observation_id"] for e in path)
+        assert pp["charged_tokens"] > 0
+
+
 def test_document_ingest_stores_artifact(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post(

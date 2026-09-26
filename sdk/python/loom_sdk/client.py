@@ -157,6 +157,36 @@ class Loom:
     def expand(self, handle_id: str, budget: int = 800) -> dict:
         return self._post("/v1/expand", {"handle": handle_id, "budget": budget})
 
+    def path(
+        self,
+        from_: EntityTuple,
+        to: EntityTuple,
+        via: list[str] | None = None,
+        depth: int = 3,
+        max_paths: int = 8,
+        budget: int = 800,
+        as_of: str | None = None,
+        valid_at: str | None = None,
+    ) -> dict:
+        """The edge sequence(s) that connect two entities along `via`
+        predicates (D-067) — "what connects A to B?". Empty `via` follows the
+        namespace's containment predicates. Reports paths that EXIST, each hop
+        cited; it does not rank or score them. as_of / valid_at as in ask()."""
+        return self._post(
+            "/v1/path",
+            {
+                "namespace": self.namespace,
+                "from": {"type": from_[0], "key": from_[1]},
+                "to": {"type": to[0], "key": to[1]},
+                "via": via or [],
+                "depth": depth,
+                "max_paths": max_paths,
+                "budget": budget,
+                "as_of": as_of,
+                "valid_at": valid_at,
+            },
+        )
+
     def answer(
         self,
         question: str,

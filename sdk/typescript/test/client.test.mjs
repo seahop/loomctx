@@ -30,6 +30,15 @@ test("typescript sdk round trip", { skip: !url && "LOOM_URL not set" }, async ()
   assert.ok(pack.items.length > 0 && pack.items[0].citations.length > 0);
   assert.equal(pack.namespace, "tsdk");
 
+  await loom.claim({
+    subject: ["host", "web 01/a"], predicate: "member_of", object: ["domain", "corp.local"],
+    observed_at: OBSERVED, source: "inv", event_id: "ts-m1",
+  });
+  const paths = await loom.path(["user", "j&d"], ["domain", "corp.local"],
+    { via: ["logged_in_by", "member_of"], depth: 2, budget: 2000 });
+  assert.equal(paths.from.key, "j&d");
+  assert.ok(paths.paths.length > 0 && paths.paths[0].every((e) => e.cite));
+
   const doc = await loom.document({ text: "report body", source: "ir", observed_at: OBSERVED, filename: "ir.txt", event_id: "ts-d1" });
   assert.equal(doc.status, "accepted");
   assert.equal((await loom.artifact(doc.artifact_id)).text, "report body");
