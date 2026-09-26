@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .contracts import AskRequest, EntityRef, Observation, ScopeSpec
+from .store.common import redact_dsn
 
 BUDGETS = (1500, 3000, 4000)
 CHAIN_PREDICATES = ("member_of", "has_ace", "trusts", "contains",
@@ -527,7 +528,7 @@ def main(argv: list[str] | None = None) -> None:
         results = evaluate(store, args.namespace, truth, budgets, index, progress)
         summary = summarize(results, index)
         meta = {"date": datetime.now(timezone.utc).date().isoformat(),
-                "store": args.db or os.environ.get("LOOM_DB", "loom.db"),
+                "store": redact_dsn(args.db or os.environ.get("LOOM_DB", "loom.db")),
                 "namespace": args.namespace, "scale": truth.get("scale", args.scale),
                 "seed": truth.get("seed", args.seed), "counts": truth.get("counts", {}),
                 "ingest": ingest}

@@ -770,6 +770,11 @@ def main(argv: list[str] | None = None) -> None:
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
     print(json.dumps({**totals, "envelopes": stats}))
+    rejected = totals.get("rejected", 0)
+    if rejected:
+        # a scheduled import must fail visibly, not "succeed" with a hole in
+        # it (D-063)
+        raise SystemExit(f"{rejected} envelopes were refused by the engine (see the lines above)")
 
 
 if __name__ == "__main__":

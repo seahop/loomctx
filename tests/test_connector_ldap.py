@@ -258,3 +258,23 @@ def test_schema_registers_the_object_level_predicates():
     types = {t.name for t in reg.entity_types}
     assert {"domain", "computer", "user", "group", "ou", "gpo", "container"} <= types
     assert reg.strict is False
+
+
+def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):
+    """D-063: a loader that saw any refusal must not exit 0."""
+    import pytest
+
+    from loom import ingest
+    from loom.connectors import vulns
+
+    monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
+
+    def refusing(url, lines, size, key, timeout=60.0):
+        n = sum(1 for _ in lines)
+        return {"total": n, "recorded": n - 2, "accepted": 0, "rejected": 2}
+
+    monkeypatch.setattr(ingest, "post_batches", refusing)
+    with pytest.raises(SystemExit) as exc:
+        ldap.main(["import", str(FIXTURE), "--namespace", "ad", "--url", "http://loom.invalid"])
+    assert exc.value.code not in (0, None)
+    assert "2 envelopes were refused" in str(exc.value.code)

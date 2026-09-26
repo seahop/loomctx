@@ -114,3 +114,29 @@ def test_harness_runs_end_to_end_and_summarizes(loaded):
                                        "scale": "small", "seed": 7,
                                        "counts": truth["counts"]})
     assert "path-recall" in table and "3-hop recall" in table
+
+
+def test_cli_report_redacts_a_store_dsn_password(monkeypatch, tmp_path):
+    """The report's `store` line must not carry a DSN password (as S-45 in
+    retrieval_eval): main() redacts it before markdown() prints it."""
+    captured = {}
+    ldif, truth = ad_gen.generate(7, "tiny")
+    truth_path = tmp_path / "t.json"
+    import json
+    truth_path.write_text(json.dumps({**truth, "chains": [], "decoys": []}))
+    db = str(tmp_path / "r.db")
+    store = SqliteStore(db)
+    ad_eval.load_ldif(store, ldif, "ad")
+    store.close()
+    monkeypatch.setattr("loom.store.factory.store_from_url", lambda url: SqliteStore(db))
+    real_md = ad_eval.markdown
+
+    def spy(summary, meta):
+        captured["meta"] = meta
+        return real_md(summary, meta)
+
+    monkeypatch.setattr(ad_eval, "markdown", spy)
+    ad_eval.main(["--db", "postgresql://loom:s3cret@db:5432/loom", "--truth", str(truth_path),
+                  "--budgets", "1500", "--quiet", "--out", str(tmp_path / "r.md")])
+    assert "s3cret" not in captured["meta"]["store"]
+    assert "s3cret" not in (tmp_path / "r.md").read_text()
