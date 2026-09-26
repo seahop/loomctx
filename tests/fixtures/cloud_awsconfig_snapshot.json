@@ -1,0 +1,149 @@
+{
+  "fileVersion": "1.0",
+  "configurationItems": [
+    {
+      "version": "1.3",
+      "accountId": "123456789012",
+      "configurationItemCaptureTime": "2026-09-20T08:00:00.000Z",
+      "configurationItemStatus": "OK",
+      "configurationStateId": "1600000000000",
+      "configurationItemMD5Hash": "",
+      "arn": "arn:aws:ec2:us-east-2:123456789012:vpc/vpc-0abc111111aaaa111",
+      "resourceType": "AWS::EC2::VPC",
+      "resourceId": "vpc-0abc111111aaaa111",
+      "resourceName": null,
+      "awsRegion": "us-east-2",
+      "availabilityZone": "Not Applicable",
+      "tags": { "Name": "loom-demo-vpc" },
+      "relatedEvents": [],
+      "relationships": [
+        {
+          "resourceId": "subnet-0def222222bbbb222",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::Subnet",
+          "name": "Contains Subnet"
+        }
+      ],
+      "configuration": {
+        "cidrBlock": "10.0.0.0/16",
+        "state": "available",
+        "isDefault": false,
+        "instanceTenancy": "default"
+      }
+    },
+    {
+      "version": "1.3",
+      "accountId": "123456789012",
+      "configurationItemCaptureTime": "2026-09-20T08:00:00.000Z",
+      "configurationItemStatus": "OK",
+      "configurationStateId": "1600000000001",
+      "configurationItemMD5Hash": "",
+      "arn": "arn:aws:ec2:us-east-2:123456789012:subnet/subnet-0def222222bbbb222",
+      "resourceType": "AWS::EC2::Subnet",
+      "resourceId": "subnet-0def222222bbbb222",
+      "resourceName": null,
+      "awsRegion": "us-east-2",
+      "availabilityZone": "us-east-2a",
+      "tags": { "Name": "loom-demo-subnet-a" },
+      "relatedEvents": [],
+      "relationships": [
+        {
+          "resourceId": "vpc-0abc111111aaaa111",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::VPC",
+          "name": "Is contained in Vpc"
+        }
+      ],
+      "configuration": {
+        "cidrBlock": "10.0.4.0/24",
+        "availableIpAddressCount": 250,
+        "mapPublicIpOnLaunch": false,
+        "state": "available"
+      }
+    },
+    {
+      "version": "1.3",
+      "accountId": "123456789012",
+      "configurationItemCaptureTime": "2026-09-20T08:00:00.000Z",
+      "configurationItemStatus": "OK",
+      "configurationStateId": "1600000000002",
+      "configurationItemMD5Hash": "",
+      "arn": "arn:aws:ec2:us-east-2:123456789012:security-group/sg-0aa333333cccc333",
+      "resourceType": "AWS::EC2::SecurityGroup",
+      "resourceId": "sg-0aa333333cccc333",
+      "resourceName": null,
+      "awsRegion": "us-east-2",
+      "availabilityZone": "Not Applicable",
+      "tags": { "Name": "loom-demo-web-sg" },
+      "relatedEvents": [],
+      "relationships": [
+        {
+          "resourceId": "vpc-0abc111111aaaa111",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::VPC",
+          "name": "Is contained in Vpc"
+        }
+      ],
+      "configuration": {
+        "groupName": "loom-demo-web-sg",
+        "description": "web tier",
+        "ipPermissions": [
+          {
+            "ipProtocol": "tcp",
+            "fromPort": 22,
+            "toPort": 22,
+            "ipv4Ranges": [ { "cidrIp": "10.0.0.0/8" } ]
+          },
+          {
+            "ipProtocol": "tcp",
+            "fromPort": 443,
+            "toPort": 443,
+            "ipv4Ranges": [ { "cidrIp": "0.0.0.0/0" } ]
+          }
+        ]
+      }
+    },
+    {
+      "version": "1.3",
+      "accountId": "123456789012",
+      "configurationItemCaptureTime": "2026-09-20T08:00:00.000Z",
+      "configurationItemStatus": "OK",
+      "configurationStateId": "1600000000003",
+      "configurationItemMD5Hash": "",
+      "arn": "arn:aws:ec2:us-east-2:123456789012:instance/i-0123456789abcdef0",
+      "resourceType": "AWS::EC2::Instance",
+      "resourceId": "i-0123456789abcdef0",
+      "resourceName": null,
+      "awsRegion": "us-east-2",
+      "availabilityZone": "us-east-2a",
+      "tags": { "Name": "loom-demo-web-01" },
+      "relatedEvents": [],
+      "relationships": [
+        {
+          "resourceId": "subnet-0def222222bbbb222",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::Subnet",
+          "name": "Is contained in Subnet"
+        },
+        {
+          "resourceId": "vpc-0abc111111aaaa111",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::VPC",
+          "name": "Is contained in Vpc"
+        },
+        {
+          "resourceId": "sg-0aa333333cccc333",
+          "resourceName": null,
+          "resourceType": "AWS::EC2::SecurityGroup",
+          "name": "Is associated with SecurityGroup"
+        }
+      ],
+      "configuration": {
+        "instanceType": "t3.micro",
+        "imageId": "ami-0abcd1234efgh5678",
+        "privateIpAddress": "10.0.4.7",
+        "state": { "code": 16, "name": "running" }
+      }
+    }
+  ]
+}
