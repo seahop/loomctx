@@ -2889,6 +2889,41 @@ outside the repo depends on the old names.
   fresh cluster. The saved demo transcripts under `demo/` are recordings
   and keep the old tool names until the next rehearsal re-captures them.
 
+## D-089 · Agent scorecard: room to think, empty replies are errors, ruled-out CVEs are not claims (2026-09-27)
+
+The 2026-09-27 scorecard (36 models × 5 runs on GKE, the first on the
+renamed build) came back with 45 empty answers across 16 models — mostly
+the newest reasoning models, which scored 0/5 on the two-hop task. Three
+harness defects, all fixed before any number was published:
+
+1. **Output cap on the OpenAI-compatible path.** Every OpenRouter model ran
+   at `max_tokens=1500`. A reasoning model's hidden thinking counts against
+   that cap, so it ran out before a tool call or an answer; a non-empty
+   answer could also be cut mid-sentence (one Opus 5.5 answer ends at
+   "(for example CVE-2026-55654 ["). The direct-Anthropic path already had
+   8,000 (D-047 follow-up); the OpenAI path now has the same,
+   `AGENT_MAX_TOKENS` (`LOOMCTX_AGENT_MAX_TOKENS`).
+2. **An empty reply twice read as an empty final answer.** The D-039 retry
+   marker was overwritten by the second empty reply, so the run ended with
+   `answer=''` and no error, scored as the model being wrong. Every turn
+   now carries why it ended (`finish_reason` / `stop_reason`), and a second
+   empty reply is an error: "output cap (8000 tokens) reached before an
+   answer" or "empty completion twice".
+3. **A CVE the answer rules out counted as a false KEV claim.** D-057 fails
+   an exposure answer that names a real non-KEV CVE — right for a claim,
+   wrong for "OpenSSL does carry non-KEV CVEs, e.g. X, but none are
+   KEV-listed", which careful models write. A non-KEV CVE now counts
+   against the answer only when some sentence naming it does not rule it
+   out as KEV / exploited (`_ruled_out`); precision is over the CVEs the
+   answer claims. A claim next to an unrelated "not" ("exploited in the
+   wild and not yet patched") still fails.
+
+Verified on the five worst-affected models before the re-run: GPT-5.2 and
+Kimi K3 went from empty answers to passes naming all 32 KEV CVEs; GLM-5.3
+and Qwen3.8 Max answered in full and passed once the ruled-out rule held.
+The first table was not published; the scorecard in `docs/models.md` is the
+re-run on this harness.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

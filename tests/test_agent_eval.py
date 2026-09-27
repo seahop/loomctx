@@ -145,6 +145,33 @@ def test_exposure_passes_on_recall_not_on_one_name():
     assert not ae._score_cves(f"{names[0]} [abcdefab]", none, seen, Store())["pass"]
 
 
+def test_a_cve_the_answer_rules_out_is_not_a_false_kev_claim():
+    """D-089: careful answers named non-KEV CVEs only to exclude them ("OpenSSL
+    does carry non-KEV CVEs, e.g. X, but none are KEV-listed") and failed on
+    precision. A CVE counts against the answer only when some sentence
+    naming it does not rule it out."""
+    kev = {f"CVE-2026-{i:04d}": "linux:linux_kernel" for i in range(1, 5)}
+    truth = {"kev": kev, "via": {c: [p] for c, p in kev.items()}}
+
+    class Store:
+        def get_entity(self, ns, ref):
+            return object()
+    seen = {"abcdef" * 5 + "ab"}
+    listed = ", ".join(sorted(kev)) + " affect the Linux kernel [abcdefab]."
+    for aside in ("OpenSSL does carry non-KEV CVEs (e.g. CVE-2026-9001, CVE-2026-9002) but none are KEV-listed.",
+                  "The data shows NVD edges for openssh (e.g. CVE-2026-9001) but **no** `exploited_in_wild` observations.",
+                  "CVE-2026-9001 affects openssh; it is not on the KEV list.",
+                  "A scan of openssh CVEs (e.g., CVE-2026-9001, CVE-2026-9002, etc. — [abcdefab]) found **no** "
+                  "entries flagged `exploited_in_wild = True`."):
+        r = ae._score_cves(f"{listed}\n{aside}", truth, seen, Store())
+        assert r["pass"] and r["false_kev"] == 0 and r["ruled_out"] >= 1 and r["precision"] == 1.0, aside
+    # a claim is still a claim — even next to an unrelated "not"
+    for claim in ("CVE-2026-9001 is exploited in the wild and not yet patched.",
+                  "CVE-2026-9001 is KEV-listed. Elsewhere, CVE-2026-9001 is not exploited."):
+        r = ae._score_cves(f"{listed}\n{claim}", truth, seen, Store())
+        assert not r["pass"] and r["false_kev"] == 1, claim
+
+
 def test_every_factual_task_needs_a_seen_citation_and_dates_are_not_cites():
     seen = {"abcdef" * 5 + "ab"}
     assert ae.cite_tokens_in("on 20260820, id 12345678 [abcdefab] [0123456789abcdef0123456789abcdef]") == [
@@ -398,6 +425,38 @@ def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retri
     ])
     r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0]
     assert r.error is None and r.score["pass"] and r.steps == 3
+
+
+def test_an_empty_reply_twice_is_an_error_not_an_empty_answer(seeded_db):
+    """D-089: the retry marker was overwritten by the second empty reply, so
+    the run ended with answer '' and no error — scored as the model's
+    wrong answer. Now the second empty reply is an error that says why."""
+    r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=Scripted(["", ""]))[0]
+    assert r.answer == "" and r.error == "empty completion twice" and not r.infra
+    assert not r.score["pass"] and r.steps == 2
+
+    def capped(provider, system, messages, tools):
+        return ae.Turn("", [], {"role": "assistant", "content": ""}, {"in": 10, "out": 8000}, "length")
+    r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=capped)[0]
+    assert r.error == f"output cap ({ae.AGENT_MAX_TOKENS} tokens) reached before an answer"
+
+
+def test_openai_path_leaves_room_for_reasoning_and_reads_why_the_reply_ended(monkeypatch):
+    """D-089: on OpenRouter a reasoning model's thinking counts against
+    max_tokens; at 1500 it ran out before a tool call or an answer."""
+    sent = []
+
+    def fake_post(url, body, headers, timeout=0):
+        sent.append(body)
+        return {"choices": [{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 8000, "cost": 0.01}}
+
+    monkeypatch.setattr(ae, "_post_json", fake_post)
+    monkeypatch.setattr(ae, "_NO_TEMPERATURE", set())
+    p = ae.Provider("openai", "https://openrouter.ai/api/v1", "some/reasoning-model", "k")
+    turn = ae.call_model(p, "sys", [{"role": "user", "content": "q"}], [_Tool("ask")])
+    assert sent[-1]["max_tokens"] == ae.AGENT_MAX_TOKENS == 8000
+    assert turn.stop == "length" and turn.text == "" and not turn.calls
 
 
 def test_lease_history_in_the_first_sentence_is_not_an_assertion():

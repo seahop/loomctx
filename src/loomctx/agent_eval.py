@@ -48,6 +48,11 @@ MAX_TOOL_CHARS = 24_000       # a tool result larger than this is cut, with a ma
 # budget_tokens form and runs without thinking here, as it did on the
 # scorecard. LOOMCTX_AGENT_THINKING=off omits the parameter for every model.
 ANTHROPIC_MAX_TOKENS = 8000
+# The same room on the OpenAI-compatible path (OpenRouter and friends): a
+# reasoning model's hidden thinking counts against max_tokens there, and at
+# 1500 it ran out before a tool call or an answer, which read as an empty
+# final answer (D-089). LOOMCTX_AGENT_MAX_TOKENS overrides it.
+AGENT_MAX_TOKENS = int(os.environ.get("LOOMCTX_AGENT_MAX_TOKENS", "8000"))
 THINKING = (os.environ.get("LOOMCTX_AGENT_THINKING") or "adaptive").strip().lower()
 _NO_ADAPTIVE = re.compile(r"haiku-4-5|sonnet-4-5|opus-4-5|claude-3")
 NAMESPACE = "netsec"
@@ -132,6 +137,20 @@ def _product_named(answer: str, key: str) -> bool:
     return bool(part) and part in _loose(answer)
 
 
+# a sentence that rules a CVE out as KEV / exploited ("non-KEV", "none are
+# KEV-listed", "no exploited_in_wild observation"), negation first
+_NOT_KEV = re.compile(r"non-?KEV|(?:\b(?:not|no|none|never|without)\b|n't\b)[^.;\n]{0,80}?"
+                      r"(?:KEV|exploited|exploitation|listed)", re.I)
+_CVE_SENTENCE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!etc\.)(?<=[.!?])\s+|\n")   # "e.g." / "etc." end no sentence
+
+
+def _ruled_out(answer: str, cve: str) -> bool:
+    """Every sentence naming `cve` says it is not KEV-listed / exploited: a
+    careful answer that excludes it is not claiming it (D-089)."""
+    sentences = [x for x in _CVE_SENTENCE.split(answer) if cve in x]
+    return bool(sentences) and all(_NOT_KEV.search(x) for x in sentences)
+
+
 def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
     """Pass: at least `exposure_required` of the KEV set named, none
     invented, none real-but-not-KEV-for-this-host, the software each named
@@ -143,8 +162,12 @@ def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
     invented = sorted(c for c in mentioned
                       if store.get_entity(NAMESPACE, EntityRef(type="cve", key=c)) is None)
     # real CVEs that are NOT in the KEV set for web-01: naming them as the
-    # exposure is a precision failure, not just a recall shortfall
-    false_kev = sorted((mentioned - kev) - set(invented))
+    # exposure is a precision failure, not just a recall shortfall — unless
+    # every sentence naming one rules it out (D-089)
+    not_kev = (mentioned - kev) - set(invented)
+    ruled_out = sorted(c for c in not_kev if _ruled_out(answer, c))
+    false_kev = sorted(not_kev - set(ruled_out))
+    claimed = mentioned - set(ruled_out)
     via = truth.get("via") or {c: [p] for c, p in truth["kev"].items()}
     software = sorted({p for c in hits for p in via.get(c, []) if _product_named(answer, p)})
     unexplained = [c for c in hits if not any(p in software for p in via.get(c, []))]
@@ -156,8 +179,8 @@ def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
     return {
         "kev_total": len(kev), "kev_named": len(hits), "kev_required": required, "hits": hits,
         "recall": round(len(hits) / len(kev), 3) if kev else None,
-        "precision": round(len(hits) / len(mentioned), 3) if mentioned else None,
-        "cves_mentioned": len(mentioned), "invented_cves": invented,
+        "precision": round(len(hits) / len(claimed), 3) if claimed else None,
+        "cves_mentioned": len(mentioned), "ruled_out": len(ruled_out), "invented_cves": invented,
         "false_kev": len(false_kev), "false_kev_examples": false_kev[:3],
         "software_named": software, "software_missing_for": unexplained[:3], **cites,
         "pass": ok and _faithful(cites),
@@ -358,6 +381,7 @@ class Turn:
     calls: list[tuple[str, str, dict]]     # (call id, tool name, args)
     raw_message: Any
     usage: dict                            # in, out, and cost (USD) when the provider reports it
+    stop: str = ""                         # why the reply ended: finish_reason / stop_reason
 
 
 def _openai_tools(tools) -> list[dict]:
@@ -391,7 +415,7 @@ def _post_at_zero(p: Provider, url: str, body: dict, headers: dict) -> dict:
     return _post_json(url, body, headers, timeout=180)
 
 
-def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int = 1500) -> Turn:
+def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int = AGENT_MAX_TOKENS) -> Turn:
     if p.kind == "openai":
         headers = {"authorization": f"Bearer {p.api_key}"} if p.api_key else {}
         body = {
@@ -407,7 +431,8 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
             # body: the provider's outage, not the model's answer
             raise LLMError(f"provider returned no choices: {str(data.get('error') or data)[:300]}",
                            transient=True)
-        msg = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        msg = choice["message"]
         calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc["function"]
@@ -419,7 +444,7 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
         u = data.get("usage") or {}
         return Turn(msg.get("content") or "", calls, msg,
                     {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0),
-                     "cost": float(u.get("cost") or 0.0)})
+                     "cost": float(u.get("cost") or 0.0)}, choice.get("finish_reason") or "")
     body = anthropic_body(p, system, messages, tools, max_tokens)
     headers = {"x-api-key": p.api_key or "", "anthropic-version": "2023-06-01"}
     url = p.base_url + "/v1/messages"
@@ -443,7 +468,7 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
     # the whole content list goes back on the next turn — thinking blocks
     # included, unchanged, as the same model expects them
     return Turn(text, calls, {"role": "assistant", "content": data.get("content", [])},
-                {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0)})
+                {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0)}, stop or "")
 
 
 def anthropic_body(p: Provider, system: str, messages: list, tools, max_tokens: int) -> dict:
@@ -522,11 +547,17 @@ async def run_task(session, provider: Provider, task: Task, store,
             result.usage["out"] += turn.usage.get("out", 0)
             result.usage["cost"] = round(result.usage.get("cost", 0.0) + turn.usage.get("cost", 0.0), 5)
             if not turn.calls:
-                if not turn.text.strip() and not result.answer:
-                    # a provider returning neither text nor tool calls is a
-                    # transient, not an answer: one retry (D-039)
-                    result.answer = "\x00retry"
-                    continue
+                if not turn.text.strip():
+                    if result.answer != "\x00retry":
+                        # a provider returning neither text nor tool calls is a
+                        # transient, not an answer: one retry (D-039)
+                        result.answer = "\x00retry"
+                        continue
+                    # twice: an error, never an empty "final answer" (D-089)
+                    result.answer = ""
+                    result.error = (f"output cap ({AGENT_MAX_TOKENS} tokens) reached before an answer"
+                                    if turn.stop in ("length", "max_tokens") else "empty completion twice")
+                    break
                 result.answer = turn.text
                 break
             outputs = []
