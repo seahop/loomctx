@@ -70,6 +70,7 @@ def load_ldif(store, ldif_text: str, namespace: str, source: str = "ad-export",
     """Import an LDIF export through the raw-LDAP connector into `store`,
     returning object stats and ingest timing/throughput."""
     from .connectors import ldap
+    store.put_schema(ldap.schema(namespace))   # as the connector's own import does
     stats: dict[str, int] = {}
     t0 = time.monotonic()
     envs = ldap.ldif_to_envelopes(ldif_text, namespace, source, stats=stats)
@@ -84,6 +85,7 @@ def load_ldif(store, ldif_text: str, namespace: str, source: str = "ad-export",
     if buf:
         store.record_claims(buf)
         recorded += len(buf)
+    store.refresh_statistics()
     elapsed = time.monotonic() - t0
     return {"objects": stats.get("object", 0), "invalid": stats.get("invalid", 0),
             "observations": recorded, "seconds": round(elapsed, 3),
@@ -263,6 +265,9 @@ def find_path_blind(store, namespace: str, record: dict, budget: int) -> dict:
     pack = find_paths(store, req)
     ms = (time.monotonic() - t0) * 1000
     cited = {e.cite.observation_id for p in pack.paths for e in p if e.cite.observation_id}
+    # a path through a disabled account comes back flagged (D-080): its
+    # status fact is cited alongside the edges
+    cited |= {n.cite.observation_id for n in pack.node_status if n.cite.observation_id}
     return {"cited": cited, "paths": len(pack.paths), "ms": ms,
             "truncated": bool(pack.truncated), "tokens": pack.charged_tokens}
 

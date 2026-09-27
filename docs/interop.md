@@ -476,11 +476,13 @@ find_path(from="user:S-1-5-21-…-1106",              # svc-sql
 # POST /v1/path {"from": …, "to": …, "via": […], "depth": 3, "budget": 800}
 ```
 
-It is a bounded, shortest-first BFS over the **same** gather/walk machinery
-`ask_scope` uses, following `via` edges in both directions (an `affects`
-edge is stored cve→product but walked product→cve), simple paths only (a
-cycle never loops), capped by `depth` (≤ 3, the scope cap; a longer request
-is clamped and noted), `max_paths`, the token `budget`, and the
+It is a bounded, shortest-first search over the **same** gather/walk
+machinery `ask_scope` uses, grown from both ends and joined in the middle
+(D-080), following `via` edges in both directions (an `affects` edge is
+stored cve→product but walked product→cve), simple paths only (a cycle never
+loops, and no turning back along one predicate at an entity unless
+`siblings`), capped by `depth` (default 4, ≤ 6; a longer request is clamped
+and noted), `max_paths`, the token `budget`, and the
 `LOOM_MAX_SCOPE_*` caps. Each returned `PathEdge` is **cited** and carries
 its `valid_from`/`valid_to`; `as_of`/`valid_at` filter every edge and a
 superseded one (D-050) never appears; a path through an entity outside a
@@ -488,7 +490,10 @@ type-scoped grant is not returned. A cut — more paths than `max_paths` or
 the budget allowed, the depth cap, the entity cap, a hub's gather limit — is
 reported in `truncated` (never silently dropped), and `notes` carry the same
 request advice a pack does (an unknown `via` predicate with close matches,
-an unknown endpoint, "no path found within depth N").
+an unknown endpoint, "no path found within depth N"). A path through a
+disabled account is returned with that account's `enabled = false` in
+`node_status`, cited — the LDAP, Entra and Okta schemas mark `enabled` (and
+Okta's `status`) as node status.
 
 It stays **honest and domain-agnostic**: it enumerates paths that EXIST in
 the data along the named predicates (the KEV `host → product → cve` chain

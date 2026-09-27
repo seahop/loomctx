@@ -397,13 +397,44 @@ Scope walks from random users over the generic identity predicates at
 per-user OAuth2 consents collided, role holders that were groups or
 service principals became users, Okta role assignments in the API's own
 shape were dropped and the two connectors' schemas clobbered each other —
-all fixed and exact above. Still open (S-57): a user's walk climbs to the
+all fixed and exact above. Then open, fixed by D-080 below (S-57): a user's walk climbs to the
 every-user group and back down to its members, so any ask of depth 2+
 costs ~2 s and depth 3 hits the scope cap; over HTTP the 3-hop
 user → group → role-assignable group → Global Administrator path took
 9.2 s by `/v1/path` and 10.8 s by `/v1/ask` at 60,000 users, while paths
 that avoid the hub stay at 30–60 ms / 0.2–2.9 s. Postgres stayed under
 620 MiB of its 1 GiB limit; no pod restarted during the loads.
+
+### Re-validated after D-080 / D-081 (2026-09-26)
+
+A fresh cluster on the same recipe with the D-080 walk and path changes;
+the 60,000 + 41,973-user exports loaded again through the gateway (1,381,619
+rows, 0 refused, 2,322 s end to end, 0 missing / 0 extra edges). Scope walks
+through the every-user groups, read from Postgres:
+
+| Depth | Before (p50 / p95, entities) | After D-080 (p50 / p95, entities) |
+| --- | --- | --- |
+| 1 | 197 ms / 299 ms, 5.5 | 156 ms / 193 ms, 5.5 |
+| 2 | 2.4 s / 2.8 s, 1,148 | 317 ms / 517 ms, 13 |
+| 3 | 8.0 s / 8.7 s, 2,000 (scope cap) | 350 ms / 1.2 s, 32 |
+
+The 3-hop user → group → role-assignable group → Global Administrator path:
+find_path 3.7 s → 0.47 s in process; over HTTP, 9.2 s → 0.12 s warm (the
+first requests after a rollout, on fresh engine pods and cold replica
+caches, took 1.9–5.4 s before settling at 0.03–1.2 s).
+
+**What this run found** (S-59, D-081): a blind AD benchmark loaded into a
+fresh namespace of the 1.5M-row store took ~90 s per ask; an hour later the
+same ask took 0.8 s. Autovacuum analyzes after 10 % of a table changes, so a
+namespace under a tenth of the store was planned without statistics for
+it. Reproduced (44 s → 0.5 s after `ANALYZE`) and fixed: schema v7 sets
+bounded analyze thresholds on `observations` / `entities` — applied in
+place to the live database on the image roll, no downtime — and direct bulk
+loads refresh statistics when they finish. After the fix, fresh namespaces
+asked at once: blind AD scope walks 0.75–2.1 s p50, find_path 0.15–0.21 s
+(`docs/ad-eval.md`); a small IAM load through the gateway, asked the moment
+the queue drained, 0.19 s at depth 2 and 0.25 s for the Global
+Administrator path over HTTP. The cluster was torn down volumes first.
 
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 

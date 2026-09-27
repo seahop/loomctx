@@ -141,6 +141,7 @@ def load_direct(db: str | None, lines: Iterable[str], size: int) -> dict[str, in
             counts = handle_batch(store, [b.encode() for b in batch])
             for k in totals:
                 totals[k] += counts.get(k, 0)
+        store.refresh_statistics()
     finally:
         store.close()
     return totals

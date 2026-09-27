@@ -261,6 +261,13 @@ class ScopeSpec(BaseModel):
     )
     expand: list[str] = Field(default_factory=list)
     depth: int = Field(default=1, ge=0, le=3)
+    siblings: bool = Field(
+        default=False,
+        description="also turn back along the same predicate at a reached "
+        "entity — user -member_of-> group <-member_of- every other member. Off "
+        "by default: through a group that holds every user it pulls the whole "
+        "directory into the scope (D-080)",
+    )
     follow_extracted: bool = Field(
         default=False,
         description="also traverse edges that were extracted from documents "
@@ -427,10 +434,11 @@ class AnswerResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # Reachability — connecting edge sequences between two entities (D-067)       #
 # --------------------------------------------------------------------------- #
-# Longest edge sequence a `path` search walks. The scope walk caps depth at 3
-# (ScopeSpec.depth); a path request may ask for more but is clamped to this
-# and told so in a note.
-MAX_PATH_DEPTH = 3
+# Longest edge sequence a `path` search walks. The search meets in the middle
+# (D-080), so a 6-edge path costs two 3-hop frontiers, not one 6-hop one; a
+# request asking for more is clamped and told so in a note.
+MAX_PATH_DEPTH = 6
+DEFAULT_PATH_DEPTH = 4
 
 
 class PathEdge(BaseModel):
@@ -451,6 +459,16 @@ class PathEdge(BaseModel):
 
 # A path is an ordered edge sequence connecting `from` to `to`.
 Path = list[PathEdge]
+
+
+class NodeStatus(BaseModel):
+    """A status fact about an entity a path passes through (D-080): the
+    newest visible value of a `node_status` predicate, as stored and cited."""
+
+    entity: EntityRef
+    predicate: str
+    value: ObjectValue
+    cite: Citation
 
 
 class PathRequest(BaseModel):
@@ -476,9 +494,15 @@ class PathRequest(BaseModel):
         "namespace's registered containment predicates, like a scope",
     )
     depth: int = Field(
-        default=MAX_PATH_DEPTH, ge=1, le=32,
-        description="the most edges a path may hold; clamped to the scope "
+        default=DEFAULT_PATH_DEPTH, ge=1, le=32,
+        description="the most edges a path may hold; clamped to the path "
         f"depth cap ({MAX_PATH_DEPTH}) and noted when a longer one is asked",
+    )
+    siblings: bool = Field(
+        default=False,
+        description="also allow a path to turn back along the same predicate "
+        "at an entity — user -member_of-> group <-member_of- admin: a shared "
+        "group, not a route. Off by default, as in a scope walk (D-080)",
     )
     max_paths: int = Field(
         default=8, gt=0, le=100,
@@ -519,6 +543,13 @@ class PathPack(BaseModel):
         "max_paths or the budget allowed (max_paths), or the depth cap "
         "reached with the frontier still open (depth)",
     )
+    node_status: list[NodeStatus] = Field(
+        default_factory=list,
+        description="for every entity on a returned path, its current value "
+        "of each predicate the registry marks `node_status` (an account's "
+        "`enabled`, say), cited and charged against the budget: a path "
+        "through a disabled account is returned, and says so (D-080)",
+    )
     notes: list[str] = Field(
         default_factory=list,
         description="what the search could not do as asked, and what it did "
@@ -550,6 +581,12 @@ class PredicateDef(BaseModel):
         default=False,
         description="a 'contains / member of' relation: scopes with no "
         "explicit `expand` follow every containment predicate (D-012/D-024)",
+    )
+    node_status: bool = Field(
+        default=False,
+        description="a scalar that qualifies an entity as a step on a path "
+        "(an account's `enabled`): find_path reports each path entity's "
+        "current value of it, cited (D-080)",
     )
 
 

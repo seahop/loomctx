@@ -227,6 +227,13 @@ CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
     ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_entity_created ON entities (namespace, created_at);
+-- analyze after a bounded change, not a tenth of the table (v7, D-081): a new
+-- namespace loaded into a million-row store was planned without statistics
+-- for it (44 s per ask, 0.5 s after ANALYZE) until a tenth had changed
+ALTER TABLE observations SET (autovacuum_analyze_scale_factor = 0.01,
+                              autovacuum_analyze_threshold = 5000);
+ALTER TABLE entities SET (autovacuum_analyze_scale_factor = 0.01,
+                          autovacuum_analyze_threshold = 5000);
 """
 
 # search_entities: a half-open range with the text_pattern_ops operators —
@@ -238,7 +245,7 @@ _SEARCH_SQL = (
 )
 _PREFIX_END = "\U0010ffff"
 
-SCHEMA_VERSION = 6  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key)
+SCHEMA_VERSION = 7  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key; v7: analyze thresholds, D-081)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -673,6 +680,13 @@ class PostgresStore(GraphStore):
                 + " ORDER BY o.id COLLATE \"C\" LIMIT %s",
                 (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP))
         return [common.row_to_observation(r) for r in rows]
+
+    def refresh_statistics(self) -> None:
+        """ANALYZE the two big tables: a bulk load's rows are planned blind
+        until autovacuum next analyzes them (D-081)."""
+        with self._tx():
+            self._x("ANALYZE observations")
+            self._x("ANALYZE entities")
 
     def _migrate(self, cur) -> None:
         """One-shot versioned steps (H-B12); idempotent DDL lives in _SCHEMA."""

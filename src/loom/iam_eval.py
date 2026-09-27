@@ -89,6 +89,7 @@ def load(store, envs: list, batch: int = 1000) -> dict:
                                       for e in envs[i:i + batch]], registry)
         for k in totals:
             totals[k] += counts.get(k, 0)
+    store.refresh_statistics()
     elapsed = time.monotonic() - t0
     return {"envelopes": len(envs), "seconds": round(elapsed, 2),
             "obs_per_sec": round(len(envs) / elapsed, 1) if elapsed else 0.0, **totals}

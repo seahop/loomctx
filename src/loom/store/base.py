@@ -569,6 +569,10 @@ class GraphStore(ABC):
     def wipe(self) -> None:
         """Delete all rows (test isolation and demo resets)."""
 
+    def refresh_statistics(self) -> None:
+        """Bring the query planner's statistics up to date after a bulk load
+        (D-081). A no-op where the backend needs none."""
+
     @abstractmethod
     def close(self) -> None:
         """Release resources."""

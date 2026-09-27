@@ -8,6 +8,33 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Postgres planner statistics after bulk loads (D-081)
+
+- A new namespace loaded into a large Postgres store was queried with stale
+  planner statistics (44 s per ask vs 0.5 s after ANALYZE) until autovacuum's
+  10 % threshold was crossed. Schema v7 sets bounded analyze thresholds on
+  `observations`/`entities` (migrates in place); direct bulk loads call the
+  new `GraphStore.refresh_statistics()` when they finish
+
+### Hub-safe walks, longer paths, flagged disabled accounts (D-080)
+
+- Scope walks no longer turn back along the predicate that reached an
+  entity: from a user, `member_of` climbs to its groups and their parents
+  instead of fanning back down to every co-member of an every-user group
+  (`ScopeSpec.siblings: true` restores it). Depth-2 identity asks went from
+  seconds to ~0.2 s; blind AD walks gather less than half as much (S-57)
+- `find_path` searches from both ends and joins in the middle, with the
+  depth cap raised 3 → 6 (default 4) and the same no-turn-back rule
+  (`PathRequest.siblings`): 4-hop AD chains are found, and a path past a hub
+  group is met from the target's side (S-58)
+- `PathPack.node_status`: every entity on a returned path carries its
+  current value of the predicates the registry marks `node_status`
+  (`PredicateDef.node_status`; `enabled` for LDAP/Entra/Okta, Okta
+  `status`), cited and charged — a path through a disabled account is
+  returned and flagged (S-58)
+- MCP `find_path` / `ask_scope` take `siblings`; `find_path` shows
+  `node_status`. Contracts, OpenAPI, TS and Go SDKs regenerated/updated
+
 ### Identity connectors at scale, blind AD benchmark, faster pack selection (D-077, D-078, D-079)
 
 - `loom.connectors.iam_gen` + `loom.iam_eval`: seeded Entra + Okta exports

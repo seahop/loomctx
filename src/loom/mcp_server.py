@@ -56,7 +56,8 @@ from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
 from .context import (build_pack, cite_text, decode_handle, expand_pack, find_paths,
                      semantic_search)
-from .contracts import (AnswerRequest, AskRequest, ClaimIn, EntityRef, ExpansionHandle,
+from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, EntityRef,
+                        ExpansionHandle,
                         Observation, PathRequest, PredicateDef, ScopeSpec, ScopeTruncation,
                         SemanticSearchResponse)
 from .gates import check_supersedes, scope_counts, scope_schema
@@ -421,6 +422,15 @@ class AgentPath(TypedDict):
 # search could not fully return, `notes` carry request advice. It reports
 # paths that EXIST — no ranking, scoring, or exploitability. Functional
 # TypedDict because 'from' (the start entity) is a Python keyword (D-067).
+class AgentNodeStatus(TypedDict):
+    """A status fact about an entity a path passes through (D-080): e.g.
+    `user:x` `enabled` = False — the path is still returned, and flagged."""
+    entity: str
+    predicate: str
+    value: Any
+    cite: str
+
+
 PathView = TypedDict("PathView", {
     "namespace": str,
     "from": EntityRef,
@@ -428,6 +438,7 @@ PathView = TypedDict("PathView", {
     "charged_tokens": int,
     "format": Format,
     "paths": list[AgentPath],
+    "node_status": NotRequired[list[AgentNodeStatus]],
     "notes": NotRequired[list[str]],
     "truncated": NotRequired[list[ScopeTruncation]],
     "coverage_warning": NotRequired[str],
@@ -815,6 +826,7 @@ def ask_scope(
     as_of: str | None = None,
     valid_at: str | None = None,
     format: Format = "concise",
+    siblings: bool = False,
     ctx: Context = None,
 ) -> AgentPack:
     """Context about SEVERAL entities at once and/or across RELATION HOPS
@@ -822,7 +834,10 @@ def ask_scope(
     contents ('domain:corp.local' expanded over ['member_of'] covers every
     member). subjects are 'type:key' handles; expand_predicates names the
     links to follow, in both directions (omit it to follow the namespace's
-    registered containment predicates); depth bounds the hops. Chain the
+    registered containment predicates); depth bounds the hops. A walk does
+    not turn back along the relation that reached an entity (from a user,
+    member_of climbs to its groups, not down to every co-member) unless
+    siblings=True. Chain the
     `links` describe_namespace lists per type: host has
     `-runs_software-> product`, product has `<-affects- cve`, so "which
     CVEs affect what host:web-01 runs" is expand_predicates=
@@ -841,7 +856,8 @@ def ask_scope(
     _known_namespace(namespace, grant)
     req = AskRequest(
         namespace=namespace,
-        scope=ScopeSpec(subjects=refs, expand=_listed(expand_predicates), depth=depth),
+        scope=ScopeSpec(subjects=refs, expand=_listed(expand_predicates), depth=depth,
+                        siblings=siblings),
         question=question,
         budget=budget,
         as_of=_parse_time(as_of),
@@ -888,6 +904,10 @@ def _path_view(pack, fmt: Format = "concise") -> PathView:
         "charged_tokens": d.get("charged_tokens", 0),
         "format": fmt, "paths": paths,
     }
+    if pack.node_status:
+        view["node_status"] = [{"entity": f"{n.entity.type}:{n.entity.key}",
+                                "predicate": n.predicate, "value": n.value,
+                                "cite": cite_text(n.cite)} for n in pack.node_status]
     if d.get("notes"):
         view = {"namespace": view["namespace"], "notes": d["notes"],
                 **{k: v for k, v in view.items() if k != "namespace"}}
@@ -911,9 +931,10 @@ def find_path(
     from_: Annotated[str, Field(alias="from")],
     to: str,
     via: list[str] | str | None = None,
-    depth: int = 3,
+    depth: int = DEFAULT_PATH_DEPTH,
     max_paths: int = 8,
     budget: int = 2000,
+    siblings: bool = False,
     namespace: str = _DEFAULT_NS,
     as_of: str | None = None,
     valid_at: str | None = None,
@@ -925,9 +946,13 @@ def find_path(
     chain, the AD user -> group -> domain chain). `from` and `to` are
     'type:key' handles; `via` names the predicates to traverse, in both
     directions (omit it to follow the namespace's containment predicates);
-    `depth` bounds the hops (capped at 3); `max_paths` bounds how many paths
-    come back, shortest first. Each hop is cited and time-scoped; as_of = what
-    was KNOWN at T, valid_at = what was TRUE at T. This reports paths that
+    `depth` bounds the hops (default 4, capped at 6); `max_paths` bounds how
+    many paths come back, shortest first. A path does not turn back along the
+    same relation at an entity (user -member_of-> group <-member_of- admin is
+    a shared group, not a route) unless siblings=True. `node_status` flags
+    what each entity on a path is — a path through a disabled account is
+    returned, with its `enabled` = False cited. Each hop is cited and
+    time-scoped; as_of = what was KNOWN at T, valid_at = what was TRUE at T. This reports paths that
     EXIST in the data — it does NOT rank, score, or weight edges by
     exploitability. `notes` say what it could not do (an unknown `via`, an
     unknown endpoint); `truncated` says when more paths, more depth, or a
@@ -940,7 +965,7 @@ def find_path(
     _known_namespace(namespace, grant)
     req = PathRequest(
         namespace=namespace, **{"from": src}, to=dst,
-        via=_listed(via), depth=depth, max_paths=max_paths, budget=budget,
+        via=_listed(via), depth=depth, max_paths=max_paths, budget=budget, siblings=siblings,
         as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
     )
     return _path_view(find_paths(_get_store(), req, allowed_types=_allowed(grant)), format)

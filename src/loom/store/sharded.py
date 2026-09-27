@@ -211,6 +211,10 @@ class ShardedStore(GraphStore):
         for s in self._all:
             s.wipe()
 
+    def refresh_statistics(self) -> None:
+        for s in self._all:
+            s.refresh_statistics()
+
     def close(self) -> None:
         for s in self._all:
             s.close()

@@ -230,17 +230,23 @@ MCP view renders it as a `coverage_warning`; the answering prompt as a
 containment predicates), depth (max edges, clamped to the scope cap 3),
 max_paths (default 8), budget (tokens), as_of?, valid_at?}`. **PathPack:**
 `{namespace, from, to, paths: [[PathEdge]] (each an ordered edge sequence,
-shortest first), charged_tokens, truncated, notes}`, where a **PathEdge** is
+shortest first), charged_tokens, truncated, node_status, notes}`, where a **PathEdge** is
 `{subject, predicate, object, cite, valid_from?, valid_to?, source}` — the
 observation exactly as stored, never re-oriented.
 
 `POST /v1/path` answers "what connects A to B?" — the KEV `host → product →
 cve` chain, the AD `user → group → (ACE) → domain` chain — with the
 connecting edge sequence(s) directly, instead of leaving an agent to
-reassemble them from a scope pack. A bounded, shortest-first BFS over the
-same gather/walk machinery `build_pack`/`resolve_scope` use: it follows `via`
-edges in **both** directions (`affects` is stored cve→product but walked
-product→cve), simple paths only (a cycle never loops), capped by `depth`,
+reassemble them from a scope pack. A bounded, shortest-first search over the
+same gather/walk machinery `build_pack`/`resolve_scope` use, grown from **both
+ends** and joined where they meet (D-080: each round extends the side with
+fewer edges to follow, so a start whose groups include one holding every user
+is met from the target's side): it follows `via` edges in **both** directions
+(`affects` is stored cve→product but walked product→cve), simple paths only
+(a cycle never loops), never turning back along the same predicate at an
+entity (`user -member_of-> group <-member_of- admin` is a shared group, not
+a route; `siblings: true` allows it), capped by `depth` (default 4, at most
+6),
 `max_paths`, `budget` (charged on the rendered path text + citations, like a
 pack) and the `LOOM_MAX_SCOPE_*` caps. Every edge is **cited** (hard
 constraint 3) and time-scoped; `as_of`/`valid_at` filter each edge and a
@@ -250,6 +256,15 @@ not returned. Cuts land in `truncated` (`max_paths`/`depth`/`scope_cap`/
 matches, an unknown endpoint, "no path found within depth N"). It is
 domain-agnostic and honest: it enumerates paths that EXIST along the named
 predicates — it does **not** rank, score, or weight edges by exploitability.
+`node_status` carries, for every entity on a returned path, its newest
+visible value of each predicate the registry marks `node_status` (an
+account's `enabled`), cited and charged: a path through a disabled account
+is returned — it may still matter — and says so.
+
+A scope walk (`ScopeSpec`) follows the same no-turn-back rule unless
+`siblings: true`: from a user, `member_of` climbs to its groups and their
+parents, not back down to every co-member (through a group holding every
+user that was the whole directory, D-080).
 
 ## Provenance: a claim that cites a document
 

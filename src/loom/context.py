@@ -66,7 +66,7 @@ from .contracts import (
     SemanticSearchResponse,
 )
 from .contracts import ExpansionHandle
-from .contracts import MAX_PATH_DEPTH, PathEdge, PathPack, PathRequest
+from .contracts import MAX_PATH_DEPTH, NodeStatus, PathEdge, PathPack, PathRequest
 from .store.base import GraphStore
 
 # Token accounting (D-051, D-058). The charged form is the compact rendering
@@ -1109,6 +1109,18 @@ def resolve_scope_paths(
                 and (valid_at is None or covers_valid_at(obs, valid_at))
                 and (scope.follow_extracted or not _is_extracted(obs)))
 
+    def turns_back(ref: EntityRef, obs: Observation) -> bool:
+        """The edge would leave `ref` along the predicate that reached it, with
+        `ref` on the same side of both edges: user -member_of-> group
+        <-member_of- every other member (D-080). Up a chain (group -member_of->
+        parent), down one (group <-member_of- subgroup <-member_of- user) and
+        across predicates (host -runs_software-> product <-affects- cve) are
+        not turns."""
+        if scope.siblings:
+            return False
+        chain = paths.get((ref.type, ref.key))
+        return bool(chain) and _turns(chain[-1], obs, ref)
+
     def admit(ref: EntityRef, end: EntityRef, obs: Observation, into: list[EntityRef]) -> None:
         nonlocal cut_at
         key = (end.type, end.key)
@@ -1146,7 +1158,7 @@ def resolve_scope_paths(
             window: dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]] = {}
             for ref in chunk:
                 for obs in gathered.get((ref.type, ref.key), []):
-                    if not walkable(obs, retired):
+                    if not walkable(obs, retired) or turns_back(ref, obs):
                         continue
                     for end in (obs.subject, obs.object):
                         if isinstance(end, EntityRef) and (end.type, end.key) not in seen:
@@ -1171,7 +1183,8 @@ def resolve_scope_paths(
                     held += read
                     carriers.update(more)
                 # in walk order: the window's carriers, then those past it
-                carriers = {k: carriers[k] for k in [*window, *carriers] if k in carriers}
+                carriers = {k: carriers[k] for k in [*window, *carriers]
+                            if k in carriers and not turns_back(carriers[k][0], carriers[k][2])}
             # What the question is about goes in first: when the entity cap
             # binds, it cuts the entities that do not carry the topic, not
             # the ones that do (D-061). Past the window only carriers enter.
@@ -1186,6 +1199,18 @@ def resolve_scope_paths(
 
 
 Reach = dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]]  # far end -> (from, end, edge)
+
+
+def _is_subject(obs: Observation, ref: EntityRef) -> bool:
+    return obs.subject.type == ref.type and obs.subject.key == ref.key
+
+
+def _turns(before: Observation, after: Observation, pivot: EntityRef) -> bool:
+    """Two consecutive edges at `pivot` on one predicate with `pivot` on the
+    same side of both — user -member_of-> group <-member_of- other user: a
+    shared neighbour, not a step onward (D-080)."""
+    return (before.predicate == after.predicate
+            and _is_subject(before, pivot) == _is_subject(after, pivot))
 
 
 def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expand: set[str],
@@ -1594,6 +1619,7 @@ def semantic_search(
 
 
 _PATH_ENUM_CAP = 256   # complete paths enumerated before the search stops (D-067)
+_WITNESS_GATHERS = 256  # entities the depth-cut check may read before it reports the cut
 
 
 def _path_edge(obs: Observation) -> PathEdge:
@@ -1680,10 +1706,11 @@ def find_paths(
         cap, row_cap = max_scope_entities(), max_scope_observations()
         work_cap = row_cap
         gathered: dict[tuple[str, str], list[Observation]] = {}
-        entities_seen: set[tuple[str, str]] = {src_key}
+        entities_seen: set[tuple[str, str]] = {src_key, dst_key}
         held = 0
         cut_at: EntityRef | None = None
         work_cut = False
+        early = False
 
         def gather(refs: list[EntityRef], into: Truncations) -> bool:
             """Gather the `refs` not gathered yet, within the row cap; False
@@ -1725,24 +1752,52 @@ def find_paths(
                 return cache[k]
             return adj
 
-        # a partial path: (where it ends, its edges, the entities on it)
-        partials: list[tuple[EntityRef, tuple[Observation, ...], frozenset]] = [
-            (src, (), frozenset({src_key}))]
-        # the last hop's far ends other than `to`: never materialized as
-        # paths, only kept (with each path's entity set) to tell whether the
-        # depth cut anything
-        leaves: dict[tuple[str, str], tuple[EntityRef, list[frozenset]]] = {}
-        for hop in range(depth):
-            if not partials:
-                break
-            if not gather([node for node, _, _ in partials], truncated):
-                cut_at = next(n for n, _, _ in partials if (n.type, n.key) not in gathered)
+        # Partial paths grow from BOTH ends and join where they meet (D-080):
+        # each round extends the side whose frontier has fewer edges to
+        # follow, so a user whose groups include one holding every user is
+        # met from the role's side instead of fanning out through the hub.
+        # A partial is (where it ends, its edges from its own root outward,
+        # the entities on it); neither side walks past the other's root.
+        Partial = tuple[EntityRef, tuple[Observation, ...], frozenset]
+        levels: dict[str, list[list[Partial]]] = {
+            "src": [[(src, (), frozenset({src_key}))]],
+            "dst": [[(dst, (), frozenset({dst_key}))]]}
+        by_end: dict[str, dict[tuple[str, str], list[Partial]]] = {
+            "src": {src_key: list(levels["src"][0])}, "dst": {dst_key: list(levels["dst"][0])}}
+        stop = {"src": dst_key, "dst": src_key}
+        found: dict[tuple[str, ...], tuple[Observation, ...]] = {}
+
+        def meet(side: str, end_key: tuple[str, str], edges: tuple[Observation, ...],
+                 nodes: frozenset) -> None:
+            other = "dst" if side == "src" else "src"
+            pivot = EntityRef(type=end_key[0], key=end_key[1])
+            for _, o_edges, o_nodes in by_end[other].get(end_key, ()):
+                if len(found) >= _PATH_ENUM_CAP:
+                    return
+                if nodes & o_nodes != {end_key}:
+                    continue   # the halves share an entity besides the join: not simple
+                if not req.siblings and edges and o_edges and _turns(edges[-1], o_edges[-1], pivot):
+                    continue   # the halves turn back on each other at the join
+                path = (edges + tuple(reversed(o_edges)) if side == "src"
+                        else o_edges + tuple(reversed(edges)))
+                found.setdefault(tuple(e.id for e in path), path)
+
+        total = 0   # edges the two sides' frontiers span together
+        while total < depth and len(found) < _PATH_ENUM_CAP:
+            if not levels["src"][-1] or not levels["dst"][-1]:
+                break   # one side cannot extend: no longer path exists
+            frontier = [n for side in ("src", "dst") for n, _, _ in levels[side][-1]]
+            if not gather(frontier, truncated):
+                cut_at = next(n for n in frontier if (n.type, n.key) not in gathered)
                 break
             adj = adjacency()
-            last = hop == depth - 1
-            next_partials: list[tuple[EntityRef, tuple[Observation, ...], frozenset]] = []
-            for node, edges, visited in partials:
-                if work_cut or cut_at is not None or len(complete) >= _PATH_ENUM_CAP:
+            fan = {side: sum(len(adj((n.type, n.key))) for n, _, _ in levels[side][-1])
+                   for side in ("src", "dst")}
+            side = "src" if fan["src"] <= fan["dst"] else "dst"
+            last = total + 1 == depth   # a last hop only joins; nothing is held
+            grown: list[Partial] = []
+            for node, edges, nodes in levels[side][-1]:
+                if work_cut or cut_at is not None or len(found) >= _PATH_ENUM_CAP:
                     break
                 for obs, end in adj((node.type, node.key)):
                     work += 1
@@ -1750,54 +1805,78 @@ def find_paths(
                         work_cut, cut_at = True, node
                         break
                     ekey = (end.type, end.key)
-                    if ekey in visited:
+                    if ekey in nodes:
                         continue   # already on this path (no cycles)
-                    if ekey == dst_key:
-                        if len(complete) < _PATH_ENUM_CAP:
-                            complete.append(edges + (obs,))
-                        continue   # reached the target; do not walk past it
-                    if last:
-                        leaves.setdefault(ekey, (end, []))[1].append(visited)
+                    if not req.siblings and edges and _turns(edges[-1], obs, node):
                         continue
+                    if ekey == stop[side]:
+                        meet(side, ekey, edges + (obs,), nodes | {ekey})
+                        continue   # reached the other root; do not walk past it
+                    if ekey not in by_end["dst" if side == "src" else "src"] and last:
+                        continue   # meets nothing, and no hop follows
                     if ekey not in entities_seen:
                         if len(entities_seen) >= cap:
                             cut_at = cut_at or end
                             continue
                         entities_seen.add(ekey)
-                    next_partials.append((end, edges + (obs,), visited | {ekey}))
-                    materialized += 1
-            partials = next_partials
-            if work_cut or len(complete) >= _PATH_ENUM_CAP:
+                    grown_edges, grown_nodes = edges + (obs,), nodes | {ekey}
+                    meet(side, ekey, grown_edges, grown_nodes)
+                    if not last:
+                        partial = (end, grown_edges, grown_nodes)
+                        grown.append(partial)
+                        by_end[side].setdefault(ekey, []).append(partial)
+                        materialized += 1
+            levels[side].append(grown)
+            total += 1
+            if work_cut or cut_at is not None:
                 break
+            # every path up to `total` edges is now found; with more than
+            # max_paths of them, the shortest are settled
+            if len(found) > req.max_paths and total < depth:
+                early = True
+                break
+        complete = list(found.values())
 
-        # The depth cut something only when a depth-length path could still
-        # be extended: one of its far ends has a walkable edge to an entity
-        # off that path. Checked a chunk of far ends at a time, stopping at
-        # the first witness; when the caps stop the check first, the cut is
-        # reported (a longer path may exist — the reader must not conclude
-        # absence).
-        if leaves and cut_at is None and len(complete) < _PATH_ENUM_CAP:
-            order = list(leaves)
-            for start in range(0, len(order), _SCOPE_CHUNK):
-                chunk = order[start:start + _SCOPE_CHUNK]
-                # a far end's own gather limit is not the path's to report ({})
-                if start >= cap or not gather([leaves[k][0] for k in chunk], {}):
-                    depth_open = True
-                    break
-                adj = adjacency()
-                for k in chunk:
-                    near = {(e.type, e.key) for _, e in adj(k)}
-                    if any(near - on_path for on_path in leaves[k][1]):
+        # The depth cut something only when a depth-length walk from `from`
+        # (not through `to`) ends somewhere with an edge off it: a longer
+        # path may exist. The start side's frontier is walked on, depth
+        # first, stopping at the first witness; a check the caps stop first
+        # reports the cut (the reader must not conclude absence).
+        if (total == depth and not early and cut_at is None and not work_cut
+                and len(complete) < _PATH_ENUM_CAP and levels["src"][-1]):
+            need = depth - (len(levels["src"]) - 1)
+            stack = [(n, nodes, need, edges[-1] if edges else None)
+                     for n, edges, nodes in levels["src"][-1]]
+            visits = 0
+            adj = adjacency()
+            while stack and not depth_open:
+                node, nodes, left, came = stack.pop()
+                k = (node.type, node.key)
+                if k not in gathered:
+                    visits += 1
+                    if visits > _WITNESS_GATHERS or not gather([node], {}):
                         depth_open = True
                         break
-                if depth_open:
-                    break
+                    adj = adjacency()
+                onward = [(o, e) for o, e in adj(k) if (e.type, e.key) not in nodes
+                          and (req.siblings or came is None or not _turns(came, o, node))]
+                if left == 0:
+                    depth_open = bool(onward)
+                    continue
+                for obs, end in onward:
+                    ekey = (end.type, end.key)
+                    if ekey != dst_key:
+                        stack.append((end, nodes | {ekey}, left - 1, obs))
 
         if work_cut:
             notes.append(f"the search examined {work_cap:,} edge extensions (the "
                          "LOOM_MAX_SCOPE_OBSERVATIONS bound) and stopped: a hub fans out into "
                          "more routes than that, so more paths may exist; name fewer 'via' "
                          "predicates or lower depth")
+        if early:
+            notes.append(f"stopped at {total} edges with more than max_paths ({req.max_paths}) "
+                         "paths found: those returned are the shortest; longer ones were not "
+                         "enumerated")
         if cut_at is not None:
             _record_scope_cap(truncated, cut_at, len(entities_seen), len(entities_seen) + 1)
 
@@ -1833,6 +1912,46 @@ def find_paths(
             continue   # a later, cheaper path may still fit
         returned.append(edges)
         charged += cost
+
+    # what each entity on a returned path IS, where the registry marks a
+    # predicate as node status (an account's `enabled`, D-080): a path through
+    # a disabled account is still a path — returned, and flagged, cited and
+    # charged like everything else
+    node_status: list[NodeStatus] = []
+    registered = _schema(store, ns)
+    status_preds = {d.name for d in (registered.predicates if registered is not None else [])
+                    if d.node_status}
+    if status_preds and returned:
+        on_path = list(dict.fromkeys(
+            (ref.type, ref.key) for edges in returned for e in edges
+            for ref in (e.subject, e.object) if isinstance(ref, EntityRef)))
+        refs = [EntityRef(type=t, key=k) for t, k in on_path]
+        rows = store.observations_for_many(ns, refs, limit=50, observed_before=req.as_of,
+                                           predicates=sorted(status_preds))
+        dropped_status = 0
+        for ref in refs:
+            mine = [o for o in rows.get((ref.type, ref.key), [])
+                    if o.predicate in status_preds and _is_subject(o, ref)
+                    and _in_scope(o, allowed_types) and not _is_extracted(o)
+                    and (req.valid_at is None or covers_valid_at(o, req.valid_at))]
+            retired = _supersession(mine)
+            newest: dict[str, Observation] = {}
+            for o in sorted(mine, key=lambda o: _aware(o.observed_at), reverse=True):
+                if o.id not in retired:
+                    newest.setdefault(o.predicate, o)
+            for pred in sorted(newest):
+                o = newest[pred]
+                cost = item_tokens(ContextItem(kind="fact", text=_render_fact(o), score=1.0,
+                                               citations=[_citation(o)]))
+                if charged + cost > budget:
+                    dropped_status += 1
+                    continue
+                node_status.append(NodeStatus(entity=ref, predicate=pred, value=o.object,
+                                              cite=_citation(o)))
+                charged += cost
+        if dropped_status:
+            notes.append(f"{dropped_status} status fact(s) about entities on the returned paths "
+                         "did not fit the token budget; raise budget")
 
     # more paths existed than were returned: the max_paths cap or the budget
     # cut them — reported, never silently dropped
@@ -1889,7 +2008,8 @@ def find_paths(
     return PathPack(
         namespace=ns, from_=src, to=dst,
         paths=[[_path_edge(e) for e in edges] for edges in returned],
-        charged_tokens=charged, truncated=list(truncated.values()), notes=notes)
+        charged_tokens=charged, truncated=list(truncated.values()),
+        node_status=node_status, notes=notes)
 
 
 def expand_pack(

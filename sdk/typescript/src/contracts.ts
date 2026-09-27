@@ -206,6 +206,10 @@ export interface ScopeSpec {
   expand?: string[];
   depth?: number;
   /**
+   * also turn back along the same predicate at a reached entity — user -member_of-> group <-member_of- every other member. Off by default: through a group that holds every user it pulls the whole directory into the scope (D-080)
+   */
+  siblings?: boolean;
+  /**
    * also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)
    */
   follow_extracted?: boolean;
@@ -335,9 +339,13 @@ export interface PathRequest {
    */
   via?: string[];
   /**
-   * the most edges a path may hold; clamped to the scope depth cap (3) and noted when a longer one is asked
+   * the most edges a path may hold; clamped to the path depth cap (6) and noted when a longer one is asked
    */
   depth?: number;
+  /**
+   * also allow a path to turn back along the same predicate at an entity — user -member_of-> group <-member_of- admin: a shared group, not a route. Off by default, as in a scope walk (D-080)
+   */
+  siblings?: boolean;
   /**
    * the most paths to return, shortest first; more found than this is reported in `truncated` (reason max_paths)
    */
@@ -378,6 +386,10 @@ export interface PathPack {
    */
   truncated?: ScopeTruncation[];
   /**
+   * for every entity on a returned path, its current value of each predicate the registry marks `node_status` (an account's `enabled`, say), cited and charged against the budget: a path through a disabled account is returned, and says so (D-080)
+   */
+  node_status?: NodeStatus[];
+  /**
    * what the search could not do as asked, and what it did instead — advice about the request, not evidence: not cited, not charged against the budget (D-064, D-067)
    */
   notes?: string[];
@@ -400,6 +412,19 @@ export interface PathEdge {
   valid_from?: string | null;
   valid_to?: string | null;
   source: string;
+}
+/**
+ * A status fact about an entity a path passes through (D-080): the
+ * newest visible value of a `node_status` predicate, as stored and cited.
+ *
+ * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * via the `definition` "NodeStatus".
+ */
+export interface NodeStatus {
+  entity: EntityRef;
+  predicate: string;
+  value: EntityRef | string | number | boolean;
+  cite: Citation;
 }
 /**
  * Ask + synthesize: retrieve a context pack, then have the configured
@@ -474,6 +499,10 @@ export interface PredicateDef {
    * a 'contains / member of' relation: scopes with no explicit `expand` follow every containment predicate (D-012/D-024)
    */
   containment?: boolean;
+  /**
+   * a scalar that qualifies an entity as a step on a path (an account's `enabled`): find_path reports each path entity's current value of it, cited (D-080)
+   */
+  node_status?: boolean;
 }
 export interface IngestBatchResponse {
   total: number;

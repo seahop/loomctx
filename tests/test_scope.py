@@ -139,7 +139,9 @@ def test_scope_walk_does_not_hop_through_an_entity_the_reader_cannot_see(tmp_pat
     not reach db-01 *through* domain:corp.local — the hop is invisible to
     them, so the reached facts would arrive without their chain."""
     store, domain = make_store(tmp_path)
-    scope = ScopeSpec(subjects=[EntityRef(type="host", key="web-01")], expand=["member_of"], depth=2)
+    # siblings: web-01's fellow members of the domain are the premise here (D-080)
+    scope = ScopeSpec(subjects=[EntityRef(type="host", key="web-01")], expand=["member_of"], depth=2,
+                      siblings=True)
     everyone = build_pack(store, AskRequest(scope=scope, question="who logged in?", budget=3000))
     assert ("host", "db-01") in _reached(everyone)
     scoped = build_pack(store, AskRequest(scope=scope, question="who logged in?", budget=3000),
@@ -432,3 +434,37 @@ def test_the_scope_budget_carries_the_answer_within_the_mcp_limit(tmp_path, monk
     limit = 25_000   # Claude Code's default MAX_MCP_OUTPUT_TOKENS
     assert wire[mcp_server.SCOPE_BUDGET_HINT] * 3 <= limit and wire[6000] * 3 <= limit
     assert all(wire[b] <= 1.15 * b + 1000 for b in wire)
+
+
+def _membership_store(tmp_path):
+    """alice and bob in ops; ops in tier0; tier0 in all-admins; carol in a
+    subgroup of ops."""
+    store = SqliteStore(tmp_path / "sib.db")
+    def m(s, o, st="user"):
+        store.record_claim(ClaimIn(subject=EntityRef(type=st, key=s), predicate="member_of",
+                                   object=EntityRef(type="group", key=o),
+                                   observed_at=_at(1), source="idp"))
+    m("alice", "ops"); m("bob", "ops"); m("ops", "tier0", "group")
+    m("tier0", "all-admins", "group"); m("oncall", "ops", "group"); m("carol", "oncall")
+    return store
+
+
+def test_a_walk_does_not_turn_back_along_the_edge_that_reached_it(tmp_path):
+    """From a user, member_of climbs to the groups and their parents; it does
+    not come back down the same predicate to every other member of a group —
+    through a group holding every user that is the whole directory (D-080)."""
+    store = _membership_store(tmp_path)
+    keys = lambda refs: {r.key for r in refs}  # noqa: E731
+    up = resolve_scope(store, "default", ScopeSpec(
+        subjects=[EntityRef(type="user", key="alice")], expand=["member_of"], depth=3))
+    assert keys(up) == {"alice", "ops", "tier0", "all-admins"}
+    # anchored at a group, the walk goes down, and down again through a subgroup
+    down = resolve_scope(store, "default", ScopeSpec(
+        subjects=[EntityRef(type="group", key="ops")], expand=["member_of"], depth=2))
+    assert {"alice", "bob", "oncall", "carol"} <= keys(down)
+    # siblings on request
+    sib = resolve_scope(store, "default", ScopeSpec(
+        subjects=[EntityRef(type="user", key="alice")], expand=["member_of"], depth=2,
+        siblings=True))
+    assert {"bob", "oncall"} <= keys(sib)
+    store.close()

@@ -717,7 +717,8 @@ def schema(namespace: str) -> SchemaRegistration:
             PredicateDef(name="rbcd_from",
                          description="resource-based constrained delegation: the trustee may act on "
                                      "behalf of this object"),
-            PredicateDef(name="enabled", description="the account is enabled (userAccountControl)"),
+            PredicateDef(name="enabled", node_status=True,
+                         description="the account is enabled (userAccountControl)"),
             PredicateDef(name="is_dc", description="a domain controller machine account"),
             PredicateDef(name="unconstrained_delegation",
                          description="TRUSTED_FOR_DELEGATION (userAccountControl 0x80000)"),

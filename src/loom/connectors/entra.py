@@ -545,7 +545,6 @@ def schema(namespace: str) -> SchemaRegistration:
                          description="API permission the app registration requires"),
             PredicateDef(name="reports_to", object_types=["user"],
                          description="manager relationship"),
-            PredicateDef(name="enabled", description="account is enabled"),
             PredicateDef(name="privileged",
                          description="a high-privilege directory role"),
             PredicateDef(name="upn", description="userPrincipalName"),

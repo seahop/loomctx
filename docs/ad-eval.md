@@ -87,7 +87,9 @@ Every walk knows only the start and the target:
 - **scope walk** — one ask anchored at each endpoint over the fixed
   predicate set `member_of, has_ace, trusts, contains, can_delegate_to,
   rbcd_from` at the depth cap (3), plus an account-status ask on the start.
-- **find_path** — start → target over the same set at the default depth.
+- **find_path** — start → target over the same set at the default depth
+  (4); a path's `node_status` (an account's `enabled`) counts as cited
+  evidence.
 - **recall** — planted chains whose *every* edge came back **cited** (a
   citation with a real observation id).
 - **decoys** — each lands in one outcome: *evidenced* (the apparent path
@@ -100,50 +102,46 @@ Every walk knows only the start and the target:
 - **entities gathered vs total**, **truncated** walks, **build latency**
   p50/p95 and **pack tokens**.
 
-## Results — blind, seed 7 (2026-09-26)
+## Results — blind, seed 7 (2026-09-26, after D-080/D-081)
 
-Scope walk:
+Scope walk (two endpoint asks + the start's account-status ask):
 
-| Scale / store | Observations | Budget | Recall 2 / 3 / 4-hop | Decoys evidenced / not surfaced / leaked | Entities gathered / total | Build p50 / p95 |
-| --- | --- | --- | --- | --- | --- | --- |
-| medium, SQLite (laptop) | 31,433 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,108 / 4,429 | 4.2 s / 8.8 s |
-| medium, SQLite (laptop) | 31,433 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,108 / 4,429 | 5.9 s / 10.7 s |
-| large, SQLite (laptop) | 97,815 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,497 / 13,529 | 6.3 s / 7.2 s |
-| large, SQLite (laptop) | 97,815 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,497 / 13,529 | 7.5 s / 9.0 s |
-| medium, Postgres (GKE) | 31,433 | 1500 | 4/4 · 4/4 · **0/3** | 6 / 0 / 0 | 2,273 / 4,429 | 6.3 s / 6.8 s |
-| medium, Postgres (GKE) | 31,433 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,273 / 4,429 | 6.4 s / 6.9 s |
-| large, Postgres (GKE) | 97,815 | 1500 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,517 / 13,529 | 10.0 s / 10.8 s |
-| large, Postgres (GKE) | 97,815 | 4000 | 4/4 · 4/4 · 3/3 | 6 / 0 / 0 | 2,517 / 13,529 | 10.8 s / 11.5 s |
+| Scale / store | Observations | All recall at 1,500 / at 3,000+ | Decoys evidenced / not surfaced / leaked | Entities gathered / total | Build p50 / p95 at 3,000 |
+| --- | --- | --- | --- | --- | --- |
+| medium, SQLite (laptop) | 31,433 | 11/11 · 11/11 | 6 / 0 / 0 | 920 / 4,429 | 0.58 s / 2.4 s |
+| large, SQLite (laptop) | 97,815 | 11/11 · 11/11 | 6 / 0 / 0 | 979 / 13,529 | 1.3 s / 2.9 s |
+| medium, Postgres (GKE) | 31,433 | 9/11 · 11/11 | 6 / 0 / 0 | 918 / 4,429 | 0.76 s / 3.5 s |
+| large, Postgres (GKE) | 97,815 | 11/11 · 11/11 | 6 / 0 / 0 | 979 / 13,529 | 1.35 s / 5.7 s |
 
-find_path (the same at every budget):
+find_path (start → target, default depth 4):
 
-| Scale | Recall 2 / 3 / 4-hop | Decoys evidenced / not surfaced / leaked | p50 |
+| Scale / store | All recall at 1,500 / at 3,000+ | Decoys evidenced / not surfaced / leaked | p50 |
 | --- | --- | --- | --- |
-| medium, SQLite | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.0–1.2 s |
-| large, SQLite | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.2–1.3 s |
-| medium, Postgres (GKE) | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.2–1.3 s |
-| large, Postgres (GKE) | 4/4 · 4/4 · 0/3 | 4 / 0 / 2 | 1.1–1.8 s |
+| medium, SQLite | 11/11 · 11/11 | 6 / 0 / 0 | 0.10 s |
+| large, SQLite | 10/11 · 11/11 | 6 / 0 / 0 | 0.12 s |
+| medium, Postgres (GKE) | 10/11 · 11/11 | 6 / 0 / 0 | 0.15 s |
+| large, Postgres (GKE) | 9/11 · 11/11 | 6 / 0 / 0 | 0.20 s |
 
-(Laptop timings were taken under heavy unrelated host load. The GKE rows
-ran from a toolbox pod against the `scale-pg-ha` Postgres (3 instances,
-1 GiB each), the engine's own read path; the store was loaded directly, not
-through the gateway.)
+(GKE: a toolbox pod against the `scale-pg-ha` Postgres, 3 instances at
+1 GiB, the store loaded directly into a fresh namespace and asked at once.
+Where recall misses at 1,500 tokens it is a 4-hop chain that did not fit
+the budget; from 3,000 every chain comes back.)
 
-**Reading it.** Recall survives blinding — every planted chain, including
-the cross-domain 4-hop ones, comes back fully cited from the two endpoint
-asks — but the cost does not. With `contains` in a generic predicate set
-the walk climbs to the OU / domain and back down, gathering about half the
-directory (2,108 of 4,429 entities; 2,497 of 13,529 at large, where the
-scope cap stops it) at several seconds per ask — 6 s on the medium directory and 10–11 s on the
-large one against Postgres. On Postgres at 1,500 tokens the medium
-directory's 4-hop chains did not fit (0/3; 3/3 from 3,000 up): the budget,
-not the walk, is the limit there. The D-066 figure of ~2.5 %
-gathered in ~0.2 s was a product of being told the chain. find_path finds
-every 2- and 3-hop chain but no 4-hop one (its depth is capped at 3,
-S-58), and returns the disabled-account decoys' paths without the
-`enabled = false` that disqualifies them (the scope walk's account-status
-ask does surface it). Trust decoys come back with their `transitive` /
-`sid_filtering` attrs on the cited edge either way.
+**Reading it.** Recall survives blinding: every planted chain, the
+cross-domain 4-hop ones included, comes back fully cited from 3,000 tokens,
+by the endpoint asks and by find_path alike. What blinding first exposed
+was the cost. The initial blind run gathered about half the directory
+(2,108 of 4,429 entities) at 4–11 s per ask, because a walk climbed to an
+OU or group and came back down to all its contents; find_path could not
+return 4-hop chains at all and returned the disabled-account decoys without
+the `enabled = false` that disqualifies them. D-080 stopped the walk turning
+back along the predicate that reached an entity, made find_path search from
+both ends to depth 6, and added `node_status` so a path through a disabled
+account comes back flagged; D-081 fixed the Postgres planner statistics
+that made a freshly loaded namespace ~50× slower. The D-066 figure of
+~2.5 % gathered in ~0.2 s was still a product of being told the chain: a
+blind walk gathers ~20 % of the medium directory (7 % of large) in about a
+second.
 
 ## A live reader (illustrative, not a headline)
 

@@ -2619,6 +2619,76 @@ affordability when it reaches the top rather than on every scan. Every
 existing pack test, including the exact charged-token ones, is unchanged.
 On the hub walk: 3.1 s → 1.2 s in selection.
 
+## D-080 · No turning back, paths met in the middle, node status (2026-09-26)
+
+Closes S-57 and S-58. Three changes, one contract addition each.
+
+**Scope walks do not turn back** (`ScopeSpec.siblings`, default false). The
+walk followed each expand predicate both ways with no memory of how it
+reached an entity, so from a user `member_of` climbed to a group and came
+straight back down to every member: through a group holding every user,
+depth 2 gathered ~1,100 entities and depth 3 hit the scope cap (2–8 s per
+ask at 20–60k users). Now an edge that leaves an entity along the predicate
+that reached it, with the entity on the same side of both edges, is not
+followed — user -member_of-> group <-member_of- co-member, OU -contains->
+user <-contains- … . Up a chain, down a chain and across predicates
+(host -runs_software-> product <-affects- cve, the KEV demo) are unchanged;
+every seed and demo test holds. `siblings: true` restores co-members for the
+question that wants them.
+
+**find_path meets in the middle** (`MAX_PATH_DEPTH` 3 → 6,
+`PathRequest.depth` default 3 → 4, `PathRequest.siblings`). Partial paths
+grow from both endpoints and join where they meet; each round extends the
+side whose frontier has fewer edges to follow, so a user in an every-user
+group reaches Global Administrator from the role's side without walking the
+group's members. A 6-edge path costs two 3-hop frontiers, which is what
+makes the higher cap affordable. It applies the same no-turn-back rule (a
+shared group with an admin is not a route to the admin's role; at the
+bidirectional search's cost those co-membership paths had crowded the real
+one out of `max_paths`), and stops once more than `max_paths` paths are
+settled at a length. The depth-cut report keeps its meaning (a depth-length
+walk from `from` that could extend), checked depth-first to the first
+witness.
+
+**Node status** (`PredicateDef.node_status`, `PathPack.node_status`). A
+predicate the registry marks node status — `enabled` for LDAP, Entra and
+Okta (declared once in `iam_schema`), Okta's `status` — is reported for every
+entity on a returned path: its newest visible value (as_of, valid_at,
+supersession applied), cited and charged against the budget. A path through
+a disabled account is returned, because it can still matter, and says so.
+
+Measured (blind AD medium, laptop): find_path recall 73 % → 100 % (4-hop
+0/3 → 3/3), 1.0–1.2 s → 0.1 s, disabled-account decoys leaked → evidenced;
+scope walk 2,108 → 920 entities gathered, 4–6 s → 0.5 s. IAM small: depth-2
+hub walks 3.3 s → 0.16 s (1,052 → 16 entities), the 3-hop Global
+Administrator find_path 1.1 s → 0.05 s. On GKE (Postgres,
+60,000 + 41,973 users loaded through the gateway): depth-2 hub asks 2.4 s →
+0.32 s p50 (1,148 → 13 entities), depth-3 8.0 s → 0.35 s (2,000, the scope
+cap → 32); the 3-hop Global Administrator find_path 3.7 s → 0.47 s, 0.12 s
+warm over HTTP. Blind AD on Postgres (loaded after D-081): scope walk p50
+0.75–0.98 s medium, 1.35–2.1 s large (was 6–11 s), find_path 0.15–0.21 s,
+every chain from 3,000 tokens and every decoy evidenced on both surfaces.
+
+## D-081 · Planner statistics after a bulk load (2026-09-26)
+
+On GKE a blind AD ask against Postgres took ~90 s; the same ask took 0.8 s
+an hour later. Reproduced: a fresh namespace (31k observations) loaded into
+a 1.5M-row store, then asked at once — 44 s; after `ANALYZE` — 0.5 s.
+Autovacuum analyzes a table after 10 % of its rows change, so a namespace
+under a tenth of the store was planned without statistics for it, possibly
+for good. Any production import of a new source into a large store hit it;
+the earlier 6–11 s GKE AD figures were inflated the same way.
+
+Two changes, no contract change. Schema v7 sets
+`autovacuum_analyze_scale_factor = 0.01` and `autovacuum_analyze_threshold
+= 5000` on `observations` and `entities` (applied in place on open; the
+live 1.5M-row cluster migrated with no downtime), so every writer — the
+gateway → consumer path included — is re-analyzed within a minute of a
+bounded change. And `GraphStore.refresh_statistics()` (ANALYZE on
+Postgres, a no-op on SQLite, forwarded by the sharded store) runs when a
+direct bulk load finishes (`import --db`, `ingest` direct, the eval
+loaders), so a load is planned correctly the moment it returns.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -143,26 +143,43 @@ def test_depth_cut_only_reported_when_the_frontier_can_extend(tmp_path):
     store.close()
 
 
+def _hub(prefix, hub, shared, n=300):
+    return [ClaimIn(namespace="net", subject=EntityRef(type="cve", key=f"{prefix}-{i}"),
+                    predicate="affects", object=EntityRef(type="product", key=prod),
+                    observed_at=_at(1), source="nvd")
+            for i in range(n) for prod in [hub, *shared]]
+
+
+def test_dead_end_target_is_disproved_without_the_hub(tmp_path):
+    """The search grows from both ends (D-080): from a product with 300 CVEs
+    to one in a two-node component, the target's side runs out after one
+    hop, so no path is proved without fanning out through the hub."""
+    store = SqliteStore(tmp_path / "dead.db")
+    store.record_claims(_hub("CVE", "hub", [f"q{i}" for i in range(5)]) + [
+        ClaimIn(namespace="net", subject=EntityRef(type="product", key="far"),
+                predicate="affects", object=EntityRef(type="product", key="farther"),
+                observed_at=_at(1), source="nvd")])
+    stats: dict = {}
+    pack = find_paths(store, _req(**{"from": EntityRef(type="product", key="hub")},
+                                  to=EntityRef(type="product", key="far"), via=["affects"],
+                                  depth=6), stats=stats)
+    assert pack.paths == [] and not pack.truncated
+    assert stats["work"] <= 2 and stats["partials"] <= 1
+    assert any("no path found" in n for n in pack.notes)
+    store.close()
+
+
 def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
-    """The BFS is over paths: from a product with many CVEs that also affect
-    a few shared products, every shared product is re-reached through each
-    CVE and the last hop fans back out through every CVE — 300 x 5 x 300 =
-    450k extensions unbounded. The work is capped at
-    LOOM_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
+    """Two hubs, each with 300 CVEs that also affect 5 shared products of its
+    own, and nothing between them: both sides must fan out, and the third
+    hop of either goes back through every CVE (1,500 x 300 extensions). The
+    work is capped at LOOM_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
     store = SqliteStore(tmp_path / "hub.db")
-    shared = [f"q{i}" for i in range(5)]
-    claims = []
-    for i in range(300):
-        for prod in ["hub", *shared]:
-            claims.append(ClaimIn(namespace="net", subject=EntityRef(type="cve", key=f"CVE-{i}"),
-                                  predicate="affects", object=EntityRef(type="product", key=prod),
-                                  observed_at=_at(1), source="nvd"))
-    claims.append(ClaimIn(namespace="net", subject=EntityRef(type="product", key="far"),
-                          predicate="affects", object=EntityRef(type="product", key="farther"),
-                          observed_at=_at(1), source="nvd"))
-    store.record_claims(claims)
+    store.record_claims(_hub("A", "hub", [f"q{i}" for i in range(5)])
+                        + _hub("B", "hub2", [f"r{i}" for i in range(5)]))
     req = _req(**{"from": EntityRef(type="product", key="hub")},
-               to=EntityRef(type="product", key="far"), via=["affects"], depth=3)
+               to=EntityRef(type="product", key="hub2"), via=["affects"], depth=6,
+               siblings=True)   # product <- cve -> product is a turn at the cve
 
     monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "20000")
     stats: dict = {}
@@ -172,12 +189,10 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
     assert any(t.reason == "scope_cap" for t in pack.truncated)
     assert any("edge extensions" in n for n in pack.notes)
 
-    # the default bound holds too, and the last hop materializes nothing:
-    # the partial paths held are the hop-2 ones only (300 CVEs x 5 shared)
     monkeypatch.delenv("LOOM_MAX_SCOPE_OBSERVATIONS")
     stats = {}
-    pack = find_paths(store, req, stats=stats)   # the work counters bound it; no wall clock (flaky under load)
-    assert stats["work"] <= 100_000 + 1 and stats["partials"] <= 300 + 300 * 5
+    pack = find_paths(store, req, stats=stats)
+    assert stats["work"] <= 100_000 + 1 and stats["partials"] <= 100_000
     assert any("edge extensions" in n for n in pack.notes)
     store.close()
 
@@ -185,7 +200,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
 def test_depth_over_cap_is_clamped_and_noted(tmp_path):
     store = SqliteStore(tmp_path / "clamp.db")
     _edge(store, "net", ("n", "a"), ("n", "b"))
-    pack = find_paths(store, _req(**{"from": _n("a")}, to=_n("b"), via=["link"], depth=5))
+    pack = find_paths(store, _req(**{"from": _n("a")}, to=_n("b"), via=["link"], depth=9))
     assert len(pack.paths) == 1
     assert any("clamped" in n for n in pack.notes)
 
@@ -403,3 +418,88 @@ def test_seed_alert_to_domain_path_is_cited(tmp_path):
         assert ("host", "web-01") in keys
     finally:
         store.close()
+
+
+# ---------------------------------------------- longer paths, hubs, status (D-080) #
+
+def test_four_and_six_hop_paths_found(tmp_path):
+    store = SqliteStore(tmp_path / "long.db")
+    chain = "abcdefg"
+    for x, y in zip(chain, chain[1:]):
+        _edge(store, "net", ("n", x), ("n", y))
+    four = find_paths(store, _req(**{"from": _n("a")}, to=_n("e"), via=["link"]))  # default depth
+    assert [(e.subject.key, e.object.key) for e in four.paths[0]] == [
+        ("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]
+    six = find_paths(store, _req(**{"from": _n("a")}, to=_n("g"), via=["link"], depth=6))
+    assert len(six.paths) == 1 and len(six.paths[0]) == 6
+    assert all(e.cite.observation_id for e in six.paths[0])
+    store.close()
+
+
+def test_path_is_met_from_the_target_side_past_a_hub(tmp_path):
+    """A user in a group holding 1,000 users and in a small group that holds
+    a role: the search extends the cheaper side, so it reaches the role
+    without walking the big group's members."""
+    store = SqliteStore(tmp_path / "meet.db")
+    claims = [ClaimIn(namespace="iam", subject=EntityRef(type="user", key=f"u{i}"),
+                      predicate="member_of", object=EntityRef(type="group", key="everyone"),
+                      observed_at=_at(1), source="idp") for i in range(1000)]
+    claims += [
+        ClaimIn(namespace="iam", subject=EntityRef(type="user", key="u7"), predicate="member_of",
+                object=EntityRef(type="group", key="ops"), observed_at=_at(1), source="idp"),
+        ClaimIn(namespace="iam", subject=EntityRef(type="group", key="ops"), predicate="member_of",
+                object=EntityRef(type="group", key="tier0"), observed_at=_at(1), source="idp"),
+        ClaimIn(namespace="iam", subject=EntityRef(type="group", key="tier0"), predicate="has_role",
+                object=EntityRef(type="role", key="global-admin"), observed_at=_at(1), source="idp")]
+    store.record_claims(claims)
+    stats: dict = {}
+    pack = find_paths(store, PathRequest(
+        namespace="iam", **{"from": EntityRef(type="user", key="u7")},
+        to=EntityRef(type="role", key="global-admin"), via=["member_of", "has_role"], depth=4),
+        stats=stats)
+    assert [e.predicate for e in pack.paths[0]] == ["member_of", "member_of", "has_role"]
+    assert stats["work"] < 50, stats     # the 1,000 members were never walked
+    store.close()
+
+
+def test_path_through_a_disabled_account_is_returned_and_flagged(tmp_path):
+    """A disabled account on a path is still a path (it may matter), so it is
+    returned — with its `enabled = false` beside it, cited and charged, for
+    every predicate the registry marks node_status."""
+    store = SqliteStore(tmp_path / "status.db")
+    store.put_schema(SchemaRegistration(namespace="iam", predicates=[
+        PredicateDef(name="member_of", containment=True),
+        PredicateDef(name="enabled", node_status=True)]))
+    user, group = EntityRef(type="user", key="old-admin"), EntityRef(type="group", key="admins")
+    store.record_claim(ClaimIn(namespace="iam", subject=user, predicate="member_of", object=group,
+                               observed_at=_at(1), source="idp"))
+    store.record_claim(ClaimIn(namespace="iam", subject=user, predicate="enabled", object=True,
+                               observed_at=_at(1), source="idp"))
+    off = store.record_claim(ClaimIn(namespace="iam", subject=user, predicate="enabled",
+                                     object=False, observed_at=_at(5), source="idp"))
+    req = PathRequest(namespace="iam", **{"from": user}, to=group, via=["member_of"], depth=1)
+    pack = find_paths(store, req)
+    assert len(pack.paths) == 1
+    assert [(s.entity, s.predicate, s.value, s.cite.observation_id) for s in pack.node_status] == [
+        (user, "enabled", False, off.id)]           # the newest value, not the older True
+    bare = find_paths(store, req.model_copy(update={"budget": 60}))
+    assert bare.charged_tokens < pack.charged_tokens or not bare.paths
+    # as of before it was disabled, the path reads the account as enabled
+    early = find_paths(store, req.model_copy(update={"as_of": _at(3)}))
+    assert [s.value for s in early.node_status] == [True]
+    store.close()
+
+
+def test_a_shared_group_is_not_a_route_unless_siblings_asked(tmp_path):
+    """user -member_of-> staff <-member_of- admin -has_role-> GA is a shared
+    group, not a way to the role; returned only with siblings=True."""
+    store = SqliteStore(tmp_path / "sib.db")
+    _edge(store, "iam", ("user", "eve"), ("group", "staff"), pred="member_of")
+    _edge(store, "iam", ("user", "root"), ("group", "staff"), pred="member_of")
+    _edge(store, "iam", ("user", "root"), ("role", "ga"), pred="has_role")
+    req = PathRequest(namespace="iam", **{"from": EntityRef(type="user", key="eve")},
+                      to=EntityRef(type="role", key="ga"), via=["member_of", "has_role"], depth=3)
+    assert find_paths(store, req).paths == []
+    both = find_paths(store, req.model_copy(update={"siblings": True}))
+    assert [e.predicate for e in both.paths[0]] == ["member_of", "member_of", "has_role"]
+    store.close()

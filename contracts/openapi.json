@@ -832,6 +832,49 @@
         "title": "IngestItemResult",
         "type": "object"
       },
+      "NodeStatus": {
+        "description": "A status fact about an entity a path passes through (D-080): the\nnewest visible value of a `node_status` predicate, as stored and cited.",
+        "properties": {
+          "cite": {
+            "$ref": "#/components/schemas/Citation"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "entity",
+          "predicate",
+          "value",
+          "cite"
+        ],
+        "title": "NodeStatus",
+        "type": "object"
+      },
       "PathEdge": {
         "description": "One edge of a path, exactly as it is stored (never re-oriented): the\nobservation's `subject` `predicate` `object`, cited and time-scoped. The\ntraversal direction is implied by the edge's place in the sequence \u2014 an\n`affects` edge (cve -> product) walked product -> cve still renders\ncve affects product, so the reader sees the fact as recorded (D-067).",
         "properties": {
@@ -921,6 +964,14 @@
             "title": "Namespace",
             "type": "string"
           },
+          "node_status": {
+            "description": "for every entity on a returned path, its current value of each predicate the registry marks `node_status` (an account's `enabled`, say), cited and charged against the budget: a path through a disabled account is returned, and says so (D-080)",
+            "items": {
+              "$ref": "#/components/schemas/NodeStatus"
+            },
+            "title": "Node Status",
+            "type": "array"
+          },
           "notes": {
             "description": "what the search could not do as asked, and what it did instead \u2014 advice about the request, not evidence: not cited, not charged against the budget (D-064, D-067)",
             "items": {
@@ -983,8 +1034,8 @@
             "type": "integer"
           },
           "depth": {
-            "default": 3,
-            "description": "the most edges a path may hold; clamped to the scope depth cap (3) and noted when a longer one is asked",
+            "default": 4,
+            "description": "the most edges a path may hold; clamped to the path depth cap (6) and noted when a longer one is asked",
             "maximum": 32.0,
             "minimum": 1.0,
             "title": "Depth",
@@ -1006,6 +1057,12 @@
             "default": "default",
             "title": "Namespace",
             "type": "string"
+          },
+          "siblings": {
+            "default": false,
+            "description": "also allow a path to turn back along the same predicate at an entity \u2014 user -member_of-> group <-member_of- admin: a shared group, not a route. Off by default, as in a scope walk (D-080)",
+            "title": "Siblings",
+            "type": "boolean"
           },
           "to": {
             "$ref": "#/components/schemas/EntityRef"
@@ -1054,6 +1111,12 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "node_status": {
+            "default": false,
+            "description": "a scalar that qualifies an entity as a step on a path (an account's `enabled`): find_path reports each path entity's current value of it, cited (D-080)",
+            "title": "Node Status",
+            "type": "boolean"
           },
           "object_types": {
             "description": "allowed object entity types; empty = any entity or scalar",
@@ -1174,6 +1237,12 @@
             "default": false,
             "description": "also traverse edges that were extracted from documents (D-023 second-class witnesses); off by default so a hostile document cannot rewrite the topology a scope walks (D-046)",
             "title": "Follow Extracted",
+            "type": "boolean"
+          },
+          "siblings": {
+            "default": false,
+            "description": "also turn back along the same predicate at a reached entity \u2014 user -member_of-> group <-member_of- every other member. Off by default: through a group that holds every user it pulls the whole directory into the scope (D-080)",
+            "title": "Siblings",
             "type": "boolean"
           },
           "subjects": {

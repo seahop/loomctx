@@ -122,7 +122,18 @@ type PathPack struct {
 	Paths         [][]PathEdge `json:"paths"`
 	ChargedTokens int          `json:"charged_tokens"`
 	Truncated     []any        `json:"truncated,omitempty"`
+	NodeStatus    []NodeStatus `json:"node_status,omitempty"`
 	Notes         []string     `json:"notes,omitempty"`
+}
+
+// NodeStatus is a status fact about an entity a path passes through — an
+// account's `enabled`, say — the newest visible value, cited (D-080). A path
+// through a disabled account is returned; this says so.
+type NodeStatus struct {
+	Entity    EntityRef `json:"entity"`
+	Predicate string    `json:"predicate"`
+	Value     any       `json:"value"`
+	Cite      Citation  `json:"cite"`
 }
 
 // PathOptions: Via = predicates to traverse (both directions; empty follows

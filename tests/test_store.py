@@ -1207,7 +1207,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -1372,7 +1372,7 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
 
 
 # ------------------------------------------------------- schema v5 #
@@ -1422,7 +1422,7 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 6
+        assert again.schema_version() == SCHEMA_VERSION == 7
         rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
@@ -1459,7 +1459,7 @@ def test_two_processes_migrating_one_old_file_both_open(tmp_path):
     for t in threads:
         t.join()
     assert errors == [] and len(opened) == 4
-    assert all(s.schema_version() == 6 for s in opened)
+    assert all(s.schema_version() == 7 for s in opened)
     for s in opened:
         s.close()
     # the losing side of a race that slipped past the check: tolerated
@@ -1728,7 +1728,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 6
+        assert again.schema_version() == SCHEMA_VERSION == 7
         rows = _exec(again, "SELECT key, norm_key FROM entities WHERE key <> 'web-01' AND key <> 'jdoe' ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [
             ("2001:db8::1", "2001:db8::1"), ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")]
@@ -2254,3 +2254,17 @@ def test_topic_pack_carries_the_hub_answer_with_its_edges(store, monkeypatch):
             key = subject.split(":", 1)[1]
             assert edges[subject].object == "product:kernel"
             assert edges[subject].cites == [edges_by_cve[key].id[:12]]
+
+
+def test_refresh_statistics_is_safe_after_a_load(store):
+    """D-081: a bulk loader refreshes planner statistics when it finishes;
+    a no-op on SQLite, ANALYZE on Postgres, idempotent on both."""
+    store.record_claims([login_claim("stats")])
+    store.refresh_statistics()
+    store.refresh_statistics()
+    assert store.observations_for("stats", EntityRef(type="host", key="web-01"))
+    from loom.store.postgres import PostgresStore
+    if isinstance(store, PostgresStore):
+        with store._tx():
+            opts = store._q("SELECT reloptions FROM pg_class WHERE relname = 'observations'")
+        assert "autovacuum_analyze_threshold=5000" in (opts[0]["reloptions"] or [])

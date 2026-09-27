@@ -237,7 +237,7 @@ _PREFIX_END = "\U0010ffff"
 # lease owners, lower(key) index, numeric norm_key rule (recompute);
 # v6: observations.supersedes (D-050); tick-scan indexes and high-water marks
 # (R-9); hex/colon norm_key rule (recompute keys carrying ':')
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7  # v7 (D-081) changes Postgres storage settings only; SQLite just records it
 
 # Columns added after their table's first release: added on open when missing
 _WANTED_COLUMNS = {
