@@ -134,3 +134,60 @@ def test_separate_files_claim_nothing_about_collections_they_do_not_hold():
     preds = {e.object for e in entra.entra_to_envelopes(json.dumps(users), "iam")
              if e.predicate == "collected"}
     assert preds == {"enabled"}
+
+
+# ------------------------------------------------------------------ drift #
+
+def test_a_dropped_attribute_is_reported_as_drift(tmp_path):
+    """The same directory exported twice; the second export (a changed tool
+    or ldapsearch option) no longer carries userAccountControl."""
+    ldif, _ = ad_gen.generate(7, "small")
+    ldif = "\n".join(line for line in ldif.splitlines() if not line.startswith("#"))
+    db = str(tmp_path / "drift.db")
+    store = SqliteStore(db)
+    store.put_schema(ldap.schema("ad"))
+    store.record_claims(list(ldap.ldif_to_envelopes(ldif, "ad",
+                                                    as_of=datetime(2026, 9, 1, tzinfo=timezone.utc))))
+    store.close()
+    watch = coverage.Watch()
+    later = list(watch.wrap(ldap.ldif_to_envelopes(_strip(ldif, "userAccountControl"), "ad",
+                                                   as_of=datetime(2026, 9, 10, tzinfo=timezone.utc))))
+    found = watch.report(None, db, None)
+    user = next(d for d in found if d.kind == "ldap:user")
+    assert "useraccountcontrol" in user.removed and not user.added
+    assert "no longer carries useraccountcontrol" in user.text()
+    # once stored, the same comparison reads back from the store
+    store = SqliteStore(db)
+    store.record_claims(later)
+    assert any(d.kind == "ldap:user" and "useraccountcontrol" in d.removed
+               for d in coverage.drift(coverage.stored(store, "ad")))
+    store.close()
+
+
+def test_an_unchanged_reimport_is_not_drift(tmp_path):
+    ldif, _ = ad_gen.generate(7, "small")
+    db = str(tmp_path / "same.db")
+    store = SqliteStore(db)
+    store.put_schema(ldap.schema("ad"))
+    envs = list(ldap.ldif_to_envelopes(ldif, "ad"))
+    store.record_claims(envs)
+    store.record_claims(envs)
+    assert coverage.drift(coverage.stored(store, "ad")) == []
+    store.close()
+
+
+def test_drift_reads_earlier_shapes_from_the_engine_when_importing_through_a_gateway(monkeypatch, tmp_path):
+    """The gateway serves ingest only; LOOM_READ_URL names the engine the
+    earlier shapes are read from."""
+    seen = []
+
+    def fake_remote(url, namespace, key=None, ref=None):
+        seen.append(url)
+        return []
+
+    monkeypatch.setattr(coverage, "remote", fake_remote)
+    monkeypatch.setenv("LOOM_READ_URL", "http://engine:8000")
+    ldif, _ = ad_gen.generate(7, "small")
+    watch = coverage.Watch()
+    list(watch.wrap(ldap.ldif_to_envelopes(ldif, "ad")))
+    assert watch.report("http://gateway", None, "k") == [] and seen == ["http://engine:8000"]

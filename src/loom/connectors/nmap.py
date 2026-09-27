@@ -64,6 +64,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Iterable, Iterator
 
+from .. import coverage
+from .. import identity as ident
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef,
                          PredicateDef, Provenance, SchemaRegistration)
 from .vulns import parse_cpe as _parse_cpe_23
@@ -177,6 +179,29 @@ def host_envelopes(host: ET.Element, namespace: str, observed: datetime, stamp: 
         return
     key, host_attrs = identity
     ref = EntityRef(type="host", key=key)
+    yield from _inventory(host, namespace, observed, stamp, rid, source, cites, ref, host_attrs)
+
+
+def _inventory(host, namespace, observed, stamp, rid, source, cites, ref, host_attrs):
+    """The host's claims, then — only when it has any (an up host with no
+    open port yields nothing, as before) — what the scan calls it, for
+    resolution across tools (D-083); the address is a time-stamped link,
+    never an identifier. Every claim cites the scan report."""
+    claims = list(_host_facts(host, namespace, observed, stamp, rid, source, cites, ref, host_attrs))
+    if not claims:
+        return
+    yield from claims
+    names = [host_attrs.get("hostname"), *host_attrs.get("hostnames", [])]
+    yield from ident.claims(namespace, ref, [("fqdn" if "." in n else "hostname", n)
+                                             for n in names if n]
+                            + [("mac", host_attrs.get("mac"))], observed, source, {"scan": rid},
+                            provenance=cites)
+    yield from ident.ip_claims(namespace, ref, [host_attrs.get("ip"), host_attrs.get("ip6")],
+                               observed, source, {"scan": rid}, provenance=cites)
+
+
+def _host_facts(host, namespace, observed, stamp, rid, source, cites, ref, host_attrs):
+    key = ref.key
     prefix = f"nmap:{rid}:{key}"
 
     def claim(pred: str, obj, tag: str = "", **kw) -> ClaimIn:
@@ -287,7 +312,10 @@ def report_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
     per_host: list[list[ClaimIn]] = []
     services = 0
     hosts_up = 0
+    shapes = coverage.Shapes()
     for host in root.findall("host"):
+        shapes.add("nmap:host", [c.tag for c in host]
+                   + [f"service.{a}" for svc in host.findall("ports/port/service") for a in svc.attrib])
         try:
             envs = list(host_envelopes(host, namespace, observed, stamp, rid, source, cites))
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
@@ -307,6 +335,7 @@ def report_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
         for env in envs:
             stats["claim"] = stats.get("claim", 0) + 1
             yield env
+    yield from shapes.claims(namespace, source, observed)
 
 
 # ------------------------------------------------------------------- schema #
@@ -321,10 +350,12 @@ def schema(namespace: str) -> SchemaRegistration:
         namespace=namespace,
         entity_types=[
             EntityTypeDef(name="host", description="a scanned host (target hostname, else IP)"),
+            *ident.SCHEMA_TYPES, coverage.ENTITY_TYPE,
             EntityTypeDef(name="product", description="software, keyed vendor:product as in CPE 2.3 "
                           "(the same node loom.connectors.vulns / OCSF / STIX write to)"),
         ],
         predicates=[
+            *ident.SCHEMA_PREDICATES, *coverage.SCHEMA_PREDICATES,
             PredicateDef(name="listens_on_port", description="an open port (scalar int; the seed's "
                          "own nmap port fact)"),
             PredicateDef(name="runs_service", description="an open service as proto/port; attrs carry "
@@ -401,10 +432,13 @@ def main(argv: list[str] | None = None) -> None:
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace), args.url, args.db, args.key)
-    lines = _to_lines(envs)
+    watch = coverage.Watch()
+    lines = _to_lines(watch.wrap(envs))
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
-    print(json.dumps({**totals, "envelopes": stats}))
+    drift = watch.report(args.url, args.db, args.key)
+    print(json.dumps({**totals, "envelopes": stats, "drift": [d.text() for d in drift]}))
+    coverage.print_drift(drift)
     fail_on_refusals(totals, remote=bool(args.url))   # a refusal fails the load (D-063, S-36)
 
 

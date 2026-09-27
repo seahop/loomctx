@@ -346,14 +346,34 @@ def row_to_schema(row: Mapping[str, Any]) -> SchemaRegistration:
 
 def merge_schema(existing: SchemaRegistration | None,
                  incoming: SchemaRegistration) -> SchemaRegistration:
-    """Registration is additive: later definitions override by name, the
-    rest survive; `strict` takes the incoming value."""
+    """Registration is additive: an entity type or predicate registered
+    again merges with what is there (D-083). Several connectors share one
+    namespace per environment, and a later registration used to replace a
+    predicate outright — LDAP's `member_of -> group` would then reject the
+    seed's `host member_of domain`, and each identity connector's `has_role`
+    the other's (S-55). Now a predicate's object types are the union (empty
+    — any — stays any), `containment` and `node_status` hold if either side
+    sets them, and the description is the incoming one when it has one;
+    `strict` takes the incoming value."""
     if existing is None:
         return incoming
     types = {t.name: t for t in existing.entity_types}
-    types.update({t.name: t for t in incoming.entity_types})
+    for t in incoming.entity_types:
+        old = types.get(t.name)
+        types[t.name] = t if old is None or t.description else old
     preds = {p.name: p for p in existing.predicates}
-    preds.update({p.name: p for p in incoming.predicates})
+    for p in incoming.predicates:
+        old = preds.get(p.name)
+        if old is None:
+            preds[p.name] = p
+            continue
+        objects = ([] if not old.object_types or not p.object_types
+                   else list(dict.fromkeys([*old.object_types, *p.object_types])))
+        preds[p.name] = p.model_copy(update={
+            "object_types": objects,
+            "containment": old.containment or p.containment,
+            "node_status": old.node_status or p.node_status,
+            "description": p.description or old.description})
     return SchemaRegistration(
         namespace=incoming.namespace,
         entity_types=list(types.values()),

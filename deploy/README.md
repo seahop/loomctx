@@ -436,6 +436,43 @@ asked at once: blind AD scope walks 0.75–2.1 s p50, find_path 0.15–0.21 s
 the queue drained, 0.19 s at depth 2 and 0.25 s for the Global
 Administrator path over HTTP. The cluster was torn down volumes first.
 
+### Identity, host artifacts, drift and purple on GKE (2026-09-27, D-083…D-086)
+
+The whole suite now also runs on the cluster: a test image (the engine
+plus `tests/`) as two Jobs, one on SQLite and one against an in-cluster
+Postgres — **803 passed / 110 skipped, and 896 passed / 17 skipped**. Then
+the `scale-pg-ha` stack (auth on, signed handles, no provider keys) took a
+synthetic estate (`loom.connectors.estate_gen`, large: 6,000 machines in
+two domains, 3,000 users) through the connectors' own `import --url
+http://loom-gateway` — LDAP, two nmap scans with reassigned addresses,
+osquery process/hash logs for 3,000 machines, tasklist for 300, EDR
+detections as OCSF, an Atomic Red Team log of 600 actions — with the
+enrichment worker resolving identities in the background, and
+`loom.estate_eval` checking the store against the generator's truth:
+
+| Check | Result |
+| --- | --- |
+| Ingest through the gateway | 1,274,653 envelopes, 0 refused; posted in 2,727 s, drained in 6,343 s (the identity pass running alongside) |
+| Machines folded (directory object + scanned / listed host, via FQDN) | 5,400 / 5,400 |
+| Second-domain twins sharing a short hostname (weak) | 600, **0 false merges**; reassigned addresses merged nothing |
+| Process-list accounts (`CORP\userNNNNN`) folded into directory users | 3,000 / 3,000 |
+| Coverage | the tasklist listings' missing parents reported; a scope ask over `spawned_by` names the gap (93 ms) |
+| Drift | the later LDAP export without `userAccountControl` reported for `ldap:computer` and `ldap:user` — in the store and in the gateway import's own output |
+| Purple | **600 / 600** actions classified as planted (326 detected, 138 host only, 136 missed), latency exact on all 326, report in 2.65 s |
+| find_path directory user -> the machine a process ran on (run_as, runs_on) | found, 89 ms |
+
+**What the cluster found** (`docs/hardening.md` S-60…S-63): an OCSF (or
+STIX) import through a gateway failed outright — its version-chaining
+lookup read from the gateway, which serves ingest only (`LOOM_READ_URL`
+now names the engine, and a 404 degrades to in-run chaining); weak
+identifier groups starved the strong ones in the worker's candidate list,
+so it merged nothing (separate passes now); per-host endpoint coverage
+evicted the import shapes from a newest-N read and drift went silent
+(shapes on their own entity, coverage per format); and the identity pass
+merges ~5 entities/s on this Postgres, so a first 12,600-merge load folds
+over ~45 minutes in the background (S-63, open). The cluster was torn down
+volumes first.
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

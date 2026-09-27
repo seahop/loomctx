@@ -2268,3 +2268,26 @@ def test_refresh_statistics_is_safe_after_a_load(store):
         with store._tx():
             opts = store._q("SELECT reloptions FROM pg_class WHERE relname = 'observations'")
         assert "autovacuum_analyze_threshold=5000" in (opts[0]["reloptions"] or [])
+
+
+def test_shared_identifier_groups(store):
+    """D-083: identifier entities two or more entities point at, narrowed by
+    `since` to what new edges touched; a tombstoned edge does not count."""
+    from datetime import timedelta
+    ident = EntityRef(type="identifier", key="fqdn:web-01.corp.local")
+    lone = EntityRef(type="identifier", key="fqdn:db-02.corp.local")
+    def edge(subject_key, obj, etype="host"):
+        return store.record_claim(ClaimIn(namespace="ids", subject=EntityRef(type=etype, key=subject_key),
+                                          predicate="identified_by", object=obj, observed_at=datetime.now(timezone.utc),
+                                          source="t"))
+    edge("web-01", ident)
+    edge("S-1-5-21-1", ident, etype="computer")
+    third = edge("10.0.4.7", ident)
+    edge("db-02", lone)
+    groups = store.shared_identifier_groups("ids")
+    assert [(g.key, sorted(m.key for m in ms)) for g, ms in groups] == [
+        ("fqdn:web-01.corp.local", ["10.0.4.7", "S-1-5-21-1", "web-01"])]
+    assert store.shared_identifier_groups("ids", since=datetime.now(timezone.utc) + timedelta(hours=1)) == []
+    store.redact("ids", third.id, "test")
+    [(_, members)] = store.shared_identifier_groups("ids")
+    assert sorted(m.key for m in members) == ["S-1-5-21-1", "web-01"]

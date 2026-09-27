@@ -82,14 +82,28 @@ pipeline devices). Path:
 After extraction, a claim mined from a PDF and a claim from a syslog event are the
 same shape in the store; only metadata differs.
 
-## Entity resolution — two tiers
+## Entity resolution
 
 - **Deterministic:** structured claims resolve by natural keys per the schema
   registry (`host:web-01`, `user:jdoe`). Fast, no ambiguity.
-- **Fuzzy:** document mentions resolve via alias tables → embedding similarity →
-  LLM adjudication for the ambiguous remainder. An unresolvable mention becomes a
-  **provisional entity** (never dropped) that can be merged later. Merges are
-  recorded as events themselves, so they are auditable and reversible.
+- **Spelling and structure** (the enrichment worker): the same key under two
+  types, keys equal once normalized (`web-01` / `WEB_01`), and structurally
+  alike vendor:product keys — auto-merged when unambiguous, else adjudicated
+  by an LLM (D-019, D-024, D-042).
+- **Shared identifiers** (D-083): connectors state what each tool calls a
+  host or principal (`identified_by identifier:fqdn:…`, `:sid:`, `:upn:`,
+  `:account:DOMAIN\name`, `:mac:`, `:cloud_id:`); entities of one family that
+  share a strong identifier fold together, a weak one (a short hostname) is
+  adjudicated, an IP address never merges anything (it is a time-stamped
+  `has_ip` link). This is what makes a scan, the directory, the IdP, EDR and
+  host artifacts describe one machine and one person. Resolution is per
+  namespace: one namespace per environment.
+- **Fuzzy:** document mentions resolve via alias tables → LLM adjudication for
+  the ambiguous remainder. An unresolvable mention becomes a **provisional
+  entity** (never dropped) that can be merged later.
+
+Merges are recorded (merge log + alias table), auditable and reversible; a
+reversal is remembered as a decline that every tier honors.
 
 ## The retrieval contract (the differentiator)
 
@@ -139,9 +153,10 @@ grounding prompt. The pack rides along in the response for audit (D-012).
 
 ## Access surfaces — shells over one core
 
-1. **MCP server** (primary, for agents): `find_entity`, `find_related`, `ask`,
-   `ask_scope`, `expand`, `record_claim`, `get_observations`, `answer`. Agents
-   also *write back* what they learn.
+1. **MCP server** (primary, for agents): `list_namespaces`,
+   `describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
+   `find_path`, `expand`, `record_claim`, `get_observations`, `answer`,
+   `purple_report`. Agents also *write back* what they learn.
 2. **HTTP API + thin SDKs** (Python, TypeScript, Go; OpenAPI for the rest) for
    apps and custom pipeline code. `POST /v1/ingest/batch` takes a JSON array or
    NDJSON, which is what log shippers' HTTP outputs produce.

@@ -37,8 +37,8 @@ def _by_pred(envs):
 
 def test_parses_multiple_hosts_open_ports_and_service_cpe():
     envs = list(nmap.report_to_envelopes(INVENTORY.read_text(), "netsec"))
-    claims = [e for e in envs if isinstance(e, ClaimIn)]
-    # every claim carries the scan time (2026-09-26) and cites the report doc
+    claims = [e for e in envs if isinstance(e, ClaimIn) and e.subject.type == "host"]
+    # every host claim carries the scan time (2026-09-26) and cites the report doc
     assert all(c.observed_at.year == 2026 for c in claims)
     assert all(c.provenance and c.provenance.artifact_event_id for c in claims)
     hosts = {c.subject.key for c in claims}
@@ -149,7 +149,7 @@ IPV6_BARE_EMPTY = """<?xml version="1.0"?>
 def test_ipv6_bare_ip_hostname_and_empty_host():
     stats: dict = {}
     envs = list(nmap.report_to_envelopes(IPV6_BARE_EMPTY, "netsec", stats=stats))
-    claims = [e for e in envs if isinstance(e, ClaimIn)]
+    claims = [e for e in envs if isinstance(e, ClaimIn) and e.subject.type == "host"]
     hosts = {c.subject.key for c in claims}
     # IPv6-keyed host; bare-IPv4-keyed host (no hostname); the closed-only and
     # the down host yield nothing

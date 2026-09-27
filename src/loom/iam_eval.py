@@ -98,7 +98,8 @@ def load(store, envs: list, batch: int = 1000) -> dict:
 def stored_edges(store, namespace: str) -> dict[str, set[tuple]]:
     out: dict[str, set[tuple]] = {src: set() for src in SOURCES.values()}
     for obs in store.iter_observations(namespace):
-        if isinstance(obs.object, EntityRef) and obs.source in out:
+        if (isinstance(obs.object, EntityRef) and obs.source in out
+                and obs.predicate not in ("identified_by", "has_ip")):
             out[obs.source].add((obs.subject.type, obs.subject.key, obs.predicate,
                                  obs.object.type, obs.object.key))
     return out

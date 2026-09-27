@@ -17,12 +17,13 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `find_entity(query)` | Resolve a name/key fragment to `type:key` handles |
 | `find_related(question)` | Entities related by meaning — over facts *and* the passages of documents that claims cite — each with the fact or passage that matched, cited (needs `LOOM_EMBED_*`; D-040) |
 | `ask(subject, question, budget, as_of?, valid_at?, format?)` | Budgeted, cited context on **one** entity (`as_of` = known at T, `valid_at` = true at T) |
-| `ask_scope(subjects, question, expand_predicates?, depth?, budget?, format?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve; an attribute in `expand_predicates` is the question's topic; default budget 3000 |
-| `find_path(from, to, via?, depth?, max_paths?, budget?, as_of?, valid_at?, format?)` | The connecting **edge sequence(s)** between two entities along `via`, shortest first, each hop cited (host→product→cve, user→group→domain); reports paths that EXIST, does not rank or score them (D-067) |
+| `ask_scope(subjects, question, expand_predicates?, depth?, budget?, format?, siblings?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve; an attribute in `expand_predicates` is the question's topic; default budget 3000; a walk does not turn back to co-members unless `siblings` (D-080) |
+| `find_path(from, to, via?, depth?, max_paths?, budget?, as_of?, valid_at?, format?, siblings?)` | The connecting **edge sequence(s)** between two entities along `via`, shortest first (default depth 4, at most 6), each hop cited (host→product→cve, user→group→domain); `node_status` flags a disabled account on a path; reports paths that EXIST, does not rank or score them (D-067, D-080) |
 | `expand(handle, budget, format?)` | Progressive disclosure — pull one thread deeper; a `cite` token returns that one observation |
 | `record_claim(subject, predicate, ..., object_ref \| object_value, supersedes?, event_id?)` | Agents write back facts they learn; `supersedes` records a correction of an earlier observation |
 | `get_observations(subject)` | Raw audit view (an entity, or a `cite` token / observation id) |
 | `answer(question, subject?)` | Server-side LLM synthesis (guides to `ask` when no LLM is configured) |
+| `purple_report(operation, status?, before_minutes?, after_hours?, limit?)` | A red-team operation's logged actions against the detections on the same hosts: detected / host_only / missed / no_target, latency, cite tokens for both sides (D-086) |
 
 Every tool takes a `namespace`; a call against a namespace that holds no
 data is an *error naming the namespaces that do*, not an empty list — a

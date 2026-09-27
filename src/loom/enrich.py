@@ -808,6 +808,88 @@ def resolve_entities(store: GraphStore, limit: int = 50,
     return merged
 
 
+_identity_seen_until: dict[tuple[str, str], datetime] = {}
+
+
+def resolve_identities(store: GraphStore, limit: int = 200,
+                       llm: LLMClient | None = None) -> int:
+    """Tier 4 (D-083): entities that share an identifier. A connector states
+    what a tool calls a host or principal as `identified_by` edges
+    (`loom.identity`); two entities of one family (host-like: host,
+    computer, instance…; principal-like: user, service principal) pointing
+    at the same STRONG identifier — fqdn, mac, cloud id, sid, upn, mail,
+    DOMAIN\\account — are one thing and fold into the best-established one.
+    A WEAK identifier (a short hostname) goes to the adjudicator when an
+    LLM is configured, else is left. Different families sharing an
+    identifier is a data error, logged, never merged. Declines hold.
+
+    Two passes with their own watermarks, strong then weak: weak groups
+    are never auto-merged, so in one list they filled every tick's limit
+    and starved the strong ones (6,000 machines on GKE: the worker merged
+    nothing, D-083). Each pass is incremental — only groups an edge
+    recorded since it last completed touched (the first reads all) — and
+    re-resolves members to their canonical entity first, so a chain (A~B
+    by fqdn, B~C by mac) collapses in one pass."""
+    from . import identity
+    _refresh_declines()
+    strong = [k for k, is_strong in identity.KINDS.items() if is_strong]
+    weak = [k for k, is_strong in identity.KINDS.items() if not is_strong]
+    merged = 0
+    budget = {"asked": 0, "outage": False}
+    for namespace, types in store.namespace_summary().items():
+        if identity.ENTITY_TYPE not in types:
+            continue
+        merged += _identity_pass(store, namespace, "strong", strong, limit, None, budget)
+        if llm is not None:
+            merged += _identity_pass(store, namespace, "weak", weak, limit, llm, budget)
+    return merged
+
+
+def _identity_pass(store: GraphStore, namespace: str, name: str, kinds: list[str], limit: int,
+                   llm: LLMClient | None, budget: dict) -> int:
+    from . import identity
+    started = datetime.now(timezone.utc)
+    groups = store.shared_identifier_groups(
+        namespace, since=_identity_seen_until.get((namespace, name)), limit=limit,
+        predicate=identity.PREDICATE, kinds=kinds)
+    merged = 0
+    for ident, members in groups:
+        kind, _ = identity.split(ident.key)
+        refs = [EntityRef(type=m.type, key=m.key) for m in members]
+        canon = store.resolve_refs(namespace, refs)
+        current = {}
+        for ref in refs:
+            c = canon.get((ref.type, ref.key))
+            if c is not None and (e := store.get_entity(namespace, c)) is not None:
+                current[(e.type, e.key)] = e
+        by_family: dict[str, list] = {}
+        for e in current.values():
+            fam = identity.family(e.type)
+            if fam is not None:
+                by_family.setdefault(fam, []).append(e)
+        if len(by_family) > 1:
+            log.info("identifier %s is claimed by different kinds of thing (%s); not merged",
+                     ident.key, ", ".join(sorted(_handle(e) for e in current.values())))
+        for group in by_family.values():
+            if len(group) < 2:
+                continue
+            canonical, *rest = _ranked(store, namespace, group)
+            if identity.KINDS.get(kind):
+                merged += _merge_all(store, namespace, canonical, rest)
+                continue
+            for other in rest:
+                if (llm is None or budget["asked"] >= ADJUDICATIONS_PER_TICK or budget["outage"]
+                        or _is_declined(store, namespace, _handle(canonical), _handle(other))):
+                    continue
+                outcome = _adjudicate_pair(store, llm, namespace, canonical, other)
+                budget["asked"] += outcome in _ASKED
+                merged += outcome == "merged"
+                budget["outage"] = budget["outage"] or outcome == "outage"
+    if len(groups) < limit and not budget["outage"] and budget["asked"] < ADJUDICATIONS_PER_TICK:
+        _identity_seen_until[(namespace, name)] = started
+    return merged
+
+
 def _is_declined(store: GraphStore, namespace: str, a: str, b: str) -> bool:
     """Declines persist in the store (D-044): a worker restart — or a
     nightly CronJob — must not re-bill the same question."""
@@ -1412,6 +1494,8 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None,
     return {
         "extracted": _guarded("extraction", extract_pending, store, llm) if llm and "extract" in on else 0,
         "resolved": _guarded("resolution", resolve_entities, store, 50, llm) if "resolve" in on else 0,
+        "identities": (_guarded("identities", resolve_identities, store, 200, llm)
+                       if "resolve" in on else 0),
         "adjudicated": (_guarded("adjudication", adjudicate_entities, store, llm)
                         if llm and "adjudicate" in on else 0),
         "aliases": (_guarded("aliases", lambda s, l: adjudicate_aliases(s, l)["merged"], store, llm)
@@ -1596,6 +1680,8 @@ def main(argv: list[str] | None = None) -> None:
         llm = llm_from_env()
         try:
             merged = resolve_entities(store, limit=500, llm=None if args.dry_run else llm)
+            if not args.dry_run:
+                merged += resolve_identities(store, limit=10_000, llm=llm)
             types = tuple(t.strip() for t in args.types.split(",") if t.strip())
             if llm is None and not args.dry_run:
                 raise SystemExit("resolve: no LLM configured (LOOM_LLM_*); use --dry-run to list candidates")

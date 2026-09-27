@@ -40,7 +40,7 @@ import hashlib
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -257,7 +257,9 @@ INSTRUCTIONS = (
     "pack overflows client tool-result limits. find_path returns the edge "
     "sequence(s) that connect two entities along named predicates "
     "(reachability: host->product->cve, user->group->domain), each hop "
-    "cited — it reports the paths that exist, it does not rank them. Every "
+    "cited — it reports the paths that exist, it does not rank them. "
+    "purple_report sets a red-team operation's logged actions against the "
+    "detections on the same hosts (detected / host_only / missed). Every "
     "pack tool takes format='concise' (default: "
     "12-hex `cite` tokens, subjects summarized) or 'detailed' (full 32-hex "
     "observation ids next to each cite, every reached subject listed). "
@@ -971,6 +973,58 @@ def find_path(
     return _path_view(find_paths(_get_store(), req, allowed_types=_allowed(grant)), format)
 
 
+class PurpleView(TypedDict):
+    """Red actions of an operation against the detections around them (D-086)."""
+    namespace: str
+    operation: str
+    summary: dict[str, Any]
+    rows: list[dict[str, Any]]
+    shown: int
+    notes: list[str]
+
+
+def purple_report(
+    operation: str,
+    namespace: str = _DEFAULT_NS,
+    status: list[str] | str | None = None,
+    before_minutes: int = 5,
+    after_hours: int = 24,
+    limit: int = 50,
+    ctx: Context = None,
+) -> PurpleView:
+    """Purple-team correlation: every action a red-team operation logged
+    (loom.connectors.oplog) set against the detections (OCSF findings) on
+    the same host — resolved across tool naming, D-083 — from
+    before_minutes before it to after_hours after it. Each row is
+    `detected` (a finding mapping to the action's ATT&CK technique or its
+    parent/sub-technique), `host_only` (something fired on that host, not
+    that technique), `missed`, or `no_target`, with the first detection's
+    latency and cite tokens for both sides. `status` narrows the rows
+    (e.g. ['missed', 'host_only'] for the gaps); `summary` always counts
+    all of them. `notes` carry coverage gaps behind the result (D-082)."""
+    from . import purple
+    grant = _grant(ctx, namespace, "r")
+    for t in ("activity", "operation", "host", "finding", "technique"):
+        _gate_type(grant, t)
+    _known_namespace(namespace, grant)
+    rows, notes = purple.correlate(_get_store(), namespace, operation,
+                                   timedelta(minutes=before_minutes), timedelta(hours=after_hours))
+    wanted = set(_listed(status)) if status else None
+    shown = [r for r in rows if wanted is None or r.status in wanted][:max(1, min(limit, 500))]
+    view_rows = []
+    for r in shown:
+        view_rows.append({
+            "activity": r.activity, "performed_at": r.performed_at, "techniques": r.techniques,
+            "hosts": r.hosts, "procedure": r.procedure, "status": r.status,
+            "cites": [c[:12] for c in r.cites],
+            "detections": [{"finding": m.finding, "title": m.title, "source": m.source,
+                            "detected_at": m.detected_at, "latency_seconds": m.latency_seconds,
+                            "level": m.level, "techniques": m.techniques,
+                            "cites": [c[:12] for c in m.cites]} for m in r.matches[:3]]})
+    return {"namespace": namespace, "operation": operation, "summary": purple.summary(rows),
+            "rows": view_rows, "shown": len(view_rows), "notes": notes}
+
+
 def _observation_view(namespace: str, grant: Grant | None, obs) -> ObservationList:
     """One raw observation, gated like get_observations."""
     if grant is not None and not (
@@ -1178,6 +1232,7 @@ TOOL_META: dict[str, tuple[str, bool, bool]] = {
     "record_claim": ("Record a claim", False, True),
     "get_observations": ("Get raw observations", True, True),
     "answer": ("LLM answer with citations", True, False),
+    "purple_report": ("Red actions vs detections", True, True),
 }
 
 TOOLS = (
@@ -1192,6 +1247,7 @@ TOOLS = (
     record_claim,
     get_observations,
     answer,
+    purple_report,
 )
 
 

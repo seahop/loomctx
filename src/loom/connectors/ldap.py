@@ -1,9 +1,9 @@
 """Raw-LDAP / LDIF interop: an Active Directory export in, typed cited claims out.
 
-    python -m loom.connectors.ldap import export.ldif --namespace ad                 # into the LOOM_DB store
-    python -m loom.connectors.ldap import export.ldif --namespace ad --url http://loom:8000 --key ...
-    python -m loom.connectors.ldap emit export.ldif --namespace ad > envelopes.jsonl
-    python -m loom.connectors.ldap schema --namespace ad                             # the registry it declares
+    python -m loom.connectors.ldap import export.ldif --namespace netsec                 # into the LOOM_DB store
+    python -m loom.connectors.ldap import export.ldif --namespace netsec --url http://loom:8000 --key ...
+    python -m loom.connectors.ldap emit export.ldif --namespace netsec > envelopes.jsonl
+    python -m loom.connectors.ldap schema --namespace netsec                             # the registry it declares
 
 What it is (and is NOT):
 
@@ -93,11 +93,12 @@ from datetime import datetime, timezone
 from typing import Iterable, Iterator
 
 from .. import coverage
+from .. import identity as ident
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
 
 SOURCE_DEFAULT = "ad-export"
-NAMESPACE_DEFAULT = "ad"
+NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
 
 # objectClass -> Loom entity type, most specific first (objectClass is
 # multi-valued; a computer also carries `user`, a domain also `top`).
@@ -517,6 +518,18 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
     if os_name:
         yield claim("os", os_name)
 
+    # what other tools call this account or machine (D-083): the SID, the
+    # UPN and DOMAIN\sam a Windows host prints, the DNS name a scanner sees
+    if etype in ("user", "computer"):
+        at = dn.lower().find("dc=")
+        dns_domain = _dn_to_domain(dn[at:]) if at != -1 else None
+        pairs = [("sid", sid), ("upn", entry.text("userprincipalname")), ("mail", entry.text("mail"))]
+        if sam and dns_domain:
+            pairs.append(("account", f"{dns_domain}\\{sam}"))
+        if etype == "computer":
+            pairs += [("fqdn", entry.text("dnshostname")), ("hostname", sam)]
+        yield from ident.claims(namespace, ref, pairs, observed, source, base_attrs)
+
     # userAccountControl bitmask -> attrs
     uac = _int(entry.text("useraccountcontrol"))
     is_dc = False
@@ -675,8 +688,10 @@ def ldif_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
         observed = datetime.now(timezone.utc)
     directory = Directory(entries, observed, export=source)
     counts: dict[str, Counter] = {}
+    shapes = coverage.Shapes()
     for entry in entries:
         _count_coverage(entry, counts)
+        shapes.add(f"ldap:{entity_type_of(entry)}", entry.attrs)
         try:
             n = 0
             for env in entry_envelopes(entry, directory, namespace, source):
@@ -687,6 +702,7 @@ def ldif_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
             stats["invalid"] = stats.get("invalid", 0) + 1
             print(f"ldap object {entry.dn}: skipped: {str(exc).splitlines()[0][:200]}", file=sys.stderr)
     yield from _coverage_envelopes(counts, namespace, source, observed)
+    yield from shapes.claims(namespace, source, observed)
 
 
 def _count_coverage(entry: LdifEntry, counts: dict[str, Counter]) -> None:
@@ -744,9 +760,11 @@ def schema(namespace: str) -> SchemaRegistration:
             EntityTypeDef(name="container", description="a directory container"),
             EntityTypeDef(name="spn", description="a service principal name (delegation target)"),
             coverage.ENTITY_TYPE,
+            *ident.SCHEMA_TYPES,
         ],
         predicates=[
-            coverage.PREDICATE_DEF,
+            *coverage.SCHEMA_PREDICATES,
+            *ident.SCHEMA_PREDICATES,
             PredicateDef(name="member_of", object_types=["group"], containment=True,
                          description="direct group membership (member / memberOf); nesting is the walk's job"),
             PredicateDef(name="contains", containment=True,
@@ -846,10 +864,13 @@ def main(argv: list[str] | None = None) -> None:
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace), args.url, args.db, args.key)
-    lines = _to_lines(envs)
+    watch = coverage.Watch()
+    lines = _to_lines(watch.wrap(envs))
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
-    print(json.dumps({**totals, "envelopes": stats}))
+    drift = watch.report(args.url, args.db, args.key)
+    print(json.dumps({**totals, "envelopes": stats, "drift": [d.text() for d in drift]}))
+    coverage.print_drift(drift)
     rejected = totals.get("rejected", 0)
     if rejected:
         # a scheduled import must fail visibly, not "succeed" with a hole in

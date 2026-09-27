@@ -1,10 +1,10 @@
 """Cloud inventory / config interop: a cloud resource export in, cited
 timestamped inventory claims out.
 
-    python -m loom.connectors.cloud import state.tfstate.json --format terraform --namespace cloud
-    python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace cloud --url http://loom:8000 --key ...
-    python -m loom.connectors.cloud emit state.json --format terraform --namespace cloud > envelopes.jsonl
-    python -m loom.connectors.cloud schema --namespace cloud
+    python -m loom.connectors.cloud import state.tfstate.json --format terraform --namespace netsec
+    python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace netsec --url http://loom:8000 --key ...
+    python -m loom.connectors.cloud emit state.json --format terraform --namespace netsec > envelopes.jsonl
+    python -m loom.connectors.cloud schema --namespace netsec
 
 What it is (and is NOT):
 
@@ -62,11 +62,12 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
+from .. import identity as ident
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef,
                          PredicateDef, Provenance, SchemaRegistration)
 
 SOURCE_DEFAULT = "cloud"
-NAMESPACE_DEFAULT = "cloud"
+NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
 FORMATS = ("terraform", "awsconfig")
 
 # Resource-type -> entity-type maps, kept deliberately small and generic. The
@@ -131,6 +132,26 @@ def _scalar_attrs(config: dict) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------- terraform #
+
+_INSTANCE_TYPES = ("aws_instance", "AWS::EC2::Instance")
+
+
+def _instance_identity(namespace: str, ref: EntityRef, values: dict, observed: datetime,
+                       source: str) -> list[ClaimIn]:
+    """What other tools call a compute instance (D-083): its instance id, DNS
+    names and interface MACs, so a scan or an EDR event naming the machine
+    folds into it; its addresses as time-stamped `has_ip` links."""
+    get = values.get
+    pairs = [("cloud_id", get("id") or get("instanceId"))]
+    for key in ("private_dns", "public_dns", "privateDnsName", "publicDnsName"):
+        pairs.append(("fqdn", get(key)))
+    for nic in (get("networkInterfaces") or get("network_interface") or []):
+        if isinstance(nic, dict):
+            pairs.append(("mac", nic.get("macAddress") or nic.get("mac_address")))
+    ips = [get(k) for k in ("private_ip", "public_ip", "privateIpAddress", "publicIpAddress")]
+    return ident.claims(namespace, ref, pairs, observed, source) + ident.ip_claims(
+        namespace, ref, ips, observed, source)
+
 
 def _tf_entity(rtype: str, address: str) -> EntityRef:
     return EntityRef(type=_TF_ENTITY.get(rtype, "resource"), key=address)
@@ -206,6 +227,8 @@ def terraform_to_envelopes(text: str, namespace: str, source: str,
 
         yield claim("resource_type", rtype)
         stats["claim"] = stats.get("claim", 0) + 1
+        if rtype in _INSTANCE_TYPES:
+            yield from _instance_identity(namespace, ref, res.get("values") or {}, observed, source)
         # scalar attributes as scalar claims
         for n, (key, value) in enumerate(_scalar_attrs(res.get("values") or {}).items()):
             if n >= _MAX_ATTRS:
@@ -338,6 +361,8 @@ def awsconfig_to_envelopes(text: str, namespace: str, source: str,
             yield claim("in_account", EntityRef(type="cloud_account", key=account))
             stats["claim"] = stats.get("claim", 0) + 1
         config = item.get("configuration") if isinstance(item.get("configuration"), dict) else {}
+        if rtype in _INSTANCE_TYPES:
+            yield from _instance_identity(namespace, ref, {"instanceId": rid, **config}, observed, source)
         for n, (key, value) in enumerate(_scalar_attrs(config).items()):
             if n >= _MAX_ATTRS:
                 break
@@ -397,6 +422,7 @@ def schema(namespace: str) -> SchemaRegistration:
     return SchemaRegistration(
         namespace=namespace,
         entity_types=[
+            *ident.SCHEMA_TYPES,
             EntityTypeDef(name="resource", description="a cloud resource, keyed by its terraform "
                           "address or its cloud resource id / ARN"),
             EntityTypeDef(name="vpc", description="a virtual network (aws_vpc, google_compute_network, ...)"),
@@ -405,6 +431,7 @@ def schema(namespace: str) -> SchemaRegistration:
             EntityTypeDef(name="cloud_account", description="the account/project a resource belongs to"),
         ],
         predicates=[
+            *ident.SCHEMA_PREDICATES,
             PredicateDef(name="resource_type", description="the cloud/terraform resource type "
                          "(anchors the entity; attrs carry region, arn, tags)"),
             PredicateDef(name="in_subnet", object_types=["subnet"], containment=True,

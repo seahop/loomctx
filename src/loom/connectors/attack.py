@@ -1,10 +1,10 @@
 """MITRE ATT&CK taxonomy interop (D-073): the published ATT&CK knowledge base
 (STIX 2.1 JSON) in, cited catalog claims out.
 
-    python -m loom.connectors.attack import enterprise-attack.json --namespace attack   # into the LOOM_DB store
-    python -m loom.connectors.attack import bundle.json --namespace attack --url http://loom:8000 --key ...
-    python -m loom.connectors.attack emit bundle.json --namespace attack > envelopes.jsonl
-    python -m loom.connectors.attack schema --namespace attack                           # the registry it declares
+    python -m loom.connectors.attack import enterprise-attack.json --namespace netsec   # into the LOOM_DB store
+    python -m loom.connectors.attack import bundle.json --namespace netsec --url http://loom:8000 --key ...
+    python -m loom.connectors.attack emit bundle.json --namespace netsec > envelopes.jsonl
+    python -m loom.connectors.attack schema --namespace netsec                           # the registry it declares
 
 What it is: a PARSER for the public `mitre-attack` STIX 2.1 bundles MITRE
 publishes (https://github.com/mitre-attack/attack-stix-data — enterprise,
@@ -63,7 +63,7 @@ from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
 from .stix import _stamp, _utc, cve_id
 
 SOURCE_DEFAULT = "mitre-attack"
-NAMESPACE_DEFAULT = "attack"
+NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
 DESC_CHARS = 8000                     # a catalog description is prose; cap it, marking truncation
 ATTACK_KILL_CHAINS = ("mitre-attack", "mitre-mobile-attack", "mitre-ics-attack")
 

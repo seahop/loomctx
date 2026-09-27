@@ -202,10 +202,11 @@ def test_empty_and_invalid_exports():
 def test_schema_registers_small_generic_types_and_containment():
     reg = cloud.schema("cloud")
     ents = {e.name for e in reg.entity_types}
-    assert ents == {"resource", "vpc", "subnet", "security_group", "cloud_account"}
+    assert ents == {"resource", "vpc", "subnet", "security_group", "cloud_account", "identifier", "ip"}
     preds = {p.name: p for p in reg.predicates}
     assert {"resource_type", "in_subnet", "in_vpc", "in_account", "attached_to",
-            "depends_on", "references", "allows_ingress", "member_of"} == set(preds)
+            "depends_on", "references", "allows_ingress", "member_of",
+            "identified_by", "has_ip"} == set(preds)
     # the containment edges a scope with no explicit expand will follow (D-024)
     for pred in ("in_subnet", "in_vpc", "in_account", "member_of"):
         assert preds[pred].containment is True

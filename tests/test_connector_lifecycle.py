@@ -205,7 +205,8 @@ def test_a_write_only_key_imports_without_cross_run_chaining(monkeypatch, capsys
                                             for i in range(len(items))]}).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    envs = ocsf.events_to_envelopes([OPEN, RESCAN], "netsec")
+    envs = [e for e in ocsf.events_to_envelopes([OPEN, RESCAN], "netsec")
+            if e.predicate == "affected_by"]          # identity / shape claims: tested apart
     totals = load_chained(envs, HttpSink("http://loom", "k"), keyed_by("finding_uid", {"affected_by"}))
     assert totals["recorded"] == 2 and totals["superseded"] == 1        # in-run chaining still works
     assert posted[1][0]["supersedes"] == "o0"
@@ -233,7 +234,7 @@ def test_status_mapping_follows_the_spec():
     assert not ocsf.closes_exposure({"status_id": 3, "activity_id": 3})
     assert not ocsf.closes_exposure({"status_id": 5}) and not ocsf.closes_exposure({"status_id": "New"})
     claims = list(ocsf.event_to_envelopes({**OPEN, "status_id": "weird", "severity_id": None}, "netsec"))
-    assert claims and claims[0].attrs["status_id"] == 0
+    assert next(c for c in claims if c.predicate == "affected_by").attrs["status_id"] == 0
 
 
 # ----------------------------------------------------------------------- STIX #
@@ -574,3 +575,42 @@ def test_a_source_pinned_refresh_key_skips_a_registration_it_cannot_make(tmp_pat
                                                      reg.predicates[0].model_copy(update={"name": "new_pred"})]})
         with pytest.raises(SystemExit, match="403"):
             vulns.register(more, "http://loom", None, "refresh")     # a real change still needs the operator
+
+
+def test_a_gateway_import_reads_prior_versions_from_the_engine(monkeypatch, capsys):
+    """A gateway serves ingest only: lookups go to LOOM_READ_URL when set,
+    and a 404 without it degrades to in-run chaining instead of failing."""
+    from loom.connectors.chain import HttpSink, keyed_by, load_chained
+    gets = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        if req.get_method() == "GET":
+            gets.append(req.full_url)
+            if req.full_url.startswith("http://gateway"):
+                raise urllib.error.HTTPError(req.full_url, 404, "no", {}, io.BytesIO(b"404 page not found"))
+            return Resp(json.dumps({"observations": []}).encode())
+        items = [json.loads(line) for line in req.data.decode().splitlines()]
+        return Resp(json.dumps({"total": len(items), "recorded": len(items), "accepted": 0, "rejected": 0,
+                                "results": []}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    envs = [e for e in ocsf.events_to_envelopes([OPEN], "netsec") if e.predicate == "affected_by"]
+    totals = load_chained(envs, HttpSink("http://gateway", "k"), keyed_by("finding_uid", {"affected_by"}))
+    assert totals["recorded"] == 1 and "LOOM_READ_URL" in capsys.readouterr().err
+    gets.clear()
+    monkeypatch.setenv("LOOM_READ_URL", "http://engine:8000")
+    load_chained(envs, HttpSink("http://gateway", "k"), keyed_by("finding_uid", {"affected_by"}))
+    assert gets and all(u.startswith("http://engine:8000/") for u in gets)

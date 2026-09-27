@@ -82,6 +82,41 @@ class GraphStore(ABC):
         Same-type members are safe to auto-merge; cross-type ones need
         adjudication."""
 
+    def shared_identifier_groups(
+        self, namespace: str, since: datetime | None = None, limit: int = 200,
+        predicate: str = "identified_by", kinds: list[str] | None = None,
+    ) -> list[tuple[Entity, list[Entity]]]:
+        """Identifier entities (the objects of `predicate` edges) that two
+        or more distinct entities point at, each with those entities —
+        resolution by shared identifier (D-083). `since` narrows to groups
+        an edge recorded after it touched, so a tick reads only what is new.
+        `kinds` keeps identifiers whose key starts `<kind>:`. Backends
+        override with one query; this default reads every row."""
+        by_ident: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        touched: set[tuple[str, str]] = set()
+        for obs in self.iter_observations(namespace):
+            if obs.predicate != predicate or not isinstance(obs.object, EntityRef):
+                continue
+            if kinds and obs.object.key.split(":", 1)[0] not in kinds:
+                continue
+            key = (obs.object.type, obs.object.key)
+            by_ident.setdefault(key, set()).add((obs.subject.type, obs.subject.key))
+            if since is None or obs.recorded_at > since:
+                touched.add(key)
+        out = []
+        for key in sorted(touched):
+            members = by_ident.get(key, set())
+            if len(members) < 2:
+                continue
+            ident = self.get_entity(namespace, EntityRef(type=key[0], key=key[1]))
+            ents = [e for t, k in sorted(members)
+                    if (e := self.get_entity(namespace, EntityRef(type=t, key=k))) is not None]
+            if ident is not None and len(ents) > 1:
+                out.append((ident, ents))
+            if len(out) >= limit:
+                break
+        return out
+
     # ------------------------------------------------ schema registry (D-024)
 
     @abstractmethod

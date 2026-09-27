@@ -264,7 +264,11 @@ is returned — it may still matter — and says so.
 Coverage (D-082) rides as ordinary claims — `coverage:collection
 -collected-> "<predicate>"`, attrs `source`, `scope`, `with`, `of`, `state` —
 written by connectors; a pack's or a path's `notes` start `coverage:` when a
-predicate it walks (or a status it reports) was not fully collected.
+predicate it walks (or a status it reports) was not fully collected. So do
+import shapes (D-085, `coverage:shapes -shape-> "<source kind>"`, attrs
+`fields`, `objects`) and identifiers (D-083: `<entity> -identified_by->
+identifier:<kind>:<value>`, `<host> -has_ip-> ip:<address>`) — conventions
+over the existing envelope, not new contract types.
 
 A scope walk (`ScopeSpec`) follows the same no-turn-back rule unless
 `siblings: true`: from a user, `member_of` climbs to its groups and their

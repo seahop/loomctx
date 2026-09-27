@@ -8,6 +8,39 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Identity across tools, host artifacts, format drift, purple correlation (D-083…D-086)
+
+- Identity (D-083): connectors state what each tool calls a host or person
+  (`identified_by identifier:<kind>:<value>` — fqdn, mac, cloud id, sid,
+  upn, mail, `DOMAIN\account`; short hostname as a weak one) and the
+  enrichment worker folds entities of one family that share a strong
+  identifier; IPs become time-stamped `has_ip` links, never merges. nmap,
+  LDAP, Entra (incl. the on-premises SID of hybrid users), Okta, OCSF,
+  cloud instances, endpoint and op logs emit them
+- One namespace per environment: every connector defaults to `netsec`, and
+  schema registration merges a shared predicate's definitions (union of
+  object types) instead of replacing them
+- Host artifacts (D-084): `loom.connectors.endpoint` parses process lists
+  and file listings — osquery (rows and results logs), tasklist,
+  PowerShell Win32_Process / Get-Process / Get-ChildItem / Get-FileHash,
+  `ps`, `ls -laR`, `sha256sum`, CSV — into processes (host + pid + start),
+  files, shared hashes and accounts that fold into directory users
+- Format drift (D-085): imports record the fields they read per object
+  kind and report a field that appeared or vanished since the last import
+  from the same source (`"drift"` in the import output,
+  `python -m loom.coverage drift`)
+- Purple correlation (D-086): `loom.connectors.oplog` (Atomic Red Team,
+  Attire, CSV/JSON) records red-team actions; OCSF detections link
+  `indicates technique`; `python -m loom.purple` and the MCP tool
+  `purple_report` classify each action detected / host only / missed with
+  latency and citations
+- `LOOM_READ_URL`: an OCSF/STIX import or a drift check through a gateway
+  (ingest only) reads prior versions / shapes from the engine (S-60)
+- Tested on GKE: 803 tests on SQLite and 896 on the Postgres lane, and a
+  6,000-machine synthetic estate through the gateway — 5,400/5,400 machines
+  and 3,000/3,000 accounts folded, 0 false merges, purple 600/600
+  (deploy/README.md); open: identity-pass throughput (S-63)
+
 ### Coverage: what an import collected (D-082)
 
 - Connectors record what their export carried (`loom.coverage`): LDAP per

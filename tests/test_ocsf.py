@@ -101,8 +101,12 @@ def test_finding_maps_to_host_and_cve_claims():
 
     # deterministic: replays dedupe by event_id, a re-scan (new time) records anew
     again = list(ocsf.events_to_envelopes([FINDING], "netsec"))
-    assert [c.event_id for c in again] == [c.event_id for c in claims if c.attrs.get("finding_uid") == "fnd-1001"]
-    assert len({c.event_id for c in claims}) == len(claims)
+    # identity / shape claims (D-083/D-085) are tested apart; a host's identity
+    # restated by two findings is one event id, deduplicated on ingest
+    facts = [c for c in claims if c.attrs.get("finding_uid")]
+    assert ([c.event_id for c in again if c.attrs.get("finding_uid")]
+            == [c.event_id for c in facts if c.attrs.get("finding_uid") == "fnd-1001"])
+    assert len({c.event_id for c in facts}) == len(facts)
     rescan = list(ocsf.events_to_envelopes([{**FINDING, "time": T0 + 86_400_000}], "netsec"))
     assert rescan[0].event_id != again[0].event_id
 
@@ -232,7 +236,8 @@ def test_cli_import_export_emit_schema(tmp_path, capsys):
     try:
         reg = store.get_schema("netsec")
         assert reg is not None and "affected_by" in {p.name for p in reg.predicates}
-        assert {o.predicate for o in store.observations_for("netsec", EntityRef(type="host", key="web-01"))} == {"affected_by"}
+        preds = {o.predicate for o in store.observations_for("netsec", EntityRef(type="host", key="web-01"))}
+        assert preds - {"identified_by", "has_ip"} == {"affected_by"}
     finally:
         store.close()
     def count():

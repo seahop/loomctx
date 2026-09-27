@@ -28,6 +28,7 @@ has no store to ask, so it does not chain.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.parse
 from datetime import datetime, timezone
@@ -130,6 +131,9 @@ class HttpSink:
 
     def __init__(self, url: str, key: str | None):
         self.url = url.rstrip("/")
+        # a gateway serves ingest only: prior versions are read from the
+        # engine LOOM_READ_URL names, when the writes go through one
+        self.read_url = (os.environ.get("LOOM_READ_URL") or url).rstrip("/")
         self.key = key
         self.totals = {"total": 0, "recorded": 0, "accepted": 0, "rejected": 0}
         self._n = 0
@@ -143,9 +147,16 @@ class HttpSink:
         path = (f"/v1/entities/{urllib.parse.quote(ref.type, safe='')}/{urllib.parse.quote(ref.key, safe='')}"
                 f"/observations?limit={LOOKUP_LIMIT}&namespace={urllib.parse.quote(namespace, safe='')}")
         try:
-            body = request_json(self.url + path, None, headers, method="GET",
+            body = request_json(self.read_url + path, None, headers, method="GET",
                                 what=f"lookup {ref.type}:{ref.key}")
         except SystemExit as exc:
+            if "HTTP 404" in str(exc):
+                # the URL serves no reads (a gateway): chain within this run only
+                self.cannot_read = True
+                print(f"lookup not served ({exc}); importing WITHOUT cross-run version chaining — "
+                      "set LOOM_READ_URL to the engine when importing through a gateway",
+                      file=sys.stderr)
+                return []
             if "HTTP 401" not in str(exc) and "HTTP 403" not in str(exc):
                 raise
             # a write-only key (the usual shipper grant) cannot read prior

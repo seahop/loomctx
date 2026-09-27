@@ -1,8 +1,10 @@
-# Interop: STIX 2.1, OCSF, LDAP, Entra ID, Okta
+# Interop: STIX 2.1, OCSF, LDAP, Entra ID, Okta, host artifacts, red-team logs
 
 Loom's own shapes are the contracts in `src/loom/contracts.py`; the world
-speaks STIX (threat intelligence), OCSF (security events), raw LDAP, and
-cloud identity providers (Entra ID, Okta). Connectors translate at the
+speaks STIX (threat intelligence), OCSF (security events), raw LDAP,
+cloud identity providers (Entra ID, Okta), process and file listings
+(osquery, tasklist, PowerShell, ps, ls) and red-team operation logs
+(Atomic Red Team, Attire). Connectors translate at the
 edges, so a TIP's bundle, a scanner's findings, a directory export or an
 IdP's user/group/role JSON land as cited, time-windowed
 claims, and Loom's facts leave as records other tools accept. The engine
@@ -31,10 +33,10 @@ python -m loom.connectors.ocsf emit findings.ndjson --namespace netsec
 python -m loom.connectors.ocsf schema --namespace netsec
 
 # raw LDAP / LDIF (Active Directory)
-python -m loom.connectors.ldap import export.ldif --namespace ad                      # into the LOOM_DB store
-python -m loom.connectors.ldap import export.ldif --namespace ad --url http://loom:8000 --key loomk_...
-python -m loom.connectors.ldap emit export.ldif --namespace ad > envelopes.jsonl
-python -m loom.connectors.ldap schema --namespace ad [--as-of 2026-09-20T09:00:00Z]
+python -m loom.connectors.ldap import export.ldif --namespace netsec                      # into the LOOM_DB store
+python -m loom.connectors.ldap import export.ldif --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.ldap emit export.ldif --namespace netsec > envelopes.jsonl
+python -m loom.connectors.ldap schema --namespace netsec [--as-of 2026-09-20T09:00:00Z]
 
 # nmap scan inventory (an `nmap -oX` XML report an operator already produced)
 python -m loom.connectors.nmap import report.xml --namespace netsec                   # into the LOOM_DB store
@@ -49,26 +51,42 @@ python -m loom.connectors.osv emit advisory.json --namespace netsec > envelopes.
 python -m loom.connectors.osv schema --namespace netsec
 
 # cloud inventory / config (terraform show -json / .tfstate, or an AWS Config snapshot)
-python -m loom.connectors.cloud import state.json --format terraform --namespace cloud
-python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace cloud --url http://loom:8000 --key loomk_...
-python -m loom.connectors.cloud schema --namespace cloud
+python -m loom.connectors.cloud import state.json --format terraform --namespace netsec
+python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.cloud schema --namespace netsec
 
 # MITRE ATT&CK taxonomy (the published mitre-attack STIX 2.1 bundle)
-python -m loom.connectors.attack import enterprise-attack.json --namespace attack
-python -m loom.connectors.attack schema --namespace attack
+python -m loom.connectors.attack import enterprise-attack.json --namespace netsec
+python -m loom.connectors.attack schema --namespace netsec
 
 # Entra ID / Azure AD (a Microsoft Graph API JSON export)
-python -m loom.connectors.entra import users.json groups.json --namespace iam
-python -m loom.connectors.entra import directory_export.json --namespace iam --url http://loom:8000 --key loomk_...
-python -m loom.connectors.entra emit users.json --namespace iam > envelopes.jsonl
-python -m loom.connectors.entra schema --namespace iam
+python -m loom.connectors.entra import users.json groups.json --namespace netsec
+python -m loom.connectors.entra import directory_export.json --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.entra emit users.json --namespace netsec > envelopes.jsonl
+python -m loom.connectors.entra schema --namespace netsec
 
 # Okta directory (an Okta API JSON export)
-python -m loom.connectors.okta import users.json groups.json --namespace iam
-python -m loom.connectors.okta import directory.json --namespace iam --url http://loom:8000 --key loomk_...
-python -m loom.connectors.okta emit users.json --namespace iam > envelopes.jsonl
-python -m loom.connectors.okta schema --namespace iam
+python -m loom.connectors.okta import users.json groups.json --namespace netsec
+python -m loom.connectors.okta import directory.json --namespace netsec --url http://loom:8000 --key loomk_...
+python -m loom.connectors.okta emit users.json --namespace netsec > envelopes.jsonl
+python -m loom.connectors.okta schema --namespace netsec
+
+# Host artifacts: process lists and file listings (D-084)
+python -m loom.connectors.endpoint import procs.csv --host WEB-01            # tasklist /v /fo csv
+python -m loom.connectors.endpoint import results.log                        # osqueryd results log
+python -m loom.connectors.endpoint import listing.txt --host web-01 --all-files
+
+# Red-team operation logs (D-086) and the purple report
+python -m loom.connectors.oplog import ExecutionLog.csv --operation q3-purple   # Atomic / Attire / CSV / JSONL
+python -m loom.purple q3-purple                                                 # red actions vs detections
+
+# What imports collected (D-082) and how their format drifted (D-085)
+python -m loom.coverage gaps --namespace netsec
+python -m loom.coverage drift --namespace netsec
 ```
+
+Every connector writes into `netsec` by default: one namespace per
+environment or engagement (D-083, see "Registering the names").
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
 library, for a pipeline that cannot depend on the Loom package.
@@ -341,7 +359,7 @@ Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
 ## Raw LDAP / LDIF (Active Directory) → Loom
 
 `loom.connectors.ldap` decodes a raw directory export — object by object,
-deterministically — into typed, cited claims in an `ad` namespace, so an
+deterministically — into typed, cited claims in the environment's namespace (`netsec` by default, D-083), so an
 agent can ask **object-level reachability** questions over the ordinary
 scope walk: *"what rights / trust / membership path connects user:X to
 domain:B?"*. It reads a **file** (LDIF); it is not a collector and issues
@@ -630,8 +648,8 @@ freehand names and nmap's service-DB vendors show; forcing it here would be
 wrong. So on one CVE an OSV `affects → package:PyPI:django` and an NVD
 `affects → product:djangoproject:django` sit side by side as two honest,
 un-reconciled edges — surfaced, not hidden. (`affects` is registered for
-**both** `product` and `package` object types, because registration overrides
-object types by name; see below.)
+**both** `product` and `package` object types; since D-083 a registration
+merges object types by name rather than replacing them — see below.)
 
 ### Severity conflict with NVD, cited
 
@@ -680,7 +698,7 @@ only; export stays `vulnerability_finding`.
 
 `loom.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
 AWS Config `configurationItems` snapshot (a file; it calls no cloud API)
-into cited, timestamped inventory claims in a `cloud` namespace — strictly
+into cited, timestamped inventory claims in the environment's namespace — strictly
 inventory/config-as-facts, so an analyst can ask "what changed", "what is
 exposed", "what is in this subnet" over the scope walk / `find_path`.
 
@@ -758,7 +776,7 @@ export's own `users`/`groups`/`servicePrincipals`, else as a user. Per-user
 OAuth2 consents (`consentType: Principal`) are one fact per consenting
 user; the client id rides as an attr.
 
-The `iam` namespace is shared with the Okta connector. The two predicates
+The namespace is shared with the Okta connector (and every other source of the environment, D-083). The two predicates
 that carry object types, `member_of` and `has_role`, are declared once in
 `loom.connectors.iam_schema` and used by both: registration merges by
 predicate name with the later definition winning, so two different
@@ -833,6 +851,111 @@ walks behave through the hubs. Results: `docs/hardening.md` S-52…S-57,
 python -m loom.iam_eval --db /data/iam.db --generate --scale medium
 ```
 
+## One host, one person across tools (identity, D-083)
+
+Every tool names things its own way — the directory `WEB-01$` with
+`dNSHostName` web-01.corp.local, a scanner by FQDN and address, osquery by
+upper-case FQDN, tasklist by `COMPUTERNAME`, the EDR by short hostname; a
+user is `CORP\jdoe` on a Windows host, `jdoe@corp.com` at the IdP and a SID
+in AD. Each connector keys entities its own way and states what it knows
+as identifiers:
+
+```
+host:web-01.corp.local  -identified_by-> identifier:fqdn:web-01.corp.local
+computer:S-1-5-…-1104   -identified_by-> identifier:fqdn:web-01.corp.local
+host:web-01.corp.local  -has_ip-> ip:10.0.4.7            (time-stamped, never an identifier)
+```
+
+| Kind | Strength | From |
+| --- | --- | --- |
+| `fqdn`, `mac`, `cloud_id` | strong (host) | nmap, LDAP `dNSHostName`, OCSF device, cloud instances, endpoint |
+| `sid`, `upn`, `mail`, `account` (`DOMAIN\name`) | strong (principal) | LDAP, Entra (incl. `onPremisesSecurityIdentifier`), Okta, process owners, op logs |
+| `hostname` (short) | weak | implied by every FQDN; tasklist, EDR short names, `WEB-01$` |
+
+The enrichment worker's resolution job (tier 4, `enrich.resolve_identities`)
+folds entities of one family — host-like (host, computer, instance, …) or
+principal-like (user, service principal) — that share a STRONG identifier.
+A WEAK one goes to the LLM adjudicator when one is configured and is
+otherwise left alone: two domains can both have a `web-01`. An address is
+never grounds to merge (DHCP reuses it); it is a `has_ip` edge with its
+observation time, so `as_of` / `valid_at` answer who had it when. The same
+identifier on a user and a host is logged as a data error, not merged.
+Merges are reversible (`python -m loom.lifecycle unmerge`) and a decline
+sticks, as for every tier. `python -m loom.enrich resolve` runs the pass
+on demand.
+
+## Host artifacts: processes and files (D-084)
+
+`loom.connectors.endpoint` parses what was collected on a host — it runs
+nothing on any machine. Recognised, auto-detected: osquery rows
+(`osqueryi --json`) and osqueryd results logs; Windows `tasklist /v /fo csv`,
+PowerShell `Get-CimInstance Win32_Process | ConvertTo-Json`, `Get-Process |
+ConvertTo-Json`, `Get-ChildItem -Recurse | ConvertTo-Json`,
+`Get-FileHash | ConvertTo-Json`; `ps -eo pid,ppid,user,lstart,args`,
+`ps aux`, `ls -laR --time-style=full-iso`, `sha256sum`; any CSV with a
+`path` column.
+
+| Entity | Key | Edges |
+| --- | --- | --- |
+| process | `process:<host>:<pid>:<start>` (pids are reused) | `runs_on` host, `spawned_by` parent, `executes` file, `run_as` user; `pid`, `name`, `cmdline`, `started_at` |
+| file | `file:<host>:<path>` (Windows paths folded) | `located_on` host, `has_hash` hash; `size`, `modified_at`, `owner`, `mode` |
+| hash | `hash:sha256:<hex>` / `md5:` | shared across hosts: one binary on 14 machines is one node |
+| user | `DOMAIN\name`, or `host\name` for local / built-in accounts | an `account` identifier, so it folds into the directory's user |
+
+A listing is a snapshot at its collection time. A full recursive file
+listing is large, so only executables, scripts, libraries, configs, keys
+and hashed files are kept unless `--all-files`; the skipped count is
+reported. What a format does not carry — tasklist has no parents or
+command lines — is recorded as coverage, per import format (not per host:
+a fleet's listings would write thousands of records), so a walk over
+`spawned_by` says that the tasklist listings did not carry it.
+
+## When a tool's format changes (drift, D-085)
+
+A tool upgrade that renames or drops a field does not fail an import: the
+parser stops finding it and the facts it carried quietly stop arriving.
+Each import (LDAP, Entra, Okta, nmap, OCSF, endpoint, oplog) records the
+shape of what it read — per kind of object, the fields seen and in how
+many objects — and compares it with the previous import from the same
+source. A field present in at least 5 % of objects before and absent now
+(or the reverse) is reported in the import's output (`"drift": [...]`,
+and on stderr), whether it went straight to the store or to an engine;
+an import through a gateway (which serves ingest only) reads the earlier
+shapes from the engine named by `LOOM_READ_URL`, and says so when it is
+unset. The same variable serves the OCSF and STIX importers' version
+chaining (prior versions of a finding are looked up before a new one is
+written); without it, a gateway import chains within the run only and
+warns. `python -m loom.coverage drift` lists drift afterwards. A re-import
+of the same export is not drift.
+
+## Red-team operation logs and purple correlation (D-086)
+
+`loom.connectors.oplog` records what an authorized red team did: Atomic
+Red Team's execution log (CSV), the Attire JSON logger, or any CSV / JSON /
+JSONL naming a time and a technique or target. Each action becomes
+`activity:<operation>:<id>` — `in_operation`, `performed_at`,
+`uses_technique technique:<T####[.###]>` (the ATT&CK connector's keys),
+`targets host`, `as_user`, `command`, `procedure`, `operator`, `outcome`,
+`tool`. OCSF detections now carry `indicates technique:<id>` from
+`finding_info.attacks[]`.
+
+`python -m loom.purple <operation>` (and the MCP tool `purple_report`) sets
+every action against the detections on its target host — matched by
+resolved identity, the short hostname included, since Atomic logs
+`WEB-01` where the EDR reports `web-01.corp.local` — from 5 minutes
+before to 24 hours after (`--before` / `--after`):
+
+| Status | Meaning |
+| --- | --- |
+| detected | a finding on the host in the window maps to the action's technique, its parent or a sub-technique |
+| host only | something fired on that host in the window, on another or no technique |
+| missed | nothing on that host in the window |
+| no target | the log names no host |
+
+Each row carries the first detection's latency and cite tokens for both
+sides; coverage gaps behind the result (actions logged without a
+technique or host) are noted.
+
 ## Registering the names in the schema registry
 
 Every importer registers a non-strict schema for the namespace on
@@ -843,17 +966,25 @@ a STIX `vulnerability` and the OSV/GHSA connector (`cvss_score`,
 reads as one record whatever produced it — an OSV advisory keyed by its CVE
 alias corroborates or conflicts with NVD on the same node (D-035). The
 OSV connector's `affects` is registered for both the NVD `product` and its
-own `package` object type (registration overrides object types by name, so
-the OSV registration carries the superset); its `package` and `advisory`
-entity types are its own. The nmap connector's `runs_software` reuses that same
-`product` object type and CPE `vendor:product` keying, so a scanned host's
-software meets NVD/KEV at one node. The LDAP connector registers its own
-`ad` vocabulary (`member_of`, `has_ace`, `trusts`, …) — a separate domain,
-typically its own namespace. The Entra ID and Okta connectors share the `iam`
-namespace with overlapping predicates (`member_of`, `has_role`, `name`,
-`enabled`; the typed two declared once in `iam_schema`), so both IdPs' objects land in one walkable graph and entity
-resolution (D-042/D-060) can fold shared users across providers. To pin a
-namespace to exactly these names:
+own `package` object type; its `package` and `advisory` entity types are
+its own. The nmap connector's `runs_software` reuses that same `product`
+object type and CPE `vendor:product` keying, so a scanned host's software
+meets NVD/KEV at one node.
+
+**One namespace per environment (D-083).** Every connector defaults to
+`netsec`, so the directory, the IdPs, scans, cloud inventory, host
+artifacts, detections, red-team logs and the vulnerability corpus of one
+environment land in one graph — identity resolution and purple correlation
+only work within a namespace. Give each engagement or environment its own
+namespace (`--namespace corp-q3`), and every connector the same one. Since
+several connectors then register into one namespace, a registration MERGES
+with what is there: a predicate registered twice keeps the union of its
+object types (`member_of` -> `group` from LDAP and -> `domain` from the
+seed), and `containment` / `node_status` hold if either registration sets
+them; before D-083 the later registration replaced the earlier one, and
+one connector's claims could be rejected under another's definition. The
+Entra ID and Okta connectors still declare their shared predicates once
+(`iam_schema`). To pin a namespace to exactly these names:
 
 ```bash
 python -m loom.connectors.stix schema --namespace netsec > stix.json
@@ -862,6 +993,6 @@ python -m loom.connectors.ocsf schema --namespace netsec > ocsf.json
 curl -X POST http://loom:8000/v1/schemas -H 'content-type: application/json' -H "X-Loom-Key: $KEY" -d @schema.json
 ```
 
-Registration is additive by name (D-024); with `strict` the namespace
+Registration is additive by name (D-024, merging per predicate since D-083); with `strict` the namespace
 rejects unregistered predicates and entity types with a 422, which is how
 a mis-mapped bundle is caught before it lands.

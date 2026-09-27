@@ -325,7 +325,7 @@ def _envs(mod, doc):
     fn = entra.entra_to_envelopes if mod is entra else okta.okta_to_envelopes
     stats: dict[str, int] = {}
     return [e for e in fn(json.dumps(doc), "iam", stats=stats)
-            if e.predicate != "collected"], stats      # coverage records: tested apart
+            if e.predicate not in {"collected", "shape", "identified_by", "has_ip"}], stats   # coverage / identity: tested apart
 
 
 def test_entra_per_user_consents_do_not_collide():

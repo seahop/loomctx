@@ -1016,6 +1016,54 @@ class SqliteStore(GraphStore):
                 " prior_subject_id, prior_object_entity_id, prior_object_json)"
                 " VALUES (?, ?, ?, ?, ?)", children)
 
+    def shared_identifier_groups(self, namespace, since=None, limit=200, predicate="identified_by",
+                                 kinds=None):
+        """One query (D-083): identifier entities pointed at by two or more
+        distinct entities, among those an edge recorded after `since`
+        touched; tombstoned edges do not count."""
+        live = "NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
+        # identifier keys are "<kind>:<value>": `kinds` keeps those groups only
+        # (the strong pass must not queue behind weak groups it never merges)
+        kind_sql = ""
+        if kinds:
+            kind_sql = (" AND object_entity_id IN (SELECT id FROM entities WHERE namespace = {p} AND ("
+                        + " OR ".join(["key LIKE {p}"] * len(kinds)) + "))")
+        touched = ("SELECT DISTINCT object_entity_id FROM observations"
+                   " WHERE namespace = {p} AND predicate = {p}"
+                   + (" AND recorded_at > {p}" if since is not None else "") + kind_sql)
+        sql = ("WITH touched AS (" + touched + "),"
+               " multi AS (SELECT o.object_entity_id AS ident FROM observations o"
+               "  JOIN touched t ON t.object_entity_id = o.object_entity_id"
+               "  WHERE o.namespace = {p} AND o.predicate = {p} AND " + live +
+               "  GROUP BY o.object_entity_id HAVING COUNT(DISTINCT o.subject_id) > 1"
+               "  ORDER BY o.object_entity_id LIMIT {p})"
+               " SELECT DISTINCT m.ident, o.subject_id FROM multi m JOIN observations o"
+               "  ON o.namespace = {p} AND o.object_entity_id = m.ident AND o.predicate = {p}"
+               "  AND " + live)
+        args = [namespace, predicate, *([common.iso(since)] if since is not None else []),
+                *([namespace, *(f"{k}:%" for k in kinds)] if kinds else []),
+                namespace, predicate, limit, namespace, predicate]
+        with self._tx(read=True):
+            pairs = self._conn.execute(sql.format(p='?'), tuple(args)).fetchall()
+            ids = sorted({r["ident"] for r in pairs} | {r["subject_id"] for r in pairs})
+            rows = {}
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join(['?'] * len(chunk))
+                found = self._conn.execute(f"SELECT * FROM entities WHERE id IN ({marks})",
+                                           tuple(chunk)).fetchall()
+                for r in found:
+                    rows[r["id"]] = common.row_to_entity(r)
+        groups: dict[str, list] = {}
+        for r in pairs:
+            groups.setdefault(r["ident"], []).append(r["subject_id"])
+        out = []
+        for ident, subjects in sorted(groups.items()):
+            members = sorted((rows[s] for s in set(subjects) if s in rows), key=lambda e: (e.type, e.key))
+            if ident in rows and len(members) > 1:
+                out.append((rows[ident], members))
+        return out
+
     def fuzzy_merge_candidates(
         self, namespace: str | None = None, limit: int = 50
     ) -> list[list[Entity]]:

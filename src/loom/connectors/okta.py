@@ -1,9 +1,9 @@
 """Okta identity interop: an Okta API JSON export in, cited identity claims out.
 
-    python -m loom.connectors.okta import users.json groups.json --namespace iam
-    python -m loom.connectors.okta import directory.json --namespace iam --url http://loom:8000 --key ...
-    python -m loom.connectors.okta emit users.json --namespace iam > envelopes.jsonl
-    python -m loom.connectors.okta schema --namespace iam
+    python -m loom.connectors.okta import users.json groups.json --namespace netsec
+    python -m loom.connectors.okta import directory.json --namespace netsec --url http://loom:8000 --key ...
+    python -m loom.connectors.okta emit users.json --namespace netsec > envelopes.jsonl
+    python -m loom.connectors.okta schema --namespace netsec
 
 What it is (and is NOT):
 
@@ -55,12 +55,13 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
 from .. import coverage
+from .. import identity as ident
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
 from .iam_schema import SHARED_PREDICATES
 
 SOURCE_DEFAULT = "okta-export"
-NAMESPACE_DEFAULT = "iam"
+NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
 
 ADMIN_ROLES = {
     "SUPER_ADMIN", "ORG_ADMIN", "APP_ADMIN", "USER_ADMIN",
@@ -167,6 +168,10 @@ def _user_envelopes(obj: dict, ns: str, source: str, observed: datetime,
     if display:
         yield claim("name", display)
 
+    yield from ident.claims(ns, ref, [("upn", login), ("mail", email),
+                                      ("mail", profile.get("secondEmail"))],
+                            observed, source, base)
+
     status = obj.get("status")
     if status:
         yield claim("enabled", status == "ACTIVE")
@@ -271,6 +276,7 @@ def _app_envelopes(obj: dict, ns: str, source: str, observed: datetime,
     label = obj.get("label")
     if label:
         yield claim("name", label)
+
     status = obj.get("status")
     if status:
         yield claim("enabled", status == "ACTIVE")
@@ -356,6 +362,11 @@ def okta_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
         "role_assignment": _role_assignment_envelopes,
     }
 
+    shapes = coverage.Shapes()
+    for key, items in buckets.items():
+        for obj in items:
+            profile = obj.get("profile") if isinstance(obj.get("profile"), dict) else {}
+            shapes.add(f"okta:{key}", [*obj, *(f"profile.{k}" for k in profile)])
     for key, items in buckets.items():
         forced = {"users": "user", "groups": "group", "apps": "app",
                   "appUsers": "app_user",
@@ -379,6 +390,7 @@ def okta_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
                 print(f"okta object {obj.get('id', '?')}: skipped: "
                       f"{str(exc).splitlines()[0][:200]}", file=sys.stderr)
     yield from _coverage_envelopes(buckets, namespace, source, observed)
+    yield from shapes.claims(namespace, source, observed)
 
 
 def _coverage_envelopes(buckets: dict[str, list[dict]], ns: str, source: str,
@@ -421,6 +433,7 @@ def schema(namespace: str) -> SchemaRegistration:
         namespace=namespace,
         entity_types=[
             coverage.ENTITY_TYPE,
+            *ident.SCHEMA_TYPES,
             EntityTypeDef(name="user", description="an Okta user"),
             EntityTypeDef(name="group", description="an Okta group"),
             EntityTypeDef(name="app", description="an Okta application integration"),
@@ -518,10 +531,13 @@ def main(argv: list[str] | None = None) -> None:
     from .vulns import register
     if not args.no_schema:
         register(schema(args.namespace), args.url, args.db, args.key)
-    lines = _to_lines(_all_envs())
+    watch = coverage.Watch()
+    lines = _to_lines(watch.wrap(_all_envs()))
     totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
               else load_direct(args.db, lines, args.batch))
-    print(json.dumps({**totals, "envelopes": stats}))
+    drift = watch.report(args.url, args.db, args.key)
+    print(json.dumps({**totals, "envelopes": stats, "drift": [d.text() for d in drift]}))
+    coverage.print_drift(drift)
     rejected = totals.get("rejected", 0)
     if rejected:
         raise SystemExit(f"{rejected} envelopes were refused by the engine")

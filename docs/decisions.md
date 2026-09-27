@@ -2723,6 +2723,99 @@ synthetic AD generator now gives every object a security descriptor (an
 empty DACL for most), as a real dump does. No contract change: coverage
 records are ordinary claims.
 
+## D-083 · Identity across tools; one namespace per environment; registration merges (2026-09-27)
+
+Resolution folded entities only by key spelling (D-019/D-024/D-042);
+connectors emitted `sam`, `upn`, `mail` "for resolution" but nothing read
+them, so `web-01` (a scan), `WEB-01$` / `web-01.corp.local` (AD) and
+`i-0abc…` (the cloud) stayed three machines, and `CORP\jdoe`, `jdoe@corp.com`
+and a SID three people. Connectors now state identifiers as edges to
+`identifier:<kind>:<normalized>` entities (`loom.identity`: fqdn, mac,
+cloud_id, sid, upn, mail, `DOMAIN\account` strong; the short hostname —
+implied by every FQDN — weak), and a fourth resolution tier
+(`enrich.resolve_identities`, under the `resolve` job) folds entities of
+one family (host-like / principal-like) that share a strong identifier,
+into the best-established one (`_ranked`). Strong and weak identifiers
+are separate passes with their own watermarks — in one list, weak groups
+(never auto-merged) filled every tick's limit and the worker merged
+nothing (found on GKE at 6,000 machines). A weak one goes to the
+adjudicator when an LLM is configured; the same identifier across
+families is logged, not merged; declines hold. An IP is never an
+identifier: scans, OCSF and cloud state it as `has_ip`, time-stamped, the
+way the seed's DHCP lease is modelled. The pass is incremental
+(`GraphStore.shared_identifier_groups(namespace, since)`, one query per
+backend) and re-resolves group members to their canonical entity first,
+so chains collapse in one pass. Emitting: nmap (hostnames, MAC, address),
+LDAP (SID, UPN, mail, `DOMAIN\sam`, `dNSHostName`, the machine account),
+Entra (UPN, mail, proxy addresses, the on-premises SID and account — so
+hybrid users meet their AD object), Okta (login, email), OCSF device
+objects, cloud instances (instance id, DNS names, MACs), endpoint and
+op-log hosts and accounts.
+
+Resolution never crosses a namespace, so the connectors' defaults — `ad`,
+`iam`, `cloud`, `attack`, `netsec` — kept an environment in five graphs.
+Every connector now defaults to `netsec`: one namespace per environment
+or engagement. Several connectors then register into one namespace, and a
+registration used to REPLACE a same-named predicate (last writer wins,
+S-55 generalized: LDAP's `member_of -> group` would reject the seed's
+`host member_of domain`). `merge_schema` now merges per predicate: the
+union of object types (empty — any — stays any), `containment` /
+`node_status` if either sets them, the incoming description. No contract
+change to `ClaimIn` / packs; a new store method with a generic default.
+
+## D-084 · Host artifacts: processes and file listings (2026-09-27)
+
+`loom.connectors.endpoint` parses process lists and file listings
+collected on hosts (osquery rows and results logs, tasklist CSV,
+PowerShell Win32_Process / Get-Process / Get-ChildItem / Get-FileHash JSON,
+`ps -eo … lstart …`, `ps aux`, `ls -laR --time-style=full-iso`,
+`sha256sum`, CSV with a `path` column), auto-detected. A process is keyed
+by host, pid AND start time (pids are reused); its parent is the same
+snapshot's row for the parent pid. A file is keyed by host and path
+(Windows paths folded); a content hash is its own entity, shared across
+hosts. Process owners become accounts with an `account` identifier, so
+`CORP\jdoe` folds into the directory's user (D-083); built-in and local
+accounts are scoped to the host. A full recursive listing keeps
+executables, scripts, libraries, configs, keys and hashed files unless
+`--all-files`. What a format lacks (tasklist: parents, command lines) is
+recorded as coverage (D-082).
+
+## D-085 · Format drift (2026-09-27)
+
+A tool version that renames or drops a field fails nothing — the facts it
+carried stop arriving. Imports now record their shape (`coverage:shapes
+-shape-> "<source kind>"`, attrs: field -> objects carrying it), and the
+next import from the same source is compared with the newest earlier one:
+a field in at least 5 % of objects before and none now, or the reverse, is
+drift, reported in the import's JSON output and on stderr. Shapes live on
+their own entity (`coverage:shapes`): on one entity with a fleet's
+per-host coverage records, a newest-N read evicted the earlier shape and
+drift went silent (found on GKE); endpoint coverage is also recorded per
+import format now, not per host (read from the
+store for `--db`, through `/v1/entities/coverage/shapes/observations`
+for `--url` — or `LOOM_READ_URL` when `--url` is a gateway, which serves
+ingest only), and by `python -m loom.coverage drift`. LDAP, Entra, Okta,
+nmap, OCSF, endpoint and op logs record shapes. A re-import of the same
+export compares equal.
+
+## D-086 · Red-team operation logs and purple correlation (2026-09-27)
+
+`loom.connectors.oplog` records an operation's actions — Atomic Red
+Team's execution log, the Attire JSON logger, or a CSV / JSON / JSONL with
+a time and a technique or target — as `activity` entities `in_operation`,
+with `uses_technique` (the ATT&CK connector's `technique:` keys),
+`targets`, `as_user`, `command` and friends. OCSF detections now link
+`indicates technique:<id>` from `finding_info.attacks[]` (the
+sub-technique when given). `loom.purple` (CLI and the MCP tool
+`purple_report`) sets each action against the detections on its target
+host from 5 minutes before to 24 hours after: detected (the technique, its
+parent or a sub-technique), host only, missed, or no target, with the
+first detection's latency and both sides' citations. The target is
+matched by resolved identity and, for this report-time join (not a
+merge), by any shared identifier including the short hostname — Atomic
+logs `WEB-01` where the EDR has the FQDN. Coverage gaps behind the result
+are noted. MCP gains one read-only tool; no contract change.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -10,4 +10,12 @@ connector registers a schema for the namespace and everything else is data.
     ocsf    OCSF vulnerability_finding events, both directions (R-8)
     ldap    raw LDAP / LDIF directory exports -> object-level AD reachability
             claims (D-065; docs/interop.md)
+    entra / okta   identity-provider exports (D-075/D-076)
+    nmap / osv / cloud / attack   scans, advisories, cloud inventory, ATT&CK
+    endpoint   process lists and file listings (D-084)
+    oplog      red-team operation logs, for the purple report (D-086)
+
+Every connector writes into one namespace per environment (`netsec` by
+default) and states identifiers (D-083), coverage (D-082) and the shape of
+what it read (D-085).
 """

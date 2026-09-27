@@ -23,6 +23,7 @@ presentable.
 | 2026-09-24 | Design follow-ups from the 2026-09-23 review (`docs/hardening.md` §2026-09-23, D-050…D-056): recorded supersession + PROV-O export, honest budget (`charged_tokens`) + BM25/rank fusion + value-per-token packing, retrieval scorecard with baselines (`docs/evaluation.md`), schema v6 store work, MCP 2026-07-28 alignment, engine-side rate limiting, STIX/OCSF connectors; GKE re-validation including an in-place v5→v6 migration (D-052) |
 | 2026-09-24 | Whole-project review (`docs/hardening.md` §S, D-057…D-062): eval harness validity (equal-token baselines, graded answers, unsent rows excluded), read-path conflict/brief/alias/scope fixes and a wire-honest MCP budget, browser-facing guards and write-side citation gates, sticky resolution and bounded adjudication, multihop over hub entities in one ask (D-061), small-budget packing (D-062), release fixes (fresh-clone test run, Go SDK CI); scorecards re-run on this build |
 | 2026-09-25 | GKE re-validation with auth on, signed handles, provider keys and the real corpus loaded by the documented Jobs (D-063): ten deployment-path bugs found and fixed (nightly refresh key, source families, worker pools, keys mount, DSN in scorecards…); failover 12 s / 0 lost writes, drain 0 not-ready, load 435/s |
+| 2026-09-27 | Identity across tools (D-083), host artifacts (D-084), format drift (D-085), purple correlation (D-086); one namespace per environment, registration merges shared predicates; tests run on GKE: 803 (SQLite) / 896 (Postgres lane) pass; 6,000-machine estate through the gateway: identities 100 % folded with 0 false merges, purple 600/600; S-60…S-62 fixed, S-63 (identity-pass throughput) open |
 | 2026-09-27 | Coverage (D-082): connectors record what each export carried; asks and find_path note predicates an import did not (fully) collect and path entities with unknown status; 753 tests pass (845 on the Postgres lane) |
 | 2026-09-26 | Hub-safe walks and paths (D-080, D-081): no same-predicate turn-back in scope walks and find_path (`siblings` opts in), bidirectional find_path to depth 6, `node_status` flags disabled accounts on paths, Postgres analyze thresholds + `refresh_statistics()` after bulk loads (schema v7); S-57/S-58/S-59 closed; re-validated on GKE; 746 tests pass (838 on the Postgres lane) |
 | 2026-09-26 | Identity connectors checked at scale (D-077…D-079): Entra/Okta generator + harness, four connector defects fixed (S-52…S-55), blind AD re-measurement (S-51), lazy-greedy pack selection; validated on GKE through the gateway path to 1.38M observations; open: identity-hub walk cost (S-57), find_path depth/status (S-58); 738 tests pass |
@@ -304,6 +305,20 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   the same `iam` namespace — users, groups, apps, app-user assignments, MFA
   factors, admin roles. Both IdPs share predicates for cross-provider entity
   resolution.
+- ✅ Coverage (2026-09-27, D-082): connectors record what each export
+  carried; asks and find_path say when they walk an uncollected predicate.
+- ✅ Identity across tools (2026-09-27, D-083): identifier edges from every
+  connector, a shared-identifier resolution tier, IPs as time-stamped links;
+  one namespace per environment (`netsec` default) with merging registration.
+- ✅ Host artifacts (2026-09-27, D-084): `loom.connectors.endpoint` —
+  processes and file listings from osquery, tasklist, PowerShell, ps, ls,
+  sha256sum, CSV.
+- ✅ Format drift (2026-09-27, D-085): import shapes compared import to
+  import; `python -m loom.coverage drift`.
+- ✅ Purple correlation (2026-09-27, D-086): `loom.connectors.oplog`
+  (Atomic, Attire, CSV/JSON), OCSF `indicates technique`, `python -m
+  loom.purple` / MCP `purple_report`; `loom.estate_eval` checks all four on
+  a synthetic estate (GKE numbers in deploy/README.md).
 - ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
   `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
   connecting two entities along named predicates — the reachability chain

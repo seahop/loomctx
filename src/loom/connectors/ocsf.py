@@ -69,6 +69,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
+from .. import coverage
+from .. import identity as ident
 from ..contracts import (ClaimIn, DocumentIn, EntityRef, EntityTypeDef, Observation,
                          PredicateDef, SchemaRegistration)
 from .chain import aware, supersession, version_key
@@ -94,6 +96,26 @@ DETECTION_CLASS_UIDS = frozenset(DETECTION_CLASS)
 PRED_DETECTED_ON = "detected_on"     # finding -> the host it concerns (lifecycle carrier)
 PRED_REFERENCES = "references"       # finding -> a CVE it references (fuses on the cve node)
 PRED_TITLE = "title"                 # the finding's own title (scalar, on the finding entity)
+PRED_INDICATES = "indicates"         # finding -> the ATT&CK technique it maps to (D-086)
+_TECHNIQUE = re.compile(r"^T\d{4}(\.\d{3})?$")
+
+
+def technique_refs(event: dict) -> list[str]:
+    """ATT&CK technique ids a detection maps to (`finding_info.attacks[]`,
+    or the older top-level `attacks[]`): the sub-technique when given, else
+    the technique — keyed as the ATT&CK connector keys them."""
+    info = event.get("finding_info") if isinstance(event.get("finding_info"), dict) else {}
+    out: list[str] = []
+    for attack in (info.get("attacks") or event.get("attacks") or []):
+        if not isinstance(attack, dict):
+            continue
+        for part in ("sub_technique", "technique"):
+            uid = str((attack.get(part) or {}).get("uid") or "").strip().upper()
+            if _TECHNIQUE.match(uid):
+                if uid not in out:
+                    out.append(uid)
+                break
+    return out
 
 SEVERITY = {0: "unknown", 1: "informational", 2: "low", 3: "medium", 4: "high", 5: "critical",
             6: "fatal", 99: "other"}
@@ -141,6 +163,28 @@ def _stamp(dt: datetime) -> str:
 
 def normalize_key(text: str) -> str:
     return re.sub(r"[^a-z0-9.]+", "_", text.strip().lower()).strip("_")
+
+
+def device_identity(event: dict, namespace: str, host: str, observed: datetime,
+                    source: str) -> list[ClaimIn]:
+    """What the event's device / endpoint calls the host (D-083): hostname
+    or FQDN, MAC, cloud instance uid as identifiers; its IPs as
+    time-stamped `has_ip` links, never identifiers."""
+    ref = EntityRef(type="host", key=host)
+    pairs, ips = [], []
+    for obj in (event.get("device"), event.get("endpoint")):
+        if not isinstance(obj, dict):
+            continue
+        short = obj.get("hostname")
+        joined = (f"{short}.{obj['domain']}" if short and obj.get("domain") and "." not in str(short)
+                  else None)
+        for name in (short, obj.get("name"), joined):
+            if name:
+                pairs.append(("fqdn" if "." in str(name) else "hostname", str(name)))
+        pairs += [("mac", obj.get("mac")), ("cloud_id", obj.get("instance_uid"))]
+        ips.append(obj.get("ip"))
+    return (ident.claims(namespace, ref, pairs, observed, source, {"ocsf": True})
+            + ident.ip_claims(namespace, ref, ips, observed, source))
 
 
 def host_of(event: dict) -> str | None:
@@ -291,6 +335,8 @@ def _detection_envelopes(event: dict, namespace: str, source: str | None = None)
     prefix = f"ocsf:{uid}:{_stamp(observed)}"
     finding = EntityRef(type="finding", key=uid)
     host = host_of(event)
+    if host:
+        yield from device_identity(event, namespace, host, observed, src)
     status_id = status_id_of(event)
     severity_id = _int(event.get("severity_id"))
     title = str(info.get("title") or info.get("desc") or DETECTION_CLASS.get(cls, "finding"))[:200]
@@ -315,6 +361,9 @@ def _detection_envelopes(event: dict, namespace: str, source: str | None = None)
     if host:
         yield claim(finding, PRED_DETECTED_ON, EntityRef(type="host", key=host),
                     attrs=state, valid_from=first_seen, valid_to=valid_to)
+    for tid in technique_refs(event):
+        yield claim(finding, PRED_INDICATES, EntityRef(type="technique", key=tid), tag=f":{tid}",
+                    attrs={"first_seen": first_seen.isoformat() if first_seen else None})
     for cid in _cve_refs(event):
         yield claim(finding, PRED_REFERENCES, EntityRef(type="cve", key=cid), tag=f":{cid}",
                     attrs=state, valid_from=first_seen, valid_to=valid_to)
@@ -332,6 +381,8 @@ def _vuln_finding_envelopes(event: dict, namespace: str, source: str | None = No
     uid = finding_uid(event)
     prefix = f"ocsf:{uid}:{_stamp(observed)}"
     host = host_of(event)
+    if host:
+        yield from device_identity(event, namespace, host, observed, src)
     status_id = _int(event.get("status_id"))
     severity_id = _int(event.get("severity_id"))
     first_seen = _epoch(info.get("first_seen_time")) or _epoch(info.get("created_time"))
@@ -439,10 +490,16 @@ def _restated_claim(rec: dict, namespace: str) -> ClaimIn | None:
 def events_to_envelopes(events: Iterable[dict], namespace: str, source: str | None = None,
                         stats: dict[str, int] | None = None) -> Iterator[ClaimIn]:
     stats = stats if stats is not None else {}
+    shapes = coverage.Shapes()
+    newest: datetime | None = None
     for event in events:
         if not isinstance(event, dict):
             stats["skipped"] = stats.get("skipped", 0) + 1
             continue
+        info = event.get("finding_info") if isinstance(event.get("finding_info"), dict) else {}
+        shapes.add(f"ocsf:{event.get('class_uid', '?')}",
+                   [*event, *(f"finding_info.{k}" for k in info),
+                    *(f"device.{k}" for k in (event.get("device") or {}) if isinstance(event.get("device"), dict))])
         try:
             # materialized per event: a malformed one (a future `time`, a
             # field of the wrong shape) is counted, not the end of the import
@@ -454,8 +511,13 @@ def events_to_envelopes(events: Iterable[dict], namespace: str, source: str | No
             continue
         n = len(envs)
         yield from envs
+        for env in envs:
+            if isinstance(env, ClaimIn) and (newest is None or env.observed_at > newest):
+                newest = env.observed_at
         kind = "finding" if n else ("other_class" if _int(event.get("class_uid")) != CLASS_UID else "empty")
         stats[kind] = stats.get(kind, 0) + 1
+    if shapes.objects:
+        yield from shapes.claims(namespace, source or "ocsf", newest or datetime.now(timezone.utc))
 
 
 def iter_events(path: str) -> Iterator[dict]:
@@ -712,12 +774,15 @@ def schema(namespace: str) -> SchemaRegistration:
         namespace=namespace,
         entity_types=[
             EntityTypeDef(name="host", description="an asset a finding names (device / endpoint / resources)"),
+            *ident.SCHEMA_TYPES, coverage.ENTITY_TYPE,
             EntityTypeDef(name="cve", description="a CVE record (vulnerabilities[].cve.uid)"),
+            EntityTypeDef(name="technique", description="an ATT&CK technique, keyed by its id (T1003.001)"),
             EntityTypeDef(name="product", description="software, keyed vendor:product"),
             EntityTypeDef(name="finding", description="a SIEM/EDR/XDR detection, security or incident "
                           "finding (OCSF classes 2004 / 2001 / 2005), keyed by its finding uid"),
         ],
         predicates=[
+            *ident.SCHEMA_PREDICATES, *coverage.SCHEMA_PREDICATES,
             PredicateDef(name=PRED_AFFECTED, object_types=["cve"],
                          description="OCSF vulnerability_finding: the host has this CVE; attrs carry the "
                                      "finding uid, status and severity"),
@@ -725,6 +790,8 @@ def schema(namespace: str) -> SchemaRegistration:
                          description="a detection finding concerns this host (the lifecycle carrier; attrs "
                                      "carry the finding title, status and severity, valid_to set on "
                                      "Resolved/Close but not Suppressed)"),
+            PredicateDef(name=PRED_INDICATES, object_types=["technique"],
+                         description="the ATT&CK technique a detection maps to (finding_info.attacks)"),
             PredicateDef(name=PRED_REFERENCES, object_types=["cve"],
                          description="a detection finding references this CVE (fuses on the shared cve node)"),
             PredicateDef(name=PRED_TITLE, description="a detection finding's title"),
@@ -796,7 +863,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({"findings": len(findings), "out": args.out}), file=sys.stderr)
         return
     stats: dict[str, int] = {}
-    envs = events_to_envelopes(iter_events(args.events), args.namespace, args.source, stats)
+    watch = coverage.Watch()
+    envs = watch.wrap(events_to_envelopes(iter_events(args.events), args.namespace, args.source, stats))
     if args.command == "emit":
         for line in _to_lines(envs):
             sys.stdout.write(line)
@@ -820,7 +888,9 @@ def main(argv: list[str] | None = None) -> None:
             totals = load_chained(envs, StoreSink(store), key, args.batch)
         finally:
             store.close()
-    print(json.dumps({**totals, "events": stats}))
+    drift = watch.report(args.url, args.db, args.key)
+    print(json.dumps({**totals, "events": stats, "drift": [d.text() for d in drift]}))
+    coverage.print_drift(drift)
     from ..ingest import fail_on_refusals
     fail_on_refusals(totals, remote=bool(args.url))   # a refusal fails the load (D-063, S-36)
 
