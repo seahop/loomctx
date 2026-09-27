@@ -1,4 +1,4 @@
-# Synthetic AD export for the LDAP connector demo (loom.connectors.ldap).
+# Synthetic AD export for the LDAP connector demo (loomctx.connectors.ldap).
 # Not real data. objectSid is given in string form here for readability;
 # real exports carry it base64/binary and the connector decodes it the same.
 # Export date drives observed_at / valid_at:

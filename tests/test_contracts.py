@@ -1,7 +1,7 @@
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from loom.contracts import ClaimIn, DocumentIn, EntityRef, IngestEnvelope
+from loomctx.contracts import ClaimIn, DocumentIn, EntityRef, IngestEnvelope
 
 ENVELOPE = TypeAdapter(IngestEnvelope)
 
@@ -62,7 +62,7 @@ def test_confidence_bounds():
 
 
 def test_provenance_needs_a_reference():
-    from loom.contracts import Provenance
+    from loomctx.contracts import Provenance
     assert Provenance(artifact_event_id="doc-1").artifact_id is None
     assert Provenance(artifact_id="abc").artifact_event_id is None
     with pytest.raises(ValidationError):

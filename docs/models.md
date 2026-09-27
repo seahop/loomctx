@@ -1,8 +1,8 @@
-# Which models drive Loom well (D-041)
+# Which models drive LoomCtx well (D-041)
 
-Loom does not ship a model. It ships an MCP surface and an HTTP API, and
+LoomCtx does not ship a model. It ships an MCP surface and an HTTP API, and
 the agent on the other side is whatever a team already runs. So the useful
-question is not "which model is best" but **which models, given Loom's
+question is not "which model is best" but **which models, given LoomCtx's
 tools and no other help, find the data and answer faithfully** — and at
 what cost. This page is the measured answer, and the command that produced
 it, so it can be re-run when models change (they change monthly).
@@ -50,7 +50,7 @@ Model ids age fast. The evidence and the command to re-run it follow.
 
 ## How it is measured
 
-`python -m loom.agent_eval --models a,b,c --repeat 3 --markdown scorecard.md`
+`python -m loomctx.agent_eval --models a,b,c --repeat 3 --markdown scorecard.md`
 runs each model as an agent over the real MCP transport against the real
 corpus (`docs/real-data.md`, embedded with `openai/text-embedding-3-small`
 at 512 dimensions). Four tasks, no pre-built scope, no hints beyond the
@@ -131,8 +131,8 @@ single-entity task at least two runs in three.
 
 **What the remaining misses are.** The four 9/12 models (both Qwen, the
 larger Gemini Flash, `gpt-5.2`) stop the chain early or name a CVE from an
-adjacent product; that is the model's reading of the chain Loom returns,
-not a gap in what Loom returned. `mistral-medium-3-5` is the one weak
+adjacent product; that is the model's reading of the chain LoomCtx returns,
+not a gap in what LoomCtx returned. `mistral-medium-3-5` is the one weak
 model, missing single-entity tasks too.
 
 **How the number moved.** The 2026-09-09 table (commit history) passed
@@ -140,7 +140,7 @@ exposure on naming *any one* KEV CVE — nine 12/12s under a loose rule.
 Under the strict D-057 scorer the same corpus gave 1 exposure pass before
 D-061 (the scope walk could not see the kernel hub's KEV edges), 9 after
 D-061, and 30 after D-064 fixed how agents ask. Each step was a fix in
-Loom, not a change to the grading.
+LoomCtx, not a change to the grading.
 
 **The faithfulness check catches what it should.** In 216 task-runs one
 answer cited an id the model had never been shown (`minimax-m2.7`, the
@@ -169,7 +169,7 @@ keeps that down.
   `anthropic/claude-haiku-4.5`.
 - **Not on this evidence:** `mistralai/mistral-medium-3-5` (6/12, misses
   single-entity tasks too).
-- **The server-side answering LLM** (`/v1/answer`, `LOOM_LLM_*`) is a
+- **The server-side answering LLM** (`/v1/answer`, `LOOMCTX_LLM_*`) is a
   reader, not an agent: it needs no tool calling, so any model on this
   page works there.
 
@@ -178,8 +178,8 @@ quoting a number in a talk; this table took about three hours and $9.
 
 ## Retrieval, not models: the other scorecard
 
-This page asks which models can drive Loom's tools. `docs/evaluation.md`
-asks the prior question with `python -m loom.retrieval_eval`: on the same
+This page asks which models can drive LoomCtx's tools. `docs/evaluation.md`
+asks the prior question with `python -m loomctx.retrieval_eval`: on the same
 store and the same generated questions, does a budgeted context pack beat
 handing the model everything, or cosine ranking or the newest facts at
 the same token budget? On this corpus, read by `deepseek-chat-v3.1`, it
@@ -191,16 +191,16 @@ current build (the 2026-09-24 table in `docs/evaluation.md` has vector at
 ## Re-running it
 
 ```bash
-docker compose exec --user 10001 loom python -m loom.agent_eval --db /data/loom.db \
+docker compose exec --user 10001 loomctx python -m loomctx.agent_eval --db /data/loomctx.db \
     --models google/gemini-2.5-flash,anthropic/claude-sonnet-4.5 --repeat 3 --markdown /data/scorecard.md
 ```
 
-Any OpenAI-compatible endpoint with tool calling works (`LOOM_LLM_*`;
-`LOOM_AGENT_MODEL` overrides the model), as does `LOOM_LLM_PROVIDER=anthropic`.
+Any OpenAI-compatible endpoint with tool calling works (`LOOMCTX_LLM_*`;
+`LOOMCTX_AGENT_MODEL` overrides the model), as does `LOOMCTX_LLM_PROVIDER=anthropic`.
 The agent's MCP server needs the embedder the corpus was embedded with
-(`LOOM_EMBED_*`). Cost appears only where the provider reports it
+(`LOOMCTX_EMBED_*`). Cost appears only where the provider reports it
 (OpenRouter does). `--repeat 3` gives pass rates instead of single
 samples; a full eighteen-model, three-run table takes about three hours —
 run it detached (`docker compose exec -d … > /data/scorecard.log`).
-`LOOM_AGENT_MAX_STEPS` raises the 20-step cap if a model needs more room
+`LOOMCTX_AGENT_MAX_STEPS` raises the 20-step cap if a model needs more room
 to verify.

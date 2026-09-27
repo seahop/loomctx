@@ -2,7 +2,7 @@
 //
 //   node scripts/gen.mjs ../../contracts/schemas.json src/contracts.ts
 //
-// Every root exported by `python -m loom.schemas` becomes an exported type;
+// Every root exported by `python -m loomctx.schemas` becomes an exported type;
 // the shared $defs (EntityRef, Citation, ...) are emitted once. The output is
 // committed and CI regenerates it to prove the SDK cannot drift from the
 // Python contracts.
@@ -53,8 +53,8 @@ for (const p of Object.values(properties)) untitleLeaves(p, true);
 for (const d of Object.values(defs)) untitleLeaves(d, true);
 
 const combined = {
-  title: "LoomContracts",
-  description: "All Loom contract roots (generated wrapper; use the named exports).",
+  title: "LoomCtxContracts",
+  description: "All LoomCtx contract roots (generated wrapper; use the named exports).",
   type: "object",
   properties,
   additionalProperties: false,
@@ -64,8 +64,8 @@ const combined = {
 const banner =
   "/* eslint-disable */\n" +
   "/**\n * GENERATED from contracts/schemas.json by scripts/gen.mjs — do not edit.\n" +
-  " * Source of truth: src/loom/contracts.py (docs/contracts.md).\n */\n\n";
-const ts = await compile(combined, "LoomContracts", {
+  " * Source of truth: src/loomctx/contracts.py (docs/contracts.md).\n */\n\n";
+const ts = await compile(combined, "LoomCtxContracts", {
   bannerComment: banner,
   additionalProperties: false,
   style: { singleQuote: false, semi: true },

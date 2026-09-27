@@ -1,15 +1,15 @@
 /* eslint-disable */
 /**
  * GENERATED from contracts/schemas.json by scripts/gen.mjs — do not edit.
- * Source of truth: src/loom/contracts.py (docs/contracts.md).
+ * Source of truth: src/loomctx/contracts.py (docs/contracts.md).
  */
 
 export type IngestEnvelope = ClaimIn | DocumentIn;
 
 /**
- * All Loom contract roots (generated wrapper; use the named exports).
+ * All LoomCtx contract roots (generated wrapper; use the named exports).
  */
-export interface LoomContracts {
+export interface LoomCtxContracts {
   IngestEnvelope?: IngestEnvelope;
   Observation?: Observation;
   Entity?: Entity;
@@ -28,7 +28,7 @@ export interface LoomContracts {
 /**
  * Structured, entity-addressed ingestion payload. Maps ~1:1 to an Observation.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ClaimIn".
  */
 export interface ClaimIn {
@@ -58,7 +58,7 @@ export interface ClaimIn {
 /**
  * Address of an entity by natural key, e.g. host:web-01.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "EntityRef".
  */
 export interface EntityRef {
@@ -74,7 +74,7 @@ export interface EntityRef {
  * must land first (same batch is fine: documents are stored before the
  * batch's claims); an unresolvable reference rejects the claim.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "Provenance".
  */
 export interface Provenance {
@@ -86,7 +86,7 @@ export interface Provenance {
 /**
  * Unstructured ingestion payload. Stored verbatim as an artifact, mined async.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "DocumentIn".
  */
 export interface DocumentIn {
@@ -179,7 +179,7 @@ export interface AskRequest {
   scope?: ScopeSpec | null;
   question: string;
   /**
-   * token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)
+   * token budget; mandatory cap (LOOMCTX_MAX_BUDGET is the real ceiling)
    */
   budget?: number;
   as_of?: string | null;
@@ -192,7 +192,7 @@ export interface AskRequest {
  * `expand` names the containment/relational predicates to follow outward
  * from the subjects (e.g. ["member_of"]); `depth` bounds the traversal.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ScopeSpec".
  */
 export interface ScopeSpec {
@@ -221,7 +221,7 @@ export interface ExpandRequest {
 /**
  * The unit of retrieval: budgeted, ranked, cited, expandable.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ContextPack".
  */
 export interface ContextPack {
@@ -260,7 +260,7 @@ export interface ContextPack {
  * observations, briefs cite the observations they were synthesized from,
  * excerpts cite the artifact span they quote.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ContextItem".
  */
 export interface ContextItem {
@@ -277,7 +277,7 @@ export interface ContextItem {
  * or a span of a stored document (excerpts). At least one of
  * observation_id / artifact_id is set (D-023).
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "Citation".
  */
 export interface Citation {
@@ -293,7 +293,7 @@ export interface Citation {
  * kind says what was left out: more observations of one predicate, or a
  * whole conflict that didn't fit the budget (never silently dropped).
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ExpansionHandle".
  */
 export interface ExpansionHandle {
@@ -310,7 +310,7 @@ export interface ExpansionHandle {
  * were never looked at (D-038). A scope walk cut by the entity cap is
  * reported the same way, with reason `scope_cap` (D-058).
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "ScopeTruncation".
  */
 export interface ScopeTruncation {
@@ -318,7 +318,7 @@ export interface ScopeTruncation {
   gathered: number;
   total: number;
   /**
-   * gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` — `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned — `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)
+   * gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOMCTX_MAX_SCOPE_ENTITIES / LOOMCTX_MAX_SCOPE_OBSERVATIONS) while expanding `entity` — `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned — `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)
    */
   reason?: "gather_limit" | "scope_cap" | "max_paths" | "depth";
 }
@@ -351,7 +351,7 @@ export interface PathRequest {
    */
   max_paths?: number;
   /**
-   * token budget, charged on the rendered path text plus citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)
+   * token budget, charged on the rendered path text plus citations exactly as a pack is (LOOMCTX_MAX_BUDGET is the ceiling)
    */
   budget?: number;
   as_of?: string | null;
@@ -401,7 +401,7 @@ export interface PathPack {
  * `affects` edge (cve -> product) walked product -> cve still renders
  * cve affects product, so the reader sees the fact as recorded (D-067).
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "PathEdge".
  */
 export interface PathEdge {
@@ -417,7 +417,7 @@ export interface PathEdge {
  * A status fact about an entity a path passes through (D-080): the
  * newest visible value of a `node_status` predicate, as stored and cited.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "NodeStatus".
  */
 export interface NodeStatus {
@@ -455,7 +455,7 @@ export interface SemanticSearchResponse {
  * An entity surfaced by meaning rather than by name (D-025): the best
  * matching fact is the evidence, cited like any pack item.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "SemanticMatch".
  */
 export interface SemanticMatch {
@@ -476,7 +476,7 @@ export interface SchemaRegistration {
   strict?: boolean;
 }
 /**
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "EntityTypeDef".
  */
 export interface EntityTypeDef {
@@ -485,7 +485,7 @@ export interface EntityTypeDef {
   facets?: string[];
 }
 /**
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "PredicateDef".
  */
 export interface PredicateDef {
@@ -516,7 +516,7 @@ export interface IngestBatchResponse {
  * the reason; the rest of the batch still lands — a shipper's bad record
  * never blocks its good ones.
  *
- * This interface was referenced by `LoomContracts`'s JSON-Schema
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
  * via the `definition` "IngestItemResult".
  */
 export interface IngestItemResult {

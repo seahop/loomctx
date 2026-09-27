@@ -16,7 +16,7 @@ WORKDIR /app
 # found a boto3 patch drift between two builds of one commit before this.
 # Regenerate with scripts/lock-deps.sh after editing pyproject.toml. The
 # `test` extra stays in the image on purpose: one image serves
-# loom/test/consumer/mcp so they can never drift apart (D-011).
+# loomctx/test/consumer/mcp so they can never drift apart (D-011).
 COPY requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 COPY pyproject.toml README.md ./
@@ -32,19 +32,19 @@ RUN pip install --no-cache-dir --no-deps . \
 # Non-root (H-F8): a fixed uid so k8s fsGroup / compose volumes line up.
 # /data is created owned by that user, so a fresh named volume inherits it.
 # The entrypoint starts as root only to fix ownership of an older root-owned
-# volume, then drops to `loom` via setpriv (util-linux, already in the base).
-RUN groupadd -r -g 10001 loom && useradd -r -u 10001 -g loom -d /app loom \
-    && mkdir -p /data && chown loom:loom /data /app
-COPY deploy/docker-entrypoint.sh /usr/local/bin/loom-entrypoint
-RUN chmod 0755 /usr/local/bin/loom-entrypoint
-ENTRYPOINT ["loom-entrypoint"]
+# volume, then drops to `loomctx` via setpriv (util-linux, already in the base).
+RUN groupadd -r -g 10001 loomctx && useradd -r -u 10001 -g loomctx -d /app loomctx \
+    && mkdir -p /data && chown loomctx:loomctx /data /app
+COPY deploy/docker-entrypoint.sh /usr/local/bin/loomctx-entrypoint
+RUN chmod 0755 /usr/local/bin/loomctx-entrypoint
+ENTRYPOINT ["loomctx-entrypoint"]
 ENV HOME=/app
 
-ENV LOOM_DB=/data/loom.db
+ENV LOOMCTX_DB=/data/loomctx.db
 VOLUME /data
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=4s --start-period=5s --retries=6 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).status == 200 else 1)"
 
-CMD ["python", "-m", "loom.serve"]
+CMD ["python", "-m", "loomctx.serve"]

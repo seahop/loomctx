@@ -1,4 +1,4 @@
-"""The raw-LDAP / LDIF connector (loom.connectors.ldap): LDIF parsing
+"""The raw-LDAP / LDIF connector (loomctx.connectors.ldap): LDIF parsing
 (base64, folding, multi-valued), objectSid decode, a hand-crafted Security
 Descriptor decoding to the right `has_ace` rights, userAccountControl bits, a
 trust with direction / transitivity, idempotent re-import, and a round-trip
@@ -11,10 +11,10 @@ import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
-from loom.connectors import ldap
-from loom.context import build_pack
-from loom.contracts import AskRequest, EntityRef, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import ldap
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, EntityRef, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "corp_ad.ldif"
 DOMAIN_SID = "S-1-5-21-1111111111-2222222222-3333333333"
@@ -294,8 +294,8 @@ def test_find_path_user_to_domain_returns_the_cited_chain(tmp_path):
     Admins -has_ace-> corp.local -trusts-> dev.local, each hop cited. The
     connector carries the evidence; find_path enumerates the connecting edge
     sequence — it does not rank or score it."""
-    from loom.context import find_paths
-    from loom.contracts import PathRequest
+    from loomctx.context import find_paths
+    from loomctx.contracts import PathRequest
 
     ldif = tmp_path / "corp-with-acls.ldif"
     ldif.write_text(_roundtrip_ldif())
@@ -335,8 +335,8 @@ def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):
     """D-063: a loader that saw any refusal must not exit 0."""
     import pytest
 
-    from loom import ingest
-    from loom.connectors import vulns
+    from loomctx import ingest
+    from loomctx.connectors import vulns
 
     monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
 
@@ -346,6 +346,6 @@ def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):
 
     monkeypatch.setattr(ingest, "post_batches", refusing)
     with pytest.raises(SystemExit) as exc:
-        ldap.main(["import", str(FIXTURE), "--namespace", "ad", "--url", "http://loom.invalid"])
+        ldap.main(["import", str(FIXTURE), "--namespace", "ad", "--url", "http://loomctx.invalid"])
     assert exc.value.code not in (0, None)
     assert "2 envelopes were refused" in str(exc.value.code)

@@ -6,7 +6,7 @@ real files, not hopes. Numbers marked *re-verify on the frozen volume*
 come from the 2026-09-09/11 corpus and must be re-read from the volume
 you actually freeze (below) — the feeds move daily.
 
-**The one sentence.** Loom absorbs facts about entities over time, from
+**The one sentence.** LoomCtx absorbs facts about entities over time, from
 structured claims and documents, and hands an agent a token-budgeted,
 cited, question-scoped context pack — conflicts first, provenance always,
 and it says when it did not look at everything.
@@ -21,13 +21,13 @@ then never write to again; the morning of the talk is for `readyz` and a
 rehearsal, not for loading.
 
 ```bash
-git clone https://github.com/seahop/Loom && cd Loom
-docker compose up -d --build loom
-docker compose exec loom python -m loom.seed load                          # prints: loaded 592 claims and 5 documents
-docker compose exec --user 10001 loom python -m loom.connectors.vulns load \
-    --db /data/loom.db --bridge-seed-hosts                                 # ~110 s incl. feed download, ~525k envelopes (re-verify on the frozen volume)
-docker compose exec -e LOOM_LLM_MODEL=google/gemini-3.5-flash-lite loom \
-    python -m loom.enrich resolve                                          # alias pass (D-042): ~283 adjudications, ~3 cents, ~27 min — start it, go and eat
+git clone https://github.com/seahop/loomctx && cd LoomCtx
+docker compose up -d --build loomctx
+docker compose exec loomctx python -m loomctx.seed load                          # prints: loaded 592 claims and 5 documents
+docker compose exec --user 10001 loomctx python -m loomctx.connectors.vulns load \
+    --db /data/loomctx.db --bridge-seed-hosts                                 # ~110 s incl. feed download, ~525k envelopes (re-verify on the frozen volume)
+docker compose exec -e LOOMCTX_LLM_MODEL=google/gemini-3.5-flash-lite loomctx \
+    python -m loomctx.enrich resolve                                          # alias pass (D-042): ~283 adjudications, ~3 cents, ~27 min — start it, go and eat
 ```
 
 **Pin the judge.** The alias pass is LLM-adjudicated; D-042's 58 merges,
@@ -37,20 +37,20 @@ reproducibility, not ranking: adjudication is one pair at a time with no
 tool calls, and the agent scorecard (`docs/models.md`) measures something
 else. A different judge produces
 a different merge set, and every number in Acts 2 and 3 moves with it.
-`LOOM_LLM_PROVIDER` / `LOOM_LLM_API_KEY` come from `.env` as usual; only
+`LOOMCTX_LLM_PROVIDER` / `LOOMCTX_LLM_API_KEY` come from `.env` as usual; only
 the model is overridden for this one command.
 
 **Freeze the corpus.** Once the alias pass has printed its counts:
 
 ```bash
-docker compose exec loom python -m loom.lifecycle export --out /data/demo-frozen.jsonl   # --db defaults to LOOM_DB (/data/loom.db)
-docker cp "$(docker compose ps -q loom)":/data/demo-frozen.jsonl ~/Desktop/demo-frozen.jsonl
-docker compose stop loom && docker compose start loom      # proves the volume comes back
+docker compose exec loomctx python -m loomctx.lifecycle export --out /data/demo-frozen.jsonl   # --db defaults to LOOMCTX_DB (/data/loomctx.db)
+docker cp "$(docker compose ps -q loomctx)":/data/demo-frozen.jsonl ~/Desktop/demo-frozen.jsonl
+docker compose stop loomctx && docker compose start loomctx      # proves the volume comes back
 ```
 
 From here on the volume is read-only by policy: no `seed load`, no
 connector run, no `enrich`. If it is ever lost, the restore is
-`docker compose exec loom python -m loom.lifecycle import --path /data/demo-frozen.jsonl`
+`docker compose exec loomctx python -m loomctx.lifecycle import --path /data/demo-frozen.jsonl`
 on a fresh volume (the export carries tombstones and aliases too, H-B4). If
 you must re-run the connector on the day, add `--offline`: it loads
 from the feed cache without touching the network, so the venue's Wi-Fi
@@ -59,11 +59,11 @@ is not on the critical path.
 Then the agent side:
 
 ```bash
-claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
+claude mcp add loomctx -- docker compose --project-directory "$PWD" run --rm -T loomctx python -m loomctx.mcp_server
 # or, without touching your Claude Code config: claude --mcp-config demo/mcp.json --strict-mcp-config
 ```
 
-Set `LOOM_MCP_NAMESPACE=netsec` in `.env` if you want the agent to skip
+Set `LOOMCTX_MCP_NAMESPACE=netsec` in `.env` if you want the agent to skip
 the namespace argument (compose passes it to the stdio server and the
 `mcp` profile). Check `curl -s localhost:8000/readyz` says `ready`, open
 a terminal with `claude` in the repo, and keep a second terminal for
@@ -82,7 +82,7 @@ curl -s localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 Point at: `laptop-17` (not `web-01`, which held it until Aug 10), every
 item's `citations`, `budget` (600) and `charged_tokens` (60 — the pack
 spent only what the answer needed). Say: *the agent asked for 600 tokens and
-got the most relevant cited facts that fit, and Loom reports what it actually
+got the most relevant cited facts that fit, and LoomCtx reports what it actually
 spent; anything cut becomes a handle it can pull deeper.*
 
 *"What OS does web-01 run?"* — conflicts ship first:
@@ -97,7 +97,7 @@ Point at: item 0 is `kind: conflict`, two sources, two citations; the
 `handles` list at the bottom (`76 more 'logged_in_by' observations`, with
 `omitted_handles: 4` — web-01 has 77 logins in the seed, and at budget 400
 `charged_tokens` is 351; recomputed 2026-09-24 on the seed after D-062, whose plain-text handle id makes that handle 57 tokens instead of 86). Say:
-*Loom never picks a side
+*LoomCtx never picks a side
 silently. The agent sees the disagreement before it sees anything else,
 and gets handles for what did not fit.*
 
@@ -131,7 +131,7 @@ curl -s localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 
 Point at: `truncated: 1,000 of 2,747` (re-verify on the frozen volume —
 the total grows with every NVD day) and the single handle for the rest.
-Say: *when Loom did not look at everything, it says so. An agent cannot
+Say: *when LoomCtx did not look at everything, it says so. An agent cannot
 honestly answer "no" from this pack.*
 
 ## Act 3 — an agent on its own (5 min, Claude Code over MCP)
@@ -155,7 +155,7 @@ the agent still spills, say so on stage — *the pack was bigger than the
 agent's inbox, so it asked for less* — and move on.
 
 Narrate the tool calls as they scroll: `describe_namespace` (*it learns
-the schema — Loom is domain-agnostic, the domain is data*), `find_entity`
+the schema — LoomCtx is domain-agnostic, the domain is data*), `find_entity`
 (*names to handles*), `ask_scope` with `expand_predicates` (*two hops:
 host → software ← CVE, in one call*), `ask` on each candidate CVE (*it
 verifies*), `find_related` (*meaning-based search over the advisories*),
@@ -214,7 +214,7 @@ its `cite` token. Transcript: `demo/act3-writeback-claude-code.json`.
 | --- | --- |
 | The venue network is down | Acts 1 and 2 need no network. For Act 3 use the local Claude Code session if it is authenticated, else open `demo/act3-after-aliases.md` (the rehearsal, tool calls then the verbatim answer), `demo/act3-before-aliases.md` (the seam) or `demo/agent-transcript.json` (a Sonnet 5 `agent_eval` run) and walk through them |
 | The connector load was skipped | Act 2 falls back to the seed data: `initech` contract-owner conflict in `procurement`, and the incident report document `IR-4432` |
-| Claude Code misbehaves | `docker compose exec loom python -m loom.agent_eval --db /data/loom.db --tasks exposure` prints the same tool sequence and answer with the configured model in ~40 s |
+| Claude Code misbehaves | `docker compose exec loomctx python -m loomctx.agent_eval --db /data/loomctx.db --tasks exposure` prints the same tool sequence and answer with the configured model in ~40 s |
 | Someone asks "what if the model lies?" | Every item carries an observation id, and the scorecard checks every cited id against what the model was shown: in 216 task-runs across eighteen models one answer cited an id it had never seen, and the check caught it and failed that run (`docs/models.md`). The one thing citations cannot catch is a confident "no" — which is why `truncated` exists |
 | Someone asks "how fast / how big?" | Single-entity ask 2–5 ms on 465k observations; two-hop scope over 1,077 entities 0.5 s; fresh clone to loaded real corpus in 142 s (all laptop, generator co-located; `docs/real-data.md`); real nodes: 435/s load, 178/s ingest, 201/s ask on GKE with auth on (D-063, `deploy/README.md`) |
 
@@ -229,10 +229,10 @@ the talk.
 - [x] Both Act 1 `curl` commands return what the script says — laptop-17 + charged_tokens 60, conflict first + charged_tokens 351, "76 more 'logged_in_by'" handle with omitted_handles 4 (verified against a live engine on the post-D-062 build, 2026-09-24)
 - [x] Both Act 2 `curl` commands return what the script says (2026-09-09 corpus) — **re-run on the frozen volume**
 - [x] Act 3 run with Claude Code (2026-09-10 before aliases, 2026-09-11 after); transcripts saved in `demo/`
-- [x] Act 1 numbers re-verified on the current build (2026-09-26, fresh seed store): 60 (laptop-17 first) and 351 (conflict first, "76 more 'logged_in_by'", omitted_handles 4) with the default unsigned handles; 366 if `LOOM_HANDLE_SECRET` is set (signed handles cost ~15 more)
+- [x] Act 1 numbers re-verified on the current build (2026-09-26, fresh seed store): 60 (laptop-17 first) and 351 (conflict first, "76 more 'logged_in_by'", omitted_handles 4) with the default unsigned handles; 366 if `LOOMCTX_HANDLE_SECRET` is set (signed handles cost ~15 more)
 - [ ] Night-before load on the current build, alias pass with the pinned judge, `demo-frozen.jsonl` exported and copied off
 - [ ] Act 2 numbers re-read from the frozen volume and edited into this file
 - [x] Act 3 scope pack measured inline on the current build (2026-09-26): 4,073 cl100k tokens at the default budget 3,000, ~6× under Claude Code's 25k limit, so no spill/`grep` is possible. The literal in-Claude-Code transcript check is folded into the morning-of run below
 - [ ] Act 3 re-run the morning of the talk (no writes to the volume other than the write-back follow-up)
-- [ ] `claude mcp list` shows `loom` connected (or pass `--mcp-config demo/mcp.json --strict-mcp-config`)
+- [ ] `claude mcp list` shows `loomctx` connected (or pass `--mcp-config demo/mcp.json --strict-mcp-config`)
 - [ ] Fallback files on the desktop; slides have the two diagrams from `docs/infrastructure.md`

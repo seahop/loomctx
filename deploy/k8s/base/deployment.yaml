@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: loom
+  name: loomctx
   labels:
-    app: loom
+    app: loomctx
 spec:
   # SQLite on an RWO volume => exactly one replica, and Recreate so upgrades
   # never run two writers. Scaling out = swapping in a server-backed
@@ -13,11 +13,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: loom
+      app: loomctx
   template:
     metadata:
       labels:
-        app: loom
+        app: loomctx
     spec:
       # nothing here talks to the Kubernetes API
       automountServiceAccountToken: false
@@ -29,8 +29,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: loom
-          image: ghcr.io/seahop/loom:latest
+        - name: loomctx
+          image: ghcr.io/seahop/loomctx:latest
           # read-only root: the engine writes only to /data (the store) and
           # /tmp (an emptyDir); no capability is needed to serve HTTP on 8000
           securityContext:
@@ -42,23 +42,23 @@ spec:
             - containerPort: 8000
               name: http
           env:
-            - name: LOOM_DB
-              value: /data/loom.db
-            # --- auth (D-013a / D-021): uncomment once the `loom-keys` Secret
+            - name: LOOMCTX_DB
+              value: /data/loomctx.db
+            # --- auth (D-013a / D-021): uncomment once the `loomctx-keys` Secret
             # exists (deploy/README.md). Until then the engine runs in open
             # dev mode and logs a warning at startup.
-            # - name: LOOM_AUTH_FILE
-            #   value: /etc/loom-keys/keys.json
-            # - name: LOOM_HANDLE_SECRET
+            # - name: LOOMCTX_AUTH_FILE
+            #   value: /etc/loomctx-keys/keys.json
+            # - name: LOOMCTX_HANDLE_SECRET
             #   valueFrom:
-            #     secretKeyRef: {name: loom-keys, key: handle-secret}
+            #     secretKeyRef: {name: loomctx-keys, key: handle-secret}
           volumeMounts:
             - name: data
               mountPath: /data
             - name: tmp
               mountPath: /tmp
             # - name: keys
-            #   mountPath: /etc/loom-keys
+            #   mountPath: /etc/loomctx-keys
             #   readOnly: true
           readinessProbe:
             httpGet:
@@ -82,9 +82,9 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: loom-data
+            claimName: loomctx-data
         - name: tmp
           emptyDir: {}
         # - name: keys
         #   secret:
-        #     secretName: loom-keys
+        #     secretName: loomctx-keys

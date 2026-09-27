@@ -1,5 +1,5 @@
 """Drive the MCP server the way an agent does: a real MCP client over stdio
-(the transport `claude mcp add` uses), spawning `python -m loom.mcp_server`
+(the transport `claude mcp add` uses), spawning `python -m loomctx.mcp_server`
 as a subprocess against a seeded database. Exercises the wire protocol,
 tool schemas, and the find -> ask -> expand -> record_claim loop end to end.
 """
@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from loom.seed import cmd_load
+from loomctx.seed import cmd_load
 
 
 @pytest.fixture(scope="module")
@@ -25,11 +25,11 @@ async def _session(db, fn):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    env = {**os.environ, "LOOM_DB": str(db)}
-    for var in ("LOOM_API_KEYS", "LOOM_AUTH_FILE", "LOOM_LLM_MODEL"):
+    env = {**os.environ, "LOOMCTX_DB": str(db)}
+    for var in ("LOOMCTX_API_KEYS", "LOOMCTX_AUTH_FILE", "LOOMCTX_LLM_MODEL"):
         env.pop(var, None)
     params = StdioServerParameters(
-        command=sys.executable, args=["-m", "loom.mcp_server"], env=env)
+        command=sys.executable, args=["-m", "loomctx.mcp_server"], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()

@@ -1,26 +1,26 @@
-# Engine: write to the primary, read from the replicas (D-028 LOOM_DB_READ).
+# Engine: write to the primary, read from the replicas (D-028 LOOMCTX_DB_READ).
 # Kubernetes expands $(VAR) from earlier entries, which is how the read DSN
 # is assembled from the operator's credentials without a second Secret.
 - op: replace
   path: /spec/template/spec/containers/0/env/0
   value:
-    name: LOOM_DB
+    name: LOOMCTX_DB
     valueFrom:
-      secretKeyRef: {name: loom-pg-app, key: uri}
+      secretKeyRef: {name: loomctx-pg-app, key: uri}
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: PGUSER
     valueFrom:
-      secretKeyRef: {name: loom-pg-app, key: username}
+      secretKeyRef: {name: loomctx-pg-app, key: username}
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: PGPASSWORD
     valueFrom:
-      secretKeyRef: {name: loom-pg-app, key: password}
+      secretKeyRef: {name: loomctx-pg-app, key: password}
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
-    name: LOOM_DB_READ
-    value: postgresql://$(PGUSER):$(PGPASSWORD)@loom-pg-ro:5432/loom
+    name: LOOMCTX_DB_READ
+    value: postgresql://$(PGUSER):$(PGPASSWORD)@loomctx-pg-ro:5432/loomctx

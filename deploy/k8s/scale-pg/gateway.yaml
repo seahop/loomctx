@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: loom-gateway
+  name: loomctx-gateway
   labels:
-    app: loom-gateway
+    app: loomctx-gateway
 spec:
   # Stateless by design (D-010): the Service round-robins across replicas and
   # the HPA below adds more under load. This IS the load-balancing story —
@@ -11,11 +11,11 @@ spec:
   replicas: 2
   selector:
     matchLabels:
-      app: loom-gateway
+      app: loomctx-gateway
   template:
     metadata:
       labels:
-        app: loom-gateway
+        app: loomctx-gateway
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -27,7 +27,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: ghcr.io/seahop/loom-gateway:latest
+          image: ghcr.io/seahop/loomctx-gateway:latest
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -37,24 +37,24 @@ spec:
             - containerPort: 8080
               name: http
           env:
-            - name: LOOM_NATS_URL
+            - name: LOOMCTX_NATS_URL
               value: nats://nats:4222
             # replicated ingest stream on the 3-node cluster (D-029); cap the
             # buffer at 4 GiB and shed the oldest when full
-            - name: LOOM_STREAM_REPLICAS
+            - name: LOOMCTX_STREAM_REPLICAS
               value: "3"
-            - name: LOOM_STREAM_MAX_BYTES
+            - name: LOOMCTX_STREAM_MAX_BYTES
               value: "4294967296"
-            - name: LOOM_STREAM_DISCARD
+            - name: LOOMCTX_STREAM_DISCARD
               value: "old"
             # --- auth (D-013a): the same keys file the engine mounts;
-            # uncomment once the `loom-keys` Secret exists (deploy/README.md).
+            # uncomment once the `loomctx-keys` Secret exists (deploy/README.md).
             # Until then the gateway runs in open dev mode and logs it.
-            # - name: LOOM_AUTH_FILE
-            #   value: /etc/loom-keys/keys.json
+            # - name: LOOMCTX_AUTH_FILE
+            #   value: /etc/loomctx-keys/keys.json
           # volumeMounts:
           #   - name: keys
-          #     mountPath: /etc/loom-keys   # not /etc/loom: that would hide the image's /etc/loom/schemas.json
+          #     mountPath: /etc/loomctx-keys   # not /etc/loomctx: that would hide the image's /etc/loomctx/schemas.json
           #     readOnly: true
           readinessProbe:
             httpGet:
@@ -76,17 +76,17 @@ spec:
       # volumes:
       #   - name: keys
       #     secret:
-      #       secretName: loom-keys
+      #       secretName: loomctx-keys
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: loom-gateway
+  name: loomctx-gateway
   labels:
-    app: loom-gateway
+    app: loomctx-gateway
 spec:
   selector:
-    app: loom-gateway
+    app: loomctx-gateway
   ports:
     - name: http
       port: 80
@@ -95,12 +95,12 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: loom-gateway
+  name: loomctx-gateway
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: loom-gateway
+    name: loomctx-gateway
   minReplicas: 2
   maxReplicas: 10
   metrics:

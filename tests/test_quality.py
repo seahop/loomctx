@@ -11,10 +11,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom.context import build_pack
-from loom.contracts import AskRequest, EntityRef, ScopeSpec
-from loom.seed import cmd_load
-from loom.store.sqlite import SqliteStore
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, EntityRef, ScopeSpec
+from loomctx.seed import cmd_load
+from loomctx.store.sqlite import SqliteStore
 
 
 @pytest.fixture(scope="module")
@@ -98,7 +98,7 @@ def test_q6_cross_namespace_conflict(store):
 
 
 def test_q7_budgets_always_respected(store):
-    from loom.context import est_tokens
+    from loomctx.context import est_tokens
     for budget in (120, 400, 2000):
         pack = _ask(store, "who logged in?",
                     subject=EntityRef(type="host", key="web-01"), budget=budget)
@@ -140,11 +140,11 @@ def test_q10_budget_holds_under_a_real_tokenizer(store):
         enc = tiktoken.get_encoding("cl100k_base")
     except Exception as exc:  # noqa: BLE001 — no package, or offline with no cached encoding
         pytest.skip(f"tiktoken encoding unavailable: {exc}")
-    from loom.answer import render_user_prompt
+    from loomctx.answer import render_user_prompt
 
     def block_tokens(prompt: str) -> int:
         lines = prompt.split("\n")
-        body = lines[lines.index("<<<LOOM_CONTEXT") + 1: lines.index("LOOM_CONTEXT>>>")]
+        body = lines[lines.index("<<<LOOMCTX_CONTEXT") + 1: lines.index("LOOMCTX_CONTEXT>>>")]
         return len(enc.encode("\n".join(body)))
 
     questions = [
@@ -179,8 +179,8 @@ def test_q10b_budget_holds_on_the_mcp_wire(store):
     except Exception as exc:  # noqa: BLE001 — no package, or offline with no cached encoding
         pytest.skip(f"tiktoken encoding unavailable: {exc}")
     import pydantic_core
-    from loom import mcp_server
-    from loom.context import expand_pack
+    from loomctx import mcp_server
+    from loomctx.context import expand_pack
 
     def body_tokens(pack) -> int:
         view = mcp_server._agent_view(pack)

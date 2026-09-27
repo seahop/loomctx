@@ -20,7 +20,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: loom
+      app: loomctx
   policyTypes: [Ingress]
   ingress:
     - ports:
@@ -35,7 +35,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: loom-gateway
+      app: loomctx-gateway
   policyTypes: [Ingress]
   ingress:
     - ports:
@@ -44,7 +44,7 @@ spec:
 ---
 # NATS: clients on 4222 are the gateways (publish) and the writer consumers
 # (pull); the cluster route port is peers only; the monitor port only for
-# pods that declare they scrape (label loom.dev/scrape=true, any namespace).
+# pods that declare they scrape (label loomctx.dev/scrape=true, any namespace).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -58,10 +58,10 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: loom-gateway
+              app: loomctx-gateway
         - podSelector:
             matchLabels:
-              app: loom-consumer
+              app: loomctx-consumer
       ports:
         - port: 4222
           protocol: TCP
@@ -76,7 +76,7 @@ spec:
         - namespaceSelector: {}
           podSelector:
             matchLabels:
-              loom.dev/scrape: "true"
+              loomctx.dev/scrape: "true"
       ports:
         - port: 8222
           protocol: TCP

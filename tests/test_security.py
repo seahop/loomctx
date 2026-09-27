@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-import loom.mcp_server as mcp_server
-from loom.auth import AuthConfig
-from loom.contracts import ClaimIn, EntityRef, SchemaRegistration
-from loom.store.sqlite import SqliteStore
-from loom.webguard import BrowserGuard, HostPolicy, is_json_media_type
+import loomctx.mcp_server as mcp_server
+from loomctx.auth import AuthConfig
+from loomctx.contracts import ClaimIn, EntityRef, SchemaRegistration
+from loomctx.store.sqlite import SqliteStore
+from loomctx.webguard import BrowserGuard, HostPolicy, is_json_media_type
 
 OBSERVED = "2026-09-01T14:03:00Z"
 CLAIM = {"kind": "claim", "subject": {"type": "host", "key": "web-01"}, "predicate": "logged_in_by",
@@ -21,10 +21,10 @@ CLAIM = {"kind": "claim", "subject": {"type": "host", "key": "web-01"}, "predica
 
 
 def _open_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "sec.db"))
-    for var in ("LOOM_API_KEYS", "LOOM_AUTH_FILE", "LOOM_ALLOWED_HOSTS", "LOOM_ALLOWED_ORIGINS"):
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "sec.db"))
+    for var in ("LOOMCTX_API_KEYS", "LOOMCTX_AUTH_FILE", "LOOMCTX_ALLOWED_HOSTS", "LOOMCTX_ALLOWED_ORIGINS"):
         monkeypatch.delenv(var, raising=False)
-    from loom.api.http import app
+    from loomctx.api.http import app
     return TestClient(app)
 
 
@@ -33,15 +33,15 @@ def _keys_file(tmp_path, monkeypatch, *entries):
     path = tmp_path / "keys.json"
     path.write_text(json.dumps({"keys": [
         {"sha256": hashlib.sha256(key.encode()).hexdigest(), **grant} for key, grant in entries]}))
-    monkeypatch.setenv("LOOM_AUTH_FILE", str(path))
-    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
+    monkeypatch.setenv("LOOMCTX_AUTH_FILE", str(path))
+    monkeypatch.delenv("LOOMCTX_API_KEYS", raising=False)
     return path
 
 
 def _keyed_client(tmp_path, monkeypatch, *entries):
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "sec-keyed.db"))
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "sec-keyed.db"))
     _keys_file(tmp_path, monkeypatch, *entries)
-    from loom.api.http import app
+    from loomctx.api.http import app
     return TestClient(app)
 
 
@@ -68,35 +68,35 @@ def test_simple_request_bodies_cannot_write(tmp_path, monkeypatch):
         nd = (json.dumps({**CLAIM, "event_id": "n1"}) + "\n").encode()
         assert client.post("/v1/ingest/batch", content=nd,
                            headers={"content-type": "application/x-ndjson"}).json()["recorded"] == 1
-    assert is_json_media_type("application/vnd.loom+json") and not is_json_media_type(None)
+    assert is_json_media_type("application/vnd.loomctx+json") and not is_json_media_type(None)
 
 
 def test_host_allowlist_and_foreign_origins(tmp_path, monkeypatch):
-    """DNS rebinding makes an attacker's page same-origin with a local Loom;
+    """DNS rebinding makes an attacker's page same-origin with a local LoomCtx;
     only its Host header gives it away. Defaults cover loopback, IPs (kubelet
     probes), service names and cluster DNS; anything else must be listed."""
     with _open_client(tmp_path, monkeypatch) as client:
-        for host in ("localhost:8000", "127.0.0.1:8000", "[::1]:8000", "10.4.0.12:8000", "loom",
-                     "loom:8000", "loom.loom.svc.cluster.local", "testserver", "host.docker.internal"):
+        for host in ("localhost:8000", "127.0.0.1:8000", "[::1]:8000", "10.4.0.12:8000", "loomctx",
+                     "loomctx:8000", "loomctx.loomctx.svc.cluster.local", "testserver", "host.docker.internal"):
             assert client.get("/healthz", headers={"host": host}).status_code == 200, host
         for host in ("evil.example.net", "evil.example.net:8000", "127.0.0.1.nip.io"):
             r = client.post("/v1/ingest", json=CLAIM, headers={"host": host})
-            assert r.status_code == 400 and "LOOM_ALLOWED_HOSTS" in r.json()["detail"], host
+            assert r.status_code == 400 and "LOOMCTX_ALLOWED_HOSTS" in r.json()["detail"], host
             assert client.get("/readyz", headers={"host": host}).status_code == 400
-        monkeypatch.setenv("LOOM_ALLOWED_HOSTS", "loom.example.com, *.corp.example.com")
-        for host in ("loom.example.com", "api.corp.example.com:443"):
+        monkeypatch.setenv("LOOMCTX_ALLOWED_HOSTS", "loomctx.example.com, *.corp.example.com")
+        for host in ("loomctx.example.com", "api.corp.example.com:443"):
             assert client.get("/healthz", headers={"host": host}).status_code == 200, host
         assert client.get("/healthz", headers={"host": "evil.example.net"}).status_code == 400
         # a foreign Origin is refused even with a JSON body; loopback tools
         # and listed origins pass; non-browser clients send none
         r = client.post("/v1/ingest", json=CLAIM, headers={"origin": "https://evil.example.net"})
-        assert r.status_code == 403 and "LOOM_ALLOWED_ORIGINS" in r.json()["detail"]
+        assert r.status_code == 403 and "LOOMCTX_ALLOWED_ORIGINS" in r.json()["detail"]
         assert client.post("/v1/ingest", json=CLAIM, headers={"origin": "null"}).status_code == 403
         assert client.post("/v1/ingest", json=CLAIM, headers={"origin": "http://localhost:6274"}).status_code == 200
-        monkeypatch.setenv("LOOM_ALLOWED_ORIGINS", "https://app.example.com")
+        monkeypatch.setenv("LOOMCTX_ALLOWED_ORIGINS", "https://app.example.com")
         assert client.post("/v1/ingest", json={**CLAIM, "event_id": "o2"},
                            headers={"origin": "https://app.example.com"}).status_code == 200
-        monkeypatch.setenv("LOOM_ALLOWED_HOSTS", "*")
+        monkeypatch.setenv("LOOMCTX_ALLOWED_HOSTS", "*")
         assert client.get("/healthz", headers={"host": "anything.example.net"}).status_code == 200
 
 
@@ -107,9 +107,9 @@ def test_unauthenticated_requests_are_refused_before_the_body_is_parsed(tmp_path
         garbage = {"content-type": "application/json"}
         r = client.post("/v1/ingest", content=b"{not json", headers=garbage)
         assert r.status_code == 401 and "missing API key" in r.json()["detail"]
-        r = client.post("/v1/ingest/batch", content=b"[1,2,", headers={**garbage, "x-loom-key": "bogus"})
+        r = client.post("/v1/ingest/batch", content=b"[1,2,", headers={**garbage, "x-loomctx-key": "bogus"})
         assert r.status_code == 403 and "unknown" in r.json()["detail"]
-        r = client.post("/v1/ingest", content=b"{not json", headers={**garbage, "x-loom-key": "rw-key"})
+        r = client.post("/v1/ingest", content=b"{not json", headers={**garbage, "x-loomctx-key": "rw-key"})
         assert r.status_code == 422                               # a real key reaches validation
         assert client.get("/healthz").status_code == 200           # probes stay open
 
@@ -129,7 +129,7 @@ def test_type_gated_key_cannot_cite_its_way_into_a_document(tmp_path, monkeypatc
     host-scoped rw key could cite an HR document from a host claim and then
     read it. Now it may cite only documents it ingested or ones already
     backing a fact in its world — on the single route and per batch item."""
-    admin, gated = {"X-Loom-Key": "admin"}, {"X-Loom-Key": "hosts"}
+    admin, gated = {"X-LoomCtx-Key": "admin"}, {"X-LoomCtx-Key": "hosts"}
     with _citation_world(tmp_path, monkeypatch) as client:
         secret = client.post("/v1/ingest", headers=admin, json={
             "kind": "document", "event_id": "hr-1", "text": "salary review: jdoe", "source": "hr",
@@ -158,7 +158,7 @@ def test_type_gated_key_cannot_cite_its_way_into_a_document(tmp_path, monkeypatc
             {**claim, "event_id": "b2", "provenance": {"artifact_event_id": "run-7"}}]).json()
         assert [x["status"] for x in body["results"]] == ["accepted", "recorded"], body
         # the uploader is recorded by the engine, with the key's type gate
-        stamp = client.get(f"/v1/artifacts/{own_id}", headers=admin).json()["attrs"]["loom.uploader"]
+        stamp = client.get(f"/v1/artifacts/{own_id}", headers=admin).json()["attrs"]["loomctx.uploader"]
         assert stamp == {"grant": "host-agent", "entity_types": ["host"]}
 
         # a document the admin already tied to a host fact is in the gated
@@ -177,17 +177,17 @@ def test_type_gated_key_cannot_cite_its_way_into_a_document(tmp_path, monkeypatc
 def test_senders_cannot_forge_the_uploader_stamp(tmp_path, monkeypatch):
     with _citation_world(tmp_path, monkeypatch) as client:
         forged = {"kind": "document", "text": "x", "source": "s", "observed_at": OBSERVED,
-                  "attrs": {"loom.uploader": {"grant": "host-agent"}}}
-        r = client.post("/v1/ingest", headers={"X-Loom-Key": "admin"}, json=forged)
+                  "attrs": {"loomctx.uploader": {"grant": "host-agent"}}}
+        r = client.post("/v1/ingest", headers={"X-LoomCtx-Key": "admin"}, json=forged)
         assert r.status_code == 422 and "reserved" in r.json()["detail"]
-        body = client.post("/v1/ingest/batch", headers={"X-Loom-Key": "admin"}, json=[forged]).json()
+        body = client.post("/v1/ingest/batch", headers={"X-LoomCtx-Key": "admin"}, json=[forged]).json()
         assert body["rejected"] == 1 and "reserved" in body["results"][0]["detail"]
 
 
 def test_gated_key_supersedes_only_inside_its_types(tmp_path, monkeypatch):
     """Retiring a fact is writing about it: a host-only key may not
     supersede host:web-01 -> user:jdoe (the user side is outside its world)."""
-    admin, gated = {"X-Loom-Key": "admin"}, {"X-Loom-Key": "hosts"}
+    admin, gated = {"X-LoomCtx-Key": "admin"}, {"X-LoomCtx-Key": "hosts"}
     with _citation_world(tmp_path, monkeypatch) as client:
         edge = client.post("/v1/ingest", headers=admin, json=CLAIM).json()["observation_id"]
         os_fact = client.post("/v1/ingest", headers=admin, json={
@@ -227,10 +227,10 @@ def test_type_scoped_keys_see_their_own_registry_and_counts(tmp_path, monkeypatc
            "predicates": [{"name": "runs_os"}, {"name": "logged_in_by", "object_types": ["user", "host"]},
                           {"name": "paid", "object_types": ["salary"]}]}
     with _citation_world(tmp_path, monkeypatch) as client:
-        assert client.post("/v1/schemas", headers={"X-Loom-Key": "admin"}, json=reg).status_code == 200
-        full = client.get("/v1/schemas", headers={"X-Loom-Key": "admin"}).json()
+        assert client.post("/v1/schemas", headers={"X-LoomCtx-Key": "admin"}, json=reg).status_code == 200
+        full = client.get("/v1/schemas", headers={"X-LoomCtx-Key": "admin"}).json()
         assert {e["name"] for e in full["entity_types"]} == {"host", "user", "salary"}
-        scoped = client.get("/v1/schemas", headers={"X-Loom-Key": "hosts"}).json()
+        scoped = client.get("/v1/schemas", headers={"X-LoomCtx-Key": "hosts"}).json()
         assert [e["name"] for e in scoped["entity_types"]] == ["host"]
         assert {p["name"]: p["object_types"] for p in scoped["predicates"]} == {
             "runs_os": [], "logged_in_by": ["host"]}
@@ -248,7 +248,7 @@ def test_type_scoped_keys_see_their_own_registry_and_counts(tmp_path, monkeypatc
         mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
 
         class Ctx:
-            headers = {"x-loom-key": "hosts"}
+            headers = {"x-loomctx-key": "hosts"}
 
         listed = mcp_server.list_namespaces(ctx=Ctx())
         assert listed == [{"namespace": "default", "entities": {"host": 1}, "total": 1}]
@@ -266,9 +266,9 @@ def test_engine_batch_costs_one_token_per_item(tmp_path, monkeypatch):
     """The gateway charged n for a batch of n; the engine charged 1. Now
     both charge n, and a batch larger than the bucket is a 413 (retrying
     can never help) rather than a 429."""
-    from loom.api.http import app
-    monkeypatch.setenv("LOOM_RATE_PER_SEC", "0.001")      # effectively no refill during the test
-    monkeypatch.setenv("LOOM_RATE_BURST", "5")
+    from loomctx.api.http import app
+    monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "0.001")      # effectively no refill during the test
+    monkeypatch.setenv("LOOMCTX_RATE_BURST", "5")
     monkeypatch.setattr(app, "middleware_stack", None)   # rebuild: the limiter reads the dials fresh
     with _open_client(tmp_path, monkeypatch) as client:
         items = [{**CLAIM, "event_id": f"e{i}"} for i in range(6)]
@@ -285,8 +285,8 @@ def test_engine_batch_costs_one_token_per_item(tmp_path, monkeypatch):
 def test_malformed_rate_dial_stops_engine_start_up(tmp_path, monkeypatch, value):
     """A dial that does not parse is a start-up error, not a 500 on the
     first request (and never a silent 'unlimited')."""
-    monkeypatch.setenv("LOOM_RATE_LLM_PER_SEC", value)
-    with pytest.raises(ValueError, match="LOOM_RATE_LLM_PER_SEC"):
+    monkeypatch.setenv("LOOMCTX_RATE_LLM_PER_SEC", value)
+    with pytest.raises(ValueError, match="LOOMCTX_RATE_LLM_PER_SEC"):
         with _open_client(tmp_path, monkeypatch):
             pass
 
@@ -301,7 +301,7 @@ def test_mcp_answer_honours_rate_limits(tmp_path, monkeypatch):
     _keys_file(tmp_path, monkeypatch,
                ("capped", {"id": "capped", "namespaces": ["default"], "perms": "r", "rate_llm_per_sec": 0.001}),
                ("plain", {"id": "plain", "namespaces": ["default"], "perms": "r"}))
-    for var in ("LOOM_RATE_PER_SEC", "LOOM_RATE_LLM_PER_SEC", "LOOM_RATE_BURST", "LOOM_RATE_LLM_BURST"):
+    for var in ("LOOMCTX_RATE_PER_SEC", "LOOMCTX_RATE_LLM_PER_SEC", "LOOMCTX_RATE_BURST", "LOOMCTX_RATE_LLM_BURST"):
         monkeypatch.delenv(var, raising=False)
 
     class Resp:
@@ -314,7 +314,7 @@ def test_mcp_answer_honours_rate_limits(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "_agent_view", lambda pack, fmt="concise": {})
 
     def ctx(key):
-        return type("Ctx", (), {"headers": {"x-loom-key": key}})()
+        return type("Ctx", (), {"headers": {"x-loomctx-key": key}})()
 
     try:
         mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
@@ -324,7 +324,7 @@ def test_mcp_answer_honours_rate_limits(tmp_path, monkeypatch):
         for _ in range(3):   # a key without an override is unlimited by default
             mcp_server.answer("what os?", subject="host:web-01", ctx=ctx("plain"))
         # the general dial applies per tool call on the HTTP transports
-        monkeypatch.setenv("LOOM_RATE_PER_SEC", "0.001")
+        monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "0.001")
         mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
         mcp_server.find_entity("web-01", ctx=ctx("plain"))
         with pytest.raises(Exception, match="rate limit exceeded"):
@@ -344,10 +344,10 @@ def test_mcp_http_app_guards_host_and_origin(monkeypatch):
     """compose runs the MCP server with --host 0.0.0.0, which switched the
     SDK's DNS-rebinding protection off. The HTTP app now sits behind the
     engine's Host/Origin policy (then the key gate)."""
-    for var in ("LOOM_ALLOWED_HOSTS", "LOOM_ALLOWED_ORIGINS"):
+    for var in ("LOOMCTX_ALLOWED_HOSTS", "LOOMCTX_ALLOWED_ORIGINS"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("LOOM_API_KEYS", "reader:default:r")
-    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
+    monkeypatch.setenv("LOOMCTX_API_KEYS", "reader:default:r")
+    monkeypatch.delenv("LOOMCTX_AUTH_FILE", raising=False)
     app = mcp_server.build_http_app("streamable-http", "0.0.0.0", AuthConfig.from_env())
     assert isinstance(app, BrowserGuard)
 
@@ -374,9 +374,9 @@ def test_insecure_defaults_are_flagged_or_closed(monkeypatch, caplog):
     can resolve the grant to apply its gates."""
     import logging
     assert mcp_server._arg_parser().parse_args(["--transport", "streamable-http"]).host == "127.0.0.1"
-    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
-    monkeypatch.setenv("LOOM_API_KEYS", "agentsecret:netsec:w,k7Qm2vX9pL4sT8wZ1nB6cR3y:netsec:r")
-    with caplog.at_level(logging.WARNING, logger="loom.auth"):
+    monkeypatch.delenv("LOOMCTX_AUTH_FILE", raising=False)
+    monkeypatch.setenv("LOOMCTX_API_KEYS", "agentsecret:netsec:w,k7Qm2vX9pL4sT8wZ1nB6cR3y:netsec:r")
+    with caplog.at_level(logging.WARNING, logger="loomctx.auth"):
         auth = AuthConfig.from_env()
     flagged = [r.getMessage() for r in caplog.records if "guessable" in r.getMessage()]
     assert len(flagged) == 1 and "entry 0" in flagged[0] and "agentsecret" not in flagged[0]
@@ -384,10 +384,10 @@ def test_insecure_defaults_are_flagged_or_closed(monkeypatch, caplog):
 
 
 def test_host_policy_parsing():
-    p = HostPolicy.parse("Loom.Example.com., .corp.example.com", "https://App.example.com/")
-    assert p.allows_host("loom.example.com:8443") and p.allows_host("x.corp.example.com")
+    p = HostPolicy.parse("LoomCtx.Example.com., .corp.example.com", "https://App.example.com/")
+    assert p.allows_host("loomctx.example.com:8443") and p.allows_host("x.corp.example.com")
     assert not p.allows_host("corp.example.com.evil.net")
     assert p.allows_host(None)                          # HTTP/1.0 tooling, not a browser
-    assert p.allows_origin("https://app.example.com", "loom.example.com")
-    assert p.allows_origin("https://loom.example.com:8443", "loom.example.com:8443")   # same origin
-    assert not p.allows_origin("https://evil.example.net", "loom.example.com")
+    assert p.allows_origin("https://app.example.com", "loomctx.example.com")
+    assert p.allows_origin("https://loomctx.example.com:8443", "loomctx.example.com:8443")   # same origin
+    assert not p.allows_origin("https://evil.example.net", "loomctx.example.com")

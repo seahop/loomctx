@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from loom.contracts import EntityRef
-from loom.kafka_consumer import split_values, write_with_retry
-from loom.store.sqlite import SqliteStore
+from loomctx.contracts import EntityRef
+from loomctx.kafka_consumer import split_values, write_with_retry
+from loomctx.store.sqlite import SqliteStore
 
 CLAIM = json.dumps({"kind": "claim", "subject": {"type": "host", "key": "web-01"},
                     "predicate": "logged_in_by", "object": {"type": "user", "key": "jdoe"},
@@ -27,7 +27,7 @@ def test_split_values_handles_single_and_ndjson():
 
 
 def test_write_with_retry_then_deadletter(tmp_path, monkeypatch):
-    from loom import kafka_consumer
+    from loomctx import kafka_consumer
     store = SqliteStore(tmp_path / "k.db")
     producer = FakeProducer()
     counts = asyncio.run(write_with_retry(store, producer, [CLAIM, b"{poison"]))
@@ -46,8 +46,8 @@ def test_write_with_retry_then_deadletter(tmp_path, monkeypatch):
     assert calls["n"] == 3 and slept == [2.0, 4.0]
     assert counts["deadlettered"] == 1 and counts["recorded"] == 0
     topic, value, headers = producer.sent[0]
-    assert topic == "loom.deadletter" and value == CLAIM
-    assert headers == {"Loom-Error": b"RuntimeError", "Loom-Error-Code": b"store_rejected"}
+    assert topic == "loomctx.deadletter" and value == CLAIM
+    assert headers == {"LoomCtx-Error": b"RuntimeError", "LoomCtx-Error-Code": b"store_rejected"}
     monkeypatch.undo()
     assert store.count_observations("default", EntityRef(type="host", key="web-01")) == 1
 
@@ -55,7 +55,7 @@ def test_write_with_retry_then_deadletter(tmp_path, monkeypatch):
 def test_only_the_poison_envelope_is_dead_lettered(tmp_path, monkeypatch):
     """The last attempt writes the batch one envelope at a time: the good
     batch-mates of a poison envelope land instead of being parked with it."""
-    from loom import kafka_consumer
+    from loomctx import kafka_consumer
     store = SqliteStore(tmp_path / "k3.db")
     real = store.record_claims
 
@@ -78,7 +78,7 @@ def test_only_the_poison_envelope_is_dead_lettered(tmp_path, monkeypatch):
 
 
 def test_strict_registry_rejects_on_the_kafka_path(tmp_path):
-    from loom.contracts import SchemaRegistration
+    from loomctx.contracts import SchemaRegistration
     store = SqliteStore(tmp_path / "k2.db")
     store.put_schema(SchemaRegistration(namespace="default", strict=True,
                                         entity_types=[{"name": "host"}], predicates=[]))
@@ -88,12 +88,12 @@ def test_strict_registry_rejects_on_the_kafka_path(tmp_path):
 
 
 def test_security_kwargs():
-    from loom.kafka_consumer import security_kwargs
+    from loomctx.kafka_consumer import security_kwargs
     assert security_kwargs({}) == {}
-    assert security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SSL"}).keys() == {"security_protocol", "ssl_context"}
-    sasl = security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SASL_SSL", "LOOM_KAFKA_SASL_MECHANISM": "scram-sha-256",
-                            "LOOM_KAFKA_SASL_USERNAME": "u", "LOOM_KAFKA_SASL_PASSWORD": "p"})
+    assert security_kwargs({"LOOMCTX_KAFKA_SECURITY_PROTOCOL": "SSL"}).keys() == {"security_protocol", "ssl_context"}
+    sasl = security_kwargs({"LOOMCTX_KAFKA_SECURITY_PROTOCOL": "SASL_SSL", "LOOMCTX_KAFKA_SASL_MECHANISM": "scram-sha-256",
+                            "LOOMCTX_KAFKA_SASL_USERNAME": "u", "LOOMCTX_KAFKA_SASL_PASSWORD": "p"})
     assert sasl["security_protocol"] == "SASL_SSL" and sasl["sasl_mechanism"] == "SCRAM-SHA-256"
     assert sasl["sasl_plain_username"] == "u" and "ssl_context" in sasl
     with pytest.raises(SystemExit):
-        security_kwargs({"LOOM_KAFKA_SECURITY_PROTOCOL": "SASL_PLAINTEXT"})
+        security_kwargs({"LOOMCTX_KAFKA_SECURITY_PROTOCOL": "SASL_PLAINTEXT"})

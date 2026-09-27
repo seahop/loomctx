@@ -2,10 +2,10 @@
 
 The AD analogue of the KEV multi-hop retrieval benchmark
 ([evaluation.md](evaluation.md)). It asks one question of the raw-LDAP
-connector ([interop.md](interop.md#raw-ldap--ldif-active-directory--loom)):
+connector ([interop.md](interop.md#raw-ldap--ldif-active-directory--loomctx)):
 when a real reachability chain exists in a directory — a low-privilege
 principal to a high-value target, threading **membership → ACL → (cross-domain)
-trust** — does Loom's ordinary scope walk **surface the full chain with every
+trust** — does LoomCtx's ordinary scope walk **surface the full chain with every
 edge cited**, and how much of the store does it have to sort through to do it?
 
 > **Status (2026-09-26): measured blind (D-078, closes S-51).** The first
@@ -14,35 +14,35 @@ edge cited**, and how much of the store does it have to sort through to do it?
 > also passed; those numbers are withdrawn. The tables below are blind: the
 > walk knows only the start and the target the question names.
 
-It is **synthetic and object-level only**. `loom.connectors.ad_gen`
+It is **synthetic and object-level only**. `loomctx.connectors.ad_gen`
 generates a directory, plants known chains, and buries them in dense benign
-noise; `loom.ad_eval` loads it through the connector and scores retrieval
+noise; `loomctx.ad_eval` loads it through the connector and scores retrieval
 with a **scripted reader** (no LLM, no cost). It computes no path *ranking*
 and emits no exploitation guidance: the truth sidecar already names each
 chain's edges, and the metric is only "present + cited?". This measures
-Loom, not an attacker.
+LoomCtx, not an attacker.
 
 ## Generate → import → score
 
 ```bash
 # a deterministic directory + a truth sidecar (chains and decoys)
-python -m loom.connectors.ad_gen --seed 7 --scale medium --out corp.ldif --truth corp.truth.json
+python -m loomctx.connectors.ad_gen --seed 7 --scale medium --out corp.ldif --truth corp.truth.json
 
 # load it through the ordinary raw-LDAP connector
-python -m loom.connectors.ldap import corp.ldif --namespace ad --db /data/ad.db
+python -m loomctx.connectors.ldap import corp.ldif --namespace ad --db /data/ad.db
 
 # score (scripted reader; no network)
-python -m loom.ad_eval --db /data/ad.db --truth corp.truth.json --namespace ad
+python -m loomctx.ad_eval --db /data/ad.db --truth corp.truth.json --namespace ad
 
 # or all three in one shot into a scratch store
-python -m loom.ad_eval --db /data/ad.db --generate --scale medium --seed 7
+python -m loomctx.ad_eval --db /data/ad.db --generate --scale medium --seed 7
 
 # blind (the headline): only the two named endpoints are known
-python -m loom.ad_eval --db /data/ad.db --generate --scale medium --seed 7 --blind
+python -m loomctx.ad_eval --db /data/ad.db --generate --scale medium --seed 7 --blind
 ```
 
 An optional `--live` runs a cheap model (`--model`, e.g. a
-`google/gemini-2.5-flash` via an `--env-file` of `LOOM_LLM_*`) over a few
+`google/gemini-2.5-flash` via an `--env-file` of `LOOMCTX_LLM_*`) over a few
 chains to confirm an agent assembles and cites the chain; it is capped at
 `--max-cost` and is never the headline.
 

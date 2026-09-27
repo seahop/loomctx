@@ -1,9 +1,9 @@
 import pytest
 
-from loom.context import build_pack
-from loom.contracts import AskRequest, EntityRef
-from loom.seed import generate, cmd_load
-from loom.store.sqlite import SqliteStore
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, EntityRef
+from loomctx.seed import generate, cmd_load
+from loomctx.store.sqlite import SqliteStore
 
 
 def test_generate_is_deterministic():
@@ -81,7 +81,7 @@ def test_seed_plants_a_recorded_correction_not_a_conflict(tmp_path):
     event_id; `seed load` resolves it to the observation id (minted at
     load time) and records ClaimIn.supersedes. One source, so no conflict
     item — the initech conflict (two sources) stays the conflict demo."""
-    from loom.seed import SUPERSEDES_EVENT, resolve_supersessions
+    from loomctx.seed import SUPERSEDES_EVENT, resolve_supersessions
     claims, _ = generate(seed=42)
     corrections = [c for c in claims if SUPERSEDES_EVENT in c.attrs]
     assert len(corrections) == 1 and len(claims) == 592
@@ -112,22 +112,22 @@ def test_seed_plants_a_recorded_correction_not_a_conflict(tmp_path):
 
 
 def test_load_without_db_uses_the_environment_store(tmp_path, monkeypatch, capsys):
-    """`seed load` opens the store LOOM_DB / LOOM_SHARDS / LOOM_BLOB_*
+    """`seed load` opens the store LOOMCTX_DB / LOOMCTX_SHARDS / LOOMCTX_BLOB_*
     configure, like the engine; --db is an explicit single-store override."""
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "env.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "env.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
     cmd_load(None, seed=42)
     assert "(env)" in capsys.readouterr().out
     store = SqliteStore(tmp_path / "env.db")
     assert sum(1 for _ in store.iter_artifacts()) >= 5
     store.close()
-    monkeypatch.setattr("sys.argv", ["loom.seed", "load", "--db", str(tmp_path / "explicit.db")])
-    from loom.seed import main
+    monkeypatch.setattr("sys.argv", ["loomctx.seed", "load", "--db", str(tmp_path / "explicit.db")])
+    from loomctx.seed import main
     main()
     assert (tmp_path / "explicit.db").exists() and "explicit.db" in capsys.readouterr().out
 
 
 def test_seed_never_prints_a_password():
-    from loom.seed import redact_dsn
-    assert redact_dsn("postgresql://loom:s3cret@host:5432/loom") == "postgresql://loom:***@host:5432/loom"
-    assert redact_dsn("/data/loom.db") == "/data/loom.db"
+    from loomctx.seed import redact_dsn
+    assert redact_dsn("postgresql://loomctx:s3cret@host:5432/loomctx") == "postgresql://loomctx:***@host:5432/loomctx"
+    assert redact_dsn("/data/loomctx.db") == "/data/loomctx.db"

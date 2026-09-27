@@ -6,11 +6,11 @@ read as "no access", and a missing `enabled` is not read as enabled."""
 import json
 from datetime import datetime, timezone
 
-from loom import coverage
-from loom.connectors import ad_gen, entra, ldap, okta
-from loom.context import build_pack, find_paths
-from loom.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx import coverage
+from loomctx.connectors import ad_gen, entra, ldap, okta
+from loomctx.context import build_pack, find_paths
+from loomctx.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 
 def _strip(ldif: str, *attrs: str) -> str:
@@ -177,7 +177,7 @@ def test_an_unchanged_reimport_is_not_drift(tmp_path):
 
 
 def test_drift_reads_earlier_shapes_from_the_engine_when_importing_through_a_gateway(monkeypatch, tmp_path):
-    """The gateway serves ingest only; LOOM_READ_URL names the engine the
+    """The gateway serves ingest only; LOOMCTX_READ_URL names the engine the
     earlier shapes are read from."""
     seen = []
 
@@ -186,7 +186,7 @@ def test_drift_reads_earlier_shapes_from_the_engine_when_importing_through_a_gat
         return []
 
     monkeypatch.setattr(coverage, "remote", fake_remote)
-    monkeypatch.setenv("LOOM_READ_URL", "http://engine:8000")
+    monkeypatch.setenv("LOOMCTX_READ_URL", "http://engine:8000")
     ldif, _ = ad_gen.generate(7, "small")
     watch = coverage.Watch()
     list(watch.wrap(ldap.ldif_to_envelopes(ldif, "ad")))

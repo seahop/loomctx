@@ -1,7 +1,7 @@
 """Engine-side per-grant rate limiting (hardening R-10).
 
 The middleware is exercised around a stub app that authenticates the way
-Loom's routes do (X-Loom-Key / Bearer resolved through app.state.auth), so
+LoomCtx's routes do (X-LoomCtx-Key / Bearer resolved through app.state.auth), so
 the tests pin the *contract* — auth first, buckets per grant id, never a
 bucket for a bad key, LLM routes on their own budget, 429 + Retry-After —
 without depending on the engine's routes."""
@@ -12,9 +12,9 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from loom import metrics
-from loom.auth import AuthConfig, Grant, _parse_file, _sha256, extract_key
-from loom.ratelimit import (Limit, LimiterPool, RateLimitMiddleware,
+from loomctx import metrics
+from loomctx.auth import AuthConfig, Grant, _parse_file, _sha256, extract_key
+from loomctx.ratelimit import (Limit, LimiterPool, RateLimitMiddleware,
                             RateLimitSettings, default_burst)
 
 
@@ -131,15 +131,15 @@ def test_pool_is_bounded_with_lru_eviction():
 
 def test_settings_resolution_and_env(monkeypatch):
     assert default_burst(0.2) == 1 and default_burst(2.5) == 3
-    for name in ("LOOM_RATE_PER_SEC", "LOOM_RATE_BURST", "LOOM_RATE_LLM_PER_SEC", "LOOM_RATE_LLM_BURST"):
+    for name in ("LOOMCTX_RATE_PER_SEC", "LOOMCTX_RATE_BURST", "LOOMCTX_RATE_LLM_PER_SEC", "LOOMCTX_RATE_LLM_BURST"):
         monkeypatch.delenv(name, raising=False)
     off = RateLimitSettings.from_env()
     assert off.general(None) is None and off.llm(None) is None       # dev mode: unlimited
     assert off.general(READER) is None
     assert off.general(CAPPED) == Limit(1.0, 1)                       # an override caps a key anyway
-    monkeypatch.setenv("LOOM_RATE_PER_SEC", "10")
-    monkeypatch.setenv("LOOM_RATE_BURST", "40")
-    monkeypatch.setenv("LOOM_RATE_LLM_PER_SEC", "0.5")
+    monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "10")
+    monkeypatch.setenv("LOOMCTX_RATE_BURST", "40")
+    monkeypatch.setenv("LOOMCTX_RATE_LLM_PER_SEC", "0.5")
     on = RateLimitSettings.from_env()
     assert on.general(None) == Limit(10.0, 40)
     assert on.general(READER) == Limit(10.0, 40)
@@ -150,9 +150,9 @@ def test_settings_resolution_and_env(monkeypatch):
     assert on.general(Grant(id="y", namespaces=("*",), perms="r", rate_burst=5)) == Limit(10.0, 5)
     assert on.llm(READER) == Limit(0.5, 1)
     assert on.llm(Grant(id="z", namespaces=("*",), perms="r", rate_llm_per_sec=3)) == Limit(3.0, 3)
-    monkeypatch.setenv("LOOM_RATE_PER_SEC", "0")                       # 0 = off, like the gateway
+    monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "0")                       # 0 = off, like the gateway
     assert RateLimitSettings.from_env().general(READER) is None
-    monkeypatch.setenv("LOOM_RATE_PER_SEC", "lots")
+    monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "lots")
     with pytest.raises(ValueError):
         RateLimitSettings.from_env()
 
@@ -164,7 +164,7 @@ def test_burst_then_429_then_refill_per_grant():
     app, mw = make_app(_auth(READER, OTHER), RateLimitSettings(per_sec=1.0, burst=2), clock)
     before = _rejected_rate()
     with TestClient(app) as client:
-        reader = {"X-Loom-Key": "reader-secret"}
+        reader = {"X-LoomCtx-Key": "reader-secret"}
         assert client.post("/v1/ask", headers=reader).status_code == 200
         assert client.post("/v1/ask", headers=reader).status_code == 200
         r = client.post("/v1/ask", headers=reader)
@@ -189,11 +189,11 @@ def test_no_bucket_for_a_bad_or_missing_key():
     app, mw = make_app(_auth(READER), RateLimitSettings(per_sec=1.0, burst=1), clock)
     with TestClient(app) as client:
         for i in range(20):
-            r = client.post("/v1/ask", headers={"X-Loom-Key": f"bogus-{i}"})
+            r = client.post("/v1/ask", headers={"X-LoomCtx-Key": f"bogus-{i}"})
             assert r.status_code == 403                # the route rejects it, not the limiter
         assert client.post("/v1/ask").status_code == 401
         assert mw.general.size() == 0
-        assert client.post("/v1/ask", headers={"X-Loom-Key": "reader-secret"}).status_code == 200
+        assert client.post("/v1/ask", headers={"X-LoomCtx-Key": "reader-secret"}).status_code == 200
         assert mw.general.size() == 1
 
 
@@ -202,18 +202,18 @@ def test_per_key_override_beats_the_defaults_and_applies_without_them():
     # generous defaults, one capped key
     app, _ = make_app(_auth(READER, CAPPED), RateLimitSettings(per_sec=100.0, burst=100), clock)
     with TestClient(app) as client:
-        capped = {"X-Loom-Key": "capped-secret"}
+        capped = {"X-LoomCtx-Key": "capped-secret"}
         assert client.post("/v1/ask", headers=capped).status_code == 200
         assert client.post("/v1/ask", headers=capped).status_code == 429
         for _ in range(10):
-            assert client.post("/v1/ask", headers={"X-Loom-Key": "reader-secret"}).status_code == 200
+            assert client.post("/v1/ask", headers={"X-LoomCtx-Key": "reader-secret"}).status_code == 200
     # no defaults at all (dev-like), the override still caps that key
     app, mw = make_app(_auth(READER, CAPPED), RateLimitSettings(), clock)
     with TestClient(app) as client:
         for _ in range(10):
-            assert client.post("/v1/ask", headers={"X-Loom-Key": "reader-secret"}).status_code == 200
-        assert client.post("/v1/ask", headers={"X-Loom-Key": "capped-secret"}).status_code == 200
-        assert client.post("/v1/ask", headers={"X-Loom-Key": "capped-secret"}).status_code == 429
+            assert client.post("/v1/ask", headers={"X-LoomCtx-Key": "reader-secret"}).status_code == 200
+        assert client.post("/v1/ask", headers={"X-LoomCtx-Key": "capped-secret"}).status_code == 200
+        assert client.post("/v1/ask", headers={"X-LoomCtx-Key": "capped-secret"}).status_code == 429
     assert mw.general.size() == 1                      # only the capped key holds a bucket
 
 
@@ -238,7 +238,7 @@ def test_override_from_a_keys_file_is_parsed_and_hot_retuned():
     auth = AuthConfig(entries)
     app, _ = make_app(auth, RateLimitSettings(), clock)
     with TestClient(app) as client:
-        a = {"X-Loom-Key": "a-secret"}
+        a = {"X-LoomCtx-Key": "a-secret"}
         assert [client.post("/v1/ask", headers=a).status_code for _ in range(5)] == [200] * 4 + [429]
         # the operator tightens the key (hot reload): the live bucket is
         # retuned, the old balance is capped, nothing restarts
@@ -254,7 +254,7 @@ def test_llm_routes_have_their_own_stricter_bucket():
     settings = RateLimitSettings(per_sec=10.0, burst=10, llm_per_sec=1.0, llm_burst=1)
     app, mw = make_app(_auth(READER), settings, clock)
     with TestClient(app) as client:
-        reader = {"X-Loom-Key": "reader-secret"}
+        reader = {"X-LoomCtx-Key": "reader-secret"}
         assert client.post("/v1/answer", headers=reader).status_code == 200
         r = client.post("/v1/answer", headers=reader)
         assert r.status_code == 429 and r.headers["retry-after"] == "1"
@@ -272,10 +272,10 @@ def test_llm_routes_have_their_own_stricter_bucket():
     keyed = Grant(id="agent", namespaces=("*",), perms="r", rate_llm_per_sec=1.0)
     app, _ = make_app(_auth(keyed, READER), RateLimitSettings(), clock)
     with TestClient(app) as client:
-        agent = {"X-Loom-Key": "agent-secret"}
+        agent = {"X-LoomCtx-Key": "agent-secret"}
         assert client.post("/v1/answer", headers=agent).status_code == 200
         assert client.post("/v1/answer", headers=agent).status_code == 429
-        assert client.post("/v1/answer", headers={"X-Loom-Key": "reader-secret"}).status_code == 200
+        assert client.post("/v1/answer", headers={"X-LoomCtx-Key": "reader-secret"}).status_code == 200
         assert client.post("/v1/ask", headers=agent).status_code == 200   # general is unlimited
 
 
@@ -295,8 +295,8 @@ def test_open_dev_mode_limits_per_client_ip_only_when_dialled():
 
 
 def test_middleware_reads_the_env_lazily(monkeypatch):
-    monkeypatch.setenv("LOOM_RATE_PER_SEC", "1")
-    monkeypatch.setenv("LOOM_RATE_BURST", "1")
+    monkeypatch.setenv("LOOMCTX_RATE_PER_SEC", "1")
+    monkeypatch.setenv("LOOMCTX_RATE_BURST", "1")
     clock = Clock()
     app = FastAPI()
     app.state.auth = AuthConfig([])

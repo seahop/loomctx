@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "loom": {
+    "loomctx": {
       "command": "docker",
       "args": [
         "compose",
@@ -9,10 +9,10 @@
         "run",
         "--rm",
         "-T",
-        "loom",
+        "loomctx",
         "python",
         "-m",
-        "loom.mcp_server"
+        "loomctx.mcp_server"
       ]
     }
   }

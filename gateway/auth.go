@@ -3,9 +3,9 @@ package main
 // API keys with scoping gates (docs/decisions.md D-013/D-013a) — parses the
 // SAME configuration the Python engine does, so one Secret configures both:
 //
-//   LOOM_AUTH_FILE=/etc/loom-keys/keys.json   preferred: hashed keys + gates,
+//   LOOMCTX_AUTH_FILE=/etc/loomctx-keys/keys.json   preferred: hashed keys + gates,
 //                                             hot-reloaded on mtime change
-//   LOOM_API_KEYS="key:ns:perms,..."          legacy plaintext (hashed in memory)
+//   LOOMCTX_API_KEYS="key:ns:perms,..."          legacy plaintext (hashed in memory)
 //
 // Both unset => auth disabled (open dev mode).
 
@@ -31,7 +31,7 @@ type grant struct {
 	Sources     []string `json:"sources"`
 	Expires     string   `json:"expires"`
 	Disabled    bool     `json:"disabled"`
-	// per-key rate limit (R-10); nil = the LOOM_RATE_PER_SEC default. The
+	// per-key rate limit (R-10); nil = the LOOMCTX_RATE_PER_SEC default. The
 	// engine reads the same two fields (and rate_llm_per_sec, which only
 	// it enforces — the gateway has no LLM routes), so one keys file
 	// serves both.
@@ -99,14 +99,14 @@ type authConfig struct {
 }
 
 func loadAuth() (*authConfig, error) {
-	if path := strings.TrimSpace(os.Getenv("LOOM_AUTH_FILE")); path != "" {
+	if path := strings.TrimSpace(os.Getenv("LOOMCTX_AUTH_FILE")); path != "" {
 		cfg := &authConfig{path: path}
 		if err := cfg.reload(); err != nil {
 			return nil, err
 		}
 		return cfg, nil
 	}
-	return parseAuth(os.Getenv("LOOM_API_KEYS"))
+	return parseAuth(os.Getenv("LOOMCTX_API_KEYS"))
 }
 
 func (a *authConfig) reload() error {
@@ -224,11 +224,11 @@ func parseAuth(raw string) (*authConfig, error) {
 		}
 		parts := strings.Split(item, ":")
 		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-			return nil, fmt.Errorf("LOOM_API_KEYS: bad entry %q — expected key:namespace:perms", item)
+			return nil, fmt.Errorf("LOOMCTX_API_KEYS: bad entry %q — expected key:namespace:perms", item)
 		}
 		for _, c := range parts[2] {
 			if c != 'r' && c != 'w' {
-				return nil, fmt.Errorf("LOOM_API_KEYS: perms must be r/w/rw, got %q", parts[2])
+				return nil, fmt.Errorf("LOOMCTX_API_KEYS: perms must be r/w/rw, got %q", parts[2])
 			}
 		}
 		sum := sha256.Sum256([]byte(parts[0]))
@@ -292,7 +292,7 @@ func (a *authConfig) grantFor(key string) *grant {
 }
 
 func extractKey(r *http.Request) string {
-	if k := r.Header.Get("X-Loom-Key"); k != "" {
+	if k := r.Header.Get("X-LoomCtx-Key"); k != "" {
 		return k
 	}
 	authz := r.Header.Get("Authorization")

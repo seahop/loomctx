@@ -1,14 +1,14 @@
 # Capacity evidence (D-027 6.7 / D-001a: measure, don't assume). Run the
 # load generator inside the cluster against the gateway Service (ingest) or
 # the engine Service (ask):
-#   kubectl -n loom apply -f deploy/k8s/jobs/loadgen.yaml
-#   kubectl -n loom logs job/loom-loadgen -f
+#   kubectl -n loomctx apply -f deploy/k8s/jobs/loadgen.yaml
+#   kubectl -n loomctx logs job/loomctx-loadgen -f
 # Edit args for --mode ask / --count / --concurrency. Delete and re-apply to
 # run again (Jobs are immutable).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: loom-loadgen
+  name: loomctx-loadgen
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -24,14 +24,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: loadgen
-          image: ghcr.io/seahop/loom:latest
-          command: ["python", "-m", "loom.loadgen"]
-          args: ["--url", "http://loom-gateway", "--count", "5000", "--concurrency", "32", "--namespace", "loadtest"]
-          # with auth on (the loom-keys Secret), give the generator a key that
+          image: ghcr.io/seahop/loomctx:latest
+          command: ["python", "-m", "loomctx.loadgen"]
+          args: ["--url", "http://loomctx-gateway", "--count", "5000", "--concurrency", "32", "--namespace", "loadtest"]
+          # with auth on (the loomctx-keys Secret), give the generator a key that
           # may write (and read, for --mode ask) the loadtest namespace:
           # env:
-          #   - name: LOOM_API_KEY
-          #     valueFrom: {secretKeyRef: {name: loom-loadgen-key, key: key}}
+          #   - name: LOOMCTX_API_KEY
+          #     valueFrom: {secretKeyRef: {name: loomctx-loadgen-key, key: key}}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

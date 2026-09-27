@@ -8,11 +8,11 @@ cleanup() { docker compose --profile scale stop >/dev/null 2>&1 || true; docker 
 trap cleanup EXIT
 cleanup
 # Build first so the run uses THIS checkout's code (every engine service carries `build: .`,
-# so a missing image is built rather than pulled — but an existing loom-engine:local from an
+# so a missing image is built rather than pulled — but an existing loomctx-engine:local from an
 # older checkout would otherwise be reused as-is); --wait only on the services with healthchecks (the consumer disables its own, and newer Compose fails
 # --wait on that rather than treating "running" as enough).
-docker compose --profile scale build loom gateway >/dev/null
-docker compose --profile scale up -d --scale gateway=2 --wait --wait-timeout 180 loom nats gateway lb >/dev/null
+docker compose --profile scale build loomctx gateway >/dev/null
+docker compose --profile scale up -d --scale gateway=2 --wait --wait-timeout 180 loomctx nats gateway lb >/dev/null
 docker compose --profile scale up -d consumer >/dev/null
 EID="smoke-$(date +%s)"
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST http://localhost:8081/v1/ingest \

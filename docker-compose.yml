@@ -1,23 +1,27 @@
+# Fixed project name: volumes and containers are loomctx_* whatever the
+# checkout folder is called (D-088).
+name: loomctx
+
 services:
-  # LOOM_DB is a SQLite path by default; point it at postgresql://... to use
+  # LOOMCTX_DB is a SQLite path by default; point it at postgresql://... to use
   # the server-backed store instead (D-011), e.g.:
-  #   LOOM_DB=postgresql://loom:loom@postgres:5432/loom \
-  #     docker compose --profile pg up -d loom postgres
-  # All engine-based services (loom, test, consumer, kafka-consumer, enrich,
+  #   LOOMCTX_DB=postgresql://loomctx:loomctx@postgres:5432/loomctx \
+  #     docker compose --profile pg up -d loomctx postgres
+  # All engine-based services (loomctx, test, consumer, kafka-consumer, enrich,
   # mcp) share ONE image so they can never drift apart — `docker compose build
-  # loom` refreshes them all. Each also carries `build: .` so a fresh clone can
+  # loomctx` refreshes them all. Each also carries `build: .` so a fresh clone can
   # start with any of them (e.g. `docker compose run --rm test`) and compose
-  # builds the image instead of trying to pull loom-engine:local.
-  # Ports bind to localhost unless LOOM_BIND says otherwise (.env.example).
+  # builds the image instead of trying to pull loomctx-engine:local.
+  # Ports bind to localhost unless LOOMCTX_BIND says otherwise (.env.example).
   # Third-party images are pinned by digest; Dependabot bumps them.
-  loom:
+  loomctx:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     restart: unless-stopped
     ports:
-      - "${LOOM_BIND:-127.0.0.1}:8000:8000"
+      - "${LOOMCTX_BIND:-127.0.0.1}:8000:8000"
     volumes:
-      - loom-data:/data
+      - loomctx-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
       interval: 5s
@@ -25,67 +29,67 @@ services:
       retries: 12
       start_period: 5s
     environment:
-      LOOM_DB: ${LOOM_DB:-/data/loom.db}
+      LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
       # Answering LLM (D-012): any OpenAI-compatible provider or self-hosted
       # endpoint, or provider=anthropic. Unset => /v1/answer returns 503.
-      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
-      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
-      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
-      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
-      LOOM_EMBED_PROVIDER: ${LOOM_EMBED_PROVIDER:-}
-      LOOM_EMBED_BASE_URL: ${LOOM_EMBED_BASE_URL:-}
-      LOOM_EMBED_MODEL: ${LOOM_EMBED_MODEL:-}
-      LOOM_EMBED_API_KEY: ${LOOM_EMBED_API_KEY:-}
-      LOOM_EMBED_DIM: ${LOOM_EMBED_DIM:-}
-      LOOM_EMBED_BATCH: ${LOOM_EMBED_BATCH:-}
-      LOOM_EMBED_QUERY_TIMEOUT: ${LOOM_EMBED_QUERY_TIMEOUT:-}
-      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
-      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
-      LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
-      LOOM_MAX_BODY_BYTES: ${LOOM_MAX_BODY_BYTES:-}
-      LOOM_MAX_BATCH: ${LOOM_MAX_BATCH:-}
-      LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
+      LOOMCTX_LLM_MODEL: ${LOOMCTX_LLM_MODEL:-}
+      LOOMCTX_LLM_PROVIDER: ${LOOMCTX_LLM_PROVIDER:-}
+      LOOMCTX_LLM_BASE_URL: ${LOOMCTX_LLM_BASE_URL:-}
+      LOOMCTX_LLM_API_KEY: ${LOOMCTX_LLM_API_KEY:-}
+      LOOMCTX_EMBED_PROVIDER: ${LOOMCTX_EMBED_PROVIDER:-}
+      LOOMCTX_EMBED_BASE_URL: ${LOOMCTX_EMBED_BASE_URL:-}
+      LOOMCTX_EMBED_MODEL: ${LOOMCTX_EMBED_MODEL:-}
+      LOOMCTX_EMBED_API_KEY: ${LOOMCTX_EMBED_API_KEY:-}
+      LOOMCTX_EMBED_DIM: ${LOOMCTX_EMBED_DIM:-}
+      LOOMCTX_EMBED_BATCH: ${LOOMCTX_EMBED_BATCH:-}
+      LOOMCTX_EMBED_QUERY_TIMEOUT: ${LOOMCTX_EMBED_QUERY_TIMEOUT:-}
+      LOOMCTX_API_KEYS: ${LOOMCTX_API_KEYS:-}
+      LOOMCTX_AUTH_FILE: ${LOOMCTX_AUTH_FILE:-}
+      LOOMCTX_MAX_BUDGET: ${LOOMCTX_MAX_BUDGET:-}
+      LOOMCTX_MAX_BODY_BYTES: ${LOOMCTX_MAX_BODY_BYTES:-}
+      LOOMCTX_MAX_BATCH: ${LOOMCTX_MAX_BATCH:-}
+      LOOMCTX_HANDLE_SECRET: ${LOOMCTX_HANDLE_SECRET:-}
       # per-key rate limits (R-10, D-059); unset = unlimited. Per process:
-      # the ceiling is rate x LOOM_WORKERS x replicas (docs/administration.md)
-      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
-      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
-      LOOM_RATE_LLM_PER_SEC: ${LOOM_RATE_LLM_PER_SEC:-}
-      LOOM_RATE_LLM_BURST: ${LOOM_RATE_LLM_BURST:-}
+      # the ceiling is rate x LOOMCTX_WORKERS x replicas (docs/administration.md)
+      LOOMCTX_RATE_PER_SEC: ${LOOMCTX_RATE_PER_SEC:-}
+      LOOMCTX_RATE_BURST: ${LOOMCTX_RATE_BURST:-}
+      LOOMCTX_RATE_LLM_PER_SEC: ${LOOMCTX_RATE_LLM_PER_SEC:-}
+      LOOMCTX_RATE_LLM_BURST: ${LOOMCTX_RATE_LLM_BURST:-}
       # Host / Origin allowlist (D-059): localhost, IPs and service names
-      # always pass; add the public name you serve Loom under
-      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
-      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
-      # The stdio MCP server (`docker compose run --rm -T loom python -m
-      # loom.mcp_server`), `loom.agent_eval` and `loom.enrich resolve` all run
+      # always pass; add the public name you serve LoomCtx under
+      LOOMCTX_ALLOWED_HOSTS: ${LOOMCTX_ALLOWED_HOSTS:-}
+      LOOMCTX_ALLOWED_ORIGINS: ${LOOMCTX_ALLOWED_ORIGINS:-}
+      # The stdio MCP server (`docker compose run --rm -T loomctx python -m
+      # loomctx.mcp_server`), `loomctx.agent_eval` and `loomctx.enrich resolve` all run
       # from THIS service via run/exec, so their dials ride along here.
-      LOOM_MCP_NAMESPACE: ${LOOM_MCP_NAMESPACE:-}
-      LOOM_AGENT_MODEL: ${LOOM_AGENT_MODEL:-}
-      LOOM_AGENT_MAX_STEPS: ${LOOM_AGENT_MAX_STEPS:-}
-      LOOM_ALIAS_TYPES: ${LOOM_ALIAS_TYPES:-}
+      LOOMCTX_MCP_NAMESPACE: ${LOOMCTX_MCP_NAMESPACE:-}
+      LOOMCTX_AGENT_MODEL: ${LOOMCTX_AGENT_MODEL:-}
+      LOOMCTX_AGENT_MAX_STEPS: ${LOOMCTX_AGENT_MAX_STEPS:-}
+      LOOMCTX_ALIAS_TYPES: ${LOOMCTX_ALIAS_TYPES:-}
       # Postgres-shape concurrency dials (D-028); ignored on SQLite
-      LOOM_WORKERS: ${LOOM_WORKERS:-}
-      LOOM_DB_POOL: ${LOOM_DB_POOL:-}
-      LOOM_DB_READ: ${LOOM_DB_READ:-}
-      LOOM_SHARDS: ${LOOM_SHARDS:-}
-      LOOM_BLOB_THRESHOLD: ${LOOM_BLOB_THRESHOLD:-}
-      LOOM_BLOB_DIR: ${LOOM_BLOB_DIR:-}
-      LOOM_BLOB_S3_BUCKET: ${LOOM_BLOB_S3_BUCKET:-}
-      LOOM_BLOB_S3_ENDPOINT: ${LOOM_BLOB_S3_ENDPOINT:-}
+      LOOMCTX_WORKERS: ${LOOMCTX_WORKERS:-}
+      LOOMCTX_DB_POOL: ${LOOMCTX_DB_POOL:-}
+      LOOMCTX_DB_READ: ${LOOMCTX_DB_READ:-}
+      LOOMCTX_SHARDS: ${LOOMCTX_SHARDS:-}
+      LOOMCTX_BLOB_THRESHOLD: ${LOOMCTX_BLOB_THRESHOLD:-}
+      LOOMCTX_BLOB_DIR: ${LOOMCTX_BLOB_DIR:-}
+      LOOMCTX_BLOB_S3_BUCKET: ${LOOMCTX_BLOB_S3_BUCKET:-}
+      LOOMCTX_BLOB_S3_ENDPOINT: ${LOOMCTX_BLOB_S3_ENDPOINT:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
 
   test:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     profiles: ["test"]
     environment:
-      LOOM_DB: /tmp/loom-test.db
+      LOOMCTX_DB: /tmp/loomctx-test.db
       PYTHONPATH: /app/sdk/python
       # from .env when present — lets the e2e answer test hit a real provider
-      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
-      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
-      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
-      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
+      LOOMCTX_LLM_MODEL: ${LOOMCTX_LLM_MODEL:-}
+      LOOMCTX_LLM_PROVIDER: ${LOOMCTX_LLM_PROVIDER:-}
+      LOOMCTX_LLM_BASE_URL: ${LOOMCTX_LLM_BASE_URL:-}
+      LOOMCTX_LLM_API_KEY: ${LOOMCTX_LLM_API_KEY:-}
     volumes:
       - ./tests:/app/tests:ro
       - ./sdk/python:/app/sdk/python:ro   # the SDK is tested against a live engine
@@ -95,32 +99,32 @@ services:
   # Scale shape (D-010): devices -> lb :8081 -> N gateways -> NATS -> writer
   # consumer -> shared store. Start with:
   #   docker compose --profile scale up -d --build --scale gateway=3
-  # The read path stays on the loom service (:8000).
+  # The read path stays on the loomctx service (:8000).
   # ------------------------------------------------------------------------
 
   gateway:
     build:
       context: .
       dockerfile: gateway/Dockerfile
-    image: loom-gateway:local
+    image: loomctx-gateway:local
     profiles: ["scale"]
     restart: unless-stopped
     environment:
-      LOOM_NATS_URL: nats://nats:4222
-      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
-      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
+      LOOMCTX_NATS_URL: nats://nats:4222
+      LOOMCTX_API_KEYS: ${LOOMCTX_API_KEYS:-}
+      LOOMCTX_AUTH_FILE: ${LOOMCTX_AUTH_FILE:-}
       # per-key rate limit (a batch of n costs n) and Host / Origin
       # allowlist, same dials and meaning as the engine (D-059)
-      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
-      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
-      LOOM_MAX_BATCH: ${LOOM_MAX_BATCH:-}
-      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
-      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
+      LOOMCTX_RATE_PER_SEC: ${LOOMCTX_RATE_PER_SEC:-}
+      LOOMCTX_RATE_BURST: ${LOOMCTX_RATE_BURST:-}
+      LOOMCTX_MAX_BATCH: ${LOOMCTX_MAX_BATCH:-}
+      LOOMCTX_ALLOWED_HOSTS: ${LOOMCTX_ALLOWED_HOSTS:-}
+      LOOMCTX_ALLOWED_ORIGINS: ${LOOMCTX_ALLOWED_ORIGINS:-}
       # stream shape (D-029): single-node NATS here, so replicas stay 1;
       # cap the buffer so an ingestion storm degrades predictably
-      LOOM_STREAM_REPLICAS: ${LOOM_STREAM_REPLICAS:-1}
-      LOOM_STREAM_MAX_BYTES: ${LOOM_STREAM_MAX_BYTES:-1073741824}
-      LOOM_STREAM_DISCARD: ${LOOM_STREAM_DISCARD:-old}
+      LOOMCTX_STREAM_REPLICAS: ${LOOMCTX_STREAM_REPLICAS:-1}
+      LOOMCTX_STREAM_MAX_BYTES: ${LOOMCTX_STREAM_MAX_BYTES:-1073741824}
+      LOOMCTX_STREAM_DISCARD: ${LOOMCTX_STREAM_DISCARD:-old}
     depends_on:
       nats:
         condition: service_healthy
@@ -130,7 +134,7 @@ services:
     profiles: ["scale"]
     restart: unless-stopped
     ports:
-      - "${LOOM_BIND:-127.0.0.1}:8081:8080"
+      - "${LOOMCTX_BIND:-127.0.0.1}:8081:8080"
     volumes:
       - ./deploy/compose/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -153,25 +157,25 @@ services:
 
   consumer:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
     profiles: ["scale"]
     restart: unless-stopped
-    command: python -m loom.consumer
+    command: python -m loomctx.consumer
     environment:
-      LOOM_DB: ${LOOM_DB:-/data/loom.db}
-      LOOM_NATS_URL: nats://nats:4222
+      LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
+      LOOMCTX_NATS_URL: nats://nats:4222
       # redelivery + dead-letter dials (D-029)
-      LOOM_STREAM_REPLICAS: ${LOOM_STREAM_REPLICAS:-1}
-      LOOM_ACK_WAIT: ${LOOM_ACK_WAIT:-}
-      LOOM_MAX_DELIVER: ${LOOM_MAX_DELIVER:-}
-      LOOM_DEADLETTER_MAX_BYTES: ${LOOM_DEADLETTER_MAX_BYTES:-}
+      LOOMCTX_STREAM_REPLICAS: ${LOOMCTX_STREAM_REPLICAS:-1}
+      LOOMCTX_ACK_WAIT: ${LOOMCTX_ACK_WAIT:-}
+      LOOMCTX_MAX_DELIVER: ${LOOMCTX_MAX_DELIVER:-}
+      LOOMCTX_DEADLETTER_MAX_BYTES: ${LOOMCTX_DEADLETTER_MAX_BYTES:-}
       # the gateway's keys, so queued claims get the sender's write gates (D-059)
-      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
-      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
+      LOOMCTX_API_KEYS: ${LOOMCTX_API_KEYS:-}
+      LOOMCTX_AUTH_FILE: ${LOOMCTX_AUTH_FILE:-}
     volumes:
-      - loom-data:/data
+      - loomctx-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -180,31 +184,31 @@ services:
   # pipelines already publish to. Point it at your brokers; a Redpanda for
   # local trial ships in the same profile.
   #   docker compose --profile kafka up -d
-  # NOTE: the broker credentials below authenticate Loom TO the broker; there
+  # NOTE: the broker credentials below authenticate LoomCtx TO the broker; there
   # is no per-message principal on this path — anyone who can produce to the
   # topic writes into any namespace. Topic ACLs are the write permission.
   kafka-consumer:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
     profiles: ["kafka"]
     restart: unless-stopped
-    command: python -m loom.kafka_consumer
+    command: python -m loomctx.kafka_consumer
     environment:
-      LOOM_DB: ${LOOM_DB:-/data/loom.db}
-      LOOM_KAFKA_BROKERS: ${LOOM_KAFKA_BROKERS:-redpanda:9092}
-      LOOM_KAFKA_TOPICS: ${LOOM_KAFKA_TOPICS:-loom.ingest}
-      LOOM_KAFKA_GROUP: ${LOOM_KAFKA_GROUP:-loom-writer}
-      LOOM_KAFKA_DEADLETTER: ${LOOM_KAFKA_DEADLETTER:-}
-      LOOM_MAX_DELIVER: ${LOOM_MAX_DELIVER:-}
-      LOOM_KAFKA_SECURITY_PROTOCOL: ${LOOM_KAFKA_SECURITY_PROTOCOL:-}
-      LOOM_KAFKA_SASL_MECHANISM: ${LOOM_KAFKA_SASL_MECHANISM:-}
-      LOOM_KAFKA_SASL_USERNAME: ${LOOM_KAFKA_SASL_USERNAME:-}
-      LOOM_KAFKA_SASL_PASSWORD: ${LOOM_KAFKA_SASL_PASSWORD:-}
-      LOOM_KAFKA_SSL_CAFILE: ${LOOM_KAFKA_SSL_CAFILE:-}
+      LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
+      LOOMCTX_KAFKA_BROKERS: ${LOOMCTX_KAFKA_BROKERS:-redpanda:9092}
+      LOOMCTX_KAFKA_TOPICS: ${LOOMCTX_KAFKA_TOPICS:-loomctx.ingest}
+      LOOMCTX_KAFKA_GROUP: ${LOOMCTX_KAFKA_GROUP:-loomctx-writer}
+      LOOMCTX_KAFKA_DEADLETTER: ${LOOMCTX_KAFKA_DEADLETTER:-}
+      LOOMCTX_MAX_DELIVER: ${LOOMCTX_MAX_DELIVER:-}
+      LOOMCTX_KAFKA_SECURITY_PROTOCOL: ${LOOMCTX_KAFKA_SECURITY_PROTOCOL:-}
+      LOOMCTX_KAFKA_SASL_MECHANISM: ${LOOMCTX_KAFKA_SASL_MECHANISM:-}
+      LOOMCTX_KAFKA_SASL_USERNAME: ${LOOMCTX_KAFKA_SASL_USERNAME:-}
+      LOOMCTX_KAFKA_SASL_PASSWORD: ${LOOMCTX_KAFKA_SASL_PASSWORD:-}
+      LOOMCTX_KAFKA_SSL_CAFILE: ${LOOMCTX_KAFKA_SSL_CAFILE:-}
     volumes:
-      - loom-data:/data
+      - loomctx-data:/data
     depends_on:
       redpanda:
         condition: service_healthy
@@ -223,78 +227,78 @@ services:
 
   # Enrichment worker (D-018): embeddings + document claim extraction +
   # dossiers + entity resolution. One-shot drain: docker compose run --rm enrich
-  #   python -m loom.enrich run --once
+  #   python -m loomctx.enrich run --once
   enrich:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     healthcheck:
       disable: true    # no HTTP port here; the image's readyz check doesn't apply
     profiles: ["enrich"]
-    command: python -m loom.enrich run --interval 30
+    command: python -m loomctx.enrich run --interval 30
     restart: unless-stopped
     volumes:
-      - loom-data:/data
+      - loomctx-data:/data
     environment:
-      LOOM_DB: ${LOOM_DB:-/data/loom.db}
-      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
-      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
-      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
-      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
-      LOOM_EMBED_PROVIDER: ${LOOM_EMBED_PROVIDER:-}
-      LOOM_EMBED_BASE_URL: ${LOOM_EMBED_BASE_URL:-}
-      LOOM_EMBED_MODEL: ${LOOM_EMBED_MODEL:-}
-      LOOM_EMBED_API_KEY: ${LOOM_EMBED_API_KEY:-}
-      LOOM_EMBED_DIM: ${LOOM_EMBED_DIM:-}
-      LOOM_EMBED_BATCH: ${LOOM_EMBED_BATCH:-}
+      LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
+      LOOMCTX_LLM_MODEL: ${LOOMCTX_LLM_MODEL:-}
+      LOOMCTX_LLM_PROVIDER: ${LOOMCTX_LLM_PROVIDER:-}
+      LOOMCTX_LLM_BASE_URL: ${LOOMCTX_LLM_BASE_URL:-}
+      LOOMCTX_LLM_API_KEY: ${LOOMCTX_LLM_API_KEY:-}
+      LOOMCTX_EMBED_PROVIDER: ${LOOMCTX_EMBED_PROVIDER:-}
+      LOOMCTX_EMBED_BASE_URL: ${LOOMCTX_EMBED_BASE_URL:-}
+      LOOMCTX_EMBED_MODEL: ${LOOMCTX_EMBED_MODEL:-}
+      LOOMCTX_EMBED_API_KEY: ${LOOMCTX_EMBED_API_KEY:-}
+      LOOMCTX_EMBED_DIM: ${LOOMCTX_EMBED_DIM:-}
+      LOOMCTX_EMBED_BATCH: ${LOOMCTX_EMBED_BATCH:-}
       # worker dials (D-039 / D-042)
-      LOOM_CHUNK_LIMIT: ${LOOM_CHUNK_LIMIT:-}
-      LOOM_ALIAS_TYPES: ${LOOM_ALIAS_TYPES:-}
+      LOOMCTX_CHUNK_LIMIT: ${LOOMCTX_CHUNK_LIMIT:-}
+      LOOMCTX_ALIAS_TYPES: ${LOOMCTX_ALIAS_TYPES:-}
 
   # MCP over streamable HTTP for remote agents. Local agents spawn stdio
-  # instead: claude mcp add loom -- docker compose run --rm -T loom
-  #   python -m loom.mcp_server
-  # Auth (D-024): with LOOM_AUTH_FILE / LOOM_API_KEYS set, every request on
-  # this transport must carry the same X-Loom-Key / Bearer header as the
+  # instead: claude mcp add loomctx -- docker compose run --rm -T loomctx
+  #   python -m loomctx.mcp_server
+  # Auth (D-024): with LOOMCTX_AUTH_FILE / LOOMCTX_API_KEYS set, every request on
+  # this transport must carry the same X-LoomCtx-Key / Bearer header as the
   # REST API, and each tool call is scoped by that key's grants. Unset =
   # open dev mode, which is why the port binds to localhost by default.
   mcp:
     build: .
-    image: loom-engine:local
+    image: loomctx-engine:local
     healthcheck:
       disable: true    # the image's check probes the engine's :8000/readyz, which this service doesn't serve
     profiles: ["mcp"]
     restart: unless-stopped
-    command: python -m loom.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
+    command: python -m loomctx.mcp_server --transport streamable-http --host 0.0.0.0 --port 8300
     ports:
-      - "${LOOM_BIND:-127.0.0.1}:8300:8300"
+      - "${LOOMCTX_BIND:-127.0.0.1}:8300:8300"
     volumes:
-      - loom-data:/data
+      - loomctx-data:/data
     environment:
-      LOOM_DB: ${LOOM_DB:-/data/loom.db}
-      LOOM_MCP_NAMESPACE: ${LOOM_MCP_NAMESPACE:-}
-      LOOM_LLM_MODEL: ${LOOM_LLM_MODEL:-}
-      LOOM_LLM_PROVIDER: ${LOOM_LLM_PROVIDER:-}
-      LOOM_LLM_BASE_URL: ${LOOM_LLM_BASE_URL:-}
-      LOOM_LLM_API_KEY: ${LOOM_LLM_API_KEY:-}
+      LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
+      LOOMCTX_MCP_NAMESPACE: ${LOOMCTX_MCP_NAMESPACE:-}
+      LOOMCTX_LLM_MODEL: ${LOOMCTX_LLM_MODEL:-}
+      LOOMCTX_LLM_PROVIDER: ${LOOMCTX_LLM_PROVIDER:-}
+      LOOMCTX_LLM_BASE_URL: ${LOOMCTX_LLM_BASE_URL:-}
+      LOOMCTX_LLM_API_KEY: ${LOOMCTX_LLM_API_KEY:-}
       # find_related and semantic ranking need the same embedder the
       # worker used; without this block that tool always errors here
-      LOOM_EMBED_PROVIDER: ${LOOM_EMBED_PROVIDER:-}
-      LOOM_EMBED_BASE_URL: ${LOOM_EMBED_BASE_URL:-}
-      LOOM_EMBED_MODEL: ${LOOM_EMBED_MODEL:-}
-      LOOM_EMBED_API_KEY: ${LOOM_EMBED_API_KEY:-}
-      LOOM_EMBED_DIM: ${LOOM_EMBED_DIM:-}
-      LOOM_EMBED_QUERY_TIMEOUT: ${LOOM_EMBED_QUERY_TIMEOUT:-}
-      LOOM_API_KEYS: ${LOOM_API_KEYS:-}
-      LOOM_AUTH_FILE: ${LOOM_AUTH_FILE:-}
-      LOOM_MAX_BUDGET: ${LOOM_MAX_BUDGET:-}
-      LOOM_HANDLE_SECRET: ${LOOM_HANDLE_SECRET:-}
+      LOOMCTX_EMBED_PROVIDER: ${LOOMCTX_EMBED_PROVIDER:-}
+      LOOMCTX_EMBED_BASE_URL: ${LOOMCTX_EMBED_BASE_URL:-}
+      LOOMCTX_EMBED_MODEL: ${LOOMCTX_EMBED_MODEL:-}
+      LOOMCTX_EMBED_API_KEY: ${LOOMCTX_EMBED_API_KEY:-}
+      LOOMCTX_EMBED_DIM: ${LOOMCTX_EMBED_DIM:-}
+      LOOMCTX_EMBED_QUERY_TIMEOUT: ${LOOMCTX_EMBED_QUERY_TIMEOUT:-}
+      LOOMCTX_API_KEYS: ${LOOMCTX_API_KEYS:-}
+      LOOMCTX_AUTH_FILE: ${LOOMCTX_AUTH_FILE:-}
+      LOOMCTX_MAX_BUDGET: ${LOOMCTX_MAX_BUDGET:-}
+      LOOMCTX_HANDLE_SECRET: ${LOOMCTX_HANDLE_SECRET:-}
       # per tool call; `answer` / `find_related` also spend the LLM bucket
-      LOOM_RATE_PER_SEC: ${LOOM_RATE_PER_SEC:-}
-      LOOM_RATE_BURST: ${LOOM_RATE_BURST:-}
-      LOOM_RATE_LLM_PER_SEC: ${LOOM_RATE_LLM_PER_SEC:-}
-      LOOM_RATE_LLM_BURST: ${LOOM_RATE_LLM_BURST:-}
-      LOOM_ALLOWED_HOSTS: ${LOOM_ALLOWED_HOSTS:-}
-      LOOM_ALLOWED_ORIGINS: ${LOOM_ALLOWED_ORIGINS:-}
+      LOOMCTX_RATE_PER_SEC: ${LOOMCTX_RATE_PER_SEC:-}
+      LOOMCTX_RATE_BURST: ${LOOMCTX_RATE_BURST:-}
+      LOOMCTX_RATE_LLM_PER_SEC: ${LOOMCTX_RATE_LLM_PER_SEC:-}
+      LOOMCTX_RATE_LLM_BURST: ${LOOMCTX_RATE_LLM_BURST:-}
+      LOOMCTX_ALLOWED_HOSTS: ${LOOMCTX_ALLOWED_HOSTS:-}
+      LOOMCTX_ALLOWED_ORIGINS: ${LOOMCTX_ALLOWED_ORIGINS:-}
 
   # TypeScript SDK toolchain (D-026): regen-check the generated contract
   # types, build, and run the client test against the live engine.
@@ -305,12 +309,12 @@ services:
       dockerfile: sdk/typescript/Dockerfile
     profiles: ["sdk"]
     environment:
-      LOOM_URL: http://loom:8000
+      LOOMCTX_URL: http://loomctx:8000
     volumes:
       - ./sdk/typescript/src:/app/src        # so `npm run gen` writes back
       - ./contracts:/contracts:ro
     depends_on:
-      loom:
+      loomctx:
         condition: service_healthy
 
   # Go SDK toolchain (D-034): vet, contract drift test, live test.
@@ -321,11 +325,11 @@ services:
       dockerfile: sdk/go/Dockerfile
     profiles: ["sdk"]
     environment:
-      LOOM_URL: http://loom:8000
+      LOOMCTX_URL: http://loomctx:8000
     volumes:
       - ./contracts:/contracts:ro
     depends_on:
-      loom:
+      loomctx:
         condition: service_healthy
 
   # Server-backed store for the database-scaling lane (D-011).
@@ -333,11 +337,11 @@ services:
     image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f   # postgres 17 + the vector extension (D-025)
     profiles: ["pg"]
     environment:
-      POSTGRES_USER: loom
-      POSTGRES_PASSWORD: loom
-      POSTGRES_DB: loom
+      POSTGRES_USER: loomctx
+      POSTGRES_PASSWORD: loomctx
+      POSTGRES_DB: loomctx
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U loom"]
+      test: ["CMD-SHELL", "pg_isready -U loomctx"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -350,6 +354,6 @@ services:
   # as another profile the same way postgres does.
 
 volumes:
-  loom-data:
+  loomctx-data:
   nats-data:
   pg-data:

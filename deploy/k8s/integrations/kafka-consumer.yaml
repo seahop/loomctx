@@ -1,27 +1,27 @@
 # Kafka / Redpanda writer consumer (D-034): standalone manifest — apply into
-# the loom namespace next to any shape when your pipelines already publish
+# the loomctx namespace next to any shape when your pipelines already publish
 # to Kafka. Scale replicas up to the topic's partition count.
-#   kubectl -n loom apply -f deploy/k8s/integrations/kafka-consumer.yaml
+#   kubectl -n loomctx apply -f deploy/k8s/integrations/kafka-consumer.yaml
 #
-# SECURITY: the broker credentials below authenticate Loom TO the broker and
+# SECURITY: the broker credentials below authenticate LoomCtx TO the broker and
 # encrypt the hop. There is no per-message principal on this path — anyone
 # who can produce to the topic writes into ANY namespace. The topic's ACL is
 # the write permission; grant it as narrowly as you would a write key.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: loom-kafka-consumer
+  name: loomctx-kafka-consumer
   labels:
-    app: loom-kafka-consumer
+    app: loomctx-kafka-consumer
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: loom-kafka-consumer
+      app: loomctx-kafka-consumer
   template:
     metadata:
       labels:
-        app: loom-kafka-consumer
+        app: loomctx-kafka-consumer
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -32,46 +32,46 @@ spec:
           type: RuntimeDefault
       containers:
         - name: consumer
-          image: ghcr.io/seahop/loom:latest
-          command: ["python", "-m", "loom.kafka_consumer"]
+          image: ghcr.io/seahop/loomctx:latest
+          command: ["python", "-m", "loomctx.kafka_consumer"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           env:
-            - name: LOOM_DB
+            - name: LOOMCTX_DB
               valueFrom:
                 secretKeyRef:
-                  name: loom-db
-                  key: LOOM_DB
-            - name: LOOM_KAFKA_BROKERS
+                  name: loomctx-db
+                  key: LOOMCTX_DB
+            - name: LOOMCTX_KAFKA_BROKERS
               value: "kafka:9092"          # your brokers
-            - name: LOOM_KAFKA_TOPICS
-              value: "loom.ingest"         # comma-separated
-            - name: LOOM_KAFKA_GROUP
-              value: "loom-writer"
-            - name: LOOM_KAFKA_DEADLETTER
-              value: "loom.deadletter"
+            - name: LOOMCTX_KAFKA_TOPICS
+              value: "loomctx.ingest"         # comma-separated
+            - name: LOOMCTX_KAFKA_GROUP
+              value: "loomctx-writer"
+            - name: LOOMCTX_KAFKA_DEADLETTER
+              value: "loomctx.deadletter"
             # --- broker auth / TLS: uncomment for a secured cluster.
             #     PLAINTEXT (default) | SSL | SASL_PLAINTEXT | SASL_SSL
-            # - name: LOOM_KAFKA_SECURITY_PROTOCOL
+            # - name: LOOMCTX_KAFKA_SECURITY_PROTOCOL
             #   value: "SASL_SSL"
-            # - name: LOOM_KAFKA_SASL_MECHANISM
+            # - name: LOOMCTX_KAFKA_SASL_MECHANISM
             #   value: "SCRAM-SHA-256"      # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
-            # - name: LOOM_KAFKA_SASL_USERNAME
+            # - name: LOOMCTX_KAFKA_SASL_USERNAME
             #   valueFrom:
-            #     secretKeyRef: {name: loom-kafka, key: username}
-            # - name: LOOM_KAFKA_SASL_PASSWORD
+            #     secretKeyRef: {name: loomctx-kafka, key: username}
+            # - name: LOOMCTX_KAFKA_SASL_PASSWORD
             #   valueFrom:
-            #     secretKeyRef: {name: loom-kafka, key: password}
-            # - name: LOOM_KAFKA_SSL_CAFILE   # private CA; system roots when unset
-            #   value: /etc/loom/kafka-ca.pem
+            #     secretKeyRef: {name: loomctx-kafka, key: password}
+            # - name: LOOMCTX_KAFKA_SSL_CAFILE   # private CA; system roots when unset
+            #   value: /etc/loomctx/kafka-ca.pem
           volumeMounts:
             - name: tmp
               mountPath: /tmp
             # - name: kafka-ca
-            #   mountPath: /etc/loom
+            #   mountPath: /etc/loomctx
             #   readOnly: true
           resources:
             requests:
@@ -84,5 +84,5 @@ spec:
           emptyDir: {}
         # - name: kafka-ca
         #   secret:
-        #     secretName: loom-kafka
+        #     secretName: loomctx-kafka
         #     items: [{key: ca.pem, path: kafka-ca.pem}]

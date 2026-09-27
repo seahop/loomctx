@@ -1,6 +1,6 @@
-# Loom
+# LoomCtx
 
-**A context engine for AI agents.** Loom absorbs pieces of data about entities as they
+**A context engine for AI agents.** LoomCtx absorbs pieces of data about entities as they
 arrive over time — structured events *and* unstructured documents — and hands agents
 small, question-scoped, token-budgeted slices of that knowledge instead of raw dumps.
 
@@ -8,7 +8,7 @@ small, question-scoped, token-budgeted slices of that knowledge instead of raw d
 
 Teams accumulate facts about things (a host on a network, a user, a vendor, a case)
 across many sources and long time spans. When an agent needs to reason about one of
-those things, it usually gets either nothing or everything. Loom's job is the middle:
+those things, it usually gets either nothing or everything. LoomCtx's job is the middle:
 *"what do we know about `web-01` relevant to Tuesday's alert, in under 800 tokens,
 with citations."*
 
@@ -34,11 +34,11 @@ bitemporal reads); red teams ask *what's exploitable and reachable from
 here* (scopes and relationship traversal into one budgeted pack). Same
 store, same engine — the bundled demo is network telemetry and the
 [tutorial](docs/tutorial.md) builds a vulnerability-management domain
-without touching Loom's code.
+without touching LoomCtx's code.
 
 ## How it differs
 
-| Instead of | What you get there | With Loom |
+| Instead of | What you get there | With LoomCtx |
 | --- | --- | --- |
 | A vector DB / RAG pipeline | the top-k chunks by similarity; no notion of *when* a fact held, *who* asserted it, or that two sources disagree | append-only, bitemporal observations; conflicts between sources are the first item in the pack; every item cites the observation ids behind it |
 | Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
@@ -65,10 +65,10 @@ without touching Loom's code.
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
 | `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
-| `docs/models.md` | Which LLMs drive Loom well as agents: measured scorecard with cost, and how to re-run it |
+| `docs/models.md` | Which LLMs drive LoomCtx well as agents: measured scorecard with cost, and how to re-run it |
 | `docs/evaluation.md` | The retrieval scorecard: context packs against full-context, vector and recency baselines, rule-scored |
 | `docs/interop.md` | Every connector — STIX 2.1, OCSF (findings and detections), raw LDAP / LDIF, Entra ID, Okta, nmap, OSV/GHSA, cloud inventory, ATT&CK, host artifacts (processes, files), red-team operation logs — with identity resolution across tools, coverage and format-drift reporting, and the purple report: import/export, mapping tables, `examples/stix_import.py` (PROV-O provenance export, `GET /v1/observations/{id}/prov`, is in `docs/contracts.md`) |
-| `src/loom/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
+| `src/loomctx/` | The engine: contracts, store, context-pack builder, HTTP API, workers, seed data, `connectors/` (real public data) |
 | `gateway/` | The Go ingest gateway for the scale shape: validates against `contracts/schemas.json`, forwards to NATS JetStream |
 | `sdk/python/`, `sdk/typescript/`, `sdk/go/` | Thin client SDKs; TypeScript/Go types are generated from or validated against `contracts/` |
 | `contracts/` | `schemas.json` (JSON Schema) and `openapi.json`, both regenerated and drift-checked in CI |
@@ -89,10 +89,10 @@ scratch. Full index: **[docs/README.md](docs/README.md)**.
 docker compose run --rm test
 
 # Start the engine (HTTP API on :8000) and load the demo dataset
-docker compose up -d --wait loom
-docker compose exec loom python -m loom.seed load   # 592 claims + 5 documents
+docker compose up -d --wait loomctx
+docker compose exec loomctx python -m loomctx.seed load   # 592 claims + 5 documents
 # Optional: real data next to it — CISA KEV + NVD + EPSS (docs/real-data.md)
-docker compose exec loom python -m loom.connectors.vulns load --db /data/loom.db --bridge-seed-hosts
+docker compose exec loomctx python -m loomctx.connectors.vulns load --db /data/loomctx.db --bridge-seed-hosts
 
 # Ask a focused, budgeted question about an entity
 curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
@@ -121,7 +121,7 @@ automatically. The gitignored `.env` never reaches the repo or the images.
 With it filled in, the real-provider e2e test activates:
 `docker compose run --rm test pytest -q tests/test_e2e_answer.py`.
 
-Ports bind to localhost by default; set `LOOM_BIND=0.0.0.0` in `.env`
+Ports bind to localhost by default; set `LOOMCTX_BIND=0.0.0.0` in `.env`
 (and mount keys first) to reach the engine from the LAN.
 
 Deploying beyond a laptop: `kubectl apply -k deploy/k8s`, or the **scale
@@ -132,7 +132,7 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 ## Governance
 
 - **License:** Apache-2.0.
-- **Auth:** real API keys via `python -m loom.keys generate` — hashed at
+- **Auth:** real API keys via `python -m loomctx.keys generate` — hashed at
   rest, hot-rotated, and scoped per key: namespaces, read/write (senders get
   write-only keys), entity-type allowlists (an operator's agent sees only
   that user's slice of the world — the query/LLM surface itself is never
@@ -143,7 +143,7 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
   can never duplicate a fact.
 - **Operability:** Prometheus `/metrics` on engine and gateway; `/readyz`
   probes the store.
-- **Lifecycle:** `python -m loom.lifecycle` — JSONL export/import (backup and
+- **Lifecycle:** `python -m loomctx.lifecycle` — JSONL export/import (backup and
   SQLite⇄Postgres migration), retention purge, tombstone redaction.
 - **Quality:** a retrieval scorecard runs in CI (`tests/test_quality.py`), so
   ranking changes ship with evidence.
@@ -152,7 +152,7 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 
 Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.md`.
 
-- **Ranking without an embedder is lexical.** Set `LOOM_EMBED_*` for
+- **Ranking without an embedder is lexical.** Set `LOOMCTX_EMBED_*` for
   semantic ranking, document excerpts and `find_related`; without it the
   engine still works (BM25 over what the pack renders, predicate names
   split into words), but a question has to share words with the facts it
@@ -207,5 +207,5 @@ mid-October 2026).
 Agents connect natively over MCP:
 
 ```bash
-claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
+claude mcp add loomctx -- docker compose --project-directory "$PWD" run --rm -T loomctx python -m loomctx.mcp_server
 ```

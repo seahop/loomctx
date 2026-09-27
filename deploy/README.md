@@ -1,10 +1,10 @@
-# Deploying Loom
+# Deploying LoomCtx
 
 Same images, same `/v1/ingest` contract, pick a shape:
 
 | Shape | For | How |
 | --- | --- | --- |
-| Local Compose, default | development, demos on one machine | `docker compose up loom` |
+| Local Compose, default | development, demos on one machine | `docker compose up loomctx` |
 | Local Compose, **scale** | rehearsing/exercising the ingestion tier | `docker compose --profile scale up -d --build --scale gateway=3` |
 | Kubernetes, default | shared/team deployments | `kubectl apply -k deploy/k8s` |
 | Kubernetes, **scale** | high-volume ingestion, SQLite kept (D-010) | `kubectl apply -k deploy/k8s/scale` |
@@ -30,8 +30,8 @@ SQLite trade documented in D-008.
 ## Operating it
 
 - **Metrics:** scrape the engine and each gateway at `GET /metrics`
-  (Prometheus text). Watch `loom_gateway_rejected_*` for abuse,
-  `loom_ingest_deduped_total` for retry storms, `loom_pack_build_seconds`
+  (Prometheus text). Watch `loomctx_gateway_rejected_*` for abuse,
+  `loomctx_ingest_deduped_total` for retry storms, `loomctx_pack_build_seconds`
   for read latency.
 - **Probes:** liveness `GET /healthz`; readiness `GET /readyz` (probes the
   store — a pod with a dead database drops out of the Service).
@@ -39,29 +39,29 @@ SQLite trade documented in D-008.
   first `kubectl apply` just works inside the cluster. Before exposing
   anything, mint keys (`docs/administration.md`), create a Secret from the
   keys file, and mount it on the engine and gateways — the commented
-  `LOOM_AUTH_FILE` blocks in `base/deployment.yaml`, `scale/gateway.yaml`
+  `LOOMCTX_AUTH_FILE` blocks in `base/deployment.yaml`, `scale/gateway.yaml`
   and `scale-pg/gateway.yaml` show exactly where:
 
   ```bash
-  kubectl -n loom create secret generic loom-keys --from-file=keys.json=secrets/keys.json
+  kubectl -n loomctx create secret generic loomctx-keys --from-file=keys.json=secrets/keys.json
   ```
 
   Both engine and gateway hot-reload the file, so rotating keys is
   `kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`
-  with no restarts. Set `LOOM_HANDLE_SECRET` (any long random string, the
+  with no restarts. Set `LOOMCTX_HANDLE_SECRET` (any long random string, the
   same on every engine replica) alongside it so expansion handles are signed
   (D-021).
 
 - **Host allowlist (D-059):** engine, MCP server and gateway answer 400 to
   a `Host` they don't recognise (DNS-rebinding defence). Pod IPs (probes),
-  `localhost` (port-forward), Service names (`loom`, `loom-gateway`) and
+  `localhost` (port-forward), Service names (`loomctx`, `loomctx-gateway`) and
   `*.svc` / `*.svc.cluster.local` pass by default. Behind an Ingress or a
-  load balancer with a DNS name, add that name as `LOOM_ALLOWED_HOSTS` on
-  the engine and gateway Deployments (`loom.example.com,*.corp.example.com`).
+  load balancer with a DNS name, add that name as `LOOMCTX_ALLOWED_HOSTS` on
+  the engine and gateway Deployments (`loomctx.example.com,*.corp.example.com`).
 
-- **Rate limits (R-10, D-059):** `LOOM_RATE_*` and the keys file's per-key
+- **Rate limits (R-10, D-059):** `LOOMCTX_RATE_*` and the keys file's per-key
   fields are enforced **per process** — the ceiling for one key is the
-  dial × `LOOM_WORKERS` × replicas (HPA scale-out raises it). Size the
+  dial × `LOOMCTX_WORKERS` × replicas (HPA scale-out raises it). Size the
   dials for your replica count, or enforce an exact bound at the ingress.
 
 - **Pod posture:** every pod runs as uid 10001 with a read-only root
@@ -70,18 +70,18 @@ SQLite trade documented in D-008.
   writable paths are the data volume and an `emptyDir` at `/tmp`. Each
   shape ships a **default-deny ingress** NetworkPolicy plus one allowance
   per tier (engine and gateway HTTP from anywhere the cluster routes,
-  NATS only from gateways and consumers, Postgres only from Loom's pods
+  NATS only from gateways and consumers, Postgres only from LoomCtx's pods
   and the CNPG operator). Egress is deliberately left open — engines and
   workers call LLM/embedding providers, the feeds, and possibly an external
   Postgres. Enforcement needs a CNI that implements NetworkPolicy (Calico,
   Cilium, GKE Dataplane V2); kind's default CNI silently ignores it. A
   scraper that wants NATS's monitor port labels itself
-  `loom.dev/scrape: "true"`. Tiers with ≥ 2 replicas carry a
+  `loomctx.dev/scrape: "true"`. Tiers with ≥ 2 replicas carry a
   PodDisruptionBudget (`minAvailable: 1`, NATS `maxUnavailable: 1`) so a
   node drain never takes a whole tier.
 
 - **Upgrading:** the engine migrates its store in place on first open
-  (schema version in `loom_meta`; a current schema takes a no-DDL fast
+  (schema version in `loomctx_meta`; a current schema takes a no-DDL fast
   path). Every schema bump is proven on a populated database before it is
   tagged, not just on a fresh one (D-045): seed Postgres with the image
   from the previous schema's last commit, open the same database with the
@@ -103,11 +103,11 @@ SQLite trade documented in D-008.
     for the duration of the build — open the new image once during a
     quiet window, or accept that the first engine pod to start does it.
     The enrichment workers now scan their backlogs from persisted
-    high-water marks (`loom_meta` rows named `hwm:*`, forgotten by
+    high-water marks (`loomctx_meta` rows named `hwm:*`, forgotten by
     `wipe()`); a worker's first tick after the upgrade — and every 16th
     tick — is the old full scan, so nothing is missed and the marks take
     over from there. On SQLite, reads now use a small pool of WAL read
-    connections beside the single writer (`LOOM_DB_READERS`, default 4;
+    connections beside the single writer (`LOOMCTX_DB_READERS`, default 4;
     `0` restores the single connection).
 
 **HPA prerequisite:** the cluster must run metrics-server (managed clusters
@@ -134,7 +134,7 @@ as a sidecar of the engine pod so it shares the SQLite volume. The `scale-pg`
 overlay is the fully horizontal version: point `postgres-secret.yaml` at your
 Postgres and gateways, engines, and consumers all scale independently (the
 consumers share one JetStream durable, so NATS spreads messages across
-replicas). CI publishes `ghcr.io/seahop/loom-gateway` alongside the engine
+replicas). CI publishes `ghcr.io/seahop/loomctx-gateway` alongside the engine
 image.
 
 Manifest layout: `deploy/k8s/base/` holds the default resources;
@@ -151,39 +151,39 @@ rolled out from the shipped manifests — pods run as uid 10001 with the
 persisted its stream on its PVC, and claims posted to the gateway Service
 arrived through the queue and consumers in the store served by the engine
 replicas. The `scale-pg` run used an in-cluster `pgvector/pgvector:pg17`
-Deployment behind the `loom-db` Secret.
+Deployment behind the `loomctx-db` Secret.
 
-CI publishes the image to `ghcr.io/seahop/loom` (`latest` + per-commit SHA tags)
+CI publishes the image to `ghcr.io/seahop/loomctx` (`latest` + per-commit SHA tags)
 on every push to `main`; a `vX.Y.Z` tag push re-tags that commit's
 already-published image as `:vX.Y.Z` rather than rebuilding it (D-045).
 The repository is meant to be public; **as of 2026-09-24 it is still
 private on GitHub, and so are the packages** (anonymous `docker manifest
-inspect ghcr.io/seahop/loom:latest` is refused). GHCR package visibility is
+inspect ghcr.io/seahop/loomctx:latest` is refused). GHCR package visibility is
 a **separate** setting from the repository's: after flipping the repo, an
-owner must open each package on GitHub (Packages → loom → Package settings
+owner must open each package on GitHub (Packages → loomctx → Package settings
 → Change visibility) once, or the first pull fails with `denied`. Until
 then — and for any private fork — the nodes need a pull secret: a GitHub
 token with `read:packages`, attached to the namespace's default
 ServiceAccount so no manifest changes:
 
 ```bash
-kubectl -n loom create secret docker-registry ghcr --docker-server=ghcr.io \
+kubectl -n loomctx create secret docker-registry ghcr --docker-server=ghcr.io \
   --docker-username=GITHUB_USER --docker-password="$GHCR_TOKEN"
-kubectl -n loom patch serviceaccount default -p '{"imagePullSecrets":[{"name":"ghcr"}]}'
+kubectl -n loomctx patch serviceaccount default -p '{"imagePullSecrets":[{"name":"ghcr"}]}'
 ```
 
 Then:
 
 ```bash
 kubectl apply -k deploy/k8s
-kubectl -n loom rollout status deploy/loom
+kubectl -n loomctx rollout status deploy/loomctx
 
 # try it without an ingress
-kubectl -n loom port-forward svc/loom 8000:80
+kubectl -n loomctx port-forward svc/loomctx 8000:80
 curl -s localhost:8000/healthz
 
 # load the demo dataset into the running pod's volume
-kubectl -n loom exec deploy/loom -- python -m loom.seed load
+kubectl -n loomctx exec deploy/loomctx -- python -m loomctx.seed load
 ```
 
 Pin a specific version by editing `images:` in `deploy/k8s/kustomization.yaml`
@@ -200,25 +200,25 @@ cloud enforces that a laptop cluster does not, and the recipe for each:
 | It | On GKE | Recipe |
 | --- | --- | --- |
 | Image pulls | a new project's default compute service account has no roles | `gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:NUM-compute@developer.gserviceaccount.com --role=roles/artifactregistry.reader` (or pull from GHCR) |
-| Your own build | CI images lag local commits | `docker tag loom-engine:local REGION-docker.pkg.dev/PROJECT/loom/loom:tag && docker push …`, then an overlay `images:` entry with `newName`, and roll by **digest** so a re-pushed tag is not served from the node cache |
-| JetStream storage | PVC sizes are real; a 4 GiB stream on a 1 Gi claim is refused | NATS PVC is 8 Gi in the shipped manifest; keep `LOOM_STREAM_MAX_BYTES × LOOM_STREAM_REPLICAS` under it |
-| Postgres storage | 2 Gi filled up under the corpus with vectors | 20 Gi in the shipped manifest. To grow a running cluster: `kubectl patch cluster loom-pg --type merge -p '{"spec":{"storage":{"size":"40Gi"}}}'`. If the instances are already down on a full disk the operator waits for the volume and the volume waits for a mount: patch the PVCs, mount each from a throwaway pod (busybox with the claim) until `kubectl get pvc` shows the new capacity, delete the pods, and the operator restarts the cluster |
-| Provider keys | the engine and workers need `LOOM_LLM_*` / `LOOM_EMBED_*` | `kubectl -n loom create secret generic loom-llm --from-env-file=.env` and an `envFrom: [secretRef: {name: loom-llm}]` patch on `loom` and `loom-enrich`. **Strip inline comments and quotes first**: compose tolerates `LOOM_LLM_PROVIDER=openrouter  # …`, kubectl keeps the comment in the value, and the LLM is then silently unconfigured (the worker logs "no LLM configured") |
+| Your own build | CI images lag local commits | `docker tag loomctx-engine:local REGION-docker.pkg.dev/PROJECT/loomctx/loomctx:tag && docker push …`, then an overlay `images:` entry with `newName`, and roll by **digest** so a re-pushed tag is not served from the node cache |
+| JetStream storage | PVC sizes are real; a 4 GiB stream on a 1 Gi claim is refused | NATS PVC is 8 Gi in the shipped manifest; keep `LOOMCTX_STREAM_MAX_BYTES × LOOMCTX_STREAM_REPLICAS` under it |
+| Postgres storage | 2 Gi filled up under the corpus with vectors | 20 Gi in the shipped manifest. To grow a running cluster: `kubectl patch cluster loomctx-pg --type merge -p '{"spec":{"storage":{"size":"40Gi"}}}'`. If the instances are already down on a full disk the operator waits for the volume and the volume waits for a mount: patch the PVCs, mount each from a throwaway pod (busybox with the claim) until `kubectl get pvc` shows the new capacity, delete the pods, and the operator restarts the cluster |
+| Provider keys | the engine and workers need `LOOMCTX_LLM_*` / `LOOMCTX_EMBED_*` | `kubectl -n loomctx create secret generic loomctx-llm --from-env-file=.env` and an `envFrom: [secretRef: {name: loomctx-llm}]` patch on `loomctx` and `loomctx-enrich`. **Strip inline comments and quotes first**: compose tolerates `LOOMCTX_LLM_PROVIDER=openrouter  # …`, kubectl keeps the comment in the value, and the LLM is then silently unconfigured (the worker logs "no LLM configured") |
 | A primary deletion takes three minutes to fail over | the stopping primary waits `smartShutdownTimeout` (operator default 180 s) for pooled client connections to close, and the replicas stay attached to it until then | the shipped `postgres-cluster.yaml` sets `smartShutdownTimeout: 10`; measured 183 s → 13 s to promote, 17 s write gap end to end (D-045) |
-| A worker starting while Postgres is failing over | pool initialization times out after 180 s and the pod restarts (CrashLoopBackOff) until the primary is back | expected; nothing to do — it recovers on its own, but a long back-off can add minutes after the database returns: `kubectl -n loom delete pod -l app=loom-enrich` resets it |
+| A worker starting while Postgres is failing over | pool initialization times out after 180 s and the pod restarts (CrashLoopBackOff) until the primary is back | expected; nothing to do — it recovers on its own, but a long back-off can add minutes after the database returns: `kubectl -n loomctx delete pod -l app=loomctx-enrich` resets it |
 
 **Measured** (one run each; treat as floors for this machine class):
 
 | Path | Result |
 | --- | --- |
-| Direct load into the HA primary, one loader (`loom.connectors.vulns load --db`) | 715 envelopes/s, 530k in 12.4 min |
+| Direct load into the HA primary, one loader (`loomctx.connectors.vulns load --db`) | 715 envelopes/s, 530k in 12.4 min |
 | Gateway → JetStream (3 replicas) → 2 consumers → Postgres, single envelopes | 175/s at concurrency 32 (p50 126 ms, p99 771 ms); 189/s at 128 (p50 596 ms) — every pod's CPU idle: the replicated stream acknowledgement over persistent disks is the bound |
 | Same path, `POST /v1/ingest/batch` of 500 (what shippers send) | 660 envelopes/s accepted |
 | `/v1/ask`, 2 engine replicas × 2 workers, reads on replicas, 482k observations | 287/s, p50 54 ms, p99 86 ms, 0 errors at concurrency 16 |
 | Single-entity ask, first / cached question | 430–860 ms / 30–130 ms (the first pays one embedding call) |
 | Two-hop scope, 1,077 entities reached | 1.4–2.4 s (was 5–6 s before the batched gather) |
 | Primary pod deleted under 20,000 in-flight ingests | 0 client errors, 55,000/55,000 rows present, nothing redelivered or dead-lettered — the queue absorbed it |
-| Write availability during a primary deletion | **11 s**, measured two ways on a clean cluster: a `psql` probe with `connect_timeout=2` through `loom-pg-rw`, and HTTP `POST /v1/ingest` through the engine every 0.5 s (3 failed requests of 617). Operator defaults with idle pools; with the workers holding connections the same deletion took 183 s to promote until `smartShutdownTimeout: 10` was set (D-045, 13 s to promote, 17 s write gap). The first measurement said 190 s — that was the *client* hanging in a TCP connect to the vanished primary, not the operator. Loom's pool now sets `connect_timeout=5` and TCP keepalives so engines and workers fail over with the database instead of waiting on the kernel |
+| Write availability during a primary deletion | **11 s**, measured two ways on a clean cluster: a `psql` probe with `connect_timeout=2` through `loomctx-pg-rw`, and HTTP `POST /v1/ingest` through the engine every 0.5 s (3 failed requests of 617). Operator defaults with idle pools; with the workers holding connections the same deletion took 183 s to promote until `smartShutdownTimeout: 10` was set (D-045, 13 s to promote, 17 s write gap). The first measurement said 190 s — that was the *client* hanging in a TCP connect to the vanished primary, not the operator. LoomCtx's pool now sets `connect_timeout=5` and TCP keepalives so engines and workers fail over with the database instead of waiting on the kernel |
 
 The consumers lost two deadlocks to each other on entity upserts during
 the run and retried them; no row was lost.
@@ -234,38 +234,38 @@ goes in `postgres-cluster.yaml` (or a kustomize patch):
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: loom-pg
+  name: loomctx-pg
 spec:
   # ... instances, storage, bootstrap as shipped ...
   postgresql:
     parameters:
-      # engines × LOOM_WORKERS × LOOM_DB_POOL + consumers + workers + the
+      # engines × LOOMCTX_WORKERS × LOOMCTX_DB_POOL + consumers + workers + the
       # operator's own; 8 engine pods × 2 × 4 = 64 already
       max_connections: "200"
       shared_buffers: "256MB"
   backup:
     barmanObjectStore:
-      destinationPath: s3://YOUR-BUCKET/loom-pg
+      destinationPath: s3://YOUR-BUCKET/loomctx-pg
       s3Credentials:
-        accessKeyId: {name: loom-pg-backup, key: ACCESS_KEY_ID}
-        secretAccessKey: {name: loom-pg-backup, key: SECRET_ACCESS_KEY}
+        accessKeyId: {name: loomctx-pg-backup, key: ACCESS_KEY_ID}
+        secretAccessKey: {name: loomctx-pg-backup, key: SECRET_ACCESS_KEY}
       wal: {compression: gzip}
     retentionPolicy: "30d"
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
 metadata:
-  name: loom-pg-nightly
+  name: loomctx-pg-nightly
 spec:
   schedule: "0 0 3 * * *"     # six fields: seconds first
   backupOwnerReference: self
-  cluster: {name: loom-pg}
+  cluster: {name: loomctx-pg}
 ```
 
 Continuous WAL archiving to the object store is what makes point-in-time
 recovery possible; the ScheduledBackup is the base backup it replays from.
 Restore by bootstrapping a new `Cluster` with `recovery` from the same
-store (CNPG docs). `python -m loom.lifecycle export` remains the
+store (CNPG docs). `python -m loomctx.lifecycle export` remains the
 backend-independent backup (JSONL) and is what you use to move between
 SQLite and Postgres.
 
@@ -300,11 +300,11 @@ the images pinned by digest. The project had no `default` VPC any more
 | Check | Result |
 | --- | --- |
 | Rollout | every pod Running with the new securityContext; NATS unprivileged on its PVC; engines restarted twice while the primary was still initializing (the documented pool-timeout case), nothing else restarted |
-| NetworkPolicy | an unlabeled pod: `nats:4222` blocked, `loom-pg-rw:5432` blocked, `loom-gateway:80` open, `loom:80` open; gateways publish, consumers pull, the operator reaches the instance manager (the failover below completed) |
+| NetworkPolicy | an unlabeled pod: `nats:4222` blocked, `loomctx-pg-rw:5432` blocked, `loomctx-gateway:80` open, `loomctx:80` open; gateways publish, consumers pull, the operator reaches the instance manager (the failover below completed) |
 | Ingest through lb → 2 gateways → JetStream ×3 → 2 consumers → Postgres | 5,000 single envelopes at concurrency 32: **174/s, p50 128 ms, p99 802 ms, 0 errors**, 5,000/5,000 rows present (D-043: 175/s) |
 | Asks, 2 engine replicas, reads on replicas | 3,000 at concurrency 16: **284/s, p50 55 ms, p99 78 ms, 0 errors**; the engine HPA scaled 2 → 6 during the run (D-043: 287/s) |
 | Primary deleted under a 2/s write probe through the engine | promoted in **13.3 s**; **0 of 240 writes failed** (D-045: 3 of 617 — the pool's `connect_timeout` and keepalives now ride the gap); 240/240 rows present |
-| Node drain (a node without the primary) | 33 s; PDBs allowed one NATS pod and one Postgres replica at a time; `/readyz` stayed `ready` throughout; every pod rescheduled; `loom-pg-primary` shows 0 allowed disruptions — draining the primary's node needs a switchover first (`kubectl cnpg promote`), by design |
+| Node drain (a node without the primary) | 33 s; PDBs allowed one NATS pod and one Postgres replica at a time; `/readyz` stayed `ready` throughout; every pod rescheduled; `loomctx-pg-primary` shows 0 allowed disruptions — draining the primary's node needs a switchover first (`kubectl cnpg promote`), by design |
 | Enrichment workers without provider keys | idle with two log lines ("no embedder", "no LLM"), 0 restarts |
 
 ### Re-validated on GKE with auth on and real data (2026-09-25, D-063)
@@ -313,25 +313,25 @@ The 2026-09-24 review batch (D-057…D-062) on the same recipe — project
 `<PROJECT_ID>`, `3 × e2-standard-4`, Dataplane V2, CloudNativePG 1.26,
 `scale-pg-ha` — but this time the way a production deployment runs it:
 **auth on** (a keys file on engine, gateway and consumer), **signed
-handles** (`LOOM_HANDLE_SECRET`), provider keys on the engine and workers
+handles** (`LOOMCTX_HANDLE_SECRET`), provider keys on the engine and workers
 (OpenRouter: `deepseek-chat-v3.1`, `text-embedding-3-small` at 512
 dimensions), and the full vulnerability corpus loaded through the
 documented Jobs. Every finding below is fixed on `main`.
 
 | Check | Result |
 | --- | --- |
-| Browser guards and auth, in-cluster (engine and gateway) | foreign `Host` 400, foreign `Origin` 403, `text/plain` batch 415; in-cluster names (`loom`, `loom.loom.svc[.cluster.local]`) and kubelet probes served; no key 401, unknown key 403, reader write 403; a signed handle expands, a tampered one is refused |
-| Write gates | a host-scoped key cannot cite (403) or read an admin's document over HTTP; through gateway → NATS → consumer the same claim is **rejected by the consumer** (it resolves the gateway's `Loom-Principal` to the grant); a forged `loom.uploader` stamp is refused at the gateway (422) |
-| Gateway rate dials | `LOOM_RATE_PER_SEC=0.5`, burst 2: two 202s then 429s (was: unlimited); a batch over the burst is 413 |
+| Browser guards and auth, in-cluster (engine and gateway) | foreign `Host` 400, foreign `Origin` 403, `text/plain` batch 415; in-cluster names (`loomctx`, `loomctx.loomctx.svc[.cluster.local]`) and kubelet probes served; no key 401, unknown key 403, reader write 403; a signed handle expands, a tampered one is refused |
+| Write gates | a host-scoped key cannot cite (403) or read an admin's document over HTTP; through gateway → NATS → consumer the same claim is **rejected by the consumer** (it resolves the gateway's `LoomCtx-Principal` to the grant); a forged `loomctx.uploader` stamp is refused at the gateway (422) |
+| Gateway rate dials | `LOOMCTX_RATE_PER_SEC=0.5`, burst 2: two 202s then 429s (was: unlimited); a batch over the burst is 413 |
 | Initial load (`vulns load --bridge-seed-hosts`, a Job, through the engine's batch API) | **605,803 envelopes at 435/s, 0 refused** (D-045: 421/s) |
 | Nightly refresh (the CronJob's own template, the source-pinned key) | **473,932 envelopes at 724/s, 0 refused, 0 new rows**: KEV unchanged, NVD replays deduplicated, the EPSS ledger held back 128,722 unchanged scores |
-| Enrichment, split pools (`LOOM_ENRICH_JOBS=vectors` × 2 at batch 512; `llm,resolve` × 2) | the whole corpus embedded (553,753 vectors) at ~50–120/s while the LLM pool adjudicated aliases and extracted KEV advisories; 0 restarts |
+| Enrichment, split pools (`LOOMCTX_ENRICH_JOBS=vectors` × 2 at batch 512; `llm,resolve` × 2) | the whole corpus embedded (553,753 vectors) at ~50–120/s while the LLM pool adjudicated aliases and extracted KEV advisories; 0 restarts |
 | Ingest, lb → 2 gateways → JetStream ×3 → 2 consumers → Postgres | 5,000 single envelopes at concurrency 32: **178/s, p50 132 ms, p99 758 ms, 0 errors** (D-052: 174/s) |
 | Asks, engines on replicas, auth + signed handles + semantic ranking on | 3,000 at concurrency 16: **201/s, p50 65 ms, p99 202 ms, 0 errors** (HPA 2 → 8). D-052's 284/s ran with no auth and no embedder |
 | Primary deleted under a 2/s write probe through the engine | promoted in **12 s**; **0 of 235 writes failed**; 235/235 rows present |
 | Node drains | a node with engines, gateways, a NATS pod and a Postgres replica: 125 s, every pod rescheduled; a second one with a probe Job pinned elsewhere: 34 s, **470 `/readyz` checks, 0 not ready**; Postgres 3/3 throughout |
 | The demo's two-hop question on the cluster | `ask` with scope `host:web-01` over `runs_software, affects` at 3,200 tokens: 2.7 s, charged 3,148, 38 CVEs, the kernel hub's cut reported (`gather_limit`, 2,761) |
-| Retrieval scorecard on the cluster (`retrieval_eval`, 65 questions incl. the loadtest namespace, one run, DeepSeek reading, Postgres + real embedder) | Loom 69 / 83 / 83 / **92 %** at 400 / 800 / 1,600 / 3,200 tokens against token-matched vector 74 / 74 / 74 / 80 % and recency 58 / 74 / 75 / 83 %; multi-hop only Loom (4–5 of 6 from 800 up, every other condition 0); `full` 95 % on the 59 questions it could be sent. The 400-token gap is orderings (50 % vs 75 %) — the local frozen-corpus table (`docs/evaluation.md`) has Loom ahead at 400; this corpus differs (live enrichment, the loadtest namespace, Postgres ranking) |
+| Retrieval scorecard on the cluster (`retrieval_eval`, 65 questions incl. the loadtest namespace, one run, DeepSeek reading, Postgres + real embedder) | LoomCtx 69 / 83 / 83 / **92 %** at 400 / 800 / 1,600 / 3,200 tokens against token-matched vector 74 / 74 / 74 / 80 % and recency 58 / 74 / 75 / 83 %; multi-hop only LoomCtx (4–5 of 6 from 800 up, every other condition 0); `full` 95 % on the 59 questions it could be sent. The 400-token gap is orderings (50 % vs 75 %) — the local frozen-corpus table (`docs/evaluation.md`) has LoomCtx ahead at 400; this corpus differs (live enrichment, the loadtest namespace, Postgres ranking) |
 | Agents over the cluster's MCP surface, one run | `mistral-large` 4/4, `claude-sonnet-4.5` 3/4 (a correct lease answer failed the strict first-sentence rule, S-43). The exposure task's truth set was 4 CVEs, not the 32 of the frozen scorecard corpus: the LLM alias pass that connects `linux:kernel` to `linux:linux_kernel` (D-042) was still running — agent numbers here are not comparable to `docs/models.md` |
 
 **What the cluster found** (`docs/hardening.md` S-35…S-45): the
@@ -351,12 +351,12 @@ stays `Terminating` under pvc-protection, so deleting claims first
 hangs), wait for the disks to go, then the cluster, then check:
 
 ```bash
-CLUSTER=loom-val          # your cluster name, e.g. loom-val
+CLUSTER=loomctx-val          # your cluster name, e.g. loomctx-val
 ZONE=us-central1-a        # and its zone
-kubectl -n loom delete cluster loom-pg --wait              # CloudNativePG: its instances and their PVCs
-kubectl -n loom delete statefulsets,deployments,cronjobs,jobs --all --cascade=foreground
-kubectl -n loom delete pvc --all --wait                    # NATS, feed cache: nothing mounts them now
-# (or all three at once: kubectl delete namespace loom --wait)
+kubectl -n loomctx delete cluster loomctx-pg --wait              # CloudNativePG: its instances and their PVCs
+kubectl -n loomctx delete statefulsets,deployments,cronjobs,jobs --all --cascade=foreground
+kubectl -n loomctx delete pvc --all --wait                    # NATS, feed cache: nothing mounts them now
+# (or all three at once: kubectl delete namespace loomctx --wait)
 gcloud compute disks list --filter="name~^pvc-"            # repeat until empty
 gcloud container clusters delete "$CLUSTER" --zone "$ZONE"
 gcloud compute disks list                                  # nothing left behind
@@ -367,11 +367,11 @@ gcloud compute disks list                                  # nothing left behind
 Same recipe (`3 × e2-standard-4`, Dataplane V2, CloudNativePG 1.26,
 `scale-pg-ha`, auth on, signed handles; no provider keys — nothing here
 calls a model), images built from the D-077…D-079 working tree. A toolbox
-pod generated `loom.connectors.iam_gen` exports, registered both schemas at
+pod generated `loomctx.connectors.iam_gen` exports, registered both schemas at
 the engine, imported them with the connectors' own `import --url
-http://loom-gateway --no-schema` (lb → gateways → JetStream ×3 → 2
+http://loomctx-gateway --no-schema` (lb → gateways → JetStream ×3 → 2
 consumers → Postgres), waited for the queue to drain, and ran
-`loom.iam_eval --no-load` against the Postgres store and over HTTP.
+`loomctx.iam_eval --no-load` against the Postgres store and over HTTP.
 
 | Scale | Envelopes | Refused | Ingest, end to end | Re-import adds | Edges missing / extra | Planted role paths (find_path, cited) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -442,13 +442,13 @@ The whole suite now also runs on the cluster: a test image (the engine
 plus `tests/`) as two Jobs, one on SQLite and one against an in-cluster
 Postgres — **803 passed / 110 skipped, and 896 passed / 17 skipped**. Then
 the `scale-pg-ha` stack (auth on, signed handles, no provider keys) took a
-synthetic estate (`loom.connectors.estate_gen`, large: 6,000 machines in
+synthetic estate (`loomctx.connectors.estate_gen`, large: 6,000 machines in
 two domains, 3,000 users) through the connectors' own `import --url
-http://loom-gateway` — LDAP, two nmap scans with reassigned addresses,
+http://loomctx-gateway` — LDAP, two nmap scans with reassigned addresses,
 osquery process/hash logs for 3,000 machines, tasklist for 300, EDR
 detections as OCSF, an Atomic Red Team log of 600 actions — with the
 enrichment worker resolving identities in the background, and
-`loom.estate_eval` checking the store against the generator's truth:
+`loomctx.estate_eval` checking the store against the generator's truth:
 
 | Check | Result |
 | --- | --- |
@@ -463,7 +463,7 @@ enrichment worker resolving identities in the background, and
 
 **What the cluster found** (`docs/hardening.md` S-60…S-63): an OCSF (or
 STIX) import through a gateway failed outright — its version-chaining
-lookup read from the gateway, which serves ingest only (`LOOM_READ_URL`
+lookup read from the gateway, which serves ingest only (`LOOMCTX_READ_URL`
 now names the engine, and a 404 degrades to in-run chaining); weak
 identifier groups starved the strong ones in the worker's candidate list,
 so it merged nothing (separate passes now); per-host endpoint coverage
@@ -485,10 +485,10 @@ purple 600/600, drift reported by the gateway import).
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash
-docker compose build loom && docker compose --profile scale build gateway
-docker tag loom-engine:local ghcr.io/seahop/loom:dev
-docker tag loom-gateway:local ghcr.io/seahop/loom-gateway:dev
-kind load docker-image ghcr.io/seahop/loom:dev   # minikube image load ...; Rancher Desktop
+docker compose build loomctx && docker compose --profile scale build gateway
+docker tag loomctx-engine:local ghcr.io/seahop/loomctx:dev
+docker tag loomctx-gateway:local ghcr.io/seahop/loomctx-gateway:dev
+kind load docker-image ghcr.io/seahop/loomctx:dev   # minikube image load ...; Rancher Desktop
                                                   # on the docker runtime sees local images directly
 ```
 
@@ -496,18 +496,18 @@ Kustomize forbids absolute resource paths, so pin the `:dev` tags from an
 overlay that layers on a *rendered* copy of the shipped manifests:
 
 ```bash
-mkdir -p /tmp/loom && kubectl kustomize deploy/k8s > /tmp/loom/rendered.yaml
+mkdir -p /tmp/loomctx && kubectl kustomize deploy/k8s > /tmp/loomctx/rendered.yaml
 printf '%s\n' 'resources: ["rendered.yaml"]' 'images:' \
-  '  - {name: ghcr.io/seahop/loom, newTag: dev}' \
-  '  - {name: ghcr.io/seahop/loom-gateway, newTag: dev}' > /tmp/loom/kustomization.yaml
-kubectl apply -k /tmp/loom
+  '  - {name: ghcr.io/seahop/loomctx, newTag: dev}' \
+  '  - {name: ghcr.io/seahop/loomctx-gateway, newTag: dev}' > /tmp/loomctx/kustomization.yaml
+kubectl apply -k /tmp/loomctx
 ```
 
 ## Tying in existing pipelines (D-034)
 
 Log shippers post batches to `POST /v1/ingest/batch`; Kafka topics feed
 the `kafka` profile / `deploy/k8s/integrations/kafka-consumer.yaml`; files
-load with `python -m loom.ingest`. Configs and the full table are in
+load with `python -m loomctx.ingest`. Configs and the full table are in
 [`integrations/README.md`](integrations/README.md).
 
 ## Scaling dials (D-027 / D-028)
@@ -517,21 +517,21 @@ simple as it is. Turn them when a measurement says to.
 
 | Dial | Env / manifest | Default | When |
 | --- | --- | --- | --- |
-| Engine workers per pod | `LOOM_WORKERS` | 1 | Postgres shapes: 2–4 multiplies a pod's concurrency before adding pods |
-| DB connections per worker | `LOOM_DB_POOL` | 4 | raise with `LOOM_WORKERS`; keep `workers × pool × pods` under Postgres `max_connections` |
-| Read replica for the read path | `LOOM_DB_READ` (replica DSN) | unset | packs/search/export go to replicas, ingest and worker backlog stay on the primary; reads may lag by replication delay |
+| Engine workers per pod | `LOOMCTX_WORKERS` | 1 | Postgres shapes: 2–4 multiplies a pod's concurrency before adding pods |
+| DB connections per worker | `LOOMCTX_DB_POOL` | 4 | raise with `LOOMCTX_WORKERS`; keep `workers × pool × pods` under Postgres `max_connections` |
+| Read replica for the read path | `LOOMCTX_DB_READ` (replica DSN) | unset | packs/search/export go to replicas, ingest and worker backlog stay on the primary; reads may lag by replication delay |
 | Engine pods | HPA in `scale-pg` | 2–8 | stateless once on Postgres |
 | Gateway pods | HPA in `scale` / `scale-pg` | 2–10 | ingestion bursts |
 | Writer consumers | replicas in `scale-pg` | 2 | queue depth grows |
-| Stream replicas | `LOOM_STREAM_REPLICAS` (gateway + consumer) | 1 (`scale-pg`: 3) | must match the NATS cluster size |
-| Ingest buffer cap | `LOOM_STREAM_MAX_BYTES`, `LOOM_STREAM_DISCARD` | 1 GiB / old (`scale-pg`: 4 GiB) | storms degrade predictably instead of filling disks |
-| Redelivery | `LOOM_ACK_WAIT`, `LOOM_MAX_DELIVER` (consumer) | 30 s / 5 | after the bound a message is parked on `LOOM_DEADLETTER` with the error, never dropped |
-| Enrichment workers | `loom-enrich` StatefulSet replicas + `LOOM_WORKER_COUNT` (raise together) | 2 in `scale-pg` | document/LLM backlog grows; leases + sharding prevent double spend |
-| Embedding throughput | `LOOM_EMBED_BATCH` (observations per embedder call, default 128) and `LOOM_CHUNK_LIMIT` (documents chunked per tick, default 4) | 128 / 4 | a hosted embedder takes 512–2048 per call; a 465k-observation backlog went from ~4 h to ~1 h with four sharded workers at 512 (D-039) |
-| Embedding storage | `LOOM_EMBED_DIM` (Matryoshka output size, e.g. 512) | model native (1536 for text-embedding-3-small) | vectors are packed float32 (schema v3): 6 KB per 1,536-dim row plus the ANN index's copy; 512 dims is a third of that at most of the quality (D-039) |
-| Alias resolution | `LOOM_ALIAS_TYPES` (entity types whose `vendor:product` keys get structural alias candidates, LLM-adjudicated each tick; e.g. `product`) | off | each candidate is one model call (~283 on the vulnerability corpus, ~3 cents with a flash-class judge); `python -m loom.enrich resolve --dry-run` lists candidates without asking (D-042) |
-| Tenant shards | `LOOM_SHARDS` (namespace → DSN map; engines, consumers, workers) | unset | a heavy tenant needs its own database; move with `lifecycle export`/`import`, then flip the map |
-| Artifact offload | `LOOM_BLOB_THRESHOLD` + `LOOM_BLOB_DIR` or `LOOM_BLOB_S3_BUCKET`/`_ENDPOINT` | unset | documents bloat the database; bodies above the threshold live in object storage, reinflated on every read |
+| Stream replicas | `LOOMCTX_STREAM_REPLICAS` (gateway + consumer) | 1 (`scale-pg`: 3) | must match the NATS cluster size |
+| Ingest buffer cap | `LOOMCTX_STREAM_MAX_BYTES`, `LOOMCTX_STREAM_DISCARD` | 1 GiB / old (`scale-pg`: 4 GiB) | storms degrade predictably instead of filling disks |
+| Redelivery | `LOOMCTX_ACK_WAIT`, `LOOMCTX_MAX_DELIVER` (consumer) | 30 s / 5 | after the bound a message is parked on `LOOMCTX_DEADLETTER` with the error, never dropped |
+| Enrichment workers | `loomctx-enrich` StatefulSet replicas + `LOOMCTX_WORKER_COUNT` (raise together) | 2 in `scale-pg` | document/LLM backlog grows; leases + sharding prevent double spend |
+| Embedding throughput | `LOOMCTX_EMBED_BATCH` (observations per embedder call, default 128) and `LOOMCTX_CHUNK_LIMIT` (documents chunked per tick, default 4) | 128 / 4 | a hosted embedder takes 512–2048 per call; a 465k-observation backlog went from ~4 h to ~1 h with four sharded workers at 512 (D-039) |
+| Embedding storage | `LOOMCTX_EMBED_DIM` (Matryoshka output size, e.g. 512) | model native (1536 for text-embedding-3-small) | vectors are packed float32 (schema v3): 6 KB per 1,536-dim row plus the ANN index's copy; 512 dims is a third of that at most of the quality (D-039) |
+| Alias resolution | `LOOMCTX_ALIAS_TYPES` (entity types whose `vendor:product` keys get structural alias candidates, LLM-adjudicated each tick; e.g. `product`) | off | each candidate is one model call (~283 on the vulnerability corpus, ~3 cents with a flash-class judge); `python -m loomctx.enrich resolve --dry-run` lists candidates without asking (D-042) |
+| Tenant shards | `LOOMCTX_SHARDS` (namespace → DSN map; engines, consumers, workers) | unset | a heavy tenant needs its own database; move with `lifecycle export`/`import`, then flip the map |
+| Artifact offload | `LOOMCTX_BLOB_THRESHOLD` + `LOOMCTX_BLOB_DIR` or `LOOMCTX_BLOB_S3_BUCKET`/`_ENDPOINT` | unset | documents bloat the database; bodies above the threshold live in object storage, reinflated on every read |
 
 ### Measured capacity (2026-09-08, one laptop — treat as relative floors)
 
@@ -554,7 +554,7 @@ them through the engine's batch API (D-035, `docs/real-data.md`).
 
 ## Choosing a database (D-011)
 
-`LOOM_DB` is the whole decision — a file path means SQLite, a
+`LOOMCTX_DB` is the whole decision — a file path means SQLite, a
 `postgresql://` URL means Postgres. Both backends pass the same contract
 tests and behave identically.
 
@@ -563,7 +563,7 @@ tests and behave identically.
   container with zero errors, and the measuring tool ships in the image:
 
   ```bash
-  docker compose run --rm loom python -m loom.loadgen --url http://loom:8000
+  docker compose run --rm loomctx python -m loomctx.loadgen --url http://loomctx:8000
   ```
 
 - **Scaling the database (Postgres):** use an image with the `vector`
@@ -572,11 +572,11 @@ tests and behave identically.
   `"vector_backend": "exact"`.
 
   ```bash
-  LOOM_DB=postgresql://loom:loom@postgres:5432/loom \
-    docker compose --profile pg up -d loom postgres
+  LOOMCTX_DB=postgresql://loomctx:loomctx@postgres:5432/loomctx \
+    docker compose --profile pg up -d loomctx postgres
   ```
 
-  On Kubernetes, point the engine's (and consumer's) `LOOM_DB` env at your
+  On Kubernetes, point the engine's (and consumer's) `LOOMCTX_DB` env at your
   Postgres — at which point engine replicas can scale horizontally and the
   single-replica constraint below no longer applies.
 
@@ -590,9 +590,9 @@ workload (large context, small resources).
 The scaling path (docs/decisions.md D-008) is swapping the `GraphStore` for a
 server-backed implementation — Postgres ships (`scale-pg`); a graph
 database such as Neo4j is a possible backend, not a shipped one. At that
-point replicas scale horizontally and only the `LOOM_DB`-style config
+point replicas scale horizontally and only the `LOOMCTX_DB`-style config
 changes. The API surface, image, and manifests stay the same.
 
 No ingress is shipped: it is environment-specific. Add your cluster's usual
-Ingress/HTTPRoute pointing at service `loom:80`, with keys mounted
+Ingress/HTTPRoute pointing at service `loomctx:80`, with keys mounted
 (`docs/administration.md`) before exposing beyond the cluster.

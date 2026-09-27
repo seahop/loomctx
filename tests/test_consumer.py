@@ -1,8 +1,8 @@
 import json
 
-from loom.consumer import handle_message
-from loom.contracts import EntityRef
-from loom.store.sqlite import SqliteStore
+from loomctx.consumer import handle_message
+from loomctx.contracts import EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 CLAIM = b"""{
   "kind": "claim",
@@ -36,7 +36,7 @@ def test_poison_message_is_skipped_not_raised(tmp_path):
 
 
 def test_batch_mixes_kinds_and_survives_poison(tmp_path):
-    from loom.consumer import handle_batch
+    from loomctx.consumer import handle_batch
 
     store = SqliteStore(tmp_path / "c.db")
     counts = handle_batch(store, [CLAIM, CLAIM, DOCUMENT, b"{poison"])
@@ -49,7 +49,7 @@ def test_store_failure_propagates_so_the_batch_is_redelivered(tmp_path, monkeypa
     """H-I7: a store error inside a batch is NOT swallowed (the run loop
     leaves the batch un-acked for redelivery) and nothing partial lands."""
     import pytest
-    from loom.consumer import handle_batch
+    from loomctx.consumer import handle_batch
     store = SqliteStore(tmp_path / "c.db")
 
     def boom(claims):
@@ -69,7 +69,7 @@ def test_failed_batch_naks_then_deadletters_on_last_delivery():
     dead-letter stream with the reason and ack."""
     import asyncio
     from types import SimpleNamespace
-    from loom.consumer import settle_failed_batch
+    from loomctx.consumer import settle_failed_batch
 
     published = []
 
@@ -79,9 +79,9 @@ def test_failed_batch_naks_then_deadletters_on_last_delivery():
 
     class FakeMsg:
         def __init__(self, delivered):
-            self.subject = "loom.ingest.claim"
+            self.subject = "loomctx.ingest.claim"
             self.data = CLAIM
-            self.headers = {"Loom-Principal": "shipper"}
+            self.headers = {"LoomCtx-Principal": "shipper"}
             self.metadata = SimpleNamespace(num_delivered=delivered)
             self.acked = False
             self.naks = []
@@ -98,12 +98,12 @@ def test_failed_batch_naks_then_deadletters_on_last_delivery():
     assert parked == 1
     assert fresh.naks == [2] and not fresh.acked
     assert last.acked and not last.naks
-    assert published[0][0] == "loom.deadletter.claim"
-    assert published[0][2]["Loom-Principal"] == "shipper"
+    assert published[0][0] == "loomctx.deadletter.claim"
+    assert published[0][2]["LoomCtx-Principal"] == "shipper"
     # class + code only: the exception text can quote row data and headers
     # are readable by anyone with the stream
-    assert published[0][2]["Loom-Error"] == "RuntimeError"
-    assert published[0][2]["Loom-Error-Code"] == "store_rejected"
+    assert published[0][2]["LoomCtx-Error"] == "RuntimeError"
+    assert published[0][2]["LoomCtx-Error-Code"] == "store_rejected"
     assert "locked" not in json.dumps(published[0][2])
 
 
@@ -111,9 +111,9 @@ def test_registry_validation_runs_on_the_queue_path(tmp_path):
     """The gateway checks the contract shape, not the registry: a strict
     namespace's rules (D-024) are applied here, per claim, and a violation
     is dropped with a reason rather than written or crashing the batch."""
-    from loom.consumer import handle_batch
-    from loom.contracts import PredicateDef, SchemaRegistration
-    from loom.registry import RegistryCache
+    from loomctx.consumer import handle_batch
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    from loomctx.registry import RegistryCache
     store = SqliteStore(tmp_path / "r.db")
     store.put_schema(SchemaRegistration(
         namespace="strict", strict=True,
@@ -139,7 +139,7 @@ def test_registry_validation_runs_on_the_queue_path(tmp_path):
 def test_queue_path_skips_a_claim_citing_an_unknown_document(tmp_path):
     """D-039: the consumer cannot reject per item, so it drops and logs."""
     import json
-    from loom.consumer import handle_batch
+    from loomctx.consumer import handle_batch
     store = SqliteStore(tmp_path / "q.db")
     doc = {"kind": "document", "event_id": "d1", "text": "t", "source": "s", "observed_at": "2026-09-01T00:00:00Z"}
     base = {"kind": "claim", "subject": {"type": "host", "key": "h"}, "predicate": "p", "object": 1,
@@ -165,7 +165,7 @@ class _JS:
 class _Msg:
     def __init__(self, payload, delivered=1):
         from types import SimpleNamespace
-        self.subject = "loom.ingest.claim"
+        self.subject = "loomctx.ingest.claim"
         self.data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.headers = {}
         self.metadata = SimpleNamespace(num_delivered=delivered)
@@ -190,7 +190,7 @@ def test_one_bad_envelope_no_longer_sinks_its_batch_mates(tmp_path, monkeypatch)
     poison message's delivery count and were dead-lettered with it after
     MAX_DELIVER. Now the batch is re-written one message at a time."""
     import asyncio
-    from loom.consumer import write_batch
+    from loomctx.consumer import write_batch
     store = SqliteStore(tmp_path / "iso.db")
     real = store.record_claims
 
@@ -222,7 +222,7 @@ def test_claim_whose_document_is_elsewhere_is_redelivered_not_dropped(tmp_path):
     now nak'd with a delay, lands once the document does, and is
     dead-lettered (not lost silently) if it never does."""
     import asyncio
-    from loom.consumer import write_batch
+    from loomctx.consumer import write_batch
     store = SqliteStore(tmp_path / "prov.db")
     js = _JS()
     claim = _row("c1", provenance={"artifact_event_id": "d1"})
@@ -242,12 +242,12 @@ def test_claim_whose_document_is_elsewhere_is_redelivered_not_dropped(tmp_path):
     orphan = _Msg(_row("c2", provenance={"artifact_event_id": "nope"}), delivered=5)
     counts = asyncio.run(write_batch(js, store, [orphan], max_deliver=5))
     assert counts["deadlettered"] == 1 and orphan.acked
-    assert js.published[-1][2]["Loom-Error-Code"] == "provenance_unresolved"
+    assert js.published[-1][2]["LoomCtx-Error-Code"] == "provenance_unresolved"
     store.close()
 
 
 def test_claim_may_cite_a_document_later_in_its_batch(tmp_path):
-    from loom.consumer import handle_batch
+    from loomctx.consumer import handle_batch
     store = SqliteStore(tmp_path / "order.db")
     doc = {"kind": "document", "event_id": "d9", "text": "t", "source": "s",
            "observed_at": "2026-09-01T00:00:00Z"}
@@ -265,8 +265,8 @@ def test_queue_path_applies_the_senders_write_gates(tmp_path):
     gates as the HTTP path does, and refuses a principal that is no longer
     a live grant."""
     import json
-    from loom.auth import AuthConfig, Grant
-    from loom.consumer import handle_batch
+    from loomctx.auth import AuthConfig, Grant
+    from loomctx.consumer import handle_batch
     store = SqliteStore(tmp_path / "g.db")
     auth = AuthConfig([
         ("a" * 64, Grant(id="admin", namespaces=("default",), perms="rw")),

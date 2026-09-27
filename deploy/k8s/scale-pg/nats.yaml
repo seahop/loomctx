@@ -1,6 +1,6 @@
 # NATS JetStream as a 3-node cluster (D-029): the durable buffer between the
 # gateways and the writer consumers survives the loss of any one node, and
-# the ingest stream is replicated (LOOM_STREAM_REPLICAS=3 on the gateway
+# the ingest stream is replicated (LOOMCTX_STREAM_REPLICAS=3 on the gateway
 # and consumer) so a message is acknowledged only once a quorum holds it.
 # Clients use the headless Service; the client library discovers the rest.
 # The monitor port (8222) is deliberately NOT on the Service: probes reach
@@ -70,7 +70,7 @@ spec:
             - "-m"
             - "8222"
             - "--server_name=$(POD_NAME)"
-            - "--cluster_name=loom"
+            - "--cluster_name=loomctx"
             - "--cluster=nats://0.0.0.0:6222"
             - "--routes=nats://nats-0.nats:6222,nats://nats-1.nats:6222,nats://nats-2.nats:6222"
           ports:
@@ -109,7 +109,7 @@ spec:
         resources:
           requests:
             # JetStream refuses a stream larger than its store: the gateway
-            # asks for LOOM_STREAM_MAX_BYTES (4 GiB) x LOOM_STREAM_REPLICAS,
+            # asks for LOOMCTX_STREAM_MAX_BYTES (4 GiB) x LOOMCTX_STREAM_REPLICAS,
             # so the PVC must hold that plus headroom. A 1Gi claim only
             # worked on k3s because local-path reports the host disk; GKE
             # enforced it ("insufficient storage resources", D-043).

@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from loom.connectors import ocsf
-from loom.connectors.chain import supersession
-from loom.context import build_pack
-from loom.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
-from loom.ingest import load_direct
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import ocsf
+from loomctx.connectors.chain import supersession
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
+from loomctx.ingest import load_direct
+from loomctx.store.sqlite import SqliteStore
 
 T0 = 1756728000000            # 2025-09-01T12:00:00Z
 FINDING = {
@@ -141,7 +141,7 @@ def _assert_valid_finding(record: dict) -> None:
         assert vuln["cve"]["uid"].startswith("CVE-")
         for metric in vuln["cve"].get("cvss", []):
             assert isinstance(metric["base_score"], float)
-    assert record["unmapped"]["loom_observation_ids"]
+    assert record["unmapped"]["loomctx_observation_ids"]
 
 
 def test_round_trip_through_a_store(tmp_path):
@@ -173,10 +173,10 @@ def test_round_trip_through_a_store(tmp_path):
     assert vuln["cve"]["desc"].startswith("The (1) TLS")
     assert vuln["is_exploit_available"] is True and vuln["is_fix_available"] is True
     assert vuln["affected_packages"] == [{"name": "openssl", "vendor_name": "openssl"}]
-    assert "cisa-kev" in web["unmapped"]["loom_sources"] and "acme_scanner" in web["unmapped"]["loom_sources"]
+    assert "cisa-kev" in web["unmapped"]["loomctx_sources"] and "acme_scanner" in web["unmapped"]["loomctx_sources"]
     ids = {o.id for o in observations}
-    assert set(web["unmapped"]["loom_observation_ids"]) <= ids
-    assert web["unmapped"]["loom_observation_ids"][0] in {o.id for o in observations if o.predicate == "affected_by"}
+    assert set(web["unmapped"]["loomctx_observation_ids"]) <= ids
+    assert web["unmapped"]["loomctx_observation_ids"][0] in {o.id for o in observations if o.predicate == "affected_by"}
 
     db01 = by_key[("db-01", "CVE-2026-1337")]
     assert db01["status_id"] == 4 and db01["status"] == "Resolved"
@@ -188,7 +188,7 @@ def test_round_trip_through_a_store(tmp_path):
     assert {(c.subject.key, c.object.key) for c in back["affected_by"]} == {("web-01", "CVE-2014-0160"), ("db-01", "CVE-2026-1337")}
     assert {c.object for c in back["cvss_score"]} == {7.5, 5.0}
     # ... as the observations it restates: their own sources and event ids,
-    # not re-asserted under "loom" (S-30: importing it back is a replay)
+    # not re-asserted under "loomctx" (S-30: importing it back is a replay)
     assert {c.source for c in back["affected_by"]} == {"acme_scanner"}
     assert {c.source for c in back["cvss_score"]} == {o.source for o in observations if o.predicate == "cvss_score"}
     assert {c.event_id for c in back["affected_by"]} <= {o.event_id for o in observations}
@@ -219,7 +219,7 @@ def test_cve_facts_without_a_host_export_as_findings():
     vuln = record["vulnerabilities"][0]
     assert len(vuln["cve"]["cvss"]) == 2 and all(m["severity"] == "Critical" for m in vuln["cve"]["cvss"])
     assert vuln["is_exploit_available"] is True and vuln["affected_packages"] == [{"name": "nginx", "vendor_name": "nginx"}]
-    assert sorted(record["unmapped"]["loom_observation_ids"]) == ["o1", "o2", "o3", "o4", "o5", "o6"]
+    assert sorted(record["unmapped"]["loomctx_observation_ids"]) == ["o1", "o2", "o3", "o4", "o5", "o6"]
     assert ocsf.observations_to_findings([], "netsec") == []
 
 
@@ -275,7 +275,7 @@ def test_cli_import_export_emit_schema(tmp_path, capsys):
 
 def test_cli_import_exits_non_zero_when_anything_is_refused(tmp_path, capsys):
     """D-063/S-36: a refused envelope fails the load (after the totals print)."""
-    from loom.contracts import SchemaRegistration
+    from loomctx.contracts import SchemaRegistration
     events = tmp_path / "events.ndjson"
     events.write_text(json.dumps(FINDING) + "\n")
     db = tmp_path / "strict.db"

@@ -1,4 +1,4 @@
-# Loom — context engine for AI agents
+# LoomCtx — context engine for AI agents
 
 Absorbs data about entities over time (structured claims + documents) and serves
 agents token-budgeted, cited, question-scoped "context packs".
@@ -10,23 +10,23 @@ agents token-budgeted, cited, question-scoped "context packs".
    (flip its status markers as items land)
 2. `docs/decisions.md` — constraints and choices (append new decisions there)
 3. `docs/architecture.md` — the design
-4. Code: `src/loom/contracts.py` → `src/loom/store/sqlite.py` → `src/loom/api/http.py`
+4. Code: `src/loomctx/contracts.py` → `src/loomctx/store/sqlite.py` → `src/loomctx/api/http.py`
 
 ## Hard rules
 
 - **Docker-only.** Never install packages or run project code on the host. Build and
   run everything via `docker compose ...` (tests: `docker compose run --rm test`).
-- Contracts in `src/loom/contracts.py` are the API; all surfaces serialize exactly
+- Contracts in `src/loomctx/contracts.py` are the API; all surfaces serialize exactly
   those shapes. Contract changes get a decisions.md entry.
-- Persistence only through the `GraphStore` interface (`src/loom/store/`). No SQL
+- Persistence only through the `GraphStore` interface (`src/loomctx/store/`). No SQL
   outside that package.
 - Observations are append-only; reads always take a token budget; every derived fact
   carries citations. Domain specifics go in the schema registry, never core code.
 
 ## Secrets / .env
 
-`.env` (gitignored + dockerignored) holds LOOM_LLM_* credentials; compose
-reads it automatically and passes values to loom/mcp/test services. NEVER
+`.env` (gitignored + dockerignored) holds LOOMCTX_LLM_* credentials; compose
+reads it automatically and passes values to loomctx/mcp/test services. NEVER
 commit, print, or paste `.env` contents anywhere (public repo!). When it is
 filled in, the real-provider e2e test runs:
 
@@ -45,15 +45,15 @@ docker compose build && docker compose run --rm test
 ## Demo rehearsal (deterministic seed data)
 
 ```bash
-docker compose up -d --build loom
-docker compose exec loom python -m loom.seed load
+docker compose up -d --build loomctx
+docker compose exec loomctx python -m loomctx.seed load
 # then POST /v1/ask — planted demo moments: ip 10.0.4.7 lease reassignment,
-# web-01 runs_os conflict, initech contract_owner conflict (src/loom/seed.py)
+# web-01 runs_os conflict, initech contract_owner conflict (src/loomctx/seed.py)
 ```
 
 ## Deadline
 
 Conference demo + presentation mid-October 2026 (about 2026-10-13; moved up from "end of October" on 2026-09-23). Repo is meant to be public
-(github.com/seahop/Loom; still private as of 2026-09-24 — flip repo AND GHCR
+(github.com/seahop/loomctx; still private as of 2026-09-24 — flip repo AND GHCR
 package visibility before the talk) — keep `main` green and presentable. k8s manifests in
-`deploy/k8s`; CI publishes the image to ghcr.io/seahop/loom on main.
+`deploy/k8s`; CI publishes the image to ghcr.io/seahop/loomctx on main.

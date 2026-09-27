@@ -24,12 +24,12 @@ func (m *gwMetrics) handler(w http.ResponseWriter, _ *http.Request) {
 		name, help string
 		val        int64
 	}{
-		{"loom_gateway_requests_total", "Ingest requests received", m.requests.Load()},
-		{"loom_gateway_forwarded_total", "Envelopes forwarded/queued", m.queued.Load()},
-		{"loom_gateway_rejected_invalid_total", "Rejected: malformed or contract violation", m.rejectedBad.Load()},
-		{"loom_gateway_rejected_unauthorized_total", "Rejected: missing/wrong API key", m.rejectedAuth.Load()},
-		{"loom_gateway_rejected_ratelimited_total", "Rejected: rate limit", m.rejectedRate.Load()},
-		{"loom_gateway_upstream_errors_total", "Forwarding failures", m.upstreamErr.Load()},
+		{"loomctx_gateway_requests_total", "Ingest requests received", m.requests.Load()},
+		{"loomctx_gateway_forwarded_total", "Envelopes forwarded/queued", m.queued.Load()},
+		{"loomctx_gateway_rejected_invalid_total", "Rejected: malformed or contract violation", m.rejectedBad.Load()},
+		{"loomctx_gateway_rejected_unauthorized_total", "Rejected: missing/wrong API key", m.rejectedAuth.Load()},
+		{"loomctx_gateway_rejected_ratelimited_total", "Rejected: rate limit", m.rejectedRate.Load()},
+		{"loomctx_gateway_upstream_errors_total", "Forwarding failures", m.upstreamErr.Load()},
 	} {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n",
 			c.name, c.help, c.name, c.name, c.val)

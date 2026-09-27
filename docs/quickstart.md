@@ -1,12 +1,12 @@
 # Quickstart (5 minutes)
 
-Loom running, seeded with a demo security dataset, answering a cited question —
+LoomCtx running, seeded with a demo security dataset, answering a cited question —
 in Docker, nothing on your host.
 
 ## 1. Start the engine
 
 ```bash
-docker compose up -d --wait loom       # builds the image on first run; returns once /readyz is green
+docker compose up -d --wait loomctx       # builds the image on first run; returns once /readyz is green
 curl -s localhost:8000/healthz          # {"status":"ok"}
 ```
 
@@ -17,7 +17,7 @@ with planted demo moments (an IP-lease reassignment, cross-source conflicts,
 an incident report).
 
 ```bash
-docker compose exec loom python -m loom.seed load
+docker compose exec loomctx python -m loomctx.seed load
 ```
 
 ## 3. Ask a focused, budgeted, cited question
@@ -41,19 +41,19 @@ bloating the first response.
 
 ## 4. (Optional) Let an LLM answer over the pack
 
-Point Loom at any provider (OpenRouter, Venice, Anthropic, or a self-hosted
+Point LoomCtx at any provider (OpenRouter, Venice, Anthropic, or a self-hosted
 endpoint) — copy `.env.example` to `.env`, fill in a key, and restart:
 
 ```bash
-cp .env.example .env      # set LOOM_LLM_PROVIDER / MODEL / API_KEY
-docker compose up -d --wait loom     # recreates the container with the new env
+cp .env.example .env      # set LOOMCTX_LLM_PROVIDER / MODEL / API_KEY
+docker compose up -d --wait loomctx     # recreates the container with the new env
 curl -s -X POST localhost:8000/v1/answer -H 'content-type: application/json' -d '{
   "namespace": "netsec",
   "question": "what happened around alert AL-2291, and is 10.0.4.7 relevant?"
 }' | python3 -m json.tool
 ```
 
-Loom auto-resolves the entities named in the question, builds one budgeted
+LoomCtx auto-resolves the entities named in the question, builds one budgeted
 pack across them, and the model answers with citations — and returns the
 pack it saw, so you can audit exactly what grounded the answer.
 

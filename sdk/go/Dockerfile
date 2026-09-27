@@ -7,9 +7,9 @@ COPY sdk/go/go.mod sdk/go/go.sum ./
 RUN go mod download all && go mod verify
 COPY sdk/go/ ./
 COPY contracts/schemas.json /contracts/schemas.json
-ENV LOOM_SCHEMAS=/contracts/schemas.json
+ENV LOOMCTX_SCHEMAS=/contracts/schemas.json
 # `go mod tidy -diff` fails (without writing) if go.mod/go.sum are stale.
 # A passing run prints a filtered summary, a failing one the full log; either
 # way the container exits with `go test`'s own status (sh has no pipefail, so
 # the output is never piped into grep, whose status would mask a failure).
-CMD ["sh", "-c", "go mod tidy -diff && go vet ./... || exit 1; go test ./... -v -run . > /tmp/go-test.log 2>&1; rc=$?; if [ $rc -eq 0 ]; then grep -E '^(=== RUN|--- |PASS|FAIL|ok|\\s+loom_test)' /tmp/go-test.log; else cat /tmp/go-test.log; fi; exit $rc"]
+CMD ["sh", "-c", "go mod tidy -diff && go vet ./... || exit 1; go test ./... -v -run . > /tmp/go-test.log 2>&1; rc=$?; if [ $rc -eq 0 ]; then grep -E '^(=== RUN|--- |PASS|FAIL|ok|\\s+loomctx_test)' /tmp/go-test.log; else cat /tmp/go-test.log; fi; exit $rc"]

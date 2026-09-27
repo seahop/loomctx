@@ -5,7 +5,7 @@ words in exactly these senses.
 
 ### Malleable
 
-The framework's defining quality. **Teams can reshape Loom to their domain without
+The framework's defining quality. **Teams can reshape LoomCtx to their domain without
 forking the core.** Malleability is delivered through four specific mechanisms, not
 vibes:
 
@@ -21,7 +21,7 @@ vibes:
    endpoints, or rule-based extractors.
 4. **Layered access** — MCP, HTTP, SDKs, pipeline adapters, and operator modules
    are thin shells over one core, so a new surface is an adapter, not a rewrite
-   (the Kafka consumer, `loom.kafka_consumer`, is exactly that: 120 lines over
+   (the Kafka consumer, `loomctx.kafka_consumer`, is exactly that: 120 lines over
    the same batch-write path the NATS consumer uses).
 
 If a proposed feature can only serve one domain, it belongs in a registered schema
@@ -30,7 +30,7 @@ or a plugin — not in the core.
 ### Observation
 
 An immutable, append-only record: *source S asserted fact F about entity E,
-observed at time T, recorded by Loom at time R*. Observations are never edited,
+observed at time T, recorded by LoomCtx at time R*. Observations are never edited,
 only superseded by later observations. The ground-truth layer; everything above it
 is derived and rebuildable.
 
@@ -63,7 +63,7 @@ later. Merges are recorded as events: auditable and reversible.
 ### Bitemporal
 
 Every fact carries two time axes: `valid_from`/`valid_to` (when it was true in the
-world) and `recorded_at` (when Loom learned it). "What was true in June?" and "what
+world) and `recorded_at` (when LoomCtx learned it). "What was true in June?" and "what
 did we know in June?" are different questions and both are answerable.
 
 ### Identity-over-time rule
@@ -136,17 +136,17 @@ measurements). See D-014.
 The redaction mechanism that respects append-only: a tombstoned observation
 disappears from every read (packs, expansions, raw views) but the row and
 the tombstone itself remain, so history is suppressed, never falsified.
-`python -m loom.lifecycle redact`. See D-016.
+`python -m loomctx.lifecycle redact`. See D-016.
 
 ### API key
 
-A bearer credential presented as `X-Loom-Key` or a Bearer token and enforced
+A bearer credential presented as `X-LoomCtx-Key` or a Bearer token and enforced
 identically by the engine, the ingest gateway and the MCP http transports.
-The primary form is an entry in the **keys file** (`LOOM_AUTH_FILE`, minted by
-`python -m loom.keys`): only the key's SHA-256 is stored, next to its grants
+The primary form is an entry in the **keys file** (`LOOMCTX_AUTH_FILE`, minted by
+`python -m loomctx.keys`): only the key's SHA-256 is stored, next to its grants
 — namespaces, `r`/`w`/`rw`, an optional entity-type allowlist, an optional
 source pin for writers, an expiry — and the file is hot-reloaded, so rotation
-needs no restart. `LOOM_API_KEYS` (`key:namespace:perms`, plaintext) is the
+needs no restart. `LOOMCTX_API_KEYS` (`key:namespace:perms`, plaintext) is the
 simple/legacy form for local use. Keys gate *data*, never capabilities: a valid
 reader always has the full query surface over what it may see. Unset means
 open dev mode (the engine warns). See D-013, D-013a.

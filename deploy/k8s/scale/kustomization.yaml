@@ -5,7 +5,7 @@ kind: Kustomization
 # autoscaled Go gateway tier, and a writer-consumer sidecar on the engine pod.
 # Apply with: kubectl apply -k deploy/k8s/scale
 
-namespace: loom
+namespace: loomctx
 
 resources:
   - ../base
@@ -15,8 +15,8 @@ resources:
   - pdb.yaml
 
 patches:
-  - path: loom-consumer-sidecar.yaml
+  - path: loomctx-consumer-sidecar.yaml
 
 images:
-  - name: ghcr.io/seahop/loom-gateway
+  - name: ghcr.io/seahop/loomctx-gateway
     newTag: latest

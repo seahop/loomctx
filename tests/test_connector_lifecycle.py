@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from loom.connectors import ocsf, stix
-from loom.context import build_pack
-from loom.contracts import AskRequest, EntityRef
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import ocsf, stix
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 T0 = 1756728000000            # 2025-09-01T12:00:00Z
 DAY = 86_400_000
@@ -154,16 +154,16 @@ def test_finding_chain_through_the_batch_api(tmp_path, monkeypatch, capsys):
     """Over HTTP: prior versions are looked up via the observations route
     and a version in the same batch is flushed first (the batch door
     refuses to supersede a row of the same batch)."""
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "api.db"))
-    from loom.api.http import app
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "api.db"))
+    from loomctx.api.http import app
     events = tmp_path / "scan.ndjson"
     events.write_text("".join(json.dumps(e) + "\n" for e in (OPEN, RESCAN)))
     with TestClient(app) as client:
         _route_urllib_to(client, monkeypatch)
-        ocsf.main(["import", str(events), "--namespace", "netsec", "--url", "http://loom"])
+        ocsf.main(["import", str(events), "--namespace", "netsec", "--url", "http://loomctx"])
         more = tmp_path / "later.ndjson"
         more.write_text(json.dumps(RESOLVED) + "\n")
-        ocsf.main(["import", str(more), "--namespace", "netsec", "--url", "http://loom"])
+        ocsf.main(["import", str(more), "--namespace", "netsec", "--url", "http://loomctx"])
         out = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
         assert [o["rejected"] for o in out] == [0, 0] and [o["superseded"] for o in out] == [1, 1]
         rows = client.get("/v1/entities/host/web-01/observations?namespace=netsec").json()["observations"]
@@ -178,7 +178,7 @@ def test_finding_chain_through_the_batch_api(tmp_path, monkeypatch, capsys):
 def test_a_write_only_key_imports_without_cross_run_chaining(monkeypatch, capsys):
     """The usual shipper grant cannot read: the lookup's 403 degrades to
     in-run chaining with a warning instead of failing the import."""
-    from loom.connectors.chain import HttpSink, keyed_by, load_chained
+    from loomctx.connectors.chain import HttpSink, keyed_by, load_chained
     posted = []
 
     class Resp:
@@ -207,7 +207,7 @@ def test_a_write_only_key_imports_without_cross_run_chaining(monkeypatch, capsys
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     envs = [e for e in ocsf.events_to_envelopes([OPEN, RESCAN], "netsec")
             if e.predicate == "affected_by"]          # identity / shape claims: tested apart
-    totals = load_chained(envs, HttpSink("http://loom", "k"), keyed_by("finding_uid", {"affected_by"}))
+    totals = load_chained(envs, HttpSink("http://loomctx", "k"), keyed_by("finding_uid", {"affected_by"}))
     assert totals["recorded"] == 2 and totals["superseded"] == 1        # in-run chaining still works
     assert posted[1][0]["supersedes"] == "o0"
     assert "WITHOUT version chaining" in capsys.readouterr().err
@@ -314,7 +314,7 @@ def test_one_malformed_record_does_not_abort_an_import(tmp_path):
     """A future timestamp or a field of the wrong shape in one record used
     to raise out of the generator and end the whole import."""
     import gzip
-    from loom.connectors import vulns
+    from loomctx.connectors import vulns
     future = _version(OPEN, 4102444800000)                   # 2100-01-01: the contract refuses it
     stats = {}
     claims = list(ocsf.events_to_envelopes([future, RESCAN, {"class_uid": 2002, "vulnerabilities": 7}],
@@ -394,7 +394,7 @@ def test_stix_export_writes_versions_under_one_id(tmp_path, capsys):
         stix.main(["import", str(tmp_path / name), "--namespace", "netsec", "--db", fresh])
         store = SqliteStore(fresh)
         try:
-            rows = _uses(store)                        # the actor keeps its Loom type (x_loom_entity_type)
+            rows = _uses(store)                        # the actor keeps its LoomCtx type (x_loomctx_entity_type)
             assert len(rows) == versions and all(r.supersedes == p.id for p, r in zip(rows, rows[1:]))
         finally:
             store.close()
@@ -424,12 +424,12 @@ def test_stix_export_writes_versions_under_one_id(tmp_path, capsys):
     assert _count(db) == before
 
 
-def test_stix_export_of_a_loom_native_chain():
+def test_stix_export_of_a_loomctx_native_chain():
     """A recorded supersession (D-050) with no STIX origin: the versions
     share an id derived from the first one; an edge corrected into
     something that is not a version of it ends revoked."""
     import uuid
-    from loom.contracts import Observation
+    from loomctx.contracts import Observation
     t = [datetime(2026, 9, d, tzinfo=timezone.utc) for d in (1, 2, 3, 4)]
     host, ip = EntityRef(type="host", key="web-01"), EntityRef(type="ip", key="10.0.4.7")
 
@@ -443,11 +443,11 @@ def test_stix_export_of_a_loom_native_chain():
     bundle = stix.observations_to_bundle(rows, "netsec")
     rels = {r["relationship_type"]: r for r in bundle["objects"] if r["type"] == "relationship"}
     has_ip = rels["has-ip"]
-    assert has_ip["id"] == f"relationship--{uuid.uuid5(stix.LOOM_UUID_NS, 'o1')}"
-    assert has_ip["x_loom_observation_id"] == "o2" and has_ip["created"] < has_ip["modified"]
+    assert has_ip["id"] == f"relationship--{uuid.uuid5(stix.LOOMCTX_UUID_NS, 'o1')}"
+    assert has_ip["x_loomctx_observation_id"] == "o2" and has_ip["created"] < has_ip["modified"]
     assert has_ip["stop_time"] == stix.stix_timestamp(t[1])
     owned = rels["owned-by"]
-    assert owned["revoked"] is True and owned["x_loom_superseded_by"] == "o4"
+    assert owned["revoked"] is True and owned["x_loomctx_superseded_by"] == "o4"
     assert owned["modified"] == stix.stix_timestamp(t[2])
     history = stix.observations_to_bundle(rows, "netsec", history=True)
     versions = [(r["relationship_type"], r["modified"], r.get("revoked", False))
@@ -475,8 +475,8 @@ def test_ocsf_export_writes_one_finding_per_chain(tmp_path, capsys):
     events.write_text("".join(json.dumps(e) + "\n" for e in (OPEN, RESCAN, RESOLVED)))
     db = str(tmp_path / "o.db")
     ocsf.main(["import", str(events), "--namespace", "netsec", "--db", db])
-    from loom.contracts import ClaimIn
-    from loom.ingest import load_direct
+    from loomctx.contracts import ClaimIn
+    from loomctx.ingest import load_direct
     nvd = ClaimIn(namespace="netsec", event_id="nvd:CVE-2014-0160:cvss", subject=EntityRef(type="cve", key="CVE-2014-0160"),
                   predicate="cvss_score", object=7.5, source="nvd:nvd@nist.gov", attrs={"version": "3.1"},
                   observed_at=datetime(2025, 9, 2, tzinfo=timezone.utc))
@@ -494,7 +494,7 @@ def test_ocsf_export_writes_one_finding_per_chain(tmp_path, capsys):
     ocsf.main(["import", str(tmp_path / "history.ndjson"), "--namespace", "netsec", "--db", db])
     store = SqliteStore(db)
     try:
-        assert _count(db) == before           # the CVE facts it restates are replays too, not "loom" copies
+        assert _count(db) == before           # the CVE facts it restates are replays too, not "loomctx" copies
         _check_closed_chain(_exposure(store))
     finally:
         store.close()
@@ -515,11 +515,11 @@ def test_ocsf_export_writes_one_finding_per_chain(tmp_path, capsys):
     assert _finding_state(_export_ocsf(tmp_path, fresh)) == _finding_state(newest)
 
 
-def test_ocsf_export_of_a_loom_native_chain():
+def test_ocsf_export_of_a_loomctx_native_chain():
     """Recorded supersessions with no OCSF origin: a correction that moves
     the finding to another host is its next version; one that names
     another CVE closes the old finding as Superseded."""
-    from loom.contracts import Observation
+    from loomctx.contracts import Observation
     t = [datetime(2026, 9, d, tzinfo=timezone.utc) for d in (1, 2, 3)]
     heartbleed, other = EntityRef(type="cve", key="CVE-2014-0160"), EntityRef(type="cve", key="CVE-2026-1337")
 
@@ -535,11 +535,11 @@ def test_ocsf_export_of_a_loom_native_chain():
     state = {(f["finding_info"]["uid"], f["device"]["hostname"]): f for f in findings}
     assert set(state) == {("o1", "web-01"), ("o3", "web-03"), ("o5", "web-04"), ("o6", "web-04")}
     assert state[("o1", "web-01")]["status_id"] == 4 and state[("o1", "web-01")]["activity_id"] == 3
-    assert state[("o1", "web-01")]["unmapped"]["loom_observation_ids"][0] == "o2"
+    assert state[("o1", "web-01")]["unmapped"]["loomctx_observation_ids"][0] == "o2"
     assert state[("o3", "web-03")]["status_id"] == 1 and state[("o3", "web-03")]["activity_id"] == 2
     gone = state[("o5", "web-04")]
     assert (gone["status_id"], gone["status"], gone["activity_id"]) == (99, "Superseded", 3)
-    assert gone["unmapped"]["loom_superseded_by"] == "o6"
+    assert gone["unmapped"]["loomctx_superseded_by"] == "o6"
     assert state[("o6", "web-04")]["vulnerabilities"][0]["cve"]["uid"] == "CVE-2026-1337"
     history = ocsf.observations_to_findings(rows, "netsec", now=t[2], history=True)
     assert [(f["finding_info"]["uid"], f["device"]["hostname"], f["status_id"]) for f in history
@@ -554,33 +554,33 @@ def test_a_source_pinned_refresh_key_skips_a_registration_it_cannot_make(tmp_pat
     import hashlib
     import pytest
     from fastapi.testclient import TestClient
-    from loom.connectors import vulns
+    from loomctx.connectors import vulns
     keys = tmp_path / "keys.json"
     keys.write_text(json.dumps({"keys": [
         {"sha256": hashlib.sha256(b"admin").hexdigest(), "id": "admin", "namespaces": ["*"], "perms": "rw"},
         {"sha256": hashlib.sha256(b"refresh").hexdigest(), "id": "vulns-refresh", "namespaces": ["netsec"],
          "perms": "rw", "sources": ["nvd", "cisa-kev", "first-epss"]}]}))
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "reg.db"))
-    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
-    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
-    from loom.api.http import app
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "reg.db"))
+    monkeypatch.setenv("LOOMCTX_AUTH_FILE", str(keys))
+    monkeypatch.delenv("LOOMCTX_API_KEYS", raising=False)
+    from loomctx.api.http import app
     with TestClient(app) as client:
         _route_urllib_to(client, monkeypatch)
         reg = vulns.schema("netsec")
         with pytest.raises(SystemExit, match="403"):
-            vulns.register(reg, "http://loom", None, "refresh")      # nothing registered yet: refused
-        vulns.register(reg, "http://loom", None, "admin")            # the first load, by an operator
-        vulns.register(reg, "http://loom", None, "refresh")          # nightly: nothing to add, no call
+            vulns.register(reg, "http://loomctx", None, "refresh")      # nothing registered yet: refused
+        vulns.register(reg, "http://loomctx", None, "admin")            # the first load, by an operator
+        vulns.register(reg, "http://loomctx", None, "refresh")          # nightly: nothing to add, no call
         more = reg.model_copy(update={"predicates": [*reg.predicates,
                                                      reg.predicates[0].model_copy(update={"name": "new_pred"})]})
         with pytest.raises(SystemExit, match="403"):
-            vulns.register(more, "http://loom", None, "refresh")     # a real change still needs the operator
+            vulns.register(more, "http://loomctx", None, "refresh")     # a real change still needs the operator
 
 
 def test_a_gateway_import_reads_prior_versions_from_the_engine(monkeypatch, capsys):
-    """A gateway serves ingest only: lookups go to LOOM_READ_URL when set,
+    """A gateway serves ingest only: lookups go to LOOMCTX_READ_URL when set,
     and a 404 without it degrades to in-run chaining instead of failing."""
-    from loom.connectors.chain import HttpSink, keyed_by, load_chained
+    from loomctx.connectors.chain import HttpSink, keyed_by, load_chained
     gets = []
 
     class Resp:
@@ -609,8 +609,8 @@ def test_a_gateway_import_reads_prior_versions_from_the_engine(monkeypatch, caps
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     envs = [e for e in ocsf.events_to_envelopes([OPEN], "netsec") if e.predicate == "affected_by"]
     totals = load_chained(envs, HttpSink("http://gateway", "k"), keyed_by("finding_uid", {"affected_by"}))
-    assert totals["recorded"] == 1 and "LOOM_READ_URL" in capsys.readouterr().err
+    assert totals["recorded"] == 1 and "LOOMCTX_READ_URL" in capsys.readouterr().err
     gets.clear()
-    monkeypatch.setenv("LOOM_READ_URL", "http://engine:8000")
+    monkeypatch.setenv("LOOMCTX_READ_URL", "http://engine:8000")
     load_chained(envs, HttpSink("http://gateway", "k"), keyed_by("finding_uid", {"affected_by"}))
     assert gets and all(u.startswith("http://engine:8000/") for u in gets)

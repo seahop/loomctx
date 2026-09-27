@@ -5,9 +5,9 @@ tool naming — with detected / host-only / missed and each side cited."""
 import json
 from datetime import datetime, timezone
 
-from loom import purple
-from loom.connectors import ocsf, oplog
-from loom.store.sqlite import SqliteStore
+from loomctx import purple
+from loomctx.connectors import ocsf, oplog
+from loomctx.store.sqlite import SqliteStore
 
 ATOMIC = '''"Execution Time (UTC)","Execution Time (Local)","Technique","Test Number","Test Name","Hostname","IP Address","Username","GUID","ProcessId","ExitCode"
 "2026-09-20T10:00:00Z","2026-09-20T12:00:00","T1003.001","1","Dump LSASS with procdump","WEB-01","10.0.4.7","CORP\\redop","g1","4120","0"

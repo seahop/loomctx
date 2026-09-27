@@ -1,6 +1,6 @@
-# Contributing to Loom
+# Contributing to LoomCtx
 
-Thanks for looking. Loom is small and opinionated; the fastest way to be
+Thanks for looking. LoomCtx is small and opinionated; the fastest way to be
 useful is to read `docs/architecture.md` and `docs/decisions.md` first —
 most "why is it like this?" questions are answered there, and new choices
 get a numbered entry in `decisions.md` rather than a comment.
@@ -9,13 +9,13 @@ get a numbered entry in `decisions.md` rather than a comment.
 
 - **Docker-only.** Build and run everything through `docker compose`;
   nothing installs on the host. Tests: `docker compose run --rm test`.
-- **Contracts are the API.** `src/loom/contracts.py` is the source of
+- **Contracts are the API.** `src/loomctx/contracts.py` is the source of
   truth; `contracts/schemas.json` and `contracts/openapi.json` are generated
-  from it (`python -m loom.schemas`, `python -m loom.schemas openapi`) and CI
+  from it (`python -m loomctx.schemas`, `python -m loomctx.schemas openapi`) and CI
   fails if either drifts — as do the TypeScript SDK's generated types
   (`docker compose --profile sdk run --rm sdk-ts npm run gen`). A contract
   change is a decision, not a refactor — add a `D-xxx` entry.
-- **Persistence only through `GraphStore`** (`src/loom/store/`). New store
+- **Persistence only through `GraphStore`** (`src/loomctx/store/`). New store
   behavior lands in `tests/test_store.py` first, which runs against both
   SQLite and Postgres; the two backends must stay behaviorally identical.
 - **Provenance is mandatory.** Every pack item cites something; every
@@ -36,7 +36,7 @@ get a numbered entry in `decisions.md` rather than a comment.
    changes also run the Postgres lane:
    ```bash
    docker compose --profile pg up -d --wait postgres
-   docker compose run --rm -e LOOM_TEST_POSTGRES_URL=postgresql://loom:loom@postgres:5432/loom \
+   docker compose run --rm -e LOOMCTX_TEST_POSTGRES_URL=postgresql://loomctx:loomctx@postgres:5432/loomctx \
      test pytest -q tests/test_store.py
    ```
    Gateway changes: `docker compose --profile scale build gateway` runs

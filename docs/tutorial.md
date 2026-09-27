@@ -1,15 +1,15 @@
 # Tutorial: your own security domain in 30 minutes
 
 The quickstart used a bundled dataset. Here you build a *different* one from an
-empty store — **vulnerability management** — to see how Loom adapts to whatever
+empty store — **vulnerability management** — to see how LoomCtx adapts to whatever
 security data your team actually has. Same engine, your entities, your
-predicates, no netsec-specific code anywhere in Loom.
+predicates, no netsec-specific code anywhere in LoomCtx.
 
 We'll model **assets**, **CVEs**, and **scanners**; feed both structured
 scanner events and an unstructured pentest report; then query it the way an
 agent would.
 
-> **No schema to declare.** Loom creates entity types and predicates the first
+> **No schema to declare.** LoomCtx creates entity types and predicates the first
 > time you use them — "bring your own schema" is just "start sending claims."
 > Registering a schema (`POST /v1/schemas`, D-024) is optional and additive:
 > a registered predicate's `object_types` are enforced on ingest, and a
@@ -23,7 +23,7 @@ beside the demo data without colliding.
 ## 1. A clean engine
 
 ```bash
-docker compose up -d --wait loom
+docker compose up -d --wait loomctx
 ```
 
 ## 2. Send structured claims (scanner findings)
@@ -74,7 +74,7 @@ claim(E("asset","db-01"), "affected_by", E("cve","CVE-2026-5150"),
 ```
 
 ```bash
-docker compose exec -T loom python - < feed.py
+docker compose exec -T loomctx python - < feed.py
 ```
 
 ## 3. Send an unstructured document (a pentest report)
@@ -100,7 +100,7 @@ Raw facts about an asset:
 
 ```bash
 curl -s 'localhost:8000/v1/entities/asset/web-01/observations' \
-  -H 'X-Loom-Namespace: vuln' | python3 -m json.tool
+  -H 'X-LoomCtx-Namespace: vuln' | python3 -m json.tool
 ```
 
 A focused, budgeted pack — note the CVE-severity **conflict surfaces first**:
@@ -117,21 +117,21 @@ curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 ## 5. Enrich: mine the document, embed, summarize
 
 Run the enrichment worker once against your configured LLM (see
-`.env.example` for `LOOM_LLM_*`; embeddings via `LOOM_EMBED_*`, or
-`LOOM_EMBED_PROVIDER=hashing` for an offline pass):
+`.env.example` for `LOOMCTX_LLM_*`; embeddings via `LOOMCTX_EMBED_*`, or
+`LOOMCTX_EMBED_PROVIDER=hashing` for an offline pass):
 
 ```bash
-docker compose exec -T -e LOOM_EMBED_PROVIDER=hashing loom \
-  python -m loom.enrich run --once
+docker compose exec -T -e LOOMCTX_EMBED_PROVIDER=hashing loomctx \
+  python -m loomctx.enrich run --once
 ```
 
 Now the pentest report's assertions ("web-01 exploitable via CVE-2026-1337")
 exist as cited observations, `web-01` has a dossier brief, its passages are
 retrievable as `doc_excerpt` items, and ranking is semantic. (Configure
-`LOOM_EMBED_*` on the **engine** too, not just the worker — the query is
+`LOOMCTX_EMBED_*` on the **engine** too, not just the worker — the query is
 embedded at read time; see `.env.example`.) Ask a question whose wording
 doesn't match any predicate literally, and raise the budget if you want more
-of the report's passages back — the ceiling is `LOOM_MAX_BUDGET`:
+of the report's passages back — the ceiling is `LOOMCTX_MAX_BUDGET`:
 
 ```bash
 curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
@@ -176,11 +176,11 @@ curl -s -X POST localhost:8000/v1/ask -H 'content-type: application/json' -d '{
 }' | python3 -m json.tool
 ```
 
-Neither framing is baked into Loom; both are just questions over the graph.
+Neither framing is baked into LoomCtx; both are just questions over the graph.
 
 ## 7. Connect an agent (MCP)
 
-Point any MCP-capable agent at Loom and it gets `list_namespaces`,
+Point any MCP-capable agent at LoomCtx and it gets `list_namespaces`,
 `describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
 `find_path` (the connecting edge sequence(s) between two entities, D-067),
 `expand`, `record_claim`, `get_observations`, `answer`, `purple_report` (a
@@ -188,10 +188,10 @@ red-team operation against the detections, D-086) — scoped to whatever
 the agent's API key allows:
 
 ```bash
-claude mcp add loom -- docker compose --project-directory "$PWD" run --rm -T loom python -m loom.mcp_server
+claude mcp add loomctx -- docker compose --project-directory "$PWD" run --rm -T loomctx python -m loomctx.mcp_server
 ```
 
-Now "ask Loom which assets are still exploitable" is a tool call, and the
+Now "ask LoomCtx which assets are still exploitable" is a tool call, and the
 agent can `record_claim` its own conclusions back.
 
 ## 8. Lock it down (when you're past experimenting)
@@ -202,15 +202,15 @@ agent can only *read* the slice they're cleared for — see
 
 ```bash
 mkdir -p secrets   # yours, not root's: docker would create a missing mount source as root
-docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loom \
-  python -m loom.keys --file /secrets/keys.json generate \
+docker compose run --rm --user "$(id -u):$(id -g)" -v $PWD/secrets:/secrets loomctx \
+  python -m loomctx.keys --file /secrets/keys.json generate \
   --id nessus-feed --namespace vuln --perms w \
   --entity-types asset,cve,scanner --sources nessus
 ```
 
 ## What you just proved
 
-You stood up a security domain Loom had never seen — different entities,
+You stood up a security domain LoomCtx had never seen — different entities,
 different predicates, a different document type — with no code changes and no
 schema ceremony, and got budgeted, cited, conflict-aware answers plus an agent
 integration. The same data answered a defender's question and an attacker's.
@@ -219,6 +219,6 @@ you're asking from.**
 
 Next: **[sdk.md](sdk.md)** for the typed SDKs and full surface,
 **[../deploy/integrations/README.md](../deploy/integrations/README.md)** to
-feed Loom from the shippers, queues, and files you already have,
+feed LoomCtx from the shippers, queues, and files you already have,
 **[architecture.md](architecture.md)** for how the write/read split works, and
 **[administration.md](administration.md)** for running it for a team.

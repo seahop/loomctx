@@ -1,4 +1,4 @@
-module github.com/seahop/loom/gateway
+module github.com/seahop/loomctx/gateway
 
 go 1.27
 

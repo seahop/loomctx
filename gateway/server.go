@@ -78,7 +78,7 @@ func (f *httpForwarder) forward(ctx context.Context, _, apiKey, _ string, payloa
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		req.Header.Set("X-Loom-Key", apiKey)
+		req.Header.Set("X-LoomCtx-Key", apiKey)
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -91,7 +91,7 @@ func (f *httpForwarder) forward(ctx context.Context, _, apiKey, _ string, payloa
 
 func (f *httpForwarder) close() {}
 
-const streamName = "LOOM_INGEST"
+const streamName = "LOOMCTX_INGEST"
 
 type natsForwarder struct {
 	nc *nats.Conn
@@ -138,7 +138,7 @@ func newNATSForwarder(url string, sc streamConfig) (*natsForwarder, error) {
 	}
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     streamName,
-		Subjects: []string{"loom.ingest.>"},
+		Subjects: []string{"loomctx.ingest.>"},
 		Replicas: replicas,
 		MaxBytes: sc.maxBytes,
 		Discard:  discard,
@@ -150,10 +150,10 @@ func newNATSForwarder(url string, sc streamConfig) (*natsForwarder, error) {
 	return &natsForwarder{nc: nc, js: js}, nil
 }
 
-const principalHeader = "Loom-Principal"
+const principalHeader = "LoomCtx-Principal"
 
 func (f *natsForwarder) forward(ctx context.Context, kind, _, principal string, payload []byte) (int, []byte, error) {
-	msg := &nats.Msg{Subject: "loom.ingest." + kind, Data: payload, Header: nats.Header{}}
+	msg := &nats.Msg{Subject: "loomctx.ingest." + kind, Data: payload, Header: nats.Header{}}
 	if principal != "" {
 		msg.Header.Set(principalHeader, principal)
 	}
@@ -185,13 +185,13 @@ func (f *natsForwarder) close() { f.nc.Close() }
 // The map is bounded as a belt-and-braces guard.
 //
 // A grant may carry its own rate_per_sec / rate_burst (R-10, keys file):
-// the override applies even when LOOM_RATE_PER_SEC is unset ("unlimited
+// the override applies even when LOOMCTX_RATE_PER_SEC is unset ("unlimited
 // by default, this key is capped"), and a hot-reloaded change retunes the
 // principal's live bucket.
 type limiterPool struct {
 	mu      sync.Mutex
 	rate    float64 // 0 = no default limit
-	burst   int     // LOOM_RATE_BURST; 0 = int(rate)
+	burst   int     // LOOMCTX_RATE_BURST; 0 = int(rate)
 	buckets map[string]*rate.Limiter
 }
 
@@ -213,7 +213,7 @@ func newLimiterPoolBurst(perSec float64, burst int) *limiterPool {
 
 // effective is the (rate, burst) a principal is held to: its grant's
 // override, else the pool default. A key's own rate brings its own burst
-// (rate_burst, else int(rate)) — never LOOM_RATE_BURST sized for another
+// (rate_burst, else int(rate)) — never LOOMCTX_RATE_BURST sized for another
 // rate; the same resolution as the engine. A burst below one would admit
 // nothing.
 func (p *limiterPool) effective(g *grant) (float64, int) {
@@ -329,7 +329,7 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 			if apiKey == "" {
 				m.rejectedAuth.Add(1)
 				writeJSON(w, http.StatusUnauthorized,
-					map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+					map[string]string{"detail": "missing API key (X-LoomCtx-Key or Authorization: Bearer)"})
 				return
 			}
 			g = auth.grantFor(apiKey)
@@ -364,7 +364,7 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 			if tooBig {
 				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"detail": fmt.Sprintf(
 					"batch of %d items exceeds this key's rate burst of %d; send smaller batches "+
-						"or raise rate_burst / LOOM_RATE_BURST", len(items), burst)})
+						"or raise rate_burst / LOOMCTX_RATE_BURST", len(items), burst)})
 				return
 			}
 			w.Header().Set("Retry-After", "1")
@@ -464,7 +464,7 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 			if apiKey == "" {
 				m.rejectedAuth.Add(1)
 				writeJSON(w, http.StatusUnauthorized,
-					map[string]string{"detail": "missing API key (X-Loom-Key or Authorization: Bearer)"})
+					map[string]string{"detail": "missing API key (X-LoomCtx-Key or Authorization: Bearer)"})
 				return
 			}
 			g = auth.grantFor(apiKey)
@@ -561,12 +561,12 @@ func newServerWithLimiters(cfg config, schema *jsonschema.Schema, fwd forwarder,
 	return mux
 }
 
-// uploaderAttr is the engine's reserved artifact attribute (loom.gates):
+// uploaderAttr is the engine's reserved artifact attribute (loomctx.gates):
 // which grant ingested a document, and that grant's entity types. Senders
 // may not supply it; in the NATS shape the gateway — the only hop that
 // knows the grant — records it, since the writer consumer sees only the
 // principal header.
-const uploaderAttr = "loom.uploader"
+const uploaderAttr = "loomctx.uploader"
 
 func checkReservedAttrs(kind string, doc any) string {
 	if kind != "document" {
@@ -581,7 +581,7 @@ func checkReservedAttrs(kind string, doc any) string {
 	return ""
 }
 
-// stampUploader returns the document envelope with attrs["loom.uploader"]
+// stampUploader returns the document envelope with attrs["loomctx.uploader"]
 // set from the grant; other envelopes, and open mode, pass through
 // byte-for-byte. Fields other than attrs keep their raw encoding.
 func stampUploader(raw []byte, kind string, g *grant) ([]byte, error) {

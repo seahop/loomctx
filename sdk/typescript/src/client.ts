@@ -1,5 +1,5 @@
 /**
- * Thin TypeScript client for Loom's HTTP API (docs/sdk.md). Typed transport
+ * Thin TypeScript client for LoomCtx's HTTP API (docs/sdk.md). Typed transport
  * only — no retries into semantics, no client-side ranking — over the
  * generated contract types in ./contracts, so it cannot drift from the
  * server. Zero runtime dependencies: uses the platform `fetch`.
@@ -23,18 +23,18 @@ export type EntityTuple = [type: string, key: string];
 export type ObjectArg = EntityTuple | string | number | boolean;
 
 /** A non-2xx response: `status` is the HTTP code, `detail` the engine's message. */
-export class LoomError extends Error {
+export class LoomCtxError extends Error {
   constructor(public readonly status: number, public readonly detail: string) {
     super(`HTTP ${status}: ${detail}`);
-    this.name = "LoomError";
+    this.name = "LoomCtxError";
   }
 }
 
-export interface LoomOptions {
+export interface LoomCtxOptions {
   namespace?: string;
-  /** X-Loom-Key: the caller's identity + data permissions (D-013a). */
+  /** X-LoomCtx-Key: the caller's identity + data permissions (D-013a). */
   apiKey?: string;
-  /** X-Loom-LLM-Key on answer(): bill LLM spend to this caller. */
+  /** X-LoomCtx-LLM-Key on answer(): bill LLM spend to this caller. */
   llmKey?: string;
   timeoutMs?: number;
   fetch?: typeof fetch;
@@ -97,7 +97,7 @@ export interface SearchResponse {
 
 const ref = (t: EntityTuple): EntityRef => ({ type: t[0], key: t[1] });
 
-export class Loom {
+export class LoomCtx {
   readonly baseUrl: string;
   readonly namespace: string;
   private readonly apiKey?: string;
@@ -105,7 +105,7 @@ export class Loom {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(baseUrl: string, opts: LoomOptions = {}) {
+  constructor(baseUrl: string, opts: LoomCtxOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.namespace = opts.namespace ?? "default";
     // a key read from a file or a k8s Secret often ends in a newline; the
@@ -224,7 +224,7 @@ export class Loom {
       valid_at: opts.valid_at ?? null,
       max_tokens: opts.max_tokens ?? 1024,
     };
-    const headers: Record<string, string> = this.llmKey ? { "X-Loom-LLM-Key": this.llmKey } : {};
+    const headers: Record<string, string> = this.llmKey ? { "X-LoomCtx-LLM-Key": this.llmKey } : {};
     return this.post("/v1/answer", body, headers);
   }
 
@@ -255,10 +255,10 @@ export class Loom {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     const h: Record<string, string> = {
       "content-type": "application/json",
-      "X-Loom-Namespace": this.namespace,
+      "X-LoomCtx-Namespace": this.namespace,
       ...extra,
     };
-    if (this.apiKey) h["X-Loom-Key"] = this.apiKey;
+    if (this.apiKey) h["X-LoomCtx-Key"] = this.apiKey;
     return h;
   }
 
@@ -276,7 +276,7 @@ export class Loom {
         } catch {
           /* keep raw body */
         }
-        throw new LoomError(res.status, detail);
+        throw new LoomCtxError(res.status, detail);
       }
       return text ? (JSON.parse(text) as T) : (undefined as T);
     } finally {

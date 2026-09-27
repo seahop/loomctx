@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 
 
-from loom.context import (
+from loomctx.context import (
     build_pack, decode_handle, est_tokens, expand_pack, handle_tokens, item_tokens,
 )
-from loom.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.contracts import AskRequest, ClaimIn, EntityRef, Observation, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 
 def _at(month, day, hour=12):
@@ -156,8 +156,8 @@ def test_expired_validity_is_not_a_conflict(tmp_path):
 
 
 def test_query_embedding_is_cached():
-    from loom.context import embed_query, _query_cache
-    from loom.llm import HashingEmbedder
+    from loomctx.context import embed_query, _query_cache
+    from loomctx.llm import HashingEmbedder
     calls = []
 
     class Counting(HashingEmbedder):
@@ -216,8 +216,8 @@ def test_valid_at_answers_what_was_true(tmp_path):
 
 def test_recency_is_time_decayed_not_rank_based(tmp_path):
     """H-C7: facts seconds apart score alike; a year-old one decays."""
-    from loom.context import _recency
-    from loom.contracts import Observation
+    from loomctx.context import _recency
+    from loomctx.contracts import Observation
     newest = _at(9, 1)
 
     def obs(when):
@@ -241,8 +241,8 @@ def test_stopwords_do_not_dilute_keyword_relevance(tmp_path):
 
 def test_scores_stay_comparable_when_some_vectors_are_missing(tmp_path):
     """H-C7: with an embedder serving, un-embedded facts use the same formula."""
-    from loom.enrich import embed_pending
-    from loom.llm import HashingEmbedder
+    from loomctx.enrich import embed_pending
+    from loomctx.llm import HashingEmbedder
     store, web01 = make_store(tmp_path)
     embedder = HashingEmbedder()
     embed_pending(store, embedder, batch=5)  # only SOME observations get vectors
@@ -265,7 +265,7 @@ def test_scores_stay_comparable_when_some_vectors_are_missing(tmp_path):
 
 
 def test_numpy_and_python_cosines_agree():
-    from loom.context import _cosine, cosines
+    from loomctx.context import _cosine, cosines
     q = [1.0, 2.0, 3.0]
     vecs = {"a": [1.0, 2.0, 3.0], "b": [-1.0, 0.0, 0.5], "z": [0.0, 0.0, 0.0],
             "short": [1.0, 2.0]}
@@ -278,8 +278,8 @@ def test_numpy_and_python_cosines_agree():
 def test_handles_are_capped_and_the_rest_counted(tmp_path, monkeypatch):
     """D-035: a scope over a hub entity produced 8,234 handles. Handles stay
     in priority order, stop at the cap, and the pack says how many were left."""
-    import loom.context as ctx
-    from loom.context import _MAX_HANDLES
+    import loomctx.context as ctx
+    from loomctx.context import _MAX_HANDLES
     store = SqliteStore(tmp_path / "cap.db")
     subj = EntityRef(type="host", key="busy")
     store.record_claims([
@@ -348,7 +348,7 @@ def test_conflicts_never_crowd_out_every_fact(tmp_path):
         claims.append(ClaimIn(namespace="ns", subject=cve, predicate="exploited_in_wild", object=True,
                               source="cisa-kev", observed_at=t))
     store.record_claims(claims)
-    from loom.contracts import ScopeSpec
+    from loomctx.contracts import ScopeSpec
     pack = build_pack(store, AskRequest(namespace="ns", question="exploited in wild", budget=900,
                                         scope=ScopeSpec(subjects=cves, depth=0)))
     kinds = [i.kind for i in pack.items]
@@ -365,7 +365,7 @@ def test_scope_facts_arrive_with_their_path(tmp_path):
     'web-01 runs nginx' / 'CVE-X affects nginx' (fresher rows outranked them)
     and the answering model refused to connect the dots. A fact about a
     reached entity ships with the edges it was reached through."""
-    from loom.contracts import ScopeSpec
+    from loomctx.contracts import ScopeSpec
     store = SqliteStore(tmp_path / "path.db")
     t = datetime(2026, 7, 1, tzinfo=timezone.utc)
     host, prod, cve = (EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx"),
@@ -395,7 +395,7 @@ def test_inbound_facts_on_a_reached_subject_carry_its_path(tmp_path):
     affects nginx, 'affects' not walked) was keyed on its subject — outside
     the pack — and shipped without 'web-01 runs nginx', the edge that
     says why nginx is in the pack at all."""
-    from loom.contracts import ScopeSpec
+    from loomctx.contracts import ScopeSpec
     store = SqliteStore(tmp_path / "inpath.db")
     t = datetime(2026, 7, 1, tzinfo=timezone.utc)
     host, prod = EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx")
@@ -423,7 +423,7 @@ def test_naming_the_subject_does_not_boost_its_own_facts(tmp_path):
     recent login *about web-01* matched as many question words as the KEV
     fact two hops away and outranked it on recency. The root subject's own
     name is the frame of the question, not its topic."""
-    from loom.contracts import ScopeSpec
+    from loomctx.contracts import ScopeSpec
     store = SqliteStore(tmp_path / "frame.db")
     old, new = datetime(2026, 5, 1, tzinfo=timezone.utc), datetime(2026, 9, 2, tzinfo=timezone.utc)
     host, prod, cve = (EntityRef(type="host", key="web-01"), EntityRef(type="product", key="nginx"),
@@ -448,7 +448,7 @@ def test_naming_the_subject_does_not_boost_its_own_facts(tmp_path):
 def test_handles_are_compact_and_legacy_handles_still_decode():
     import base64
     import json as _json
-    from loom.context import encode_handle
+    from loomctx.context import encode_handle
     ref = EntityRef(type="product", key="linux:linux_kernel")
     h = encode_handle("netsec", ref, "affects", None, datetime(2026, 8, 20, tzinfo=timezone.utc))
     legacy_len = len("h1_" + base64.urlsafe_b64encode(_json.dumps(
@@ -469,8 +469,8 @@ def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
     """D-038: a hub with more observations than the gather limit yields its
     newest N; the pack says so wherever that happened (subject, scope
     expansion, expand), so a reader cannot conclude absence from it."""
-    import loom.context as ctx
-    from loom.contracts import ScopeSpec
+    import loomctx.context as ctx
+    from loomctx.contracts import ScopeSpec
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "trunc.db")
     hub = EntityRef(type="product", key="linux:linux_kernel")
@@ -504,7 +504,7 @@ def test_gather_truncation_is_reported_not_silent(tmp_path, monkeypatch):
 def test_a_failing_query_embedder_degrades_to_keyword_ranking(tmp_path):
     """D-039: one ask stalled 30 s behind the embedder. Provider failure at
     ask time means keyword ranking for that ask, not an error or a wait."""
-    from loom.context import _query_cache
+    from loomctx.context import _query_cache
     store, web01 = make_store(tmp_path)
 
     class Down:
@@ -526,7 +526,7 @@ def test_as_of_is_bounded_in_the_gather_not_after_it(tmp_path, monkeypatch):
     empty time-travel pack. The bound is the store's now; the rows as of T
     come back, and a fact scheduled for later but asserted before T is in
     the view (that is valid_at's job to hide)."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "asof.db")
     host = EntityRef(type="host", key="web-01")
@@ -552,7 +552,7 @@ def test_as_of_is_bounded_in_the_gather_not_after_it(tmp_path, monkeypatch):
 
 def test_truncation_total_honors_as_of(tmp_path, monkeypatch):
     """D-046: the `truncated` denominator counts rows as of T, not overall."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "asof-trunc.db")
     host = EntityRef(type="host", key="web-01")
@@ -584,8 +584,8 @@ def test_a_forward_dated_row_does_not_age_every_real_fact(tmp_path, monkeypatch)
     observed in 2099 (restored from an export, or a typo'd year) made every
     real fact decades old and flattened ranking. The reference is clamped
     at now, so the real facts keep their relative recency."""
-    import loom.context as ctx
-    from loom.contracts import Observation
+    import loomctx.context as ctx
+    from loomctx.contracts import Observation
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))  # the newest real fact's instant
     store, web01 = make_store(tmp_path)
     before = build_pack(store, AskRequest(subject=web01, question="who logged in?", budget=3000))
@@ -622,7 +622,7 @@ def test_no_vectors_at_all_means_keyword_ranking(tmp_path):
     a neutral cosine, which cut keyword weight to 0.15 and let recency
     decide: on 'what os?' the newest login outranked the July OS fact.
     With no cosines the keyword formula ranks."""
-    from loom.llm import HashingEmbedder
+    from loomctx.llm import HashingEmbedder
     store, web01 = make_store(tmp_path)
     pack = build_pack(store, AskRequest(subject=web01, question="what os?", budget=3000),
                       embedder=HashingEmbedder())  # nothing embedded yet
@@ -636,7 +636,7 @@ def test_unembedded_facts_rank_by_the_lexical_leg_alone(tmp_path, monkeypatch):
     nothing from that leg — no fill-in value. With no lexical match either
     it takes the relevance floor and still ships; with one it earns that
     leg's full share."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))
     host = EntityRef(type="host", key="h")
 
@@ -660,8 +660,8 @@ def test_query_cache_eviction_is_safe_across_threads():
     inserting into (asks run in the threadpool); the cache is now locked
     and stays bounded under concurrent misses."""
     from concurrent.futures import ThreadPoolExecutor
-    from loom.context import _QUERY_CACHE_SIZE, _query_cache, embed_query
-    from loom.llm import HashingEmbedder
+    from loomctx.context import _QUERY_CACHE_SIZE, _query_cache, embed_query
+    from loomctx.llm import HashingEmbedder
     _query_cache.clear()
     e = HashingEmbedder()
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -692,7 +692,7 @@ def test_packing_prefers_diversity_over_twenty_identical_logins(tmp_path, monkey
     and nothing else. Once a predicate holds three items, further items of
     it compete at half their value per token, so relevant facts of other
     kinds get in while the logins stay well represented."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 1))
     store = SqliteStore(tmp_path / "diverse.db")
     host = EntityRef(type="host", key="web-01")
@@ -763,7 +763,7 @@ def test_entity_valued_conflict_between_sources(tmp_path):
 def test_single_source_lease_reassignment_is_a_time_series(tmp_path):
     """The seed's planted moment: one source (dhcp-log) hands the ip from
     web-01 to laptop-17 with adjoining windows — two facts, no conflict."""
-    from loom.seed import cmd_load
+    from loomctx.seed import cmd_load
     db = tmp_path / "seed.db"
     cmd_load(str(db), seed=42)
     store = SqliteStore(db)
@@ -841,7 +841,7 @@ def test_page_handles_reach_past_the_gather_cap(tmp_path, monkeypatch):
     but unreachable. A truncated entity now gets a `more` handle whose
     payload carries the window's edge; expanding it gathers the next
     window, with its own next-page handle, until the last one."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "pages.db")
     hub = EntityRef(type="product", key="linux:linux_kernel")
@@ -867,7 +867,7 @@ def test_page_handles_reach_past_the_gather_cap(tmp_path, monkeypatch):
         assert pack.question == "exploited"
     assert pages == 2 and len(seen) == 12
     # with a secret set the page handle is signed like any other
-    monkeypatch.setenv("LOOM_HANDLE_SECRET", "s3")
+    monkeypatch.setenv("LOOMCTX_HANDLE_SECRET", "s3")
     pack = build_pack(store, AskRequest(namespace="ns", subject=hub, question="exploited", budget=3000))
     page = next(h for h in pack.handles if "not examined" in h.hint)
     assert page.id.startswith("h2_") and expand_pack(store, page.id, budget=3000).items
@@ -878,7 +878,7 @@ def test_a_page_keeps_its_window_for_the_threads_it_cuts(tmp_path, monkeypatch):
     """A thread handle minted inside a page carries the page's edge, so
     expanding it stays in that window instead of jumping back to the
     newest rows."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "page-threads.db")
     host = EntityRef(type="host", key="web-01")
@@ -947,7 +947,7 @@ def _supersession_rows():
 def test_superseded_observation_is_history_not_a_side(monkeypatch):
     """D-050: a recorded supersession retires the corrected fact from
     conflict detection, ranks it as history and says so in its text."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 2))
     host = EntityRef(type="host", key="web-01")
     pack = build_pack(_FakeStore(_supersession_rows()), AskRequest(
@@ -971,7 +971,7 @@ def test_supersession_needs_the_correction_in_view():
     """Only a visible later observation retires another; a `supersedes`
     pointing outside the gathered set (redacted, another subject) does
     nothing, and self-reference is ignored."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     rows = _supersession_rows()
     assert set(ctx._supersession(rows)) == {"x" * 32}
     assert ctx._supersession(rows[:2]) == {}
@@ -986,7 +986,7 @@ def test_supersession_needs_the_correction_in_view():
 def test_superseded_fact_is_discounted_in_the_recency_overview(monkeypatch):
     """With no question the pack is a recency overview; the superseded
     fact still ranks at half, below the older fact that replaced nothing."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_now", lambda: _at(9, 2))
     host = EntityRef(type="host", key="web-01")
     rows = [
@@ -1037,9 +1037,9 @@ def test_a_source_that_moved_on_is_not_a_side(tmp_path):
 
 
 def test_the_planted_demo_conflicts_still_surface(tmp_path):
-    """The talk's two conflict moments (src/loom/seed.py) survive the
+    """The talk's two conflict moments (src/loomctx/seed.py) survive the
     newest-claim-per-source rule."""
-    from loom.seed import cmd_load
+    from loomctx.seed import cmd_load
     cmd_load(str(tmp_path / "seed.db"), seed=42)
     store = SqliteStore(tmp_path / "seed.db")
     for ns, subject, predicate in (("netsec", EntityRef(type="host", key="web-01"), "runs_os"),
@@ -1085,7 +1085,7 @@ def test_a_brief_is_capped_at_a_quarter_of_the_budget(tmp_path):
     """A brief citing 100 observations charged ~1,000 tokens of an
     800-token pack before any fact. It now carries its newest supporting
     observations within a quarter of the budget, charged honestly."""
-    import loom.context as ctx
+    import loomctx.context as ctx
     store, web01, rows = _dossier_store(tmp_path, n_logins=99)
     pack = build_pack(store, AskRequest(subject=web01, question="summary", budget=800))
     brief = next(i for i in pack.items if i.kind == "brief")
@@ -1123,7 +1123,7 @@ def test_a_merged_away_name_asks_about_the_canonical_entity(tmp_path):
     assert [(s.type, s.key) for s in scoped.subjects] == [("host", "web-01"), ("domain", "corp")]
     assert scoped.items[0].kind == "conflict"
     # a handle minted before the merge still expands onto the canonical rows
-    from loom.context import encode_handle
+    from loomctx.context import encode_handle
     handle = encode_handle("default", alias, "runs_os", None)
     assert expand_pack(store, handle, 2000).items
     store.close()
@@ -1145,17 +1145,17 @@ def test_the_scope_walk_is_capped_and_says_so(tmp_path, monkeypatch):
     scope = ScopeSpec(subjects=[domain], expand=["member_of"], depth=1)
     req = AskRequest(scope=scope, question="os", budget=4000)
     assert build_pack(store, req).truncated == []
-    monkeypatch.setenv("LOOM_MAX_SCOPE_ENTITIES", "10")
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_ENTITIES", "10")
     pack = build_pack(store, req)
     assert len(pack.subjects) == 10
     cut = [t for t in pack.truncated if t.reason == "scope_cap"]
     assert cut and cut[0].entity == domain and (cut[0].gathered, cut[0].total) == (10, 31)
     assert not [h for h in pack.handles if "not examined" in h.hint]   # reported, not paged
-    from loom.answer import render_user_prompt
+    from loomctx.answer import render_user_prompt
     assert "the scope was cut at 10 entities (at least 31 reached" in render_user_prompt("os", pack)
     # the row cap: the domain's 30 edges fill it; its members are left out, and counted
-    monkeypatch.delenv("LOOM_MAX_SCOPE_ENTITIES")
-    monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "30")
+    monkeypatch.delenv("LOOMCTX_MAX_SCOPE_ENTITIES")
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_OBSERVATIONS", "30")
     pack = build_pack(store, req)
     cut = [t for t in pack.truncated if t.reason == "scope_cap"]
     assert pack.subjects == [domain] and cut and (cut[0].gathered, cut[0].total) == (1, 31)
@@ -1176,8 +1176,8 @@ def test_a_thread_expansion_hands_back_a_conflict_that_does_not_fit(tmp_path):
 
 
 def test_an_excerpt_expansion_charges_its_citations(tmp_path):
-    from loom.context import encode_handle
-    from loom.contracts import DocumentIn
+    from loomctx.context import encode_handle
+    from loomctx.contracts import DocumentIn
     store = SqliteStore(tmp_path / "ex.db")
     art = store.store_artifact(DocumentIn(text="alpha beta gamma", source="ir", observed_at=_at(8, 1)))
     store.put_doc_chunks("default", art.id, "m", [(i, i * 6, i * 6 + 5, w, [1.0, 0.0])
@@ -1211,7 +1211,7 @@ def test_expansion_supersession_sees_only_what_the_reader_sees(tmp_path):
     correction outside the reader's types still retired a fact and leaked
     its id prefix. And a page's window ends before the corrections of its
     rows were made — they are now looked up by id."""
-    from loom.context import encode_handle
+    from loomctx.context import encode_handle
     store = SqliteStore(tmp_path / "sup.db")
     web01 = EntityRef(type="host", key="web-01")
     old = _claims(store, [dict(subject=web01, predicate="runs_os", object="fedora-44",
@@ -1234,7 +1234,7 @@ def test_expansion_supersession_sees_only_what_the_reader_sees(tmp_path):
 
 
 def test_a_truncation_counts_only_rows_the_reader_may_see(tmp_path, monkeypatch):
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 5)
     store = SqliteStore(tmp_path / "vis.db")
     web01 = EntityRef(type="host", key="web-01")
@@ -1275,8 +1275,8 @@ def test_the_scope_walk_does_not_follow_a_superseded_edge(tmp_path):
 
 
 def test_a_question_ending_in_punctuation_still_names_its_entity(tmp_path):
-    from loom.answer import auto_subjects
-    from loom.context import _question_tokens
+    from loomctx.answer import auto_subjects
+    from loomctx.context import _question_tokens
     store, web01 = make_store(tmp_path)
     assert auto_subjects(store, "default", "Summarize web-01.") == [web01]
     assert "web-01" in _question_tokens("is it web-01?") and "web-01." not in _question_tokens("web-01.")
@@ -1343,8 +1343,8 @@ def test_the_asked_attribute_is_not_thinned_by_the_diversity_term(tmp_path):
 def test_the_asked_attribute_ships_before_a_document_excerpt(tmp_path):
     """D-062: an advisory excerpt (half the budget) and its handle filled
     a 400-token pack asked for a KEV CVE's epss_score; no fact shipped."""
-    from loom.contracts import DocumentIn, Provenance
-    from loom.llm import HashingEmbedder
+    from loomctx.contracts import DocumentIn, Provenance
+    from loomctx.llm import HashingEmbedder
     store = SqliteStore(tmp_path / "kev.db")
     cve = EntityRef(type="cve", key="CVE-2022-27924")
     advisory = ("CVE-2022-27924: Synacor Zimbra Collaboration Suite (ZCS) Command Injection "
@@ -1373,7 +1373,7 @@ def test_the_asked_attribute_ships_before_a_document_excerpt(tmp_path):
 def test_a_question_naming_values_is_about_those_facts_not_the_attribute():
     """An ordering question names two facts by their values; taking every
     flow as the topic buried the one it names under the newest flows."""
-    from loom.context import subject_attribute
+    from loomctx.context import subject_attribute
     host = EntityRef(type="host", key="db-01")
     common = dict(namespace="default", recorded_at=_at(9, 1), confidence=1.0)
     rows = [
@@ -1398,13 +1398,13 @@ def test_text_handles_round_trip_awkward_keys(monkeypatch):
     characters a token: 128 tokens for a time-scoped handle, a third of a
     400-token pack). Keys holding the separator, the escape, dots, spaces
     and non-ASCII survive, signed or not, and decode as they always did."""
-    from loom.context import encode_handle
+    from loomctx.context import encode_handle
     at = datetime(2026, 9, 24, 4, 18, 4, 790000, tzinfo=timezone.utc)
     excerpt = {"artifact_id": "a,b", "seq": 3, "model": "openai/text-embedding-3-small"}
     for key in ("linux:linux_kernel", "a~b%7Ec", "10.0.4.7", "c\\+\\+ driver", "zürich/ü", "x.y.z"):
         ref = EntityRef(type="product", key=key)
         for secret in ("", "s3"):
-            monkeypatch.setenv("LOOM_HANDLE_SECRET", secret)
+            monkeypatch.setenv("LOOMCTX_HANDLE_SECRET", secret)
             h = encode_handle("net~sec", ref, "affects", at, at, before=at, question="why? 100% ~sure",
                               excerpt=excerpt)
             assert h.startswith("h2_" if secret else "h1_")
@@ -1412,7 +1412,7 @@ def test_text_handles_round_trip_awkward_keys(monkeypatch):
             assert meta["ns"] == "net~sec" and meta["subject"] == {"type": "product", "key": key}
             assert meta["as_of"] == meta["valid_at"] == meta["before"] == at.isoformat()
             assert meta["question"] == "why? 100% ~sure" and meta["excerpt"] == excerpt
-    monkeypatch.setenv("LOOM_HANDLE_SECRET", "")
+    monkeypatch.setenv("LOOMCTX_HANDLE_SECRET", "")
     short = encode_handle("netsec", EntityRef(type="cve", key="CVE-2026-21068"), "has_severity", at)
     assert short == "h1_netsec~cve~CVE-2026-21068~has_severity~a20260924T041804.79Z"
     assert decode_handle(short)["as_of"] == at.isoformat()

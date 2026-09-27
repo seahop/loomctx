@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom import retrieval_eval as re_
-from loom.contracts import ClaimIn, EntityRef
-from loom.llm import HashingEmbedder
-from loom.seed import cmd_load
-from loom.store.sqlite import SqliteStore
+from loomctx import retrieval_eval as re_
+from loomctx.contracts import ClaimIn, EntityRef
+from loomctx.llm import HashingEmbedder
+from loomctx.seed import cmd_load
+from loomctx.store.sqlite import SqliteStore
 
 
 @pytest.fixture(scope="module")
@@ -96,7 +96,7 @@ def test_truth_follows_the_store(tmp_path):
     store.close()
 
 
-def _ctx(ids=(), condition="loom@800"):
+def _ctx(ids=(), condition="loomctx@800"):
     return re_.Context(condition, "", set(ids), 10, 1.0, len(ids))
 
 
@@ -170,8 +170,8 @@ def test_scoring_rules_per_kind():
 def test_scripted_reader_answers_from_the_context_only(store, questions):
     reader = re_.ScriptedReader()
     aug = next(q for q in questions if q.id == "lease:10.0.4.7@2026-08-20:valid_at")
-    # loom applies valid_at: one lease survives and the reader cites it
-    ctx = re_.build_context(store, aug, "loom@800")
+    # loomctx applies valid_at: one lease survives and the reader cites it
+    ctx = re_.build_context(store, aug, "loomctx@800")
     reply, usage = reader.answer(aug, re_.SYSTEM, ctx.prompt)
     s = re_.score(aug, reply, ctx)
     assert s["pass_"] and s["support_pack"] and s["support_answer"] and s["cites_unseen"] == 0
@@ -182,25 +182,25 @@ def test_scripted_reader_answers_from_the_context_only(store, questions):
     assert re_.score(aug, reply, full)["pass_"]
     # an empty context is answered `unknown`, never guessed
     fake = next(q for q in questions if q.id.startswith("abstention:entity:"))
-    ctx = re_.build_context(store, fake, "loom@400")
+    ctx = re_.build_context(store, fake, "loomctx@400")
     assert "(none found)" in ctx.prompt
     reply, _ = reader.answer(fake, re_.SYSTEM, ctx.prompt)
     assert re_.score(fake, reply, ctx)["pass_"]
     # the conflict item is read as a conflict
     os_q = next(q for q in questions if q.id == "conflict:host:web-01:runs_os")
-    ctx = re_.build_context(store, os_q, "loom@400")
+    ctx = re_.build_context(store, os_q, "loomctx@400")
     reply, _ = reader.answer(os_q, re_.SYSTEM, ctx.prompt)
     assert reply.startswith("answer: conflicting: fedora-44 | ubuntu-22.04")
     # the two-hop chain is read through relation items
     dom = next(q for q in questions if q.id == "multihop:domain:AL-2291")
-    ctx = re_.build_context(store, dom, "loom@1600")
+    ctx = re_.build_context(store, dom, "loomctx@1600")
     reply, _ = reader.answer(dom, re_.SYSTEM, ctx.prompt)
     assert re_.score(dom, reply, ctx)["pass_"], ctx.prompt
 
 
 def _charged(ctx) -> int:
-    from loom.context import item_tokens
-    from loom.contracts import Citation, ContextItem
+    from loomctx.context import item_tokens
+    from loomctx.contracts import Citation, ContextItem
     total = 0
     for ln in re_.parse_context(ctx.prompt):
         # the rendered line carries the cite token, not the id; charge the item as the packer does
@@ -211,19 +211,19 @@ def _charged(ctx) -> int:
 
 def test_reader_parses_corrected_facts(store, questions):
     """A superseded fact renders with `[superseded by ...]` in packs only;
-    the reader missed it and loom@B lost an ordering it carried."""
+    the reader missed it and loomctx@B lost an ordering it carried."""
     lines = re_.parse_context("- (fact) vendor:hooli contract_owner mchen (2026-07-06, per contract-db) "
                               "[superseded by 95236a39ee8c] [6a3205049db9]")
     assert lines[0].predicate == "contract_owner" and lines[0].object == "mchen"
     assert lines[0].observed == "2026-07-06" and lines[0].cites == ["6a3205049db9"]
     for q in (q for q in questions if q.family == "order"):
-        ctx = re_.build_context(store, q, "loom@3200")
+        ctx = re_.build_context(store, q, "loomctx@3200")
         if set(q.truth_ids) <= ctx.cite_ids:
             reply, _ = re_.ScriptedReader().answer(q, re_.SYSTEM, ctx.prompt)
             assert re_.score(q, reply, ctx)["pass_"], q.id
 
 
-def test_vector_and_recency_fill_the_same_budget_as_loom(store, questions):
+def test_vector_and_recency_fill_the_same_budget_as_loomctx(store, questions):
     q = next(q for q in questions if q.id == "conflict:host:web-01:runs_os")
     assert re_.build_context(store, q, "vector@400").note.startswith("skipped")
     small = re_.build_context(store, q, "vector@200", embedder=HashingEmbedder())
@@ -237,8 +237,8 @@ def test_vector_and_recency_fill_the_same_budget_as_loom(store, questions):
     assert 0 < rec.items and _charged(rec) <= 200
     assert rec.tokens_est < re_.build_context(store, q, "full").tokens_est
     # the budgeted names are budget-major; a bare baseline name is refused
-    assert re_.condition_names((400, 800), ["loom", "vector", "recency", "full"]) == [
-        "loom@400", "vector@400", "recency@400", "loom@800", "vector@800", "recency@800", "full"]
+    assert re_.condition_names((400, 800), ["loomctx", "vector", "recency", "full"]) == [
+        "loomctx@400", "vector@400", "recency@400", "loomctx@800", "vector@800", "recency@800", "full"]
     with pytest.raises(ValueError):
         re_.build_context(store, q, "vector")
     with pytest.raises(ValueError):
@@ -277,12 +277,12 @@ def test_empty_and_truncated_replies_are_errors_not_abstentions(store, questions
     model = _Replies(("", {"out": 300, "cost": 0.0, "finish": "stop"}),
                      ("answer: unk", {"out": 300, "cost": 0.0, "finish": "length"}),
                      ("answer: host:laptop-17\ncites: none", {"out": 9, "cost": 0.0, "finish": "stop"}))
-    records = re_.evaluate(store, [fake, fake, lease], model, ["loom@400"])
+    records = re_.evaluate(store, [fake, fake, lease], model, ["loomctx@400"])
     assert [r.status for r in records] == ["error", "error", "ok"]
     assert "empty reply" in records[0].note and "max_tokens" in records[1].note
     # an empty reply to an abstention question used to score as a correct `unknown`
     assert records[0].score["pass_"] is None and records[0].score["abstained"] is None
-    s = re_.summarize(records, ["loom@400"])["loom@400"]
+    s = re_.summarize(records, ["loomctx@400"])["loomctx@400"]
     assert s["errored"] == 2 and s["n"] == 1 and s["accuracy"] == 1.0
     assert "abstention" not in s["families"]
 
@@ -386,46 +386,46 @@ def test_conflict_questions_are_pinned_to_a_store_derived_instant(store):
     assert all(q.as_of == datetime(2026, 9, 1, tzinfo=timezone.utc) for q in pinned)
 
 
-def test_full_is_uncapped_and_questions_outside_loom_gather_are_flagged(store, monkeypatch):
-    from loom import context
+def test_full_is_uncapped_and_questions_outside_loomctx_gather_are_flagged(store, monkeypatch):
+    from loomctx import context
     monkeypatch.setattr(context, "_GATHER_LIMIT", 3)
     qs = re_.generate_questions(store, ["netsec"], seed=7)
-    outside = [q for q in qs if q.in_loom_gather is False]
-    assert outside, "a gather cap of 3 must put some ground truth out of Loom's reach"
+    outside = [q for q in qs if q.in_loomctx_gather is False]
+    assert outside, "a gather cap of 3 must put some ground truth out of LoomCtx's reach"
     for q in outside:
         full = re_.build_context(store, q, "full")
         # the baselines gather without a cap: the truth is in `full`
         assert set(q.truth_ids) <= full.cite_ids, q.id
-        loom = re_.build_context(store, q, "loom@3200")
-        assert not set(q.truth_ids) <= loom.cite_ids, q.id
+        loomctx = re_.build_context(store, q, "loomctx@3200")
+        assert not set(q.truth_ids) <= loomctx.cite_ids, q.id
     md = re_.markdown({}, {"runs": 1}, qs)
-    assert f"Ground truth outside Loom's gather (the newest 3 observations per entity): {len(outside)} of" in md
-    assert "OUTSIDE-LOOM-GATHER" in re_.describe(qs)
+    assert f"Ground truth outside LoomCtx's gather (the newest 3 observations per entity): {len(outside)} of" in md
+    assert "OUTSIDE-LOOMCTX-GATHER" in re_.describe(qs)
 
 
 def test_end_to_end_scripted_scorecard_and_variance(store, questions, tmp_path):
-    conditions = re_.condition_names((400, 3200), ["loom", "full", "recency", "vector"])
+    conditions = re_.condition_names((400, 3200), ["loomctx", "full", "recency", "vector"])
     records = re_.evaluate(store, questions, re_.ScriptedReader(), conditions, embedder=HashingEmbedder(),
                            runs=2)
     assert len(records) == 2 * len(questions) * len(conditions)
     summary = re_.summarize(records, conditions)
-    assert summary["loom@3200"]["accuracy"] >= summary["loom@400"]["accuracy"]
+    assert summary["loomctx@3200"]["accuracy"] >= summary["loomctx@400"]["accuracy"]
     # a perfect reader over the pack: what it could not answer, the pack did not carry
     for r in records:
-        if r.condition.startswith("loom@") and r.family != "abstention" and not r.score["pass_"]:
+        if r.condition.startswith("loomctx@") and r.family != "abstention" and not r.score["pass_"]:
             assert r.score["abstained"] or not r.score["support_pack"], r
     # the reader never hallucinates and never cites what it did not see
     assert summary["full"]["hallucinated"][0] == 0 and summary["full"]["unseen"][0] == 0
     assert summary["full"]["accuracy"] == 1.0                      # everything, read perfectly
-    assert summary["full"]["tokens_est"] > summary["loom@400"]["tokens_est"]
-    assert summary["loom@3200"]["support_pack"][0] >= summary["loom@400"]["support_pack"][0]
-    assert summary["loom@3200"]["accuracy_stdev"] == 0.0 and len(summary["loom@3200"]["accuracy_runs"]) == 2
+    assert summary["full"]["tokens_est"] > summary["loomctx@400"]["tokens_est"]
+    assert summary["loomctx@3200"]["support_pack"][0] >= summary["loomctx@400"]["support_pack"][0]
+    assert summary["loomctx@3200"]["accuracy_stdev"] == 0.0 and len(summary["loomctx@3200"]["accuracy_runs"]) == 2
     # at equal tokens, the pack's ranking is what differs
     for b in (400, 3200):
-        assert summary[f"vector@{b}"]["tokens_est"] <= summary[f"loom@{b}"]["tokens_est"] * 1.6
+        assert summary[f"vector@{b}"]["tokens_est"] <= summary[f"loomctx@{b}"]["tokens_est"] * 1.6
     md = re_.markdown(summary, {"date": "2026-09-24", "store": "x", "namespaces": ["netsec"],
                                 "model": "scripted-reader", "questions": len(questions), "runs": 2})
-    assert "| `loom@400` |" in md and "| `vector@400` |" in md and "± " in md and "| lease |" in md
+    assert "| `loomctx@400` |" in md and "| `vector@400` |" in md and "± " in md and "| lease |" in md
     assert "INCOMPLETE" not in md
     md = re_.markdown(summary, {"runs": 1, "cost_capped": 7, "max_cost": 1.0})
     assert "INCOMPLETE: 7 rows were not sent" in md
@@ -436,24 +436,24 @@ def test_cli_canned_run_writes_the_table(db, tmp_path, capsys):
     canned = {q.id: "answer: unknown\ncites: none" for q in qs}
     (tmp_path / "canned.json").write_text(json.dumps(canned))
     out = tmp_path / "eval" / "table.md"
-    re_.main(["--db", db, "--canned", str(tmp_path / "canned.json"), "--conditions", "loom,recency",
+    re_.main(["--db", db, "--canned", str(tmp_path / "canned.json"), "--conditions", "loomctx,recency",
               "--budgets", "800", "--out", str(out), "--json", str(tmp_path / "r.json"), "--quiet"])
     text = out.read_text()
-    assert "| `loom@800` |" in text and "| `recency@800` |" in text
+    assert "| `loomctx@800` |" in text and "| `recency@800` |" in text
     data = json.loads((tmp_path / "r.json").read_text())
     assert data["meta"]["model"] == "canned" and len(data["records"]) == 2 * len(qs)
     # every row was streamed as it completed
     rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text().splitlines()]
     assert rows == json.loads(json.dumps(data["records"]))
     # always-unknown: every abstention passes, everything else is an abstention miss
-    summary = re_.summarize([re_.Record(**r) for r in data["records"]], ["loom@800"])["loom@800"]
+    summary = re_.summarize([re_.Record(**r) for r in data["records"]], ["loomctx@800"])["loomctx@800"]
     assert summary["hallucinated"] == (0, summary["families"]["abstention"][1])
     assert summary["passed"] == summary["families"]["abstention"][0]
     re_.main(["--db", db, "--list-questions"])
     assert "lease:10.0.4.7@2026-08-20:valid_at" in capsys.readouterr().out
     # a run cut short by --max-cost says so, loudly, and exits non-zero
     with pytest.raises(SystemExit) as exc:
-        re_.main(["--db", db, "--canned", str(tmp_path / "canned.json"), "--conditions", "loom",
+        re_.main(["--db", db, "--canned", str(tmp_path / "canned.json"), "--conditions", "loomctx",
                   "--budgets", "400", "--out", str(out), "--quiet", "--max-cost", "-1"])
     assert exc.value.code == 3 and "INCOMPLETE" in out.read_text()
     assert "INCOMPLETE" in capsys.readouterr().err
@@ -462,25 +462,25 @@ def test_cli_canned_run_writes_the_table(db, tmp_path, capsys):
 def test_the_scorecard_never_prints_a_dsn_password():
     """D-063: a GKE run's scorecard header carried the operator's Postgres
     password — and scorecards are meant to be published."""
-    from loom.store.common import redact_dsn
-    assert redact_dsn("postgresql://loom:s3cret@loom-pg-rw.loom:5432/loom") == \
-        "postgresql://loom:***@loom-pg-rw.loom:5432/loom"
-    assert redact_dsn("/data/loom.db") == "/data/loom.db"
+    from loomctx.store.common import redact_dsn
+    assert redact_dsn("postgresql://loomctx:s3cret@loomctx-pg-rw.loomctx:5432/loomctx") == \
+        "postgresql://loomctx:***@loomctx-pg-rw.loomctx:5432/loomctx"
+    assert redact_dsn("/data/loomctx.db") == "/data/loomctx.db"
     # review 2026-09-26: a query-param password, an empty user and a raw '@'
     # in the password all leaked
     for dsn, want in (
-            ("postgresql://loom@host/db?password=x", "postgresql://loom@host/db?password=***"),
-            ("postgresql://loom@host/db?sslmode=require&password=x&x=1",
-             "postgresql://loom@host/db?sslmode=require&password=***&x=1"),
+            ("postgresql://loomctx@host/db?password=x", "postgresql://loomctx@host/db?password=***"),
+            ("postgresql://loomctx@host/db?sslmode=require&password=x&x=1",
+             "postgresql://loomctx@host/db?sslmode=require&password=***&x=1"),
             ("postgresql://:pw@host:5432/db", "postgresql://:***@host:5432/db"),
-            ("postgresql://loom:p@ss@w0rd@host/db", "postgresql://loom:***@host/db"),
-            ("postgresql://loom:pa/ss?@host/db", "postgresql://loom:***@host/db"),
-            ("host=pg user=loom password='s e@cret' dbname=loom", "host=pg user=loom password=*** dbname=loom"),
+            ("postgresql://loomctx:p@ss@w0rd@host/db", "postgresql://loomctx:***@host/db"),
+            ("postgresql://loomctx:pa/ss?@host/db", "postgresql://loomctx:***@host/db"),
+            ("host=pg user=loomctx password='s e@cret' dbname=loomctx", "host=pg user=loomctx password=*** dbname=loomctx"),
             ("postgresql://host/db", "postgresql://host/db"),
-            ("postgresql://loom@host/db", "postgresql://loom@host/db"),
-            ("sqlite:///data/loom.db", "sqlite:///data/loom.db")):
+            ("postgresql://loomctx@host/db", "postgresql://loomctx@host/db"),
+            ("sqlite:///data/loomctx.db", "sqlite:///data/loomctx.db")):
         assert redact_dsn(dsn) == want, dsn
         assert not any(s in redact_dsn(dsn) for s in ("pw", "p@ss", "w0rd", "e@cret", "=x", "pa/ss"))
     import inspect
-    import loom.retrieval_eval as re_
+    import loomctx.retrieval_eval as re_
     assert "redact_dsn(args.db" in inspect.getsource(re_.main)

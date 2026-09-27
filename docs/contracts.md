@@ -1,11 +1,11 @@
 # Contracts
 
-**Source of truth: [`src/loom/contracts.py`](../src/loom/contracts.py).** This page is
+**Source of truth: [`src/loomctx/contracts.py`](../src/loomctx/contracts.py).** This page is
 the readable tour. Every surface (HTTP, MCP, SDK, CLI) serializes exactly these
 shapes; JSON Schema for non-Python consumers is exported with:
 
 ```bash
-docker compose run --rm loom python -m loom.schemas > schemas.json
+docker compose run --rm loomctx python -m loomctx.schemas > schemas.json
 ```
 
 ## Ingestion envelope
@@ -32,7 +32,7 @@ One `POST /v1/ingest` body, discriminated by `kind`.
 
 `object` may be another entity ref (creating a graph edge) **or** a scalar
 (`"os": "fedora-44"` style facts). `valid_from`/`valid_to` are the world-time axis;
-Loom stamps `recorded_at` itself (knowledge-time axis).
+LoomCtx stamps `recorded_at` itself (knowledge-time axis).
 
 **Document** — unstructured; stored verbatim, mined asynchronously:
 
@@ -53,7 +53,7 @@ Exactly one of `text` / `content_b64` is required.
 
 **Batch** — `POST /v1/ingest/batch` takes a JSON array of envelopes, NDJSON
 (one per line, `Content-Type: application/x-ndjson`), or `{"items": [...]}`,
-up to `LOOM_MAX_BATCH` (1000), and answers with `IngestBatchResponse`:
+up to `LOOMCTX_MAX_BATCH` (1000), and answers with `IngestBatchResponse`:
 
 ```json
 {"total": 3, "recorded": 1, "accepted": 1, "rejected": 1,
@@ -140,7 +140,7 @@ what it reaches over the named predicates); `as_of` is knowledge time
 ```
 
 **The budget is honest (D-051).** `budget` is the request (clamped to
-`LOOM_MAX_BUDGET`); `charged_tokens` is what the pack charged against it,
+`LOOMCTX_MAX_BUDGET`); `charged_tokens` is what the pack charged against it,
 in the compact form an agent actually receives, sized to the costlier of
 its two surfaces — the MCP concise view (compact JSON) over the answer
 prompt's lines: every item's text *plus its citations* (one
@@ -165,7 +165,7 @@ not know (with up to three close ones), an attribute named in `expand`
 taken as the question's topic, a link the question names that the scope
 stops short of, a subject that names no entity; they are advice, not
 evidence, and are not charged. A scope walk stops at
-`LOOM_MAX_SCOPE_ENTITIES` (2,000) entities and `LOOM_MAX_SCOPE_OBSERVATIONS`
+`LOOMCTX_MAX_SCOPE_ENTITIES` (2,000) entities and `LOOMCTX_MAX_SCOPE_OBSERVATIONS`
 (100,000) gathered rows; the cut is a `truncated` entry with reason
 `scope_cap`.
 
@@ -210,7 +210,7 @@ every source asserts a single current object (D-051: `dhcp` says the ip
 is web-01's, `arp-scan` says laptop-17's) — an edge one source itself
 gives several objects (logins, the products a CVE affects) is a set, and
 another source's different object is an addition. Handles feed
-`POST /v1/expand`; with `LOOM_HANDLE_SECRET` set they are signed (`h2_`
+`POST /v1/expand`; with `LOOMCTX_HANDLE_SECRET` set they are signed (`h2_`
 prefix, D-021). At most 32 handles ship, within their budget share, in
 priority order (conflicts, pages past the gather cap, excerpts, then the
 most skipped threads); `omitted_handles` counts the rest, so a scope over
@@ -248,7 +248,7 @@ entity (`user -member_of-> group <-member_of- admin` is a shared group, not
 a route; `siblings: true` allows it), capped by `depth` (default 4, at most
 6),
 `max_paths`, `budget` (charged on the rendered path text + citations, like a
-pack) and the `LOOM_MAX_SCOPE_*` caps. Every edge is **cited** (hard
+pack) and the `LOOMCTX_MAX_SCOPE_*` caps. Every edge is **cited** (hard
 constraint 3) and time-scoped; `as_of`/`valid_at` filter each edge and a
 superseded one (D-050) never appears; a path through a type-gated entity is
 not returned. Cuts land in `truncated` (`max_paths`/`depth`/`scope_cap`/
@@ -321,26 +321,26 @@ lands with the store work of the same decision.
 ## Provenance export: `GET /v1/observations/{id}/prov`
 
 One observation's provenance as JSON-LD in the W3C PROV-O vocabulary
-(D-050), for lineage tools that should not have to learn Loom's
-contracts. Namespace comes from `X-Loom-Namespace` or `?namespace=`;
+(D-050), for lineage tools that should not have to learn LoomCtx's
+contracts. Namespace comes from `X-LoomCtx-Namespace` or `?namespace=`;
 the route is gated like the raw observations route (a type-scoped reader
 gets `404` for an observation touching an entity outside their world).
 The body is a plain object, not a contract model:
 
 ```json
-{"@context": {"prov": "http://www.w3.org/ns/prov#", "xsd": "…", "loom": "urn:loom:"},
+{"@context": {"prov": "http://www.w3.org/ns/prov#", "xsd": "…", "loomctx": "urn:loomctx:"},
  "@graph": [
-   {"@id": "loom:netsec/observation/<id>", "@type": "prov:Entity",
+   {"@id": "loomctx:netsec/observation/<id>", "@type": "prov:Entity",
     "prov:generatedAtTime": {"@value": "2026-09-01T14:03:00+00:00", "@type": "xsd:dateTime"},
-    "prov:wasAttributedTo": {"@id": "loom:netsec/agent/auth-log"},
-    "prov:wasDerivedFrom": {"@id": "loom:netsec/artifact/<artifact>#char=118,203"},
-    "prov:wasGeneratedBy": {"@id": "loom:netsec/activity/extraction%2F<id>"},
-    "prov:wasRevisionOf": {"@id": "loom:netsec/observation/<older id>"},
-    "loom:subject": {"@id": "loom:netsec/entity/host%3Aweb-01"}, "loom:predicate": "runs_os",
-    "loom:object": "fedora-44", "loom:confidence": 1.0, "loom:recordedAt": {"…": "…"}},
-   {"@id": "loom:netsec/agent/auth-log", "@type": "prov:Agent", "loom:source": "auth-log"},
-   {"@id": "loom:netsec/observation/<older id>", "@type": "prov:Entity",
-    "prov:wasInvalidatedBy": {"@id": "loom:netsec/activity/supersession%2F<id>"}}
+    "prov:wasAttributedTo": {"@id": "loomctx:netsec/agent/auth-log"},
+    "prov:wasDerivedFrom": {"@id": "loomctx:netsec/artifact/<artifact>#char=118,203"},
+    "prov:wasGeneratedBy": {"@id": "loomctx:netsec/activity/extraction%2F<id>"},
+    "prov:wasRevisionOf": {"@id": "loomctx:netsec/observation/<older id>"},
+    "loomctx:subject": {"@id": "loomctx:netsec/entity/host%3Aweb-01"}, "loomctx:predicate": "runs_os",
+    "loomctx:object": "fedora-44", "loomctx:confidence": 1.0, "loomctx:recordedAt": {"…": "…"}},
+   {"@id": "loomctx:netsec/agent/auth-log", "@type": "prov:Agent", "loomctx:source": "auth-log"},
+   {"@id": "loomctx:netsec/observation/<older id>", "@type": "prov:Entity",
+    "prov:wasInvalidatedBy": {"@id": "loomctx:netsec/activity/supersession%2F<id>"}}
  ]}
 ```
 

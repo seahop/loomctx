@@ -1,15 +1,15 @@
 """Agent end-to-end harness (D-036). The loop, provider dialects, ground
 truth and scoring run here against a scripted fake model (no network); the
-live run against a real model is opt-in: LOOM_LIVE_AGENT=1 plus LOOM_LLM_*."""
+live run against a real model is opt-in: LOOMCTX_LIVE_AGENT=1 plus LOOMCTX_LLM_*."""
 
 import json
 import os
 
 import pytest
 
-from loom import agent_eval as ae
-from loom.seed import cmd_load
-from loom.store.sqlite import SqliteStore
+from loomctx import agent_eval as ae
+from loomctx.seed import cmd_load
+from loomctx.store.sqlite import SqliteStore
 
 
 @pytest.fixture(scope="module")
@@ -84,8 +84,8 @@ def test_loop_survives_a_bad_tool_call_and_bounds_steps(seeded_db):
 
 
 def test_exposure_truth_is_computed_from_the_store(tmp_path):
-    from loom.connectors import vulns
-    from loom.ingest import load_direct
+    from loomctx.connectors import vulns
+    from loomctx.ingest import load_direct
     db = tmp_path / "x.db"
     cmd_load(str(db), seed=42)
     envs = list(vulns.bridge_envelopes("netsec")) + list(vulns.kev_envelopes({
@@ -103,7 +103,7 @@ def test_exposure_truth_is_computed_from_the_store(tmp_path):
     assert score["kev_named"] == 1 and score["invented_cves"] == ["CVE-2026-9999"] and not score["pass"]
     # a real CVE that is not KEV-for-web-01 named as the exposure is a
     # precision failure (the score used to measure recall only)
-    from loom.contracts import ClaimIn, EntityRef
+    from loomctx.contracts import ClaimIn, EntityRef
     from datetime import datetime, timezone
     store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="cve", key="CVE-2026-10002"),
                                predicate="status", object="Analyzed", source="nvd",
@@ -182,7 +182,7 @@ def test_lease_truth_comes_from_validity_windows_and_dotted_ips_do_not_end_sente
     # a correct but uncited answer does not pass
     assert not ae._score_lease("10.0.4.7 was held by laptop-17.", truth, seen, store)["pass"]
     # the truth follows the store: move the lease and the answer moves with it
-    from loom.contracts import ClaimIn, EntityRef
+    from loomctx.contracts import ClaimIn, EntityRef
     from datetime import datetime, timezone
     t = datetime(2026, 8, 15, tzinfo=timezone.utc)
     store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="ip", key="10.0.4.7"), predicate="assigned_to",
@@ -210,7 +210,7 @@ def test_anthropic_call_leaves_room_for_thinking_and_keeps_the_blocks(monkeypatc
     """D-047 follow-up: with thinking on by default, max_tokens=1500 was
     spent before a tool_use block. The request now carries 8000 and
     adaptive thinking (omitted for the models that take budget_tokens or
-    when LOOM_AGENT_THINKING=off); the reply's blocks — thinking included —
+    when LOOMCTX_AGENT_THINKING=off); the reply's blocks — thinking included —
     go back on the next turn unchanged; a refusal is an error, not an answer."""
     sent = []
 
@@ -294,7 +294,7 @@ def test_results_are_handed_over_as_each_task_finishes(seeded_db, tmp_path):
     assert results[0].score["pass"] and not results[1].score["pass"]
 
 
-@pytest.mark.skipif(not os.environ.get("LOOM_LIVE_AGENT"), reason="set LOOM_LIVE_AGENT=1 (and LOOM_LLM_*) for a live agent run")
+@pytest.mark.skipif(not os.environ.get("LOOMCTX_LIVE_AGENT"), reason="set LOOMCTX_LIVE_AGENT=1 (and LOOMCTX_LLM_*) for a live agent run")
 def test_live_agent_answers_the_lease_question(seeded_db):
     r = ae.evaluate(seeded_db, ["lease"])[0]
     print(ae.summarize([r], ae.Provider.from_env().model))
@@ -332,7 +332,7 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
     """A 5xx / rate limit / error body is the provider's failure, not the
     model's answer: the task runs once more, and if it fails again it is
     'not run' — out of the pass rate, cost still counted."""
-    from loom.llm import LLMError
+    from loomctx.llm import LLMError
 
     class Flaky(Scripted):
         def __init__(self, turns, outages):
@@ -371,7 +371,7 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
     import io
     import urllib.error
     from unittest import mock
-    from loom import llm as _llm
+    from loomctx import llm as _llm
     err = urllib.error.HTTPError("https://x/v1", 402, "Payment Required", {}, io.BytesIO(b"{}"))
     with mock.patch.object(_llm, "_urlopen", side_effect=err) as call:
         try:

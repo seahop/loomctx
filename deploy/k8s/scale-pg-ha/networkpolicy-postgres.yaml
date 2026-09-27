@@ -1,5 +1,5 @@
 # The CloudNativePG instances live in this namespace, so the default-deny
-# in scale-pg applies to them too. Postgres (5432) is for Loom's engines,
+# in scale-pg applies to them too. Postgres (5432) is for LoomCtx's engines,
 # writer consumers and enrichment workers, and for the instances
 # themselves (streaming replication). The operator (in cnpg-system by
 # default) drives the instance manager on 8000; without that allowance no
@@ -12,25 +12,25 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      cnpg.io/cluster: loom-pg
+      cnpg.io/cluster: loomctx-pg
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              app: loom
+              app: loomctx
         - podSelector:
             matchLabels:
-              app: loom-consumer
+              app: loomctx-consumer
         - podSelector:
             matchLabels:
-              app: loom-enrich
+              app: loomctx-enrich
         - podSelector:
             matchLabels:
-              app: loom-kafka-consumer
+              app: loomctx-kafka-consumer
         - podSelector:
             matchLabels:
-              cnpg.io/cluster: loom-pg
+              cnpg.io/cluster: loomctx-pg
       ports:
         - port: 5432
           protocol: TCP

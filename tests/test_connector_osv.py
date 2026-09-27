@@ -1,4 +1,4 @@
-"""The OSV / GHSA advisory connector (loom.connectors.osv): parse genuine OSV
+"""The OSV / GHSA advisory connector (loomctx.connectors.osv): parse genuine OSV
 JSON into cited, timestamped claims, key it to the SAME `cve:` node NVD/KEV
 write to when the record carries a CVE alias, and prove the fusion — an OSV
 CVSS score shows as a cross-source CONFLICT on the existing CVE (D-035), cited.
@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.connectors import osv, vulns
-from loom.context import build_pack
-from loom.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import osv, vulns
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 FIX = Path(__file__).parent / "fixtures"
 LOG4SHELL = FIX / "osv_ghsa_log4shell.json"
@@ -177,7 +177,7 @@ def test_schema_registers_package_and_the_shared_cve_vocabulary():
 
 def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
     """D-063 / S-36: a loader that saw any refusal must not exit 0."""
-    from loom import ingest
+    from loomctx import ingest
     monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
 
     def refusing(url, lines, size, key, timeout=60.0):
@@ -186,7 +186,7 @@ def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
 
     monkeypatch.setattr(ingest, "post_batches", refusing)
     with pytest.raises(SystemExit) as exc:
-        osv.main(["import", str(LOG4SHELL), "--namespace", "netsec", "--url", "http://loom.invalid"])
+        osv.main(["import", str(LOG4SHELL), "--namespace", "netsec", "--url", "http://loomctx.invalid"])
     assert exc.value.code not in (0, None) and "2" in str(exc.value.code) and "refused" in str(exc.value.code)
 
 

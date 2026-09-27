@@ -1,4 +1,4 @@
-module github.com/seahop/loom/sdk/go
+module github.com/seahop/loomctx/sdk/go
 
 go 1.27
 

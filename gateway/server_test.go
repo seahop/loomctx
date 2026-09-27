@@ -120,7 +120,7 @@ func TestMissingKindRejected(t *testing.T) {
 func postWithKey(h http.Handler, body, key string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/v1/ingest", strings.NewReader(body))
 	if key != "" {
-		req.Header.Set("X-Loom-Key", key)
+		req.Header.Set("X-LoomCtx-Key", key)
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -188,7 +188,7 @@ func TestPerKeyRateLimit(t *testing.T) {
 }
 
 func TestScopedFileKeyGates(t *testing.T) {
-	key := "loomk_gwtest"
+	key := "loomctxk_gwtest"
 	sum := sha256.Sum256([]byte(key))
 	doc := fmt.Sprintf(`{"keys":[{"id":"shipper","sha256":"%x",
 	  "namespaces":["default"],"perms":"w",
@@ -227,7 +227,7 @@ func TestScopedFileKeyGates(t *testing.T) {
 }
 
 func TestKeysFileHotReload(t *testing.T) {
-	key := "loomk_rotateme"
+	key := "loomctxk_rotateme"
 	sum := sha256.Sum256([]byte(key))
 	path := filepath.Join(t.TempDir(), "keys.json")
 	entry := func(disabled bool) string {
@@ -264,7 +264,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK ||
-		!strings.Contains(rec.Body.String(), "loom_gateway_requests_total 1") {
+		!strings.Contains(rec.Body.String(), "loomctx_gateway_requests_total 1") {
 		t.Fatalf("metrics: %d %s", rec.Code, rec.Body.String())
 	}
 }
@@ -315,7 +315,7 @@ func TestUnknownKeysGetNoBuckets(t *testing.T) {
 }
 
 // R-10: a key's own rate_per_sec / rate_burst cap that principal even when
-// LOOM_RATE_PER_SEC is unset; keys without the fields stay unlimited, and
+// LOOMCTX_RATE_PER_SEC is unset; keys without the fields stay unlimited, and
 // a zero rate is a bad entry (skipped), not "unlimited".
 func TestPerKeyRateOverride(t *testing.T) {
 	fwd := &fakeForwarder{}
@@ -323,7 +323,7 @@ func TestPerKeyRateOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capped, plain, zero := "loomk_capped", "loomk_plain", "loomk_zero"
+	capped, plain, zero := "loomctxk_capped", "loomctxk_plain", "loomctxk_zero"
 	sumC, sumP, sumZ := sha256.Sum256([]byte(capped)), sha256.Sum256([]byte(plain)), sha256.Sum256([]byte(zero))
 	doc := fmt.Sprintf(`{"keys":[
 	  {"id":"capped","sha256":"%x","namespaces":["default"],"perms":"w","rate_per_sec":1,"rate_burst":2,"rate_llm_per_sec":0.5},
@@ -334,7 +334,7 @@ func TestPerKeyRateOverride(t *testing.T) {
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("LOOM_AUTH_FILE", path)
+	t.Setenv("LOOMCTX_AUTH_FILE", path)
 	auth, err := loadAuth()
 	if err != nil {
 		t.Fatal(err)
@@ -366,7 +366,7 @@ func TestPerKeyRateOverride(t *testing.T) {
 
 // H-A5/H-A13: a bad entry disables only itself; naive expires is UTC.
 func TestKeysFileToleratesBadEntries(t *testing.T) {
-	good := "loomk_good"
+	good := "loomctxk_good"
 	sum := sha256.Sum256([]byte(good))
 	doc := fmt.Sprintf(`{"keys":[
 	  {"id":"broken","sha256":"nothex","namespaces":["default"],"perms":"w"},
@@ -378,7 +378,7 @@ func TestKeysFileToleratesBadEntries(t *testing.T) {
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("LOOM_AUTH_FILE", path)
+	t.Setenv("LOOMCTX_AUTH_FILE", path)
 	auth, err := loadAuth()
 	if err != nil {
 		t.Fatalf("a bad entry must not fail the whole file: %v", err)
@@ -399,7 +399,7 @@ func TestBatchIngestArrayAndNDJSON(t *testing.T) {
 	body := "[" + validClaim + "," + bad + "," + other + "," + validClaim + "]"
 	req := httptest.NewRequest(http.MethodPost, "/v1/ingest/batch", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Loom-Key", "agentsecret")
+	req.Header.Set("X-LoomCtx-Key", "agentsecret")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -434,7 +434,7 @@ func TestBatchIngestArrayAndNDJSON(t *testing.T) {
 	nd := compact.String() + "\n" + compact.String() + "\n"
 	req = httptest.NewRequest(http.MethodPost, "/v1/ingest/batch", strings.NewReader(nd))
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	req.Header.Set("X-Loom-Key", "agentsecret")
+	req.Header.Set("X-LoomCtx-Key", "agentsecret")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted || fwd.calls != 2 {

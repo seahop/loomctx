@@ -1,12 +1,12 @@
-# Vector (vector.dev) -> Loom, no SDK (D-034).
+# Vector (vector.dev) -> LoomCtx, no SDK (D-034).
 #
 # Any Vector source works (file, journald, syslog, kubernetes_logs, kafka,
 # http_server, aws_s3, ...). The `remap` step reshapes each event into a
-# Loom claim envelope with VRL; the `http` sink posts newline-delimited
+# LoomCtx claim envelope with VRL; the `http` sink posts newline-delimited
 # JSON to POST /v1/ingest/batch on the engine or the gateway.
 #
 #   docker run --rm -v "<repo>/deploy/integrations/vector.yaml:/etc/vector/vector.yaml" \
-#     --network loom_default timberio/vector:0.42.0-alpine
+#     --network loomctx_default timberio/vector:0.42.0-alpine
 # (Vector interpolates environment variables written with a dollar sign
 # anywhere in this file, comments included. Double the sign for a literal.)
 #
@@ -18,12 +18,12 @@ sources:
     interval: 1.0
 
 transforms:
-  to_loom_claims:
+  to_loomctx_claims:
     type: remap
     inputs: [demo_auth_events]
     # Map YOUR record fields into the envelope. This example turns a generic
     # JSON log line into "host <name> logged_in_by user <user>". Records that
-    # can't be mapped are dropped here rather than rejected by Loom.
+    # can't be mapped are dropped here rather than rejected by LoomCtx.
     drop_on_error: true
     source: |
       parsed = parse_json!(string!(.message))
@@ -45,10 +45,10 @@ transforms:
       }
 
 sinks:
-  loom:
+  loomctx:
     type: http
-    inputs: [to_loom_claims]
-    uri: http://loom:8000/v1/ingest/batch      # or the gateway / lb
+    inputs: [to_loomctx_claims]
+    uri: http://loomctx:8000/v1/ingest/batch      # or the gateway / lb
     method: post
     encoding:
       codec: json
@@ -57,7 +57,7 @@ sinks:
     request:
       headers:
         Content-Type: application/x-ndjson
-        # X-Loom-Key: loomk_...                  # a write-only, source-pinned key
+        # X-LoomCtx-Key: loomctxk_...                  # a write-only, source-pinned key
     batch:
       max_events: 500
       timeout_secs: 2

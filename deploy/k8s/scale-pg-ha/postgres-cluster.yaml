@@ -1,12 +1,12 @@
 # CloudNativePG Cluster (D-030). The operator creates Services
-# loom-pg-rw (primary), loom-pg-ro (replicas), loom-pg-r (any), and the
-# Secret loom-pg-app (username/password/uri for the `loom` database).
+# loomctx-pg-rw (primary), loomctx-pg-ro (replicas), loomctx-pg-r (any), and the
+# Secret loomctx-pg-app (username/password/uri for the `loomctx` database).
 # The operator's PostgreSQL images ship the pgvector extension, so the ANN
 # index (D-025) is available; a plain image falls back to exact scans.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: loom-pg
+  name: loomctx-pg
 spec:
   instances: 3
   imageName: ghcr.io/cloudnative-pg/postgresql:17
@@ -21,8 +21,8 @@ spec:
   smartShutdownTimeout: 10
   bootstrap:
     initdb:
-      database: loom
-      owner: loom
+      database: loomctx
+      owner: loomctx
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector;
   storage:

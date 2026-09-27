@@ -11,5 +11,5 @@ COPY sdk/typescript/scripts ./scripts
 COPY sdk/typescript/src ./src
 COPY sdk/typescript/test ./test
 COPY contracts/schemas.json /contracts/schemas.json
-ENV LOOM_SCHEMAS=/contracts/schemas.json
+ENV LOOMCTX_SCHEMAS=/contracts/schemas.json
 CMD ["sh", "-c", "npm run check-gen && npm run build && npm test"]

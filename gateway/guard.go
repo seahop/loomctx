@@ -1,11 +1,11 @@
 package main
 
 // Browser-facing guards (D-059) — the same policy as the engine's
-// loom.webguard, from the same env, so one configuration covers both:
+// loomctx.webguard, from the same env, so one configuration covers both:
 //
-//   LOOM_ALLOWED_HOSTS    extra Host names ("loom.example.com", "*.corp.example.com");
+//   LOOMCTX_ALLOWED_HOSTS    extra Host names ("loomctx.example.com", "*.corp.example.com");
 //                         "*" turns the Host check off
-//   LOOM_ALLOWED_ORIGINS  browser origins allowed cross-origin; "*" = any
+//   LOOMCTX_ALLOWED_ORIGINS  browser origins allowed cross-origin; "*" = any
 //
 // Always allowed: IP literals, localhost / *.localhost, single-label names
 // (compose services, same-namespace k8s Services) and cluster suffixes
@@ -72,7 +72,7 @@ func parseHostPolicy(hosts, origins string) hostPolicy {
 }
 
 func hostPolicyFromEnv() hostPolicy {
-	return parseHostPolicy(os.Getenv("LOOM_ALLOWED_HOSTS"), os.Getenv("LOOM_ALLOWED_ORIGINS"))
+	return parseHostPolicy(os.Getenv("LOOMCTX_ALLOWED_HOSTS"), os.Getenv("LOOMCTX_ALLOWED_ORIGINS"))
 }
 
 // hostOnly: the hostname of a Host value — port dropped, brackets off,
@@ -139,13 +139,13 @@ func guardBrowser(next http.Handler, p hostPolicy, m *gwMetrics) http.Handler {
 		if !p.allowsHost(r.Host) {
 			m.rejectedBad.Add(1)
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"detail": "invalid Host header: add this name to LOOM_ALLOWED_HOSTS if Loom is served under it"})
+				"detail": "invalid Host header: add this name to LOOMCTX_ALLOWED_HOSTS if LoomCtx is served under it"})
 			return
 		}
 		if !p.allowsOrigin(r.Header.Get("Origin"), r.Host) {
 			m.rejectedAuth.Add(1)
 			writeJSON(w, http.StatusForbidden, map[string]string{
-				"detail": "cross-origin browser requests are not allowed: list the origin in LOOM_ALLOWED_ORIGINS to permit it"})
+				"detail": "cross-origin browser requests are not allowed: list the origin in LOOMCTX_ALLOWED_ORIGINS to permit it"})
 			return
 		}
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/") &&

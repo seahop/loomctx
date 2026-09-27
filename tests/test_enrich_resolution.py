@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom import enrich
-from loom.contracts import ClaimIn, EntityRef, EntityTypeDef, SchemaRegistration
-from loom.llm import LLMClient, LLMError
-from loom.store.sqlite import SqliteStore
+from loomctx import enrich
+from loomctx.contracts import ClaimIn, EntityRef, EntityTypeDef, SchemaRegistration
+from loomctx.llm import LLMClient, LLMError
+from loomctx.store.sqlite import SqliteStore
 
 T = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
@@ -120,10 +120,10 @@ def test_unmerge_can_opt_out_of_the_decline(tmp_path):
 
 
 def test_lifecycle_unmerge_records_the_decline(tmp_path, monkeypatch, capsys):
-    from loom.lifecycle import main
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "l.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
-    monkeypatch.delenv("LOOM_BLOB_THRESHOLD", raising=False)
+    from loomctx.lifecycle import main
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "l.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
+    monkeypatch.delenv("LOOMCTX_BLOB_THRESHOLD", raising=False)
     s = SqliteStore(tmp_path / "l.db")
     ip, loose = EntityRef(type="ip", key="10.0.4.7"), EntityRef(type="ip_address", key="10.0.4.7")
     s.record_claim(_claim(ip, "assigned_to", EntityRef(type="host", key="h")))
@@ -141,12 +141,12 @@ def test_lifecycle_unmerge_records_the_decline(tmp_path, monkeypatch, capsys):
 
 
 def test_distinct_cli_unmerges_and_declines(tmp_path, monkeypatch, capsys):
-    """`python -m loom.enrich distinct a b`: the operator's ruling. A pair
+    """`python -m loomctx.enrich distinct a b`: the operator's ruling. A pair
     currently merged is split first; either way it is never merged or
     asked about again."""
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "d.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
-    monkeypatch.delenv("LOOM_BLOB_THRESHOLD", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "d.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
+    monkeypatch.delenv("LOOMCTX_BLOB_THRESHOLD", raising=False)
     s = SqliteStore(tmp_path / "d.db")
     web, drift = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="web01")
     for i in range(3):
@@ -172,12 +172,12 @@ def test_distinct_cli_unmerges_and_declines(tmp_path, monkeypatch, capsys):
 
 
 def test_undistinct_cli_forgets_the_decline(tmp_path, monkeypatch, capsys):
-    """S-28: `python -m loom.enrich undistinct a b` takes a ruling back.
+    """S-28: `python -m loomctx.enrich undistinct a b` takes a ruling back.
     It merges nothing itself; the next resolution tick may fold the pair
     again. A worker's loaded decline cache drops the pair too."""
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "u.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
-    monkeypatch.delenv("LOOM_BLOB_THRESHOLD", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "u.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
+    monkeypatch.delenv("LOOMCTX_BLOB_THRESHOLD", raising=False)
     s = SqliteStore(tmp_path / "u.db")
     web, drift = EntityRef(type="host", key="web-01"), EntityRef(type="host", key="web01")
     for i in range(3):
@@ -339,8 +339,8 @@ def test_unreadable_verdicts_raise(reply):
 def test_chunking_refuses_a_short_embedding_reply(tmp_path, monkeypatch):
     """zip() stored the head and marked the artifact chunked with its tail
     missing for good."""
-    from loom.contracts import DocumentIn
-    from loom.llm import HashingEmbedder
+    from loomctx.contracts import DocumentIn
+    from loomctx.llm import HashingEmbedder
 
     class Short(HashingEmbedder):
         def embed(self, texts):

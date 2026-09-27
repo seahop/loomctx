@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: loom
+  name: loomctx
   labels:
-    app: loom
+    app: loomctx
 spec:
   # Postgres-backed => stateless engine pods; the HPA below scales the read
   # path (ask/expand/answer) with load. No volume, no Recreate constraint.
   replicas: 2
   selector:
     matchLabels:
-      app: loom
+      app: loomctx
   template:
     metadata:
       labels:
-        app: loom
+        app: loomctx
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -25,8 +25,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: loom
-          image: ghcr.io/seahop/loom:latest
+        - name: loomctx
+          image: ghcr.io/seahop/loomctx:latest
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -36,22 +36,22 @@ spec:
             - containerPort: 8000
               name: http
           env:
-            - name: LOOM_DB
+            - name: LOOMCTX_DB
               valueFrom:
                 secretKeyRef:
-                  name: loom-db
-                  key: LOOM_DB
-            # Answering LLM (D-012) — add LOOM_LLM_* here (from a Secret)
+                  name: loomctx-db
+                  key: LOOMCTX_DB
+            # Answering LLM (D-012) — add LOOMCTX_LLM_* here (from a Secret)
             # to enable /v1/answer.
             # Concurrency dials (D-028): 2 workers x 4 connections per pod;
-            # add LOOM_DB_READ (a replica DSN, e.g. the operator's -ro
+            # add LOOMCTX_DB_READ (a replica DSN, e.g. the operator's -ro
             # Service) to move the read path off the primary.
-            - name: LOOM_WORKERS
+            - name: LOOMCTX_WORKERS
               value: "2"
-            - name: LOOM_DB_POOL
+            - name: LOOMCTX_DB_POOL
               value: "4"
             # --- auth (D-013a / D-021): see base/deployment.yaml for the
-            # LOOM_AUTH_FILE / LOOM_HANDLE_SECRET block and the keys mount.
+            # LOOMCTX_AUTH_FILE / LOOMCTX_HANDLE_SECRET block and the keys mount.
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -80,12 +80,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: loom
+  name: loomctx
   labels:
-    app: loom
+    app: loomctx
 spec:
   selector:
-    app: loom
+    app: loomctx
   ports:
     - name: http
       port: 80
@@ -94,12 +94,12 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: loom
+  name: loomctx
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: loom
+    name: loomctx
   minReplicas: 2
   maxReplicas: 8
   metrics:

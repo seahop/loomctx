@@ -1,6 +1,6 @@
 # Architecture
 
-Loom is a **context engine**: it absorbs data about entities over time and serves
+LoomCtx is a **context engine**: it absorbs data about entities over time and serves
 agents small, question-scoped slices of that knowledge. It is neutral about the
 data and about intent — the same store serves blue-team questions (what happened,
 what's exposed) and red-team questions (what's exploitable, what can I reach); the
@@ -39,7 +39,7 @@ Canonical nodes produced by entity resolution, connected by edges that carry **t
 time axes**:
 
 - `valid_from` / `valid_to` — when the fact was true in the world
-- `recorded_at` — when Loom learned it
+- `recorded_at` — when LoomCtx learned it
 
 This makes "what did we know about X as of June?" and "what was true of X in June?"
 distinct, answerable questions.
@@ -126,7 +126,7 @@ The engine answers with a **context pack**:
   ("source A says X as of March; source B says Y as of May"), never silently merged
 
 Ranking inside the budget combines: similarity to the question (embedding
-cosine when `LOOM_EMBED_*` is set, keyword overlap otherwise), recency/decay,
+cosine when `LOOMCTX_EMBED_*` is set, keyword overlap otherwise), recency/decay,
 and source confidence, with extracted (`doc:*`) claims discounted. There is no
 graph-distance term: scope resolution decides *which* entities are in the pack
 (bounded BFS over the chosen predicates), and every gathered fact is then
@@ -164,8 +164,8 @@ grounding prompt. The pack rides along in the response for audit (D-012).
    configs that reshape records into envelopes, a Kafka/Redpanda consumer that
    reads envelopes from existing topics, and a bulk loader for NDJSON files
    from any language (D-034).
-4. **Operator modules** (`loom.keys`, `loom.lifecycle`, `loom.seed`,
-   `loom.ingest`, `loom.loadgen`) for humans.
+4. **Operator modules** (`loomctx.keys`, `loomctx.lifecycle`, `loomctx.seed`,
+   `loomctx.ingest`, `loomctx.loadgen`) for humans.
 
 All of them are shells over one internal service, so behavior never diverges.
 
@@ -218,8 +218,8 @@ Every tier is a replica count or a managed dependency the platform team
 already runs — never a custom cluster. Gateways and engine replicas scale
 today; the next dials, in order, are a connection pool in the engine, a
 3-node JetStream cluster with stream replicas, Postgres HA with read
-replicas (`LOOM_DB_READ`), a leased enrichment worker fleet, and per-tenant
-shards routed by namespace (`LOOM_SHARDS`). The namespace being on every
+replicas (`LOOMCTX_DB_READ`), a leased enrichment worker fleet, and per-tenant
+shards routed by namespace (`LOOMCTX_SHARDS`). The namespace being on every
 contract from day one is what makes the last dial cheap.
 
 ## Deployment posture
@@ -228,7 +228,7 @@ contract from day one is what makes the last dial cheap.
   connection string when replicas are wanted (D-011). A graph database (Neo4j)
   is a possible `GraphStore` backend, not a shipped one.
 - Enrichment workers are a **separate service** from the same image
-  (`python -m loom.enrich`; compose profile `enrich`, the `loom-enrich`
+  (`python -m loomctx.enrich`; compose profile `enrich`, the `loomctx-enrich`
   StatefulSet on k8s) — the engine never runs LLM or embedding calls in its
   request path. The worker is optional: without it packs are facts-only and
   keyword-ranked. Nothing else is added speculatively.
@@ -279,5 +279,5 @@ flowchart LR
         G3 --> N3["NATS JetStream"] --> W3["consumers ×N"] --> DB3[("Postgres")]
         E3["engines ×N (HPA)"] --> DB3
     end
-    S1 -->|"more senders"| S2 -->|"LOOM_DB=postgresql://"| S3
+    S1 -->|"more senders"| S2 -->|"LOOMCTX_DB=postgresql://"| S3
 ```

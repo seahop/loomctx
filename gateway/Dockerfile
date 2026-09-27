@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 go build -trimpath -o /gateway .
 
 FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 COPY --from=build /gateway /usr/local/bin/gateway
-COPY contracts/schemas.json /etc/loom/schemas.json
+COPY contracts/schemas.json /etc/loomctx/schemas.json
 # non-root (H-F8): the gateway reads only its schema and a mounted keys file
 USER 10001:10001
 EXPOSE 8080

@@ -8,9 +8,9 @@ the API, the SDKs, or the MCP tools. Dials referenced here are documented in
 
 ## 1. Simple shape — one container on a laptop or a small VPS
 
-`docker compose up loom`. One engine process, one SQLite file on a volume,
+`docker compose up loomctx`. One engine process, one SQLite file on a volume,
 no queue, no operator. The enrichment worker and the answering LLM are
-optional; without them Loom still ingests, ranks by keyword, and serves
+optional; without them LoomCtx still ingests, ranks by keyword, and serves
 cited packs.
 
 ```mermaid
@@ -18,11 +18,11 @@ flowchart LR
     subgraph callers["Callers"]
         agent["AI agent<br/>(Claude Code, any MCP client)"]
         app["Apps / custom code<br/>Python · TypeScript · Go SDK · curl · OpenAPI clients"]
-        ship["Existing pipelines<br/>Fluent Bit / Vector (batch HTTP) · files via loom.ingest"]
-        admin["Operator<br/>python -m loom.keys / lifecycle / seed"]
+        ship["Existing pipelines<br/>Fluent Bit / Vector (batch HTTP) · files via loomctx.ingest"]
+        admin["Operator<br/>python -m loomctx.keys / lifecycle / seed"]
     end
 
-    subgraph engine["Engine container  ·  loom-engine:local  ·  uid 10001"]
+    subgraph engine["Engine container  ·  loomctx-engine:local  ·  uid 10001"]
         direction TB
         mcp["MCP server (stdio)<br/>find_entity · find_related · ask · ask_scope<br/>expand · record_claim · get_observations · answer"]
         http["HTTP  :8000  (uvicorn, 1 worker)<br/>POST /v1/ingest · /v1/ingest/batch · /v1/ask · /v1/expand · /v1/answer · /v1/schemas<br/>GET /v1/entities/search|semantic · /v1/artifacts/{id}<br/>GET /healthz · /readyz · /metrics"]
@@ -34,19 +34,19 @@ flowchart LR
     end
 
     subgraph disk["Volume  /data"]
-        db[("loom.db  (SQLite, WAL)<br/>entities · observations · artifacts · embeddings<br/>doc_chunks · dossiers · aliases · tombstones · schemas<br/>vobs_*/vchk_* sqlite-vec ANN tables")]
+        db[("loomctx.db  (SQLite, WAL)<br/>entities · observations · artifacts · embeddings<br/>doc_chunks · dossiers · aliases · tombstones · schemas<br/>vobs_*/vchk_* sqlite-vec ANN tables")]
         keys["keys.json  (hashed keys + grants)<br/>bind-mounted, hot-reloaded"]
     end
 
     subgraph optional["Optional (compose profiles / .env)"]
-        worker["Enrichment worker  (profile: enrich)<br/>python -m loom.enrich run<br/>extract · resolve · adjudicate · embed<br/>chunk · dossiers · vector-index backfill"]
-        llm["LLM + embedding provider<br/>OpenRouter · Venice · OpenAI · Anthropic<br/>Ollama / vLLM self-hosted<br/>LOOM_LLM_* · LOOM_EMBED_*"]
+        worker["Enrichment worker  (profile: enrich)<br/>python -m loomctx.enrich run<br/>extract · resolve · adjudicate · embed<br/>chunk · dossiers · vector-index backfill"]
+        llm["LLM + embedding provider<br/>OpenRouter · Venice · OpenAI · Anthropic<br/>Ollama / vLLM self-hosted<br/>LOOMCTX_LLM_* · LOOMCTX_EMBED_*"]
     end
 
     agent -- "stdio (spawned per session)" --> mcp
-    app -- "HTTPS + X-Loom-Key" --> http
+    app -- "HTTPS + X-LoomCtx-Key" --> http
     ship -- "POST /v1/ingest/batch (NDJSON or array)" --> http
-    admin -- "docker compose run --rm loom …" --> store
+    admin -- "docker compose run --rm loomctx …" --> store
     store <--> db
     gate -. reads .-> keys
     worker <--> db
@@ -81,13 +81,13 @@ flowchart TB
     lb2["Ingress / Service"]
 
     subgraph gws["Gateway pods (Go) · HPA 2–10 · stateless"]
-        gw["authenticate → per-principal rate limit → size cap<br/>→ JSON-Schema validate → namespace/type/source gates<br/>→ publish (3 retries) · header Loom-Principal = grant id"]
+        gw["authenticate → per-principal rate limit → size cap<br/>→ JSON-Schema validate → namespace/type/source gates<br/>→ publish (3 retries) · header LoomCtx-Principal = grant id"]
     end
 
     subgraph nats["NATS JetStream · 3-node cluster · PVC per node"]
         direction LR
-        s1[("LOOM_INGEST · R=3<br/>max_bytes 4 GiB · discard old")]
-        s2[("LOOM_DEADLETTER · R=3<br/>poison + Loom-Error")]
+        s1[("LOOMCTX_INGEST · R=3<br/>max_bytes 4 GiB · discard old")]
+        s2[("LOOMCTX_DEADLETTER · R=3<br/>poison + LoomCtx-Error")]
     end
 
     subgraph cons["Writer consumers ×N · shared durable"]
@@ -99,7 +99,7 @@ flowchart TB
     end
 
     subgraph engs["Engine pods · HPA 2–8"]
-        e1["uvicorn · LOOM_WORKERS × LOOM_DB_POOL<br/>gates · registry · pack builder · semantic search"]
+        e1["uvicorn · LOOMCTX_WORKERS × LOOMCTX_DB_POOL<br/>gates · registry · pack builder · semantic search"]
     end
 
     subgraph wks["Enrichment StatefulSet ×N"]
@@ -108,8 +108,8 @@ flowchart TB
 
     subgraph pg["Postgres · CloudNativePG · 3 instances · failover"]
         direction LR
-        rw[("loom-pg-rw → primary<br/>pgvector HNSW")]
-        ro[("loom-pg-ro → 2 replicas")]
+        rw[("loomctx-pg-rw → primary<br/>pgvector HNSW")]
+        ro[("loomctx-pg-ro → 2 replicas")]
         rw -- "WAL" --> ro
     end
 
@@ -118,13 +118,13 @@ flowchart TB
 
     shippers -- "/v1/ingest · /v1/ingest/batch" --> lb1 --> gw
     kafka --> k1 --> rw
-    gw -- "loom.ingest.{kind}" --> s1
+    gw -- "loomctx.ingest.{kind}" --> s1
     s1 -- "batches" --> c1
     c1 -- "max deliveries" --> s2
     c1 -- "INSERT … ON CONFLICT (event_id)" --> rw
     agents --> lb2 --> e1
     e1 -- "writes" --> rw
-    e1 -- "reads (LOOM_DB_READ)" --> ro
+    e1 -- "reads (LOOMCTX_DB_READ)" --> ro
     w1 --> rw
     e1 -.-> llm
     w1 -.-> llm
@@ -143,15 +143,15 @@ flowchart LR
         st["GraphStore as built by the factory<br/>BlobOffloadStore( ShardedStore( … ) )"]
     end
 
-    subgraph shards["LOOM_SHARDS — tenant capacity isolation (D-032)"]
+    subgraph shards["LOOMCTX_SHARDS — tenant capacity isolation (D-032)"]
         direction TB
-        d0[("LOOM_DB (default)<br/>every unmapped namespace")]
+        d0[("LOOMCTX_DB (default)<br/>every unmapped namespace")]
         d1[("acme → its own Postgres cluster")]
         d2[("globex → a SQLite file")]
     end
 
-    subgraph blobs["LOOM_BLOB_* — artifact offload (D-033)"]
-        b1[("S3 / MinIO / Ceph bucket<br/>or a shared volume<br/>bodies above LOOM_BLOB_THRESHOLD")]
+    subgraph blobs["LOOMCTX_BLOB_* — artifact offload (D-033)"]
+        b1[("S3 / MinIO / Ceph bucket<br/>or a shared volume<br/>bodies above LOOMCTX_BLOB_THRESHOLD")]
     end
 
     st -- "namespace → shard<br/>admin calls fan out<br/>backlogs fill shard by shard" --> d0
@@ -180,7 +180,7 @@ sequenceDiagram
     participant E as Embedder (optional)
 
     A->>H: POST /v1/ask {subject or scope, question, budget, as_of?, valid_at?}
-    H->>G: X-Loom-Key → grant (namespace, perms, entity_types)
+    H->>G: X-LoomCtx-Key → grant (namespace, perms, entity_types)
     G-->>H: 401 / 403, or grant
     H->>P: build_pack(req, allowed_types)
     P->>S: resolve_scope (BFS over containment predicates, registry default)
@@ -195,7 +195,7 @@ sequenceDiagram
     Note over P: as_of → hide later-recorded facts<br/>valid_at → keep facts whose window covers T
     Note over P: rank = cosine∘keyword + time-decayed recency + confidence<br/>extracted (doc:) claims discounted
     Note over P: conflicts first (cross-source scalar disagreement)<br/>→ brief → excerpts (≤ half remaining) → facts, until budget
-    Note over P: every item cited, what didn't fit → handles<br/>(more / conflict / excerpt), HMAC-signed if LOOM_HANDLE_SECRET
+    Note over P: every item cited, what didn't fit → handles<br/>(more / conflict / excerpt), HMAC-signed if LOOMCTX_HANDLE_SECRET
     P-->>H: ContextPack
     H-->>A: 200 {items[], handles[], budget, subjects[]}
     A->>H: POST /v1/expand {handle}  (same gates re-applied)
@@ -217,16 +217,16 @@ sequenceDiagram
     D->>GW: POST /v1/ingest {envelope} — or /v1/ingest/batch [envelopes] (each item below, individually)
     GW->>GW: key → grant · rate bucket (per grant, n tokens for n items) · size cap<br/>schema validate · namespace/type/source gates
     GW-->>D: 401 / 403 / 413 / 422 / 429 on failure
-    GW->>JS: publish loom.ingest.{kind} + Loom-Principal (3 retries)
+    GW->>JS: publish loomctx.ingest.{kind} + LoomCtx-Principal (3 retries)
     JS-->>GW: quorum ack
     GW-->>D: 202 {status: queued}
-    JS->>C: batch (≤64) via durable loom-writer
+    JS->>C: batch (≤64) via durable loomctx-writer
     C->>DB: one transaction: INSERT … ON CONFLICT (namespace, event_id) DO NOTHING
     alt commit ok
         C->>JS: ack each message
     else store error (rolled back)
         C->>JS: nak (redeliver in 2 s)
-        Note over C,JS: on the 5th delivery → publish to LOOM_DEADLETTER<br/>with Loom-Error, then ack
+        Note over C,JS: on the 5th delivery → publish to LOOMCTX_DEADLETTER<br/>with LoomCtx-Error, then ack
     end
     Note over DB: claim → observation (entities auto-created)<br/>document → artifact (status pending)
     W->>DB: lease pending artifacts / claim dossier candidates<br/>shard of embedding backlog
@@ -243,7 +243,7 @@ sequenceDiagram
 | Read path | same process, same file | engine replicas, reads on Postgres replicas |
 | Vector search | sqlite-vec tables beside the JSON vectors | pgvector HNSW; exact scan if the extension is absent |
 | Enrichment | one optional worker | leased, sharded StatefulSet |
-| Tenant isolation | namespaces (data) | namespaces + `LOOM_SHARDS` (capacity) |
+| Tenant isolation | namespaces (data) | namespaces + `LOOMCTX_SHARDS` (capacity) |
 | Documents | in the database | offloaded to object storage above a threshold |
 | Auth | keys file, hot-reloaded | same file as a Secret, mounted on engines and gateways |
 | What changes for callers | nothing | nothing |

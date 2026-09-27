@@ -1,6 +1,6 @@
 """Vulnerability connector (D-035): feed shapes -> envelopes -> a store that
 answers the demo's two-hop question. Fixtures are trimmed real-feed shapes;
-the live download path is exercised only with LOOM_LIVE_FEEDS=1."""
+the live download path is exercised only with LOOMCTX_LIVE_FEEDS=1."""
 
 import gzip
 import json
@@ -8,11 +8,11 @@ import os
 
 import pytest
 
-from loom.connectors import vulns
-from loom.context import build_pack
-from loom.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef, ScopeSpec
-from loom.ingest import load_direct
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import vulns
+from loomctx.context import build_pack
+from loomctx.contracts import AskRequest, ClaimIn, DocumentIn, EntityRef, ScopeSpec
+from loomctx.ingest import load_direct
+from loomctx.store.sqlite import SqliteStore
 
 NVD_ITEM = {"cve": {
     "id": "CVE-2026-1337", "sourceIdentifier": "security@nginx.org",
@@ -353,13 +353,13 @@ def test_fetch_retries_transient_failures_and_honours_304(tmp_path, monkeypatch)
 
 
 def test_load_without_url_or_db_uses_the_environment_store(tmp_path, monkeypatch, capsys):
-    """--db is an explicit override that bypasses LOOM_SHARDS / LOOM_BLOB_*;
+    """--db is an explicit override that bypasses LOOMCTX_SHARDS / LOOMCTX_BLOB_*;
     without it (and without --url) the connector writes where the engine
-    reads: the store LOOM_DB and friends configure."""
+    reads: the store LOOMCTX_DB and friends configure."""
     cache = tmp_path / "feeds"
     _write_cache(cache)
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "env.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "env.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
     vulns.main(["load", "--cache", str(cache), "--offline", "--sources", "kev"])
     out = capsys.readouterr().out
     assert json.loads(out.splitlines()[-1])["recorded"] == 5
@@ -369,7 +369,7 @@ def test_load_without_url_or_db_uses_the_environment_store(tmp_path, monkeypatch
     store.close()
 
 
-@pytest.mark.skipif(not os.environ.get("LOOM_LIVE_FEEDS"), reason="set LOOM_LIVE_FEEDS=1 to hit the real feeds")
+@pytest.mark.skipif(not os.environ.get("LOOMCTX_LIVE_FEEDS"), reason="set LOOMCTX_LIVE_FEEDS=1 to hit the real feeds")
 def test_live_pull_is_conditional(tmp_path):
     cache = tmp_path / "feeds"
     first = vulns.pull(cache, [], {"kev"})
@@ -381,8 +381,8 @@ def test_live_pull_is_conditional(tmp_path):
 def test_kev_advisory_ranks_as_an_excerpt_for_its_cve(tmp_path):
     """D-039 end to end: the KEV claims cite their advisory, the worker
     chunks it, and the CVE's pack carries the advisory's own words."""
-    from loom.enrich import chunk_artifacts
-    from loom.llm import HashingEmbedder
+    from loomctx.enrich import chunk_artifacts
+    from loomctx.llm import HashingEmbedder
     cache = tmp_path / "feeds"
     _write_cache(cache)
     db = tmp_path / "x.db"
@@ -461,7 +461,7 @@ def test_nightly_epss_refresh_is_bounded_and_idempotent(tmp_path, monkeypatch, c
     with gzip.open(cache / "epss.csv.gz", "wt") as fh:
         fh.write(_epss("2026-09-11", [("CVE-2026-1337", 0.5, 0.9)]))
     before = ledgers[0].read_bytes()
-    import loom.ingest as ingest_mod
+    import loomctx.ingest as ingest_mod
 
     def boom(*a, **k):
         raise SystemExit("store down")
@@ -587,8 +587,8 @@ def test_a_kev_flip_through_the_batch_api(tmp_path, monkeypatch, capsys):
     import urllib.error
     import urllib.parse
     from fastapi.testclient import TestClient
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "api.db"))
-    from loom.api.http import app
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "api.db"))
+    from loomctx.api.http import app
 
     class Resp:
         def __init__(self, body):
@@ -604,7 +604,7 @@ def test_a_kev_flip_through_the_batch_api(tmp_path, monkeypatch, capsys):
             return False
 
     cache = tmp_path / "feeds"
-    args = ["load", "--cache", str(cache), "--offline", "--url", "http://loom", "--sources", "kev"]
+    args = ["load", "--cache", str(cache), "--offline", "--url", "http://loomctx", "--sources", "kev"]
     with TestClient(app) as client:
         def fake_urlopen(req, timeout=0):
             url = urllib.parse.urlsplit(req.full_url)
@@ -656,10 +656,10 @@ def test_a_refused_refresh_fails_loudly_and_keeps_the_ledger(tmp_path, monkeypat
         key("narrow", {"id": "narrow", "namespaces": ["netsec"], "perms": "rw", "sources": ["cisa-kev"]}),
         key("wide", {"id": "wide", "namespaces": ["netsec"], "perms": "rw",
                      "sources": ["cisa-kev", "first-*", "first-epss", "nvd:*"]})]}))
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "keyed.db"))
-    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
-    monkeypatch.delenv("LOOM_API_KEYS", raising=False)
-    from loom.api.http import app
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "keyed.db"))
+    monkeypatch.setenv("LOOMCTX_AUTH_FILE", str(keys))
+    monkeypatch.delenv("LOOMCTX_API_KEYS", raising=False)
+    from loomctx.api.http import app
 
     class Resp:
         def __init__(self, body):
@@ -676,7 +676,7 @@ def test_a_refused_refresh_fails_loudly_and_keeps_the_ledger(tmp_path, monkeypat
 
     cache = tmp_path / "feeds"
     _write_cache(cache)
-    base = ["load", "--cache", str(cache), "--offline", "--url", "http://loom", "--sources", "kev,epss"]
+    base = ["load", "--cache", str(cache), "--offline", "--url", "http://loomctx", "--sources", "kev,epss"]
     with TestClient(app) as client:
         def fake_urlopen(req, timeout=0):
             url = urllib.parse.urlsplit(req.full_url)
@@ -686,7 +686,7 @@ def test_a_refused_refresh_fails_loudly_and_keeps_the_ledger(tmp_path, monkeypat
                 raise urllib.error.HTTPError(req.full_url, r.status_code, "error", r.headers, io.BytesIO(r.content))
             return Resp(r.content)
         monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-        vulns.register(vulns.schema("netsec"), "http://loom", None, "admin")   # the operator's first load
+        vulns.register(vulns.schema("netsec"), "http://loomctx", None, "admin")   # the operator's first load
         with pytest.raises(SystemExit, match="refused by the engine"):
             vulns.main(base + ["--key", "narrow"])                              # first-epss not granted
         assert not list(cache.glob("epss-ledger-netsec-*.json.gz"))             # ledger not advanced
@@ -696,7 +696,7 @@ def test_a_refused_refresh_fails_loudly_and_keeps_the_ledger(tmp_path, monkeypat
 
 
 def test_source_families():
-    from loom.auth import Grant, source_matches
+    from loomctx.auth import Grant, source_matches
     assert source_matches("nvd:*", "nvd:cve@mitre.org") and source_matches("nvd", "nvd")
     assert not source_matches("nvd:*", "nvd") and not source_matches("nvd:*", "nvdx:a")
     assert not source_matches("nvd", "nvd:cve@mitre.org") and not source_matches("first-*", "first-epss")

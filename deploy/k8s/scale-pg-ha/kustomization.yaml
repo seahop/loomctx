@@ -8,7 +8,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: loom
+namespace: loomctx
 
 resources:
   - ../scale-pg
@@ -22,10 +22,10 @@ patches:
       apiVersion: v1
       kind: Secret
       metadata:
-        name: loom-db
+        name: loomctx-db
   - path: engine-db.yaml
-    target: {kind: Deployment, name: loom}
+    target: {kind: Deployment, name: loomctx}
   - path: consumer-db.yaml
-    target: {kind: Deployment, name: loom-consumer}
+    target: {kind: Deployment, name: loomctx-consumer}
   - path: consumer-db.yaml
-    target: {kind: StatefulSet, name: loom-enrich}
+    target: {kind: StatefulSet, name: loomctx-enrich}

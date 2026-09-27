@@ -4,32 +4,32 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: loom-gateway
+  name: loomctx-gateway
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: loom-gateway
+      app: loomctx-gateway
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: loom
+  name: loomctx
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: loom
+      app: loomctx
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: loom-consumer
+  name: loomctx-consumer
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: loom-consumer
+      app: loomctx-consumer
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

@@ -2,9 +2,9 @@
 
 from datetime import datetime, timezone
 
-from loom.contracts import DocumentIn, EntityRef, ClaimIn
-from loom.store.blobs import BlobOffloadStore, FilesystemBlobs, S3Blobs
-from loom.store.sqlite import SqliteStore
+from loomctx.contracts import DocumentIn, EntityRef, ClaimIn
+from loomctx.store.blobs import BlobOffloadStore, FilesystemBlobs, S3Blobs
+from loomctx.store.sqlite import SqliteStore
 
 OBSERVED = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
@@ -43,7 +43,7 @@ def test_large_bodies_offload_and_reinflate_everywhere(tmp_path):
 def test_binary_bodies_export_import_and_purge(tmp_path):
     import io
     from datetime import timedelta
-    from loom.lifecycle import export_jsonl, import_jsonl
+    from loomctx.lifecycle import export_jsonl, import_jsonl
     store, inner = _store(tmp_path)
     b64 = "QUJD" * 100
     art = store.store_artifact(DocumentIn(content_b64=b64, content_type="application/octet-stream",
@@ -86,9 +86,9 @@ def test_s3_backend_with_a_fake_client():
 
     import io
     fake = FakeS3()
-    blobs = S3Blobs("bucket", prefix="loom", client=fake)
+    blobs = S3Blobs("bucket", prefix="loomctx", client=fake)
     blobs.put("ns/a1", b"hello")
-    assert ("bucket", "loom/ns/a1") in fake.objects
+    assert ("bucket", "loomctx/ns/a1") in fake.objects
     assert blobs.get("ns/a1") == b"hello" and blobs.get("ns/none") is None
     blobs.delete("ns/a1")
     assert blobs.get("ns/a1") is None
@@ -102,16 +102,16 @@ def test_filesystem_backend_rejects_escaping_keys(tmp_path):
 
 
 def test_offload_from_env(tmp_path, monkeypatch):
-    from loom.store.factory import store_from_env
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "e.db"))
-    monkeypatch.setenv("LOOM_BLOB_THRESHOLD", "10")
-    monkeypatch.setenv("LOOM_BLOB_DIR", str(tmp_path / "blobs"))
+    from loomctx.store.factory import store_from_env
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "e.db"))
+    monkeypatch.setenv("LOOMCTX_BLOB_THRESHOLD", "10")
+    monkeypatch.setenv("LOOMCTX_BLOB_DIR", str(tmp_path / "blobs"))
     s = store_from_env()
     assert isinstance(s, BlobOffloadStore)
     art = s.store_artifact(DocumentIn(text="0123456789abcdef", source="s", observed_at=OBSERVED))
     assert s.get_artifact("default", art.id).text == "0123456789abcdef"
     s.close()
-    monkeypatch.delenv("LOOM_BLOB_THRESHOLD")
+    monkeypatch.delenv("LOOMCTX_BLOB_THRESHOLD")
     assert isinstance(store_from_env(), SqliteStore)
 
 
@@ -120,7 +120,7 @@ def test_vanished_blob_is_reported_not_served_as_the_stub(tmp_path, caplog):
     art = store.store_artifact(DocumentIn(text="z" * 300, source="s", observed_at=OBSERVED))
     key = inner.get_artifact("default", art.id).attrs["_blob"]["key"]
     (tmp_path / "blobs" / key).unlink()
-    with caplog.at_level("WARNING", logger="loom.store"):
+    with caplog.at_level("WARNING", logger="loomctx.store"):
         got = store.get_artifact("default", art.id)
     assert got.text is None and got.content_b64 is None          # never the "[offloaded: ...]" stub
     assert got.attrs["_blob_missing"] is True and got.attrs["_blob"]["key"] == key
@@ -143,7 +143,7 @@ def test_b64_threshold_compares_decoded_bytes(tmp_path):
 
 def test_blob_is_removed_when_the_row_never_lands(tmp_path, monkeypatch):
     import pytest
-    from loom.contracts import Artifact
+    from loomctx.contracts import Artifact
     store, inner = _store(tmp_path)
 
     def boom(*_a, **_k):
@@ -167,8 +167,8 @@ def test_wrappers_delegate_the_batched_defaults_too():
     observations_for_many; a wrapper that inherited them would silently
     reintroduce one transaction per claim and one round trip per ref
     (D-043) whenever offload or sharding is configured."""
-    from loom.store.base import GraphStore
-    from loom.store.sharded import ShardedStore
+    from loomctx.store.base import GraphStore
+    from loomctx.store.sharded import ShardedStore
     for wrapper in (BlobOffloadStore, ShardedStore):
         for name in ("record_claims", "observations_for_many"):
             assert getattr(wrapper, name) is not getattr(GraphStore, name), f"{wrapper.__name__}.{name}"

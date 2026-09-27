@@ -25,6 +25,7 @@ presentable.
 | 2026-09-25 | GKE re-validation with auth on, signed handles, provider keys and the real corpus loaded by the documented Jobs (D-063): ten deployment-path bugs found and fixed (nightly refresh key, source families, worker pools, keys mount, DSN in scorecards…); failover 12 s / 0 lost writes, drain 0 not-ready, load 435/s |
 | 2026-09-27 | Identity-pass throughput (D-087, S-63): FK child indexes (schema v8), batched ranking, a drainable sharded `identities` worker job, stepwise candidate query; on GKE the workers fold a 6,000-machine estate during ingest (75 merges left after the drain); 808 (SQLite) / 903 (Postgres lane) tests pass |
 | 2026-09-27 | Identity across tools (D-083), host artifacts (D-084), format drift (D-085), purple correlation (D-086); one namespace per environment, registration merges shared predicates; tests run on GKE: 803 (SQLite) / 896 (Postgres lane) pass; 6,000-machine estate through the gateway: identities 100 % folded with 0 false merges, purple 600/600; S-60…S-62 fixed, S-63 (identity-pass throughput) open |
+| 2026-09-27 | Renamed to LoomCtx (D-088): repo, package, images, env vars, k8s names and metrics; website live at loomctx.dev; 809 tests pass (904 on the Postgres lane) |
 | 2026-09-27 | Coverage (D-082): connectors record what each export carried; asks and find_path note predicates an import did not (fully) collect and path entities with unknown status; 753 tests pass (845 on the Postgres lane) |
 | 2026-09-26 | Hub-safe walks and paths (D-080, D-081): no same-predicate turn-back in scope walks and find_path (`siblings` opts in), bidirectional find_path to depth 6, `node_status` flags disabled accounts on paths, Postgres analyze thresholds + `refresh_statistics()` after bulk loads (schema v7); S-57/S-58/S-59 closed; re-validated on GKE; 746 tests pass (838 on the Postgres lane) |
 | 2026-09-26 | Identity connectors checked at scale (D-077…D-079): Entra/Okta generator + harness, four connector defects fixed (S-52…S-55), blind AD re-measurement (S-51), lazy-greedy pack selection; validated on GKE through the gateway path to 1.38M observations; open: identity-hub walk cost (S-57), find_path depth/status (S-58); 738 tests pass |
@@ -34,9 +35,9 @@ presentable.
 
 ## Phase 0 — Contracts ✅ (2026-09-03)
 
-- ✅ `src/loom/contracts.py`: envelope (claim | document), Observation, Entity,
+- ✅ `src/loomctx/contracts.py`: envelope (claim | document), Observation, Entity,
   Artifact, ContextPack/Items/Citations/Handles, AskRequest/ExpandRequest,
-  schema registry shapes. JSON Schema export: `python -m loom.schemas`.
+  schema registry shapes. JSON Schema export: `python -m loomctx.schemas`.
 
 ## Phase 1 — Core store + ingestion ✅ (2026-09-03)
 
@@ -45,7 +46,7 @@ presentable.
 - ✅ HTTP: `/healthz`, `POST /v1/ingest` (claims → 200 recorded; documents →
   202 accepted, artifact stored verbatim, extraction pending),
   `GET /v1/entities/{type}/{key}/observations`, `GET /v1/artifacts/{id}`
-- ✅ Seed corpus: `python -m loom.seed` — 592 deterministic claims + 5
+- ✅ Seed corpus: `python -m loomctx.seed` — 592 deterministic claims + 5
   documents across `netsec` and `procurement`, with planted demo moments
   (IP lease reassignment, two cross-source conflicts, incident report doc)
 - ✅ Schema registry persistence + claim validation (2026-09-08, D-024):
@@ -55,7 +56,7 @@ presentable.
 
 ## Phase 2 — Retrieval + context packs ✅ (2026-09-03)
 
-- ✅ `src/loom/context.py`: rank (keyword sim + recency + confidence) → trim
+- ✅ `src/loomctx/context.py`: rank (keyword sim + recency + confidence) → trim
   to mandatory token budget → cite every item → stateless expansion handles →
   cross-source conflict surfacing (single-source value changes are treated as
   time series, not conflicts) → as-of filtering
@@ -71,9 +72,9 @@ presentable.
 - ✅ `ScopeSpec` (multi-subject questions; BFS expansion over containment
   predicates — "domain corp.local and its contents"); merged, deduped,
   per-subject-conflict-checked packs; `GET /v1/entities/search`
-- ✅ `loom/llm.py`: OpenAI-compatible client covering OpenRouter, Venice,
+- ✅ `loomctx/llm.py`: OpenAI-compatible client covering OpenRouter, Venice,
   Groq, Together, Mistral, OpenAI, Ollama/vLLM/LM Studio (custom base URL),
-  plus native Anthropic; configured by four `LOOM_LLM_*` env vars
+  plus native Anthropic; configured by four `LOOMCTX_LLM_*` env vars
 - ✅ `POST /v1/answer`: retrieval-grounded, citation-required LLM answers;
   auto-resolves entities named in the question; returns the pack for audit
 - ✅ Live end-to-end run against a real provider (2026-09-04, OpenRouter /
@@ -84,12 +85,12 @@ presentable.
 
 ## Phase 3 — MCP server ✅ (2026-09-04)
 
-- ✅ `src/loom/mcp_server.py` on MCP SDK v2 (`MCPServer`): `find_entity`,
+- ✅ `src/loomctx/mcp_server.py` on MCP SDK v2 (`MCPServer`): `find_entity`,
   `ask`, `ask_scope`, `expand`, `record_claim`, `get_observations`,
   `answer` — same core functions as HTTP, `type:key` handles, server
   instructions teaching the find → ask small → expand → write-back loop.
-- ✅ stdio for local agents (`claude mcp add loom -- docker compose run --rm
-  -T loom python -m loom.mcp_server`) and streamable HTTP via compose
+- ✅ stdio for local agents (`claude mcp add loomctx -- docker compose run --rm
+  -T loomctx python -m loomctx.mcp_server`) and streamable HTTP via compose
   profile `mcp` (:8300/mcp, boot-verified).
 - ✅ Exercised by a real MCP client over stdio in CI (`tests/test_mcp_client.py`,
   2026-09-08) and by a live Claude Code agent session (see D-026 notes).
@@ -111,7 +112,7 @@ presentable.
 
 ## Phase 4 — Async enrichment ✅ (2026-09-04, D-018/D-019)
 
-- ✅ `python -m loom.enrich` worker (compose profile `enrich` / `--once` Job)
+- ✅ `python -m loomctx.enrich` worker (compose profile `enrich` / `--once` Job)
 - ✅ Embeddings: pluggable `Embedder` (OpenAI-compatible + offline hashing
   fallback), cosine ranking in the pack builder with keyword fallback
 - ✅ LLM claim extraction from document artifacts, with located span
@@ -130,7 +131,7 @@ presentable.
 - ✅ **Document-excerpt retrieval + tunable budget (D-020, 2026-09-04):**
   artifacts are chunked + embedded; packs surface top-relevant passages as
   cited `doc_excerpt` items (RAG over the docs behind an entity's facts);
-  `LOOM_MAX_BUDGET` makes the budget ceiling operator-tunable.
+  `LOOMCTX_MAX_BUDGET` makes the budget ceiling operator-tunable.
 - ✅ doc_excerpt expansion handles pull the surrounding passages (2026-09-08).
 - ✅ ANN vector index (2026-09-08, D-025): sqlite-vec / pgvector tables
   derived from the portable JSON vectors, exact scan as fallback; excerpt
@@ -144,10 +145,10 @@ presentable.
   documented won't-fixes. Includes `valid_at` (fact-time reads), MCP auth
   on the HTTP transports, non-root containers, and the hardened worker.
 - ✅ **Postgres `GraphStore` (D-011, 2026-09-03):** selected by
-  `LOOM_DB=postgresql://...`, behaviorally identical to SQLite (shared
+  `LOOMCTX_DB=postgresql://...`, behaviorally identical to SQLite (shared
   contract tests run against both; CI includes a live-Postgres pass).
   Singular SQLite lane tuned (WAL, NORMAL sync, batched transactions) and
-  measured with the new `loom.loadgen` tool: ~507/s SQLite, ~454/s
+  measured with the new `loomctx.loadgen` tool: ~507/s SQLite, ~454/s
   Postgres, ~515/s scale-shape intake — all 0 errors, loadgen-bound.
 - ✅ TypeScript SDK generated from the JSON Schema (2026-09-08, D-026),
   built and live-tested in CI via the compose `sdk` profile.
@@ -172,7 +173,7 @@ presentable.
   NATS, consumer sidecar), NATS JetStream buffer, Python writer consumer,
   SQLite WAL mode for cross-process sharing. Rehearsed live end-to-end:
   3 gateways → queue → consumer → `/v1/ask`. CI checks contract sync and
-  publishes `ghcr.io/seahop/loom-gateway`.
+  publishes `ghcr.io/seahop/loomctx-gateway`.
 - ✅ Load test on real nodes (2026-09-10/11, D-043 and D-045): GKE
   `scale-pg-ha`, 421/s corpus load with live workers, 202/s single-envelope
   ingest, 186/s ask, two primary failovers; the laptop table in
@@ -184,7 +185,7 @@ Infra-side dials for large organizations: more database nodes, HA
 ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
 - ✅ 6.1 Engine concurrency (2026-09-08, D-028): connection pool,
-  `LOOM_DB_READ` read replica, `LOOM_WORKERS`; measured (see D-028)
+  `LOOMCTX_DB_READ` read replica, `LOOMCTX_WORKERS`; measured (see D-028)
 - ✅ 6.2 Ingestion HA (2026-09-08, D-029): 3-node JetStream cluster in
   `scale-pg`, stream replicas/limits/discard dials, bounded redelivery,
   dead-letter stream; leader-loss chaos test passed on the cluster
@@ -192,11 +193,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   CloudNativePG 3-instance cluster, engine reads on replicas; primary
   deleted under load with zero failed requests
 - ✅ 6.4 Worker fleet (2026-09-08, D-031): leased extraction/chunking/
-  dossier work, sharded embedding backlog, `loom-enrich` StatefulSet
-- ✅ 6.5 Tenant sharding (2026-09-08, D-032): `LOOM_SHARDS` →
+  dossier work, sharded embedding backlog, `loomctx-enrich` StatefulSet
+- ✅ 6.5 Tenant sharding (2026-09-08, D-032): `LOOMCTX_SHARDS` →
   `ShardedStore`; the contract suite runs a two-shard lane
-- ✅ 6.6 Artifact offload (2026-09-08, D-033): `LOOM_BLOB_THRESHOLD` +
-  `LOOM_BLOB_DIR` / `LOOM_BLOB_S3_BUCKET`, reinflated on every read
+- ✅ 6.6 Artifact offload (2026-09-08, D-033): `LOOMCTX_BLOB_THRESHOLD` +
+  `LOOMCTX_BLOB_DIR` / `LOOMCTX_BLOB_S3_BUCKET`, reinflated on every read
 - ✅ 6.7 Capacity evidence (2026-09-08): `deploy/k8s/jobs/loadgen.yaml`;
   measured table in `deploy/README.md` (laptop floors; re-run on real
   nodes before the conference quote)
@@ -206,7 +207,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ `POST /v1/ingest/batch` (engine + gateway), per-item outcomes
 - ✅ `contracts/openapi.json` drift-checked; Java + C# generation in CI
 - ✅ Go SDK with a contract-drift test, live-tested in CI
-- ✅ `python -m loom.ingest` bulk loader (HTTP batches or direct to store)
+- ✅ `python -m loomctx.ingest` bulk loader (HTTP batches or direct to store)
 - ✅ Vector + Fluent Bit configs, live-validated (`deploy/integrations/`)
 - ✅ Kafka/Redpanda consumer with retry + dead-letter, live-validated
 - ⬜ On request: hand-written Rust client; webhook adapters beyond the
@@ -214,7 +215,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
 ## Phase 8 — Real data ✅ (D-035, 2026-09-08)
 
-- ✅ `python -m loom.connectors.vulns` — CISA KEV + NVD 2.0 + FIRST EPSS,
+- ✅ `python -m loomctx.connectors.vulns` — CISA KEV + NVD 2.0 + FIRST EPSS,
   streamed, cached with conditional GETs, idempotent, history-preserving
 - ✅ Schema registration for the namespace; seed-host bridge for the two-hop
   demo question; nightly CronJob (`deploy/k8s/jobs/vulns-refresh.yaml`)
@@ -233,7 +234,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ Adjudication declines persist in the store (D-044, schema v4)
 - ✅ CloudNativePG failover timing (2026-09-11): the 190 s was the probe
   hanging in TCP, not the operator — true outage 11 s with defaults,
-  measured through the engine; Loom's pool gained `connect_timeout` and
+  measured through the engine; LoomCtx's pool gained `connect_timeout` and
   keepalives so clients fail over with the database
 - ✅ Dossier candidates ranked by richness (distinct predicates × sources),
   single-predicate firehoses excluded (D-044)
@@ -243,9 +244,9 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   run over the real corpus with an embedding provider; KEV advisories
   surface as attributed `doc_excerpt` items and via `find_related`
 - ✅ Agent end-to-end evaluation (D-036, 2026-09-09): `python -m
-  loom.agent_eval` — real model, real MCP transport, real corpus, ground
+  loomctx.agent_eval` — real model, real MCP transport, real corpus, ground
   truth from the store; the first live run forced `list_namespaces` /
-  `describe_namespace`, the empty-namespace error, `LOOM_MCP_NAMESPACE`
+  `describe_namespace`, the empty-namespace error, `LOOMCTX_MCP_NAMESPACE`
 - ✅ Model scorecard (D-037, 2026-09-09): `--models` mode with billed cost;
   eighteen OpenRouter models across price tiers, three runs each (216
   task-runs, nine models clean at 12/12) — `docs/models.md`
@@ -262,10 +263,10 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   Object-level only: sessions / local-admin need host collection. GitHub
   issues/PRs is still the obvious non-security third one.
 - ✅ AD reachability capability benchmark (2026-09-26, D-066): a synthetic
-  directory generator (`loom.connectors.ad_gen`, deterministic by seed,
+  directory generator (`loomctx.connectors.ad_gen`, deterministic by seed,
   small/medium/large) plants known 2/3/4-hop membership → ACL → trust chains
   and decoy dead-ends (non-transitive / SID-filtered trust, disabled account)
-  in dense benign noise; `loom.ad_eval` scores whether the scope walk
+  in dense benign noise; `loomctx.ad_eval` scores whether the scope walk
   surfaces the full **cited** chain (scripted reader, no LLM). Medium run:
   100% path-recall + decoy-exclusion, ~2.5% of the store gathered per chain
   ([docs/ad-eval.md](ad-eval.md)). AD analogue of the KEV retrieval
@@ -301,7 +302,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   principals, app registrations, directory roles, role/app-role/OAuth2
   assignments, credential expiry, privileged-role tagging. Scope walk +
   find_path tested.
-- ✅ Identity connectors at scale (2026-09-26, D-077): `loom.connectors.iam_gen` + `loom.iam_eval`; GKE numbers in deploy/README.md.
+- ✅ Identity connectors at scale (2026-09-26, D-077): `loomctx.connectors.iam_gen` + `loomctx.iam_eval`; GKE numbers in deploy/README.md.
 - ✅ Okta connector (2026-09-26, D-076): Okta API JSON → identity claims in
   the same `iam` namespace — users, groups, apps, app-user assignments, MFA
   factors, admin roles. Both IdPs share predicates for cross-provider entity
@@ -311,14 +312,14 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 - ✅ Identity across tools (2026-09-27, D-083): identifier edges from every
   connector, a shared-identifier resolution tier, IPs as time-stamped links;
   one namespace per environment (`netsec` default) with merging registration.
-- ✅ Host artifacts (2026-09-27, D-084): `loom.connectors.endpoint` —
+- ✅ Host artifacts (2026-09-27, D-084): `loomctx.connectors.endpoint` —
   processes and file listings from osquery, tasklist, PowerShell, ps, ls,
   sha256sum, CSV.
 - ✅ Format drift (2026-09-27, D-085): import shapes compared import to
-  import; `python -m loom.coverage drift`.
-- ✅ Purple correlation (2026-09-27, D-086): `loom.connectors.oplog`
+  import; `python -m loomctx.coverage drift`.
+- ✅ Purple correlation (2026-09-27, D-086): `loomctx.connectors.oplog`
   (Atomic, Attire, CSV/JSON), OCSF `indicates technique`, `python -m
-  loom.purple` / MCP `purple_report`; `loom.estate_eval` checks all four on
+  loomctx.purple` / MCP `purple_report`; `loomctx.estate_eval` checks all four on
   a synthetic estate (GKE numbers in deploy/README.md).
 - ✅ `path` answer type (2026-09-26, D-067): `POST /v1/path`, MCP
   `find_path`, SDK `path()` return the cited, time-scoped edge sequence(s)
@@ -329,7 +330,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
 ## Deployment & CI (2026-09-03)
 
-- ✅ Local: `docker compose up loom`; tests: `docker compose run --rm test`
+- ✅ Local: `docker compose up loomctx`; tests: `docker compose run --rm test`
 - ✅ Kubernetes: `kubectl apply -k deploy/k8s` (single replica + PVC by
   design), `deploy/k8s/scale` (autoscaled gateways + queue), and
   `deploy/k8s/scale-pg` (Postgres-backed, every tier autoscales — gateway
@@ -337,7 +338,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   base/ + overlays; all three validated with `kustomize build`. Autoscaling
   matrix in `deploy/README.md`.
 - ✅ GitHub Actions: tests on every push/PR; image published to
-  `ghcr.io/seahop/loom` (`latest` + SHA) on `main`
+  `ghcr.io/seahop/loomctx` (`latest` + SHA) on `main`
 - ✅ Validated on a real cluster (2026-09-08, Rancher Desktop k3s): default,
   scale, and scale-pg shapes rolled out from the shipped manifests; ingest
   through gateway → NATS → consumers → store, reads from engine replicas,
@@ -347,7 +348,7 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 
 Resume by reading: `README.md` → `docs/architecture.md` → this file (status)
 → `docs/decisions.md` (constraints). Code entry:
-`src/loom/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
+`src/loomctx/contracts.py` → `store/sqlite.py` → `context.py` → `api/http.py`.
 Verify from clean checkout: `docker compose run --rm test` (about 730 test functions; the store contract suite runs in three lanes — SQLite, live Postgres, and a two-shard `ShardedStore` — and the Go/TypeScript SDKs run live against the engine in CI).
-Demo rehearsal: `docker compose up -d loom && docker compose exec loom
-python -m loom.seed load`, then hit `/v1/ask`.
+Demo rehearsal: `docker compose up -d loomctx && docker compose exec loomctx
+python -m loomctx.seed load`, then hit `/v1/ask`.

@@ -6,9 +6,9 @@ rank) except the seed integration at the end."""
 
 from datetime import datetime, timezone
 
-from loom.context import find_paths
-from loom.contracts import ClaimIn, EntityRef, PathRequest, SchemaRegistration, PredicateDef
-from loom.store.sqlite import SqliteStore
+from loomctx.context import find_paths
+from loomctx.contracts import ClaimIn, EntityRef, PathRequest, SchemaRegistration, PredicateDef
+from loomctx.store.sqlite import SqliteStore
 
 
 def _at(day, hour=12):
@@ -173,7 +173,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
     """Two hubs, each with 300 CVEs that also affect 5 shared products of its
     own, and nothing between them: both sides must fan out, and the third
     hop of either goes back through every CVE (1,500 x 300 extensions). The
-    work is capped at LOOM_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
+    work is capped at LOOMCTX_MAX_SCOPE_OBSERVATIONS and the cut is reported."""
     store = SqliteStore(tmp_path / "hub.db")
     store.record_claims(_hub("A", "hub", [f"q{i}" for i in range(5)])
                         + _hub("B", "hub2", [f"r{i}" for i in range(5)]))
@@ -181,7 +181,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
                to=EntityRef(type="product", key="hub2"), via=["affects"], depth=6,
                siblings=True)   # product <- cve -> product is a turn at the cve
 
-    monkeypatch.setenv("LOOM_MAX_SCOPE_OBSERVATIONS", "20000")
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_OBSERVATIONS", "20000")
     stats: dict = {}
     pack = find_paths(store, req, stats=stats)   # the work counters bound it; no wall clock (flaky under load)
     assert stats["work"] <= 20_000 + 1 and stats["partials"] <= 20_000
@@ -189,7 +189,7 @@ def test_hub_fanout_is_bounded_and_reported(tmp_path, monkeypatch):
     assert any(t.reason == "scope_cap" for t in pack.truncated)
     assert any("edge extensions" in n for n in pack.notes)
 
-    monkeypatch.delenv("LOOM_MAX_SCOPE_OBSERVATIONS")
+    monkeypatch.delenv("LOOMCTX_MAX_SCOPE_OBSERVATIONS")
     stats = {}
     pack = find_paths(store, req, stats=stats)
     assert stats["work"] <= 100_000 + 1 and stats["partials"] <= 100_000
@@ -318,11 +318,11 @@ def _keyed_path_client(tmp_path, monkeypatch, db):
          "namespaces": ["net"], "perms": "r"},
         {"sha256": hashlib.sha256(b"host-key").hexdigest(), "id": "hosts",
          "namespaces": ["net"], "perms": "r", "entity_types": ["host"]}]}))
-    monkeypatch.setenv("LOOM_DB", str(db))
-    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
-    for var in ("LOOM_API_KEYS", "LOOM_ALLOWED_HOSTS", "LOOM_ALLOWED_ORIGINS"):
+    monkeypatch.setenv("LOOMCTX_DB", str(db))
+    monkeypatch.setenv("LOOMCTX_AUTH_FILE", str(keys))
+    for var in ("LOOMCTX_API_KEYS", "LOOMCTX_ALLOWED_HOSTS", "LOOMCTX_ALLOWED_ORIGINS"):
         monkeypatch.delenv(var, raising=False)
-    from loom.api.http import app
+    from loomctx.api.http import app
     return TestClient(app)
 
 
@@ -339,19 +339,19 @@ def test_type_scoped_key_does_not_learn_a_gated_canonical_through_an_alias(tmp_p
     body = {"namespace": "net", "from": {"type": "host", "key": "shadow"},
             "to": {"type": "host", "key": "b"}, "via": ["link"], "depth": 1}
     with _keyed_path_client(tmp_path, monkeypatch, db) as client:
-        admin = client.post("/v1/path", json=body, headers={"x-loom-key": "admin-key"})
+        admin = client.post("/v1/path", json=body, headers={"x-loomctx-key": "admin-key"})
         assert admin.status_code == 200
         assert admin.json()["from"] == {"type": "secret", "key": "m"} and admin.json()["paths"]
         # the scoped key asked about a host it may see; the name resolves to
         # a gated secret, which is not there for it
-        scoped = client.post("/v1/path", json=body, headers={"x-loom-key": "host-key"})
+        scoped = client.post("/v1/path", json=body, headers={"x-loomctx-key": "host-key"})
         assert scoped.status_code == 200
         out = scoped.json()
         assert out["from"] == {"type": "host", "key": "shadow"} and out["paths"] == []
         assert "secret" not in json_text(out)
         # asking for the gated type directly is refused outright
         direct = client.post("/v1/path", json={**body, "from": {"type": "secret", "key": "m"}},
-                             headers={"x-loom-key": "host-key"})
+                             headers={"x-loomctx-key": "host-key"})
         assert direct.status_code == 403
 
 
@@ -398,7 +398,7 @@ def test_unknown_endpoint_noted(tmp_path):
 def test_seed_alert_to_domain_path_is_cited(tmp_path):
     """On the deterministic seed corpus: alert AL-2291 -triggered_on-> web-01
     -member_of-> corp.local, each hop cited."""
-    from loom.seed import cmd_load
+    from loomctx.seed import cmd_load
     db = str(tmp_path / "seed.db")
     cmd_load(db, seed=42)
     store = SqliteStore(db)

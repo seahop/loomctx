@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Example sender: push a small vulnerability-management dataset into Loom.
+"""Example sender: push a small vulnerability-management dataset into LoomCtx.
 
 Standard library only — the shape a real pipeline device or scanner would
-have (no dependency on the Loom package or SDK). Mirrors docs/tutorial.md.
+have (no dependency on the LoomCtx package or SDK). Mirrors docs/tutorial.md.
 
-    docker compose up -d loom
-    docker compose exec -T loom python - < examples/vuln_feed.py
+    docker compose up -d loomctx
+    docker compose exec -T loomctx python - < examples/vuln_feed.py
     # or, from the host with the engine on :8000:
     python examples/vuln_feed.py --base http://localhost:8000
 
@@ -25,7 +25,7 @@ NAMESPACE = "vuln"
 def ingest(base: str, body: dict, api_key: str | None) -> str:
     headers = {"content-type": "application/json"}
     if api_key:
-        headers["X-Loom-Key"] = api_key
+        headers["X-LoomCtx-Key"] = api_key
     req = urllib.request.Request(
         base.rstrip("/") + "/v1/ingest",
         data=json.dumps(body).encode(),

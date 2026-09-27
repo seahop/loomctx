@@ -1,4 +1,4 @@
-"""The cloud inventory / config connector (loom.connectors.cloud): parse a
+"""The cloud inventory / config connector (loomctx.connectors.cloud): parse a
 resource export into cited, timestamped inventory claims in a `cloud`
 namespace, and prove the walk answers "what is in this subnet / vpc" over the
 D-067 path search — an instance reaches its vpc through the config edges,
@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.connectors import cloud, vulns
-from loom.context import find_paths, resolve_scope
-from loom.contracts import ClaimIn, EntityRef, PathRequest, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import cloud, vulns
+from loomctx.context import find_paths, resolve_scope
+from loomctx.contracts import ClaimIn, EntityRef, PathRequest, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 FIX = Path(__file__).parent / "fixtures"
 TFSTATE = FIX / "cloud_terraform_state.json"
@@ -215,7 +215,7 @@ def test_schema_registers_small_generic_types_and_containment():
 
 def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
     """D-063 / S-36: a loader that saw any refusal must not exit 0."""
-    from loom import ingest
+    from loomctx import ingest
     monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
 
     def refusing(url, lines, size, key, timeout=60.0):
@@ -225,7 +225,7 @@ def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
     monkeypatch.setattr(ingest, "post_batches", refusing)
     with pytest.raises(SystemExit) as exc:
         cloud.main(["import", str(AWSCONFIG), "--format", "awsconfig", "--namespace", "cloud",
-                    "--url", "http://loom.invalid"])
+                    "--url", "http://loomctx.invalid"])
     assert exc.value.code not in (0, None)
     assert "2" in str(exc.value.code) and "refused" in str(exc.value.code)
 

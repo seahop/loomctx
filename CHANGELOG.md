@@ -1,12 +1,20 @@
 # Changelog
 
-Loom is pre-1.0: contracts are stable within a minor version and every
+LoomCtx is pre-1.0: contracts are stable within a minor version and every
 change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
+
+### Renamed to LoomCtx (D-088)
+
+- The project is **LoomCtx**: repo `seahop/loomctx`, Python package
+  `loomctx`, images `ghcr.io/seahop/loomctx{,-gateway}`, env vars
+  `LOOMCTX_*`, compose service and k8s resources `loomctx*`, metrics
+  `loomctx_*`, API keys `loomctxk_…`, MCP server `loomctx`. No migration
+  path: rebuild stores and clusters from scratch. Website: loomctx.dev.
 
 ### Identity-pass throughput (D-087, closes S-63)
 
@@ -18,7 +26,7 @@ tag is v0.1.0).
 - The strong identity pass is its own enrichment job, `identities`
   (enabled by `resolve` too), draining a backlog back to back and sharded
   across worker replicas; the LLM-backed weak pass stays paced with
-  adjudication; `LOOM_IDENTITY_BATCH` sets the groups per pass (500)
+  adjudication; `LOOMCTX_IDENTITY_BATCH` sets the groups per pass (500)
 - `shared_identifier_groups` runs as indexed steps (a single join stalled
   87 min on a loading namespace)
 - GKE, 6,000-machine estate through the gateway: the workers folded 8,480
@@ -36,7 +44,7 @@ tag is v0.1.0).
 - One namespace per environment: every connector defaults to `netsec`, and
   schema registration merges a shared predicate's definitions (union of
   object types) instead of replacing them
-- Host artifacts (D-084): `loom.connectors.endpoint` parses process lists
+- Host artifacts (D-084): `loomctx.connectors.endpoint` parses process lists
   and file listings — osquery (rows and results logs), tasklist,
   PowerShell Win32_Process / Get-Process / Get-ChildItem / Get-FileHash,
   `ps`, `ls -laR`, `sha256sum`, CSV — into processes (host + pid + start),
@@ -44,13 +52,13 @@ tag is v0.1.0).
 - Format drift (D-085): imports record the fields they read per object
   kind and report a field that appeared or vanished since the last import
   from the same source (`"drift"` in the import output,
-  `python -m loom.coverage drift`)
-- Purple correlation (D-086): `loom.connectors.oplog` (Atomic Red Team,
+  `python -m loomctx.coverage drift`)
+- Purple correlation (D-086): `loomctx.connectors.oplog` (Atomic Red Team,
   Attire, CSV/JSON) records red-team actions; OCSF detections link
-  `indicates technique`; `python -m loom.purple` and the MCP tool
+  `indicates technique`; `python -m loomctx.purple` and the MCP tool
   `purple_report` classify each action detected / host only / missed with
   latency and citations
-- `LOOM_READ_URL`: an OCSF/STIX import or a drift check through a gateway
+- `LOOMCTX_READ_URL`: an OCSF/STIX import or a drift check through a gateway
   (ingest only) reads prior versions / shapes from the engine (S-60)
 - Tested on GKE: 803 tests on SQLite and 896 on the Postgres lane, and a
   6,000-machine synthetic estate through the gateway — 5,400/5,400 machines
@@ -59,7 +67,7 @@ tag is v0.1.0).
 
 ### Coverage: what an import collected (D-082)
 
-- Connectors record what their export carried (`loom.coverage`): LDAP per
+- Connectors record what their export carried (`loomctx.coverage`): LDAP per
   domain (security descriptors, userAccountControl, membership when wholly
   absent), Entra and Okta per tenant/org (expanded members / owners, account
   state, MFA factors; role and app assignments for combined exports)
@@ -99,7 +107,7 @@ tag is v0.1.0).
 
 ### Identity connectors at scale, blind AD benchmark, faster pack selection (D-077, D-078, D-079)
 
-- `loom.connectors.iam_gen` + `loom.iam_eval`: seeded Entra + Okta exports
+- `loomctx.connectors.iam_gen` + `loomctx.iam_eval`: seeded Entra + Okta exports
   in the real APIs' shapes (up to 60,000 users, every-user hub groups) and a
   check of every implied edge, idempotent re-import, planted role paths and
   hub-walk cost; run locally and on GKE through the gateway path up to
@@ -121,12 +129,12 @@ tag is v0.1.0).
 
 ### Identity/IAM connectors and LDAP deep fix (D-074, D-075, D-076)
 
-- `python -m loom.connectors.entra import` parses Microsoft Graph API JSON
+- `python -m loomctx.connectors.entra import` parses Microsoft Graph API JSON
   exports (users, groups, service principals, app registrations, directory
   roles, role/app-role/OAuth2 assignments) into cited identity/RBAC claims
   in the `iam` namespace; privileged-role tagging, credential-expiry
   tracking, scope walk + find_path tested end to end (D-075)
-- `python -m loom.connectors.okta import` parses Okta API JSON exports
+- `python -m loomctx.connectors.okta import` parses Okta API JSON exports
   (users, groups, apps, app-user assignments) into the same `iam` namespace;
   MFA enrollment, credential provider, admin-role grants; both IdPs share
   overlapping predicates for cross-provider entity resolution (D-076)
@@ -141,18 +149,18 @@ tag is v0.1.0).
   2004/2001/2005) as a cited `finding` graph — `detected_on` a host,
   `references` a CVE (shared node), status-transition supersession with
   Suppressed != Resolved (D-071)
-- `python -m loom.connectors.cloud import` parses a `terraform show -json` /
+- `python -m loomctx.connectors.cloud import` parses a `terraform show -json` /
   `.tfstate` or an AWS Config snapshot into cited inventory claims
   (resource/vpc/subnet/security_group/cloud_account) with containment and
   reference edges; drift over snapshots is history (D-072)
-- `python -m loom.connectors.attack import` parses the published MITRE ATT&CK
+- `python -m loomctx.connectors.attack import` parses the published MITRE ATT&CK
   STIX bundle into a cited `attack` taxonomy (technique/tactic/group/
   software/mitigation; `in_tactic`/`uses`/`mitigates`), catalog-level only —
   no procedure detail (D-073)
 
 ### OSV / GHSA advisories + cross-vendor product resolution (D-069, D-070)
 
-- `python -m loom.connectors.osv import` parses OSV-schema advisories
+- `python -m loomctx.connectors.osv import` parses OSV-schema advisories
   (GHSA/PyPI/Go/npm) and fuses them to the shared `cve:` node by CVE alias,
   so an OSV CVSS shows as a corroboration/conflict next to NVD's; affected
   packages become `package:<ecosystem>:<name>` (not forced onto CPE)
@@ -164,7 +172,7 @@ tag is v0.1.0).
 
 ### Scan inventory: nmap connector (D-068)
 
-- `python -m loom.connectors.nmap import report.xml` parses an nmap `-oX`
+- `python -m loomctx.connectors.nmap import report.xml` parses an nmap `-oX`
   report (a file; no scanning) into `host` / `listens_on_port` /
   `runs_service` / `runs_software` / `runs_os` claims. `runs_software`
   keys products through the shared CPE parser, so a scanned host fuses
@@ -178,16 +186,16 @@ tag is v0.1.0).
 
 ### AD reachability capability benchmark (D-066) — experimental; numbers withdrawn
 
-- `python -m loom.connectors.ad_gen` — a deterministic synthetic directory
+- `python -m loomctx.connectors.ad_gen` — a deterministic synthetic directory
   generator (LDIF the connector parses; planted 2/3/4-hop reachability
-  chains + decoy dead-ends under dense noise) — and `python -m loom.ad_eval`,
+  chains + decoy dead-ends under dense noise) — and `python -m loomctx.ad_eval`,
   a scripted path-recall / decoy-exclusion / entities-gathered scorer.
   `docs/ad-eval.md`. Medium run: 100% recall and decoy-exclusion, ~2.5% of
   the store walked per chain
 
 ### Raw LDAP / Active Directory connector (D-065) — experimental
 
-- `python -m loom.connectors.ldap import export.ldif --namespace ad`:
+- `python -m loomctx.connectors.ldap import export.ldif --namespace ad`:
   decodes an LDIF directory export into cited, time-stamped claims —
   `member_of`, `trusts`, `has_ace` (from a hand-rolled Security
   Descriptor / ACE parser), delegation edges and userAccountControl / SPN
@@ -211,20 +219,20 @@ tag is v0.1.0).
 - The nightly vulns refresh works with its documented, source-pinned key:
   connectors register only what the registry lacks; source grants take
   `:*` families (engine and gateway) — the key is
-  `nvd,nvd:*,cisa-kev,first-epss,cisa-adp`; every loader (`loom.ingest`,
+  `nvd,nvd:*,cisa-kev,first-epss,cisa-adp`; every loader (`loomctx.ingest`,
   `vulns`, `stix`, `ocsf`, `ldap`) prints its totals and exits non-zero on
   any refused envelope, direct or via the engine, and the EPSS ledger
   advances only after a load that landed whole
-- Enrichment worker pools: `loom.enrich run --jobs` / `LOOM_ENRICH_JOBS`
+- Enrichment worker pools: `loomctx.enrich run --jobs` / `LOOMCTX_ENRICH_JOBS`
   (`vectors`, `llm`, named jobs); a vector backlog drains without the
   interval sleep — during a drain only the vector jobs run, while
   extraction, resolution, adjudication, aliases and dossiers keep the
   interval's pacing; a failing job backs off (one interval, doubling,
   10-minute cap)
-- Keys mount at `/etc/loom-keys` in every shipped manifest (the old path
+- Keys mount at `/etc/loomctx-keys` in every shipped manifest (the old path
   hid the gateway's schema); keys are stripped of a `--from-file` newline
   (loaders and the Python, TypeScript and Go SDKs);
-  `loom.loadgen --key`
+  `loomctx.loadgen --key`
 - `retrieval_eval` redacts the store DSN's password; the MCP server closes
   its store on exit
 - Teardown recipe deletes volumes before the cluster
@@ -236,7 +244,7 @@ Full list with statuses: `docs/hardening.md` §S.
 #### Evaluation validity (D-057)
 - Baselines fill the same token budget as the pack (`vector@B`,
   `recency@B`); `full` gathers everything; questions record whether their
-  truth is inside Loom's gather
+  truth is inside LoomCtx's gather
 - Rows never answered (over `--full-cap`, past `--max-cost`, provider
   errors, empty or truncated replies) are excluded from denominators and
   shown per condition; a tripped cost cap marks the table INCOMPLETE and
@@ -253,7 +261,7 @@ Full list with statuses: `docs/hardening.md` §S.
 - Briefs: type-gate aware, withheld for `as_of` / `valid_at`, ≤ 25 % of
   the budget; `ContextPack.withheld_briefs` (additive)
 - Merged-away names resolve to their canonical entity
-- Scope walks capped (`LOOM_MAX_SCOPE_ENTITIES`, `LOOM_MAX_SCOPE_OBSERVATIONS`)
+- Scope walks capped (`LOOMCTX_MAX_SCOPE_ENTITIES`, `LOOMCTX_MAX_SCOPE_OBSERVATIONS`)
   and reported (`ScopeTruncation.reason`, additive); superseded edges skipped
 - MCP wire within ~2 % of the charged budget (was up to 3.6×): compact
   JSON, string citations, `charged_tokens` in the agent view
@@ -280,7 +288,7 @@ Full list with statuses: `docs/hardening.md` §S.
 
 #### Security (D-059)
 - Host / Origin allowlist and JSON-only `/v1` bodies on the engine, MCP
-  http and gateway (`LOOM_ALLOWED_HOSTS`, `LOOM_ALLOWED_ORIGINS`); MCP
+  http and gateway (`LOOMCTX_ALLOWED_HOSTS`, `LOOMCTX_ALLOWED_ORIGINS`); MCP
   binds 127.0.0.1 by default
 - Type-gated keys cite only documents they uploaded or ones already in
   their world — HTTP, batch and the NATS writer; extraction stays inside
@@ -290,13 +298,13 @@ Full list with statuses: `docs/hardening.md` §S.
 - Auth before body parsing; scoped schema and counts for type-scoped keys
 
 #### Enrichment and connectors (D-060)
-- Unmerges stick; `python -m loom.enrich distinct`; adjudication calls all
+- Unmerges stick; `python -m loomctx.enrich distinct`; adjudication calls all
   count against the cap, unreadable verdicts back off and give up
 - EPSS emits changes only; OCSF / STIX imports chain versions via
   `supersedes`; Suppressed is not Resolved
 - Consumer settles per message and redelivers claims awaiting their
-  document; `loom.ingest` retries 429 / 5xx with `Retry-After`
-- Fuzzy (tier-2) candidates skip settled groups; `python -m loom.enrich
+  document; `loomctx.ingest` retries 429 / 5xx with `Retry-After`
+- Fuzzy (tier-2) candidates skip settled groups; `python -m loomctx.enrich
   undistinct` / `GraphStore.forget_decline` take a decline back
 - KEV ransomware / due-date / required-action changes are recorded as
   superseding versions (the refresh key needs `rw`); STIX and OCSF export
@@ -304,9 +312,9 @@ Full list with statuses: `docs/hardening.md` §S.
   is a replay
 
 #### Measured (2026-09-24, real corpus, D-057 scoring)
-- Retrieval, live: Loom 81 / 84 / 86 / 96 % vs token-matched vector
+- Retrieval, live: LoomCtx 81 / 84 / 86 / 96 % vs token-matched vector
   75 / 77 / 79 / 87 % at 400 / 800 / 1,600 / 3,200 tokens; the multi-hop
-  KEV question only Loom answers (15/18) — `docs/evaluation.md`
+  KEV question only LoomCtx answers (15/18) — `docs/evaluation.md`
 - Agents: eighteen models × three runs; `mistral-large` and
   `claude-sonnet-4.5` pass all twelve tasks — `docs/models.md`
 
@@ -344,11 +352,11 @@ Full list with statuses: `docs/hardening.md` §S.
 - Worker ticks are incremental (per-model/shard high-water marks with a
   periodic full rescan); the multi-entity gather pre-limits per entity
   (20k-edge hub: SQLite 101 → 21 ms, Postgres 170 → 13 ms)
-- SQLite reads use a pool of WAL readers (`LOOM_DB_READERS`, default 4);
+- SQLite reads use a pool of WAL readers (`LOOMCTX_DB_READERS`, default 4);
   `iter_entities(since=)` makes the alias pass incremental
 
 #### Evaluation (D-053)
-- `python -m loom.retrieval_eval`: packs at graded budgets against `full`,
+- `python -m loomctx.retrieval_eval`: packs at graded budgets against `full`,
   vector top-k and recency top-k on store-derived questions, rule-scored,
   no LLM judge; see `docs/evaluation.md`
 
@@ -361,8 +369,8 @@ Full list with statuses: `docs/hardening.md` §S.
   become `ssvc_*` claims when present
 - Extraction retries only the windows that failed; a partial is `done` at
   the attempt bound; `agent_eval` uses adaptive thinking on Anthropic models
-- STIX 2.1 and OCSF interop as connectors (`loom.connectors.stix`,
-  `loom.connectors.ocsf`), import and export, with per-item Loom citations;
+- STIX 2.1 and OCSF interop as connectors (`loomctx.connectors.stix`,
+  `loomctx.connectors.ocsf`), import and export, with per-item LoomCtx citations;
   the engine core learns nothing about either (`docs/interop.md`,
   `examples/stix_import.py`)
 - Seed: 592 claims, including a same-source `contract_owner` correction
@@ -371,7 +379,7 @@ Full list with statuses: `docs/hardening.md` §S.
 #### Security and operations (D-052, D-056)
 - Engine-side rate limiting (`RateLimitMiddleware`): one token bucket per
   grant, a stricter bucket for the LLM/embedder routes, 429 +
-  `Retry-After`; dials `LOOM_RATE_*` and per-key fields in the keys file;
+  `Retry-After`; dials `LOOMCTX_RATE_*` and per-key fields in the keys file;
   unset = unlimited
 - Runtime image ships without a package manager (the first gated publish
   failed Trivy on pip's vendored `msgpack` and the base `setuptools`)
@@ -399,7 +407,7 @@ design follow-ups listed in `docs/hardening.md` §R.
 - Reversible merges: `merge_log` + `unmerge` (schema v5); claims for a
   merged-away ref land on the canonical entity
 - Blob-offload wrapper delegates the batch paths; shards no longer inherit
-  `LOOM_DB_READ`; CLIs open the env-configured store
+  `LOOMCTX_DB_READ`; CLIs open the env-configured store
 - Export carries schema registrations and adjudication declines; vector index
   per model; purge cleans ANN rows; pgvector minority-namespace fallback;
   `norm_key` keeps IP/version separators

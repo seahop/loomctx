@@ -5,10 +5,10 @@ chain cited. No real IdP data; the fixtures are synthetic."""
 
 from pathlib import Path
 
-from loom.connectors import entra, okta
-from loom.context import build_pack, find_paths
-from loom.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import entra, okta
+from loomctx.context import build_pack, find_paths
+from loomctx.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 ENTRA_FIXTURE = Path(__file__).parent / "fixtures" / "entra_directory.json"
 OKTA_FIXTURE = Path(__file__).parent / "fixtures" / "okta_directory.json"
@@ -378,8 +378,8 @@ def test_shared_predicates_survive_both_registrations(tmp_path):
     """Registration merges by name, last writer wins: with both schemas
     registered (overlapping nightly refreshes), each connector's role claims
     must still validate."""
-    from loom.consumer import handle_batch
-    from loom.registry import RegistryCache
+    from loomctx.consumer import handle_batch
+    from loomctx.registry import RegistryCache
     store = SqliteStore(str(tmp_path / "reg.db"))
     try:
         for order in ((entra, okta), (okta, entra)):
@@ -404,8 +404,8 @@ def test_generated_exports_round_trip_every_edge(tmp_path):
     import json
     from datetime import datetime
 
-    from loom import iam_eval
-    from loom.connectors import iam_gen
+    from loomctx import iam_eval
+    from loomctx.connectors import iam_gen
     e_doc, o_doc, truth = iam_gen.generate(7, "tiny")
     as_of = datetime.fromisoformat(truth["export_date"].replace("Z", "+00:00"))
     store = SqliteStore(str(tmp_path / "gen.db"))

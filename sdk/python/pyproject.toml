@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "loom-sdk"
+name = "loomctx-sdk"
 version = "0.1.0"
-description = "Thin, stdlib-only Python client for the Loom context engine"
+description = "Thin, stdlib-only Python client for the LoomCtx context engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/seahop/Loom"
+Homepage = "https://github.com/seahop/loomctx"
 
 [tool.hatch.build.targets.wheel]
-packages = ["loom_sdk"]
+packages = ["loomctx_sdk"]

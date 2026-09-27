@@ -17,22 +17,22 @@ import (
 // D-059: a numeric dial that does not parse fails start-up. A fractional
 // rate used to go through ParseInt and silently leave the gateway unlimited.
 func TestRateDialsParseFloatsAndRejectGarbage(t *testing.T) {
-	t.Setenv("LOOM_RATE_PER_SEC", "0.5")
-	t.Setenv("LOOM_RATE_BURST", "3")
+	t.Setenv("LOOMCTX_RATE_PER_SEC", "0.5")
+	t.Setenv("LOOMCTX_RATE_BURST", "3")
 	cfg, err := loadConfig()
 	if err != nil || cfg.ratePerSec != 0.5 || cfg.rateBurst != 3 || cfg.hosts == nil {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 	for _, bad := range []string{"fast", "1/s", "-1", "NaN"} {
-		t.Setenv("LOOM_RATE_PER_SEC", bad)
-		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "LOOM_RATE_PER_SEC") {
-			t.Fatalf("LOOM_RATE_PER_SEC=%q: err=%v", bad, err)
+		t.Setenv("LOOMCTX_RATE_PER_SEC", bad)
+		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "LOOMCTX_RATE_PER_SEC") {
+			t.Fatalf("LOOMCTX_RATE_PER_SEC=%q: err=%v", bad, err)
 		}
 	}
-	t.Setenv("LOOM_RATE_PER_SEC", "")
-	t.Setenv("LOOM_MAX_BATCH", "lots")
-	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "LOOM_MAX_BATCH") {
-		t.Fatalf("LOOM_MAX_BATCH garbage: err=%v", err)
+	t.Setenv("LOOMCTX_RATE_PER_SEC", "")
+	t.Setenv("LOOMCTX_MAX_BATCH", "lots")
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "LOOMCTX_MAX_BATCH") {
+		t.Fatalf("LOOMCTX_MAX_BATCH garbage: err=%v", err)
 	}
 	// a fractional rate actually limits: one request, then 429
 	h := guardedServer(t, &fakeForwarder{}, "", func(c *config) { c.ratePerSec = 0.5 })
@@ -53,7 +53,7 @@ func guardedServer(t *testing.T, fwd forwarder, keys string, tweak func(*config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hosts := parseHostPolicy("loom.example.com", "https://app.example.com")
+	hosts := parseHostPolicy("loomctx.example.com", "https://app.example.com")
 	cfg := config{maxBodyBytes: 1 << 20, maxBatch: 1000, hosts: &hosts}
 	if tweak != nil {
 		tweak(&cfg)
@@ -84,14 +84,14 @@ func TestBrowserGuard(t *testing.T) {
 	fwd := &fakeForwarder{}
 	h := guardedServer(t, fwd, "", nil)
 	for _, host := range []string{"localhost:8081", "127.0.0.1:8081", "[::1]:8081", "10.4.0.12:8080",
-		"loom-gateway", "gateway:8080", "loom-gateway.loom.svc.cluster.local", "loom.example.com"} {
+		"loomctx-gateway", "gateway:8080", "loomctx-gateway.loomctx.svc.cluster.local", "loomctx.example.com"} {
 		if rec := send(h, "POST", "/v1/ingest", validClaim, map[string]string{"Host": host}); rec.Code != http.StatusOK {
 			t.Fatalf("host %q: status=%d body=%s", host, rec.Code, rec.Body.String())
 		}
 	}
-	for _, host := range []string{"evil.example.net", "evil.example.net:8081", "loom.example.com.evil.net"} {
+	for _, host := range []string{"evil.example.net", "evil.example.net:8081", "loomctx.example.com.evil.net"} {
 		rec := send(h, "POST", "/v1/ingest", validClaim, map[string]string{"Host": host})
-		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "LOOM_ALLOWED_HOSTS") {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "LOOMCTX_ALLOWED_HOSTS") {
 			t.Fatalf("host %q: status=%d", host, rec.Code)
 		}
 	}
@@ -131,12 +131,12 @@ func TestBrowserGuard(t *testing.T) {
 	// "*" lifts the Host check (a proxy in front validates it)
 	open := parseHostPolicy("*", "")
 	if !open.allowsHost("anything.example.net") {
-		t.Fatal("LOOM_ALLOWED_HOSTS=* must allow any host")
+		t.Fatal("LOOMCTX_ALLOWED_HOSTS=* must allow any host")
 	}
 }
 
 // D-059: a batch bigger than the key's bucket can never pass — 413 with a
-// reason, not a 429 a shipper would retry forever. LOOM_RATE_BURST sizes
+// reason, not a 429 a shipper would retry forever. LOOMCTX_RATE_BURST sizes
 // the default bucket.
 func TestBatchLargerThanBurstIs413(t *testing.T) {
 	fwd := &fakeForwarder{}
@@ -206,12 +206,12 @@ func TestBatchForwardPropagatesEngineVerdicts(t *testing.T) {
 const validDoc = `{"kind": "document", "text": "report", "source": "auth-log",
   "observed_at": "2026-09-01T14:03:00Z", "attrs": {"team": "ir"}}`
 
-// D-059: the uploader of a document is recorded by Loom, never by the
+// D-059: the uploader of a document is recorded by LoomCtx, never by the
 // sender. In the NATS shape the gateway stamps it (the writer sees only the
 // principal header); in the HTTP shape the engine does, so the gateway
 // forwards the bytes untouched. A sender-supplied stamp is refused.
 func TestDocumentUploaderStamp(t *testing.T) {
-	key := "loomk_docs"
+	key := "loomctxk_docs"
 	sum := sha256.Sum256([]byte(key))
 	path := filepath.Join(t.TempDir(), "keys.json")
 	doc := fmt.Sprintf(`{"keys":[{"id":"ir-shipper","sha256":"%x","namespaces":["default"],"perms":"w",
@@ -234,7 +234,7 @@ func TestDocumentUploaderStamp(t *testing.T) {
 			cfg.natsURL = "nats://unused:4222"
 		}
 		h := newServer(cfg, schema, fwd, auth)
-		rec := send(h, "POST", "/v1/ingest", validDoc, map[string]string{"X-Loom-Key": key})
+		rec := send(h, "POST", "/v1/ingest", validDoc, map[string]string{"X-LoomCtx-Key": key})
 		if rec.Code != http.StatusOK || len(fwd.payloads) != 1 {
 			t.Fatalf("nats=%v: status=%d body=%s", nats, rec.Code, rec.Body.String())
 		}
@@ -252,12 +252,12 @@ func TestDocumentUploaderStamp(t *testing.T) {
 		if nats && (stamp["grant"] != "ir-shipper" || fmt.Sprint(stamp["entity_types"]) != "[host]") {
 			t.Fatalf("stamp: %+v", stamp)
 		}
-		forged := strings.Replace(validDoc, `"team": "ir"`, `"loom.uploader": {"grant": "admin"}`, 1)
-		rec = send(h, "POST", "/v1/ingest", forged, map[string]string{"X-Loom-Key": key})
+		forged := strings.Replace(validDoc, `"team": "ir"`, `"loomctx.uploader": {"grant": "admin"}`, 1)
+		rec = send(h, "POST", "/v1/ingest", forged, map[string]string{"X-LoomCtx-Key": key})
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "reserved") {
 			t.Fatalf("nats=%v forged stamp: status=%d", nats, rec.Code)
 		}
-		rec = send(h, "POST", "/v1/ingest/batch", "["+forged+"]", map[string]string{"X-Loom-Key": key})
+		rec = send(h, "POST", "/v1/ingest/batch", "["+forged+"]", map[string]string{"X-LoomCtx-Key": key})
 		if !strings.Contains(rec.Body.String(), "reserved") || len(fwd.payloads) != 1 {
 			t.Fatalf("nats=%v forged stamp in a batch: %s", nats, rec.Body.String())
 		}

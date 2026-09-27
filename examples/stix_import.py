@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Example sender: push a STIX 2.1 bundle into Loom, standard library only.
+"""Example sender: push a STIX 2.1 bundle into LoomCtx, standard library only.
 
 The shape a TIP export hook or a pipeline step would have — no dependency
-on the Loom package. `python -m loom.connectors.stix import` does the full
+on the LoomCtx package. `python -m loomctx.connectors.stix import` does the full
 mapping (docs/interop.md); this covers the common core: relationships,
 sightings, and the name/description/pattern of the objects they join,
 with a STIX vulnerability landing on the `cve:` entity the KEV/NVD
 connector writes to.
 
     python examples/stix_import.py bundle.json --base http://localhost:8000 --namespace netsec
-    python examples/stix_import.py bundle.json --api-key loomk_...
+    python examples/stix_import.py bundle.json --api-key loomctxk_...
 """
 
 import argparse
@@ -84,7 +84,7 @@ def envelopes(bundle, namespace, default_source="stix"):
 def post_batch(base, envs, api_key):
     headers = {"content-type": "application/x-ndjson"}
     if api_key:
-        headers["X-Loom-Key"] = api_key
+        headers["X-LoomCtx-Key"] = api_key
     body = "".join(json.dumps(e) + "\n" for e in envs).encode()
     req = urllib.request.Request(base.rstrip("/") + "/v1/ingest/batch", data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req) as resp:

@@ -1,13 +1,13 @@
 """The four D-082…D-086 features together on a small synthetic estate
-(`loom.connectors.estate_gen` + `loom.estate_eval`): machines and accounts
+(`loomctx.connectors.estate_gen` + `loomctx.estate_eval`): machines and accounts
 fold across tools, the twin and address traps do not, coverage gaps and
 format drift are reported, and purple classification matches the truth."""
 
 from pathlib import Path
 
-from loom import estate_eval
-from loom.connectors import estate_gen
-from loom.store.sqlite import SqliteStore
+from loomctx import estate_eval
+from loomctx.connectors import estate_gen
+from loomctx.store.sqlite import SqliteStore
 
 
 def test_small_estate_end_to_end(tmp_path):

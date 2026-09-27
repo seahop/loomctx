@@ -1,4 +1,4 @@
-# Loom documentation
+# LoomCtx documentation
 
 Read in this order depending on why you're here.
 
@@ -19,7 +19,7 @@ Read in this order depending on why you're here.
 - **[real-data.md](real-data.md)** — load real public data (CISA KEV, NVD,
   EPSS) next to the demo hosts with one command; what the first run
   exposed.
-- **[models.md](models.md)** — which LLMs drive Loom well as agents: a
+- **[models.md](models.md)** — which LLMs drive LoomCtx well as agents: a
   measured scorecard (pass rate, faithfulness, cost) and the command to
   re-run it.
 - **[evaluation.md](evaluation.md)** — the retrieval scorecard: context
@@ -28,9 +28,9 @@ Read in this order depending on why you're here.
   numeric, ordering), rule-scored, with the command that reproduces the
   talk table.
 - **[ad-eval.md](ad-eval.md)** — the AD reachability capability benchmark:
-  a synthetic directory generator (`loom.connectors.ad_gen`) plants known
+  a synthetic directory generator (`loomctx.connectors.ad_gen`) plants known
   membership → ACL → trust chains and decoy dead-ends in dense noise, and
-  `loom.ad_eval` scores whether Loom's scope walk surfaces the full cited
+  `loomctx.ad_eval` scores whether LoomCtx's scope walk surfaces the full cited
   chain (scripted reader, no LLM). Synthetic, object-level only.
 - **[interop.md](interop.md)** — standards at the edges: STIX 2.1 and OCSF
   connectors (import and export, mapping tables, what is not mapped,

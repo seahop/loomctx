@@ -24,7 +24,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: loom
+      app: loomctx
   policyTypes: [Ingress]
   ingress:
     - ports:

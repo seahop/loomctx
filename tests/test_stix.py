@@ -13,10 +13,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom.connectors import stix
-from loom.contracts import ClaimIn, DocumentIn, EntityRef, Provenance
-from loom.ingest import load_direct
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import stix
+from loomctx.contracts import ClaimIn, DocumentIn, EntityRef, Provenance
+from loomctx.ingest import load_direct
+from loomctx.store.sqlite import SqliteStore
 
 APT = "intrusion-set--4e78f27c-31b3-4a17-8e93-7b64f0b7c3e1"
 MALWARE = "malware--31b940d4-6f7f-459a-80ea-9c1f17b58abc"
@@ -269,7 +269,7 @@ def test_round_trip_through_a_store(tmp_path):
         by_type.setdefault(obj["type"], []).append(obj)
 
     # every source became an identity; relationships cite their observation
-    sources = {o["name"] for o in by_type["identity"] if "x_loom_source" in o}
+    sources = {o["name"] for o in by_type["identity"] if "x_loomctx_source" in o}
     assert sources == {"ACME CTI", "stix"}
     def label(sid):
         return by_id[sid].get("name") or by_id[sid].get("value")
@@ -280,7 +280,7 @@ def test_round_trip_through_a_store(tmp_path):
     uses = rels[("Bobcat Breakdown", "uses", "Poison Ivy")]
     assert uses["confidence"] == 70 and uses["start_time"] == "2025-12-01T00:00:00.000Z"
     assert "stop_time" not in uses
-    assert uses["x_loom_observation_id"] in {o.id for o in observations}
+    assert uses["x_loomctx_observation_id"] in {o.id for o in observations}
     assert by_id[uses["created_by_ref"]]["name"] == "ACME CTI"
     targets = rels[("Poison Ivy", "targets", "Initech")]
     assert targets["stop_time"] == "2026-02-20T00:00:00.000Z" and targets["description"].startswith("Spear")
@@ -289,7 +289,7 @@ def test_round_trip_through_a_store(tmp_path):
     vuln = by_id[exploits["target_ref"]]
     assert vuln["external_references"] == [{"source_name": "cve", "external_id": "CVE-2014-0160"}]
     assert vuln["description"] == "OpenSSL TLS heartbeat read overrun."
-    assert vuln["x_loom_entity_type"] == "cve"
+    assert vuln["x_loomctx_entity_type"] == "cve"
     # the sighting round-trips as a sighting
     sighting = by_type["sighting"][0]
     assert by_id[sighting["sighting_of_ref"]]["name"] == "Poison Ivy"
@@ -299,8 +299,8 @@ def test_round_trip_through_a_store(tmp_path):
     apt = [o for o in by_type["intrusion-set"]][0]
     assert apt["name"] == "Bobcat Breakdown" and sorted(apt["aliases"]) == ["BOBCAT", "TA-4471"]
     assert apt["description"].startswith("A hobbyist") and apt["resource_level"] == "club"
-    assert {r["predicate"] for r in apt["x_loom_observations"]} >= {"summary", "alias", "resource_level", "name"}
-    assert all(STIX_TS.match(r["observed_at"]) and r["id"] for r in apt["x_loom_observations"])
+    assert {r["predicate"] for r in apt["x_loomctx_observations"]} >= {"summary", "alias", "resource_level", "name"}
+    assert all(STIX_TS.match(r["observed_at"]) and r["id"] for r in apt["x_loomctx_observations"])
     malware = by_type["malware"][0]
     assert malware["is_family"] is True and malware["malware_types"] == ["remote-access-trojan"]
     assert malware["kill_chain_phases"] == [{"kill_chain_name": "mitre-attack", "phase_name": "command-and-control"}]
@@ -323,8 +323,8 @@ def test_round_trip_through_a_store(tmp_path):
     assert by_pred["uses"][0].source == "ACME CTI"
 
 
-def test_export_of_loom_native_types_uses_custom_objects_and_scalars():
-    from loom.contracts import Observation
+def test_export_of_loomctx_native_types_uses_custom_objects_and_scalars():
+    from loomctx.contracts import Observation
     now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
     def obs(i, subject, pred, obj, **kw):
@@ -343,10 +343,10 @@ def test_export_of_loom_native_types_uses_custom_objects_and_scalars():
     bundle = stix.observations_to_bundle(observations, "netsec")
     by_id = _assert_valid_bundle(bundle)
     types = {o["type"] for o in by_id.values()}
-    assert {"x-loom-host", "ipv4-addr", "ipv6-addr", "user-account", "identity", "relationship", "sighting"} <= types
-    hostobj = [o for o in by_id.values() if o["type"] == "x-loom-host"][0]
-    assert hostobj["name"] == "web-01" and hostobj["x_loom_entity_type"] == "host"
-    assert hostobj["x_loom_observations"][0]["predicate"] == "runs_os"
+    assert {"x-loomctx-host", "ipv4-addr", "ipv6-addr", "user-account", "identity", "relationship", "sighting"} <= types
+    hostobj = [o for o in by_id.values() if o["type"] == "x-loomctx-host"][0]
+    assert hostobj["name"] == "web-01" and hostobj["x_loomctx_entity_type"] == "host"
+    assert hostobj["x_loomctx_observations"][0]["predicate"] == "runs_os"
     assert "runs_os" not in hostobj                                        # unmapped scalars are not invented properties
     rels = [o for o in by_id.values() if o["type"] == "relationship"]
     assert {r["relationship_type"] for r in rels} == {"has-ip", "owned-by", "leased-to"}
@@ -410,7 +410,7 @@ def test_cli_import_export_emit_schema(tmp_path, capsys):
 
 def test_cli_import_exits_non_zero_when_anything_is_refused(tmp_path, capsys):
     """D-063/S-36: a refused envelope fails the load (after the totals print)."""
-    from loom.contracts import SchemaRegistration
+    from loomctx.contracts import SchemaRegistration
     bundle_path = tmp_path / "bundle.json"
     bundle_path.write_text(json.dumps(BUNDLE))
     db = tmp_path / "strict.db"

@@ -9,7 +9,7 @@ kind: Kustomization
 # HPA prerequisite: the cluster must run metrics-server (most managed
 # clusters do; kind/minikube need it enabled).
 
-namespace: loom
+namespace: loomctx
 
 resources:
   - namespace.yaml
@@ -23,7 +23,7 @@ resources:
   - pdb.yaml
 
 images:
-  - name: ghcr.io/seahop/loom
+  - name: ghcr.io/seahop/loomctx
     newTag: latest
-  - name: ghcr.io/seahop/loom-gateway
+  - name: ghcr.io/seahop/loomctx-gateway
     newTag: latest

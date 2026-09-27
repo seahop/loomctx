@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom.answer import build_answer
-from loom.contracts import AnswerRequest, ClaimIn, EntityRef
-from loom.llm import llm_from_env
-from loom.store.sqlite import SqliteStore
+from loomctx.answer import build_answer
+from loomctx.contracts import AnswerRequest, ClaimIn, EntityRef
+from loomctx.llm import llm_from_env
+from loomctx.store.sqlite import SqliteStore
 
 pytestmark = pytest.mark.skipif(
     llm_from_env() is None,

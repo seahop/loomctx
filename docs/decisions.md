@@ -73,11 +73,11 @@ never a whole-system port.
   profile already sketched) for teams wanting Cypher or visual exploration — but it
   is not required and not the default. Kùzu is a middle option if traversal ever
   outgrows SQLite.
-- **Rule:** no code outside `src/loom/store/` may touch persistence directly.
+- **Rule:** no code outside `src/loomctx/store/` may touch persistence directly.
 
 ## D-003 · Contracts before code
 
-The Pydantic models in `src/loom/contracts.py` *are* the API. HTTP, MCP, SDK, and CLI
+The Pydantic models in `src/loomctx/contracts.py` *are* the API. HTTP, MCP, SDK, and CLI
 all serialize these exact shapes. Breaking a contract is a versioned event, not a
 refactor.
 
@@ -89,6 +89,8 @@ container) is added only when measured ingestion volume demands it. No speculati
 infrastructure.
 
 ## D-005 · The name is Loom (settled 2026-09-11)
+
+*Superseded by D-088: the project is now LoomCtx.*
 
 Chosen on 2026-09-03 for the weaving metaphor and a short CLI name, carried
 as a "working name" through the build, and confirmed as the public name
@@ -125,7 +127,7 @@ requires auth first, OQ-3). Local Compose remains the primary dev/demo shape.
 ## D-009 · CI + image publishing via GitHub Actions → GHCR (2026-09-03)
 
 Every push/PR runs the Docker test suite; pushes to `main` publish
-`ghcr.io/seahop/loom:latest` and a per-SHA tag, which the k8s manifests
+`ghcr.io/seahop/loomctx:latest` and a per-SHA tag, which the k8s manifests
 consume. The repo is public, so `main` must always be green and presentable
 (conference: mid-October 2026).
 
@@ -164,7 +166,7 @@ the queue exists only in the scale profile.
 **Update 2026-09-03: built same day at the user's request.** `gateway/` (Go,
 validates against `contracts/schemas.json` — the checked-in export that CI
 keeps in sync with the Pydantic contracts), compose `scale` profile (nginx lb
-on host :8081), `deploy/k8s/scale` overlay, `loom.consumer` writer, SQLite
+on host :8081), `deploy/k8s/scale` overlay, `loomctx.consumer` writer, SQLite
 WAL mode. Verified live: multi-gateway ingest → JetStream → consumer →
 `/v1/ask`, with contract violations rejected at the gateway.
 
@@ -179,10 +181,10 @@ must handle decent input volume if that's all a team wants. Both lanes ship:
   the queue consumer writes whole fetched batches this way. Measured
   2026-09-03 (laptop, one container, per-request HTTP ingest): **~507
   claims/s, 0 errors** (~44M/day). The measuring tool ships as
-  `python -m loom.loadgen`; at these rates the load *generator* is the
+  `python -m loomctx.loadgen`; at these rates the load *generator* is the
   bottleneck, so treat the numbers as floors.
 - **Scaling lane: `PostgresStore`,** selected purely by connection string —
-  `LOOM_DB=postgresql://...` and nothing else changes (engine, consumer, and
+  `LOOMCTX_DB=postgresql://...` and nothing else changes (engine, consumer, and
   seed all go through `store.factory`). Identical column shapes and shared
   row converters keep behavior byte-for-byte equal; the same contract test
   suite runs against both backends (CI spins up Postgres via the compose
@@ -198,17 +200,17 @@ must handle decent input volume if that's all a team wants. Both lanes ship:
 
 ## D-012 · Answering LLMs: OpenAI-compatible everywhere + Anthropic native + self-hosted; scoped questions (2026-09-03)
 
-User requirements: agents/models talking to Loom must work with OpenRouter,
+User requirements: agents/models talking to LoomCtx must work with OpenRouter,
 Venice, other common providers, or a custom self-hosted instance; and
 questions may span multiple computers or "a domain and its contents".
 
 **Provider strategy — one wire format covers nearly everyone.** OpenRouter,
 Venice, Groq, Together, Mistral, OpenAI, Ollama, vLLM, and LM Studio all
-speak the OpenAI-compatible chat-completions API, so `loom/llm.py` ships one
+speak the OpenAI-compatible chat-completions API, so `loomctx/llm.py` ships one
 stdlib-only client for all of them (provider shortcut → base URL, or
-`LOOM_LLM_BASE_URL` for anything self-hosted/custom) plus a native Anthropic
-client. Config is four env vars: `LOOM_LLM_MODEL` (required),
-`LOOM_LLM_PROVIDER` or `LOOM_LLM_BASE_URL`, `LOOM_LLM_API_KEY`. Unconfigured
+`LOOMCTX_LLM_BASE_URL` for anything self-hosted/custom) plus a native Anthropic
+client. Config is four env vars: `LOOMCTX_LLM_MODEL` (required),
+`LOOMCTX_LLM_PROVIDER` or `LOOMCTX_LLM_BASE_URL`, `LOOMCTX_LLM_API_KEY`. Unconfigured
 => `/v1/answer` returns 503 with setup instructions; everything else works
 without any LLM. No provider SDK dependencies in the core, per D-007.
 
@@ -237,8 +239,8 @@ caller naming predicates) land with schema-registry persistence.
 ## D-013 · Auth & abuse resistance: per-namespace API keys, cheap rejection first (2026-09-04)
 
 One env var configures the engine AND the Go gateway identically:
-`LOOM_API_KEYS="key:namespace:perms,..."` (perms r/w/rw, namespace `*` = all).
-Unset ⇒ open dev mode with a logged warning. Keys arrive as `X-Loom-Key` or
+`LOOMCTX_API_KEYS="key:namespace:perms,..."` (perms r/w/rw, namespace `*` = all).
+Unset ⇒ open dev mode with a logged warning. Keys arrive as `X-LoomCtx-Key` or
 `Authorization: Bearer`; comparison is constant-time. Enforcement: writes
 check the envelope's namespace, reads check the queried namespace (expand
 decodes the handle's namespace before touching the store). `/healthz`,
@@ -259,12 +261,12 @@ Design principle, set by the user: **capabilities are never gated — data is.**
 A valid reader always has the full query surface including `/v1/answer`; the
 rules control which slice of the world those queries operate over.
 
-- **Generation:** `python -m loom.keys generate` mints `loomk_...` keys
+- **Generation:** `python -m loomctx.keys generate` mints `loomctxk_...` keys
   (32 random bytes), prints the plaintext exactly once, and stores only the
   SHA-256 in a keys file. `list`/`revoke` manage it. Distribute the file via
-  `LOOM_AUTH_FILE` (a k8s Secret mount / compose bind mount); the engine and
+  `LOOMCTX_AUTH_FILE` (a k8s Secret mount / compose bind mount); the engine and
   the Go gateway **hot-reload it on change**, so rotation is
-  generate → hand over → revoke, with no restarts. Legacy `LOOM_API_KEYS`
+  generate → hand over → revoke, with no restarts. Legacy `LOOMCTX_API_KEYS`
   plaintext env entries keep working (hashed in memory).
 - **Grants (per key):** `namespaces` + `perms` (a sender's key is `w` only —
   it can put data in but never read anything back), optional
@@ -277,10 +279,10 @@ rules control which slice of the world those queries operate over.
   auto-resolution) silently operate over the scoped world instead — the
   agent experience is "this is my universe", not a wall of errors. Expand
   handles inherit the namespace check from the ask that produced them.
-- **Two credentials, cleanly separated:** the Loom bearer is the *user's*
+- **Two credentials, cleanly separated:** the LoomCtx bearer is the *user's*
   identity + data permissions; the LLM provider key is the *server's*
-  (`LOOM_LLM_API_KEY`) — users never touch it. Optionally an agent presents
-  its own provider key per request (`X-Loom-LLM-Key`) so LLM spend bills to
+  (`LOOMCTX_LLM_API_KEY`) — users never touch it. Optionally an agent presents
+  its own provider key per request (`X-LoomCtx-LLM-Key`) so LLM spend bills to
   the caller; the provider/model stays server-chosen and the bearer still
   bounds visibility.
 - **Administration:** the CLI + mounted-file flow is the audited admin path
@@ -302,9 +304,9 @@ Verified end-to-end through lb → gateway → NATS → consumer (3 posts → 1 
 
 ## D-015 · Operability: /metrics, /readyz, and a retrieval-quality harness (2026-09-04)
 
-- Engine exposes Prometheus at `/metrics` (`loom_ingest_total{kind}`,
-  `loom_ingest_deduped_total`, `loom_requests_rejected_total{reason}`,
-  `loom_pack_build_seconds` histogram, `loom_answers_total{outcome}`) and a
+- Engine exposes Prometheus at `/metrics` (`loomctx_ingest_total{kind}`,
+  `loomctx_ingest_deduped_total`, `loomctx_requests_rejected_total{reason}`,
+  `loomctx_pack_build_seconds` histogram, `loomctx_answers_total{outcome}`) and a
   store-probing `/readyz` that the k8s readiness probes now use. The gateway
   serves its own hand-rolled counters at `/metrics` (requests, forwarded,
   rejected-invalid/unauthorized/ratelimited, upstream errors) — a client
@@ -317,7 +319,7 @@ Verified end-to-end through lb → gateway → NATS → consumer (3 posts → 1 
 
 ## D-016 · Data lifecycle: export/import, retention, tombstone redaction (2026-09-04)
 
-`python -m loom.lifecycle` provides: `export`/`import` (JSONL — backup,
+`python -m loomctx.lifecycle` provides: `export`/`import` (JSONL — backup,
 SQLite⇄Postgres migration path, and the "your data is never trapped"
 guarantee), `purge --older-than-days` (retention sweep of observations +
 artifacts per namespace), and `redact` (a **tombstone**: the observation
@@ -328,12 +330,12 @@ database files survive upgrades.
 
 ## D-018 · Phase 4 enrichment: embeddings, extraction, dossiers (2026-09-04)
 
-Async worker `python -m loom.enrich` (compose profile `enrich`, or `--once`
+Async worker `python -m loomctx.enrich` (compose profile `enrich`, or `--once`
 for a cron/k8s Job), all three jobs idempotent and each skipped-not-failed
 when unconfigured:
 
 - **Embeddings** — pluggable `Embedder` (OpenAI-compatible `/embeddings`:
-  OpenAI/Mistral/Together/Ollama/self-hosted via `LOOM_EMBED_*`), plus a
+  OpenAI/Mistral/Together/Ollama/self-hosted via `LOOMCTX_EMBED_*`), plus a
   dependency-free `HashingEmbedder` for offline/CI. Vectors stored per model;
   the pack builder ranks by cosine when vectors exist and silently falls back
   to keyword overlap otherwise, so nothing breaks unconfigured. Verified: on
@@ -383,9 +385,9 @@ than 800 tokens."
 
 - **The budget is the slider, and its ceiling is tunable.** Every read carries
   a per-request `budget`; the operator sets the hard ceiling via
-  `LOOM_MAX_BUDGET` (default 32k). Requests above it are clamped and the pack
+  `LOOMCTX_MAX_BUDGET` (default 32k). Requests above it are clamped and the pack
   reports the effective budget. The contract allows up to 1e6 as an
-  absurd-value guard; `LOOM_MAX_BUDGET` is the real limit. A big *document*
+  absurd-value guard; `LOOMCTX_MAX_BUDGET` is the real limit. A big *document*
   never floods the window regardless — it's mined into discrete facts, and the
   budget governs how many surface.
 - **`doc_excerpt` retrieval (RAG over artifacts).** The enrichment worker now
@@ -399,7 +401,7 @@ than 800 tokens."
   artifact remains at `GET /v1/artifacts/{id}`.
 
 **Operational note:** semantic ranking AND excerpt retrieval require the
-*serving* engine to have `LOOM_EMBED_*` configured, not just the enrichment
+*serving* engine to have `LOOMCTX_EMBED_*` configured, not just the enrichment
 worker — the query is embedded at read time. Without an embedder the engine
 still answers (keyword ranking, facts only, no excerpts); it just isn't
 semantic. Verified live: a pentest passage surfaces as a cited `doc_excerpt`
@@ -423,8 +425,8 @@ read anything in its namespace via a minted handle or a BFS hop.
   *explicitly named* out-of-scope subject (in an ask, or in a handle) is a
   403.
 - **Expand handles pass the same gates as a fresh ask** (namespace, then the
-  decoded subject's type) and honor `LOOM_MAX_BUDGET` like ask does.
-- **Optional signing:** with `LOOM_HANDLE_SECRET` set, handles are
+  decoded subject's type) and honor `LOOMCTX_MAX_BUDGET` like ask does.
+- **Optional signing:** with `LOOMCTX_HANDLE_SECRET` set, handles are
   HMAC-SHA256 signed (`h2_` prefix) and unsigned handles are refused.
   Defense in depth — the gates above are the security boundary, signing
   just guarantees a handle is one this deployment issued. Multi-replica
@@ -548,7 +550,7 @@ and phase-4 items, landed as four commits (303b225…HEAD).
   streamable-http/SSE an ASGI gate rejects requests without a valid key,
   and every tool call applies the key's namespace/perms/type/source gates
   through the request headers — the same rules as the REST routes.
-- **Stores:** versioned one-shot migrations on a `loom_meta` table (v2 =
+- **Stores:** versioned one-shot migrations on a `loomctx_meta` table (v2 =
   norm-key backfill) beside the idempotent DDL; SQLite enforces foreign
   keys (a startup check reports pre-existing dangling rows instead of
   refusing to start); Postgres reconnects a dropped connection; exports
@@ -556,7 +558,7 @@ and phase-4 items, landed as four commits (303b225…HEAD).
   recorded since the last brief.
 - **Containers run as uid 10001** with image `HEALTHCHECK`s; k8s pods set
   `runAsNonRoot`/`fsGroup`. Bind-mounted admin recipes pass `--user`.
-  Queued messages carry the sender's grant id (`Loom-Principal`) so the
+  Queued messages carry the sender's grant id (`LoomCtx-Principal`) so the
   writer's log attributes each batch; the key itself never travels.
 - Optional `vector` extra (numpy) batches the cosine loop; the image
   installs it, pure Python remains the fallback.
@@ -597,23 +599,23 @@ scale needed it.
 
 - **`sdk/typescript/` is the D-001 escape hatch made real:** `src/contracts.ts`
   is *generated* from `contracts/schemas.json` (every root that
-  `python -m loom.schemas` exports — now the full read/write surface, not
+  `python -m loomctx.schemas` exports — now the full read/write surface, not
   just the envelope) by `scripts/gen.mjs`, and CI regenerates it and fails
   on drift, exactly like the Go gateway's schema check. The client
   (`src/client.ts`) is a zero-dependency `fetch` wrapper mirroring the
   Python SDK method for method (claim/document/registerSchema, observations/
-  artifact/ask/expand/answer/search/semantic/schema/ready, `LoomError`
+  artifact/ask/expand/answer/search/semantic/schema/ready, `LoomCtxError`
   with status + engine detail). Its test runs against a live engine in the
   compose `sdk` profile; the toolchain lives in a `node:22-alpine` image so
   nothing installs on the host. No second hand-written client will exist:
   contract fidelity is the whole compatibility story.
 - **Engine entrypoint.** Running as uid 10001 (D-024) broke any volume
   created by an earlier root build (the database file was root-owned). The
-  image now starts as root only to `chown` `/data`, then drops to `loom`
+  image now starts as root only to `chown` `/data`, then drops to `loomctx`
   via `setpriv` (util-linux, already in the base image) before exec'ing
   the command; a container started as a non-root user already (k8s
   `runAsUser`, `docker compose run --user`) execs straight through. The
-  entrypoint never writes to stdout, so `python -m loom.schemas > file`
+  entrypoint never writes to stdout, so `python -m loomctx.schemas > file`
   stays clean.
 - **MCP exercised by a real client.** `tests/test_mcp_client.py` spawns
   the server over stdio with the MCP SDK's client — the transport
@@ -622,7 +624,7 @@ scale needed it.
 
 ## D-027 · Enterprise scale: the infra dials and the order to turn them (2026-09-08, direction)
 
-Direction set by the user: large organizations must be able to scale Loom
+Direction set by the user: large organizations must be able to scale LoomCtx
 from the infrastructure side — add database nodes, run highly available
 ingestion for large volumes — without touching the contract. This entry
 records what already scales, what is a single point today, and the
@@ -630,14 +632,14 @@ staged plan (`roadmap.md` phase 6). It is a *plan*; each stage gets its
 own decision entry when built.
 
 **What already scales (validated on k8s, D-026):** gateways (stateless,
-HPA), engine replicas (stateless once `LOOM_DB` is Postgres, HPA), writer
+HPA), engine replicas (stateless once `LOOMCTX_DB` is Postgres, HPA), writer
 consumers (shared JetStream durable, add replicas freely). The contract
 (`/v1/ingest`, packs, MCP tools) is identical at every scale — that is the
 D-010 promise and it holds.
 
 **What does not, yet — verified in the code, not assumed:**
 
-1. **The queue is one pod.** The gateway creates `LOOM_INGEST` with the
+1. **The queue is one pod.** The gateway creates `LOOMCTX_INGEST` with the
    default single replica and no retention limits; NATS runs as a
    one-replica Deployment. A NATS restart pauses ingestion (the PVC keeps
    the stream, so nothing is lost), and there is no cap on how much an
@@ -661,7 +663,7 @@ D-010 promise and it holds.
 - **6.1 Engine concurrency.** `psycopg_pool` per process (the interface
   doesn't change: `_tx()` borrows a connection), drop the process lock for
   Postgres (SQLite keeps it — single writer by design), run uvicorn with
-  N workers. Measure with `loom.loadgen` before/after; this is the
+  N workers. Measure with `loomctx.loadgen` before/after; this is the
   cheapest win and the one the load test will expose first.
 - **6.2 Ingestion HA.** NATS as a 3-node JetStream cluster (StatefulSet
   with routes, or the official chart), stream `replicas: 3`, explicit
@@ -673,7 +675,7 @@ D-010 promise and it holds.
 - **6.3 Database HA + read scaling.** Postgres via an operator
   (CloudNativePG first: it ships `rw`/`ro` Services, backups, failover)
   with a 3-instance Cluster manifest in `deploy/k8s/scale-pg`; the store
-  gains an optional `LOOM_DB_READ` DSN so packs, expand, search, and
+  gains an optional `LOOMCTX_DB_READ` DSN so packs, expand, search, and
   semantic reads go to replicas while ingest stays on the primary
   (replication lag is acceptable for reads: observations are append-only
   and `as_of` already makes staleness explicit).
@@ -682,7 +684,7 @@ D-010 promise and it holds.
   candidates so N enrichment replicas share the backlog without double
   work; embedding calls batched per worker.
 - **6.5 Tenant sharding.** A `ShardedStore` implementing `GraphStore` that
-  routes each namespace to a DSN from `LOOM_SHARDS` (a small JSON map or
+  routes each namespace to a DSN from `LOOMCTX_SHARDS` (a small JSON map or
   file, hot-reloaded like the keys file); cross-namespace admin ops
   (`iter_*`, `merge_candidates(None)`) fan out. Moving a tenant is
   `lifecycle export` → import on the new shard → flip the map. Heavy
@@ -709,20 +711,20 @@ SQLite shape is untouched (one writer, one process), and a Postgres shape
 with no extra configuration behaves as before with a pool of 4.
 
 - `PostgresStore` borrows a connection per transaction from a
-  `psycopg_pool` (`LOOM_DB_POOL`, default 4) instead of serializing every
+  `psycopg_pool` (`LOOMCTX_DB_POOL`, default 4) instead of serializing every
   query through one connection and a process lock. Nested calls share the
   outer transaction; broken connections are discarded by the pool; the
   pool waits up to 90 s for Postgres at startup instead of crash-looping.
-- `LOOM_DB_READ` (optional) names a replica DSN. Packs, searches, exports,
+- `LOOMCTX_DB_READ` (optional) names a replica DSN. Packs, searches, exports,
   and index lookups borrow from that pool; ingest and the worker's backlog
   queries stay on the primary. Reads may lag by replication delay —
   acceptable because observations are append-only and `as_of` makes
   staleness explicit. `/readyz` pings both.
-- `python -m loom.serve` runs uvicorn with `LOOM_WORKERS` processes
+- `python -m loomctx.serve` runs uvicorn with `LOOMCTX_WORKERS` processes
   (default 1); the `scale-pg` engine manifest sets 2 workers × 4
   connections. Keep `workers × pool × pods` under Postgres
   `max_connections`.
-- `loom.loadgen` gained `--mode ask` and p50/p99 reporting so the read
+- `loomctx.loadgen` gained `--mode ask` and p50/p99 reporting so the read
   path is measured too.
 
 **Measured** (one laptop, compose, pgvector Postgres, load generator on the
@@ -745,10 +747,10 @@ regression). On real nodes, start at 2 workers and let the HPA add pods.
 The queue was one pod with an unreplicated, unbounded stream (D-027 #1).
 Now, all opt-in:
 
-- **Stream shape is configuration.** The gateway creates `LOOM_INGEST`
-  with `LOOM_STREAM_REPLICAS` (default 1 — a single-node NATS cannot host
-  a 3-replica stream), `LOOM_STREAM_MAX_BYTES` (compose default 1 GiB,
-  `scale-pg` 4 GiB) and `LOOM_STREAM_DISCARD` (`old`: shed the oldest
+- **Stream shape is configuration.** The gateway creates `LOOMCTX_INGEST`
+  with `LOOMCTX_STREAM_REPLICAS` (default 1 — a single-node NATS cannot host
+  a 3-replica stream), `LOOMCTX_STREAM_MAX_BYTES` (compose default 1 GiB,
+  `scale-pg` 4 GiB) and `LOOMCTX_STREAM_DISCARD` (`old`: shed the oldest
   when full; `new`: refuse new publishes so senders back off). Publishes
   retry three times over ~1 s so a leader election never surfaces as a
   502.
@@ -756,7 +758,7 @@ Now, all opt-in:
   durable has `ack_wait` (30 s) and `max_deliver` (5). A batch the store
   rejects is nak'd for prompt redelivery — event_id dedupe absorbs any
   partial writes (D-022) — and any message on its last allowed delivery
-  is published to the `LOOM_DEADLETTER` stream (`loom.deadletter.<kind>`)
+  is published to the `LOOMCTX_DEADLETTER` stream (`loomctx.deadletter.<kind>`)
   with the sender's principal and the error as headers, then acked. One
   bad envelope can no longer hold the queue hostage, and nothing is
   silently dropped.
@@ -777,7 +779,7 @@ envelope afterwards — nothing lost, nothing duplicated.
 `deploy/k8s/scale-pg-ha` layers a CloudNativePG `Cluster` (3 instances,
 streaming replication, automatic failover, pgvector via the operator's
 images) on `scale-pg`. The engine writes to the operator's `-rw` Service
-and reads from `-ro` through `LOOM_DB_READ` (D-028), assembled from the
+and reads from `-ro` through `LOOMCTX_DB_READ` (D-028), assembled from the
 operator-issued credentials with Kubernetes env expansion — no second
 Secret to manage. Writer consumers stay on the primary. The operator is a
 one-line cluster install and is the only new dependency; the plain
@@ -810,25 +812,25 @@ the same document twice (D-027 #4). Now N workers share the backlog:
   not honour its `LIMIT`) — so no two workers hold the same artifact or
   entity. Completion releases the lease (`set_extraction_status`,
   `put_doc_chunks`, `put_dossier`, `defer_extraction`); a crashed worker's
-  lease simply expires (`LOOM_LEASE_SECONDS`, default 600).
+  lease simply expires (`LOOMCTX_LEASE_SECONDS`, default 600).
 - **A hash partition for the cheap, idempotent work.** Embeddings are
   split by the observation id's last hex digit across
-  `LOOM_WORKER_SHARD="i/n"` (or the StatefulSet ordinal with
-  `LOOM_WORKER_COUNT`); no locks, no double calls, n ≤ 16.
-- **Workers have identities** (`LOOM_WORKER_ID`, default hostname) that
-  land on the claim for audit. `scale-pg` gains a `loom-enrich`
+  `LOOMCTX_WORKER_SHARD="i/n"` (or the StatefulSet ordinal with
+  `LOOMCTX_WORKER_COUNT`); no locks, no double calls, n ≤ 16.
+- **Workers have identities** (`LOOMCTX_WORKER_ID`, default hostname) that
+  land on the claim for audit. `scale-pg` gains a `loomctx-enrich`
   StatefulSet (2 replicas); compose and `scale` keep one worker, and a
   lone worker with the defaults behaves exactly as before.
 
 ## D-032 · Tenant sharding by namespace (2026-09-08, phase 6.5)
 
-Namespaces isolated data; now they can isolate *capacity*. `LOOM_SHARDS`
+Namespaces isolated data; now they can isolate *capacity*. `LOOMCTX_SHARDS`
 (inline JSON or a file: namespace → connection string, SQLite paths and
 Postgres DSNs mixable) wraps the engine's store in a `ShardedStore` that
 implements the full `GraphStore` contract:
 
 - a `namespace` argument, or an envelope/record carrying one, routes to
-  that shard; everything unmapped goes to `LOOM_DB`;
+  that shard; everything unmapped goes to `LOOMCTX_DB`;
 - `namespace=None` admin calls (`iter_*`, merge candidates) fan out and
   concatenate — so `lifecycle export` of everything still works;
 - worker backlog calls walk the shards until `limit` is filled, so a
@@ -845,14 +847,14 @@ Moving a tenant: `lifecycle export --namespace X` from the old shard,
 `import` on the new one, flip the map, restart engines/workers (the map is
 read at startup; hot reload is deliberately not built until someone needs
 it). A heavy tenant gets its own Postgres cluster; the contract never sees
-it. A small team never sets `LOOM_SHARDS`.
+it. A small team never sets `LOOMCTX_SHARDS`.
 
 ## D-033 · Artifact offload to blob storage (2026-09-08, phase 6.6)
 
 Document-heavy tenants would otherwise grow the transactional database
 with bodies it never queries (D-027 #6). Off by default. With
-`LOOM_BLOB_THRESHOLD` (bytes) plus a backend — `LOOM_BLOB_DIR` (a shared
-volume) or `LOOM_BLOB_S3_BUCKET` (+ `_ENDPOINT` for MinIO/Ceph/…, extra
+`LOOMCTX_BLOB_THRESHOLD` (bytes) plus a backend — `LOOMCTX_BLOB_DIR` (a shared
+volume) or `LOOMCTX_BLOB_S3_BUCKET` (+ `_ENDPOINT` for MinIO/Ceph/…, extra
 `s3`, boto3) — `BlobOffloadStore` wraps the store the factory built:
 bodies above the threshold are written to `<namespace>/<uuid>` and the row
 keeps an empty body plus a pointer in `attrs["_blob"]`. Every read path
@@ -864,14 +866,14 @@ streams the same bytes as before.
 
 ## D-034 · Pipeline integration surface: batch ingest, OpenAPI, Go SDK, Kafka (2026-09-08)
 
-User direction: teams must be able to tie Loom into whatever pipelines they
+User direction: teams must be able to tie LoomCtx into whatever pipelines they
 already run. Pipelines end in log shippers, queues, and scheduled exports —
 rarely in custom code — so the investment went into the integration points
 those already speak, with generated clients for the languages that remain.
 
 - **`POST /v1/ingest/batch`** on the engine and the Go gateway: a JSON
   array, NDJSON, or a wrapped `items`/`records` object of envelopes, up to
-  `LOOM_MAX_BATCH` (1000). Every item passes the same gates as
+  `LOOMCTX_MAX_BATCH` (1000). Every item passes the same gates as
   `/v1/ingest` and is reported individually (`recorded` / `accepted` /
   `rejected` + detail) — one bad record never blocks the rest. Claims land
   in one transaction per store; the gateway charges a batch of n against
@@ -887,15 +889,15 @@ those already speak, with generated clients for the languages that remain.
 - **Go SDK** (`sdk/go`): zero dependencies at runtime; its envelopes are
   validated in tests against the same schema the gateway enforces, so it
   cannot drift. Live-tested in CI like the TypeScript SDK.
-- **`python -m loom.ingest`**: NDJSON files or stdin → batches over HTTP
+- **`python -m loomctx.ingest`**: NDJSON files or stdin → batches over HTTP
   (`--url`) or straight into a store (`--db`, the consumer's code path).
   Anything that can write JSON lines is now a pipeline.
-- **Kafka / Redpanda consumer** (`python -m loom.kafka_consumer`, extra
+- **Kafka / Redpanda consumer** (`python -m loomctx.kafka_consumer`, extra
   `kafka`, compose profile `kafka` with a Redpanda for trial,
   `deploy/k8s/integrations/kafka-consumer.yaml`): reads envelopes from your
   topics, commits offsets only after the batch is written, retries a
-  rejected batch with backoff and dead-letters it to `loom.deadletter`
-  with the error after `LOOM_MAX_DELIVER`. Consuming from a team's Kafka
+  rejected batch with backoff and dead-letters it to `loomctx.deadletter`
+  with the error after `LOOMCTX_MAX_DELIVER`. Consuming from a team's Kafka
   is not the same as requiring one: nothing in the default shape depends
   on it (hard constraint 2). Validated live: produce, replay, poison.
 - **Deliberately not built:** hand-written Rust, Lua, Ruby, Java or C#
@@ -909,7 +911,7 @@ Everything before this was validated against a corpus we wrote knowing the
 answers (~590 seed claims, 5 documents). The product claim — good, cited,
 budgeted packs from messy data — had never met data we did not author. The
 first connector fixes that with three public, keyless feeds and one command
-(`python -m loom.connectors.vulns load`), and doubles as the demo's second
+(`python -m loomctx.connectors.vulns load`), and doubles as the demo's second
 act: "is web-01 exposed to something actively exploited, and why?"
 
 - **Sources → one namespace.** NVD 2.0 yearly feeds (status, trimmed
@@ -934,7 +936,7 @@ act: "is web-01 exposed to something actively exploited, and why?"
 - **Small-resource posture kept.** The feeds are streamed (`ijson`, extra
   `connectors`), never loaded whole; the cache uses conditional GETs; the
   default is this year's NVD feed only (`--years` widens it). A connector
-  is a domain adapter like `loom.seed`, not core: the engine learns
+  is a domain adapter like `loomctx.seed`, not core: the engine learns
   nothing about CVEs, the namespace's schema registration carries it.
 - **Measured, not assumed:** load rate, corpus size and pack quality from
   the first real run are recorded in `docs/real-data.md`, including what
@@ -972,8 +974,8 @@ embedded in this pass.
 
 ## D-036 · Agent end-to-end evaluation, and what it changed in the MCP surface (2026-09-09)
 
-`/v1/answer` tests a model as a *reader* of a pack Loom built; the demo's
-promise is an *agent* that finds the data itself. `python -m loom.agent_eval`
+`/v1/answer` tests a model as a *reader* of a pack LoomCtx built; the demo's
+promise is an *agent* that finds the data itself. `python -m loomctx.agent_eval`
 runs a real model over the real MCP transport (stdio, the transport
 `claude mcp add` uses) against the real corpus with four tasks and no
 pre-built scope. Ground truth comes from the store, never a fixture; the
@@ -986,7 +988,7 @@ The first live run (deepseek-chat-v3.1, four tasks) passed the lease and
 conflict questions with correct, faithful citations and failed the
 two-hop exposure question — not on retrieval: after two calls the agent
 stopped passing `namespace`, every later query hit the empty `default`
-namespace, Loom truthfully returned nothing, and the agent spent twelve
+namespace, LoomCtx truthfully returned nothing, and the agent spent twelve
 steps and 130k input tokens looking for CVEs that were one argument away.
 That is a surface problem, so the surface changed:
 
@@ -996,7 +998,7 @@ That is a surface problem, so the surface changed:
   (one GROUP BY; sharded stores merge).
 - **An empty namespace is an error, not an empty list**: every read tool
   checks the namespace holds data and names the ones that do.
-- **`LOOM_MCP_NAMESPACE`** sets the default namespace for a single-team
+- **`LOOMCTX_MCP_NAMESPACE`** sets the default namespace for a single-team
   deployment, so the argument becomes optional.
 - **Server instructions** tell agents to orient first and to pass the same
   namespace every call; the harness forwards them like a real client does.
@@ -1025,22 +1027,22 @@ Haiku 4.5 passes all four tasks including the two-hop question; the
 weaker model still omits `expand_predicates` and wanders. The surface is
 now judged adequate: it answers a correctly formed call in one shot.
 
-## D-037 · Model scorecard: which LLMs drive Loom well as agents (2026-09-09)
+## D-037 · Model scorecard: which LLMs drive LoomCtx well as agents (2026-09-09)
 
 User question: is it worth a list of models that work well with the
-platform, measured with the OpenRouter key? Yes — Loom ships no model,
+platform, measured with the OpenRouter key? Yes — LoomCtx ships no model,
 so "which agent models can actually use these tools" is a question every
 adopter has on day one, and the D-036 harness made it cheap to answer.
 
-- `python -m loom.agent_eval --models a,b,c --markdown out.md` runs the
+- `python -m loomctx.agent_eval --models a,b,c --markdown out.md` runs the
   four-task evaluation per model and asks OpenRouter to report billed
   cost per call (`usage: {include: true}`), so each row carries real
   dollars. `scorecard()` ranks by passes then cost: the cheapest model
-  that gets it right wins. `LOOM_AGENT_MAX_STEPS` overrides the step cap.
+  that gets it right wins. `LOOMCTX_AGENT_MAX_STEPS` overrides the step cap.
 - Twenty models across price tiers, one run each, then an eight-model
   retest of the two-hop task at 30 steps. Results and recommendations in
   `docs/models.md`; the transcripts stayed in the data volume.
-- What the numbers say about Loom rather than about models: faithfulness
+- What the numbers say about LoomCtx rather than about models: faithfulness
   was 20/20 (no invented entities, no unseen citations) because the pack
   hands every item an id; the two-hop task is the only discriminator and
   eleven models pass it cold; input tokens dominate cost, which is why the
@@ -1089,7 +1091,7 @@ everything*.
 
 ## D-039 · Documents in the loop: claims cite by event id; embeddings measured on real data (2026-09-09)
 
-The last Loom feature never exercised on real data was documents: the
+The last LoomCtx feature never exercised on real data was documents: the
 1,699 CISA KEV advisories were loaded but never embedded, and every agent
 run hit "no embedder configured". Embedding them exposed a gap first.
 
@@ -1105,8 +1107,8 @@ run hit "no embedder configured". Embedding them exposed a gap first.
   as excerpts for their CVE. The connector now emits the document first
   and every KEV claim cites it. The vendor edge (`made_by`) does not — it
   is derived, not stated in the text.
-- **The enrichment worker got two dials.** `LOOM_EMBED_BATCH` (default
-  128; hosted embedders take 512–2048) and `LOOM_CHUNK_LIMIT` (default 4).
+- **The enrichment worker got two dials.** `LOOMCTX_EMBED_BATCH` (default
+  128; hosted embedders take 512–2048) and `LOOMCTX_CHUNK_LIMIT` (default 4).
   At 128 per ~4 s tick the 465k-observation backlog was a four-hour job;
   four sharded workers at 512 did it in about an hour for ~$0.40.
 - **OpenRouter serves embeddings** (`openai/text-embedding-3-small`,
@@ -1126,11 +1128,11 @@ run hit "no embedder configured". Embedding them exposed a gap first.
   form, legacy JSON text, and legacy JSON carried through the Postgres
   TEXT → BYTEA migration (verified on a hand-built v2 database). The
   sqlite-vec index now receives the float32 buffer directly instead of
-  JSON it had to parse. `LOOM_EMBED_DIM` asks a Matryoshka model for a
+  JSON it had to parse. `LOOMCTX_EMBED_DIM` asks a Matryoshka model for a
   smaller output (512 for this corpus: a third of the storage at most of
   the quality).
 - **A stalled embedder must not stall an ask.** Query embeddings are
-  single-attempt with a 10 s timeout (`LOOM_EMBED_QUERY_TIMEOUT`) and any
+  single-attempt with a 10 s timeout (`LOOMCTX_EMBED_QUERY_TIMEOUT`) and any
   failure degrades that ask to keyword ranking with a warning; the batch
   path keeps its 120 s × 3. One ask had waited 30 s.
 - **Excerpts name who they are about.** `[about cve:X] "..."` — the
@@ -1207,7 +1209,7 @@ Tiers 1 and 2 (D-019, D-024) only merge keys that collide exactly once
 normalized; these do not.
 
 - **Candidates are structural, decisions are the LLM's.** For entity
-  types named in `LOOM_ALIAS_TYPES` (off by default — each candidate is a
+  types named in `LOOMCTX_ALIAS_TYPES` (off by default — each candidate is a
   model call), keys of the form `vendor:product` are compared by shape:
   the vendor name repeated inside the product (`linux:kernel` ~
   `linux:linux_kernel`), the same product token under exactly one other
@@ -1220,9 +1222,9 @@ normalized; these do not.
   sibling: no); the less-connected key merges into the more-connected one
   on a confident yes, which is how a freehand KEV key becomes an alias of
   the CPE product and its `affects` edges repoint.
-- `python -m loom.enrich resolve [--dry-run]` runs the spelling tiers and
+- `python -m loomctx.enrich resolve [--dry-run]` runs the spelling tiers and
   this one once, outside the worker loop; the worker runs it each tick
-  when `LOOM_ALIAS_TYPES` is set. Declines are remembered per process (as
+  when `LOOMCTX_ALIAS_TYPES` is set. Declines are remembered per process (as
   in D-023); persisting them is a known gap.
 - **Measured on the corpus** with `google/gemini-3.5-flash-lite` as judge:
   283 candidates, 58 merged, 223 declined, 2 deferred, about three cents.
@@ -1320,7 +1322,7 @@ until the kernel gave up; CloudNativePG's `smartShutdownTimeout` was my
 hypothesis and changing it changed nothing. With `connect_timeout=2` on
 the probe the operator promotes a replica in **11 s** with its defaults —
 and through a real engine, `POST /v1/ingest` every 0.5 s across the
-deletion failed 3 requests of 617, an 11 s window. Loom's own pool had the
+deletion failed 3 requests of 617, an 11 s window. LoomCtx's own pool had the
 same gap as the probe, so it now sets `connect_timeout=5` and TCP
 keepalives (`keepalives_idle=15`, `interval=5`, `count=3`): a connection
 to a vanished primary fails in seconds and a held one is detected within
@@ -1396,13 +1398,13 @@ true but unproven, and each is cheap to prove permanently.
   tree; the `v0.1.0` tag was then pushed at `4022aec` and three commits
   landed after it (name settled, Python 3.14 base, this entry). The
   release gate is a short run of the GKE recipe against the image CI
-  actually published (`ghcr.io/seahop/loom:<sha>`): scale-pg-ha,
+  actually published (`ghcr.io/seahop/loomctx:<sha>`): scale-pg-ha,
   loadgen ingest and ask, the worker through every stage at its 512 MiB
   limit, one failover. Results are appended to this entry, and the tag
   moves to the gated commit.
 - **The tag never had an image.** Found while preparing the gate: the
   publish job ran only for pushes to `main`, so both `v0.1.0` tag pushes
-  built nothing and `ghcr.io/seahop/loom:v0.1.0` did not exist; the
+  built nothing and `ghcr.io/seahop/loomctx:v0.1.0` did not exist; the
   `ref_name` tag line only ever produced `:main`. Rebuilding on the tag
   push would have been the obvious fix and the wrong one — a second
   build is a second image. Now a tag push re-tags the commit's already
@@ -1411,15 +1413,15 @@ true but unproven, and each is cheap to prove permanently.
   that commit never went through `main`. Publishing also now waits for
   the scale smoke.
 - **Pulling while the repository is private.** GHCR packages inherit the
-  repository's visibility; until Loom is flipped to public, every
+  repository's visibility; until LoomCtx is flipped to public, every
   `image: ghcr.io/seahop/...` in the manifests needs a pull secret
   (recipe in `deploy/README.md`). The gate uses one.
 
-**Gate run, 2026-09-11.** Image `ghcr.io/seahop/loom@sha256:338df448…`
+**Gate run, 2026-09-11.** Image `ghcr.io/seahop/loomctx@sha256:338df448…`
 (CI's build of `0eba95c`; gateway `@sha256:02d61194…`), pulled from GHCR
-through the pull secret onto a fresh `loom-gate` cluster (3 × e2-standard-4,
+through the pull secret onto a fresh `loomctx-gate` cluster (3 × e2-standard-4,
 CloudNativePG 1.26, the shipped `scale-pg-ha` overlay plus the provider
-Secret and `LOOM_ALIAS_TYPES=product`). Everything below ran with both
+Secret and `LOOMCTX_ALIAS_TYPES=product`). Everything below ran with both
 enrichment workers live against the same primary, which is the
 production condition; D-043's numbers were taken with idle pools.
 
@@ -1456,7 +1458,7 @@ two commits, and the head's CI build is compared layer by layer against the
 gated digest once it exists.
 
 **After the push (2026-09-11, tag at `5a9f16b`).** The tag run re-tagged
-instead of rebuilding: `loom:v0.1.0` and `loom-gateway:v0.1.0` are manifest
+instead of rebuilding: `loomctx:v0.1.0` and `loomctx-gateway:v0.1.0` are manifest
 lists wrapping exactly the head commit's manifests (`b4853584…`,
 `7ab170cf…`), so the tag serves the same bytes as the head's `main` build.
 That build against the gated one: Python 3.14.7 and every `.py` under
@@ -1521,7 +1523,7 @@ settle:
   spends the whole budget on the conflict (the 50 % share cap applied on
   expansion too, so `budget = est_tokens` returned ordinary facts and no
   conflict — the silent drop D-023 forbids), and `est_tokens` is the exact
-  charge. The engine warns at startup when `LOOM_HANDLE_SECRET` is unset;
+  charge. The engine warns at startup when `LOOMCTX_HANDLE_SECRET` is unset;
   the "random per-process fallback" H-A1 described never existed.
 - **Ranking honesty.** With an embedder serving but no stored vectors for
   the gathered set (worker not run, or a different model), every fact got
@@ -1558,7 +1560,7 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
 
 - **LLM clients.** The native Anthropic client read `content[0]["text"]`;
   with thinking on by default on current models `content[0]` is a
-  thinking block, so `LOOM_LLM_PROVIDER=anthropic` failed every
+  thinking block, so `LOOMCTX_LLM_PROVIDER=anthropic` failed every
   extraction, dossier, adjudication and answer except on Haiku. Replies
   are now the concatenation of `text` blocks; a refusal or empty
   completion is an `LLMError` (public: "declined" / "empty completion");
@@ -1632,9 +1634,9 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   enforced only on `/v1/ingest`. Violations are dropped with a reason and
   counted. Dead-letter headers carry the exception class and a code only
   — a Postgres `DETAIL: Key (...)=(...)` used to ride in a header — and
-  the dead-letter stream is bounded (`LOOM_DEADLETTER_MAX_BYTES`, 256
+  the dead-letter stream is bounded (`LOOMCTX_DEADLETTER_MAX_BYTES`, 256
   MiB). The Kafka consumer takes SASL/TLS settings; broker auth
-  authenticates Loom to the broker, and the topic ACL *is* the write
+  authenticates LoomCtx to the broker, and the topic ACL *is* the write
   permission.
 - **Kubernetes posture.** Every pod: non-root, read-only root filesystem
   with an emptyDir at `/tmp`, no capabilities, no service-account token.
@@ -1644,8 +1646,8 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   bounded (the Go default was unlimited on a 1 Gi PVC) and the NATS
   monitor port is off the client Services. Egress is deliberately open.
 - **Local defaults.** Compose binds the engine, load balancer and MCP to
-  `127.0.0.1` (`LOOM_BIND=0.0.0.0` for LAN access); documented env vars
-  that compose never passed (`LOOM_MCP_NAMESPACE`, `LOOM_ALIAS_TYPES`,
+  `127.0.0.1` (`LOOMCTX_BIND=0.0.0.0` for LAN access); documented env vars
+  that compose never passed (`LOOMCTX_MCP_NAMESPACE`, `LOOMCTX_ALIAS_TYPES`,
   the agent-eval and worker dials) are passed; the keys file is written
   atomically at 0600 under `secrets/`.
 
@@ -1677,7 +1679,7 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   `decline` and `merge` records; a restore used to turn a `strict`
   namespace permissive and forget every adjudication. The lifecycle CLI —
   and `seed`, `ingest`, `vulns`, `agent_eval` — open the engine's store
-  (`store_from_env`: `LOOM_SHARDS` and `LOOM_BLOB_*` apply), so an export
+  (`store_from_env`: `LOOMCTX_SHARDS` and `LOOMCTX_BLOB_*` apply), so an export
   covers every shard with real bodies; `--db` is an explicit
   single-database escape hatch. The D-032 tenant-move recipe works as
   written now.
@@ -1686,7 +1688,7 @@ gather cap. See `docs/hardening.md` (2026-09-23 section).
   `observations_for_many` one round trip per ref — the D-043 regression
   back through a wrapper the contract suite never wrapped. Every public
   store method is delegated, with a guard test on both wrappers. A shard
-  no longer inherits `LOOM_DB_READ` (a tenant's reads went to the
+  no longer inherits `LOOMCTX_DB_READ` (a tenant's reads went to the
   default cluster's replica); a shard's own `{"dsn", "read"}` entry names
   its replica. A vanished blob is reported (`_blob_missing`, body `None`)
   rather than served as the stub text; the blob is written before the
@@ -1801,7 +1803,7 @@ in `deploy/README.md`. The fully-merged batch image (schema v6) was then rolled 
 
 ## D-053 · Retrieval scorecard: packs against the obvious baselines, rule-scored, no judge (2026-09-24)
 
-`python -m loom.retrieval_eval` compares `loom@{400,800,1600,3200}`,
+`python -m loomctx.retrieval_eval` compares `loomctx@{400,800,1600,3200}`,
 `full` (everything about the question's entities; its token cost is the
 point, and it is not sent past a cap), `vector` top-k and `recency` top-k
 on the same store, the same generated questions, and the same prompt
@@ -1814,14 +1816,14 @@ scoring is rule-based; there is no LLM judge, because a second model's
 errors are indistinguishable from the first's and drift with its version.
 Citation support is measured at the id level — support@pack (the truth
 ids are among the context's citations) and support@answer (the model
-cited them) — rather than by NLI, because every Loom item carries an
+cited them) — rather than by NLI, because every LoomCtx item carries an
 observation id and the ground truth *is* a set of ids. A rule-based
 scripted reader that answers only from the rendered context isolates
 retrieval recall from reading; `--runs` reports variance; live runs carry
 provider-reported cost under a `--max-cost` ceiling. Baselines get no time
 axis on purpose: the question states the date, and reading the windows is
-what a model without Loom has to do. Seed-corpus result with the hashing
-embedder: `loom@1600` matches `full` at about 60 % of its mean tokens and
+what a model without LoomCtx has to do. Seed-corpus result with the hashing
+embedder: `loomctx@1600` matches `full` at about 60 % of its mean tokens and
 18 % of its maximum; recency loses half the conflicts and chains,
 cosine-only half the orderings; the scripted reader abstains correctly
 everywhere, so the abstention row only discriminates live models. R-6 is
@@ -1836,7 +1838,7 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
   `artifacts_needing_chunks` and `dossier_candidates` walked their tables
   from the beginning every tick (a per-row anti-join over everything
   already embedded). Each backlog now starts from a per-(model, shard)
-  high-water mark in `loom_meta` (`hwm:*`), kept 1,000 rows below the
+  high-water mark in `loomctx_meta` (`hwm:*`), kept 1,000 rows below the
   oldest pending row and monotonic, with a full rescan on a process's
   first and every 16th tick to catch backfills with old `recorded_at` and
   leases that expired unreleased. Dossier candidacy evaluates only
@@ -1852,7 +1854,7 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
   SQLite, under the compound-select bound). 20k-edge hub, limit 20:
   SQLite 101 → 21 ms, Postgres 170 → 13 ms.
 - **SQLite reads use WAL readers.** One writer plus a pool of four read
-  connections (`LOOM_DB_READERS`, 0 restores the single connection);
+  connections (`LOOMCTX_DB_READERS`, 0 restores the single connection);
   reads inside a thread's own write transaction still join it. Reads
   racing batch ingest: 63 → 649 reads/s, p50 61 → 6 ms. Known cost: a
   pure-read multi-threaded mix loses about 40 % to GIL convoying (2.9k →
@@ -1895,7 +1897,7 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
   `failed`. A vanished blob is `skipped` by extraction (chunking needs a
   store-side marker — open). The alias pass asks `iter_entities(since=)`
   and skips the walk when nothing is new. `agent_eval`'s Anthropic path
-  uses `max_tokens` 8000 with adaptive thinking (`LOOM_AGENT_THINKING=off`
+  uses `max_tokens` 8000 with adaptive thinking (`LOOMCTX_AGENT_THINKING=off`
   to disable); refusals are errors.
 - **Seed:** 592 claims — a same-source `contract_owner` correction that
   `supersedes` its predecessor, resolved at load time: "recorded
@@ -1904,21 +1906,21 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
 ## D-056 · Engine-side rate limiting; STIX 2.1 and OCSF as connectors (2026-09-24)
 
 - **The gateway's bucket model also runs in the engine**
-  (`loom.ratelimit.RateLimitMiddleware`, pure ASGI): auth first, one token
+  (`loomctx.ratelimit.RateLimitMiddleware`, pure ASGI): auth first, one token
   bucket per grant id, never one for a raw header value, an LRU-bounded
   map, and a second stricter bucket for the LLM and embedder routes
   (`/v1/answer`, `/v1/entities/semantic`) so a valid reader cannot burn
-  provider spend without bound. Dials `LOOM_RATE_PER_SEC` (the gateway's
-  name), `LOOM_RATE_BURST`, `LOOM_RATE_LLM_PER_SEC`, `LOOM_RATE_LLM_BURST`;
+  provider spend without bound. Dials `LOOMCTX_RATE_PER_SEC` (the gateway's
+  name), `LOOMCTX_RATE_BURST`, `LOOMCTX_RATE_LLM_PER_SEC`, `LOOMCTX_RATE_LLM_BURST`;
   unset = unlimited, so dev mode is unchanged; open mode limits per client
   IP only when dialled. The keys file gains `rate_per_sec`, `rate_burst`,
   `rate_llm_per_sec` (engine and Go loader; the gateway ignores the LLM
   field), hot-reloaded and retuning the live bucket; zero or negative is a
   configuration error that disables the entry. 429 with `Retry-After`;
   probes and scrapes are never limited.
-- **Interop lives in connectors, not core.** `loom.connectors.stix`
+- **Interop lives in connectors, not core.** `loomctx.connectors.stix`
   (bundle → envelopes, observations → a valid 2.1 bundle) and
-  `loom.connectors.ocsf` (`vulnerability_finding` in and out) plus a
+  `loomctx.connectors.ocsf` (`vulnerability_finding` in and out) plus a
   non-strict schema registration; the engine learns nothing about either
   standard, and a `mapping` dict overrides the default table per
   namespace. Identity conventions: a STIX `vulnerability` with a CVE
@@ -1929,23 +1931,23 @@ rehearsal-week task. Local output lives in `eval/` (gitignored).
   object's `modified` (event ids embed it: replays dedupe, revisions
   append); reports and notes are documents cited by the claims of the
   objects they list (D-039). Skipped by design: revoked objects, markings,
-  `observed-data`, custom properties. Exports carry per-item Loom
-  citations (`x_loom_observation_id`, `unmapped.loom_observation_ids`).
+  `observed-data`, custom properties. Exports carry per-item LoomCtx
+  citations (`x_loomctx_observation_id`, `unmapped.loomctx_observation_ids`).
 
 ## D-057 · Evaluation validity: equal-token baselines, graded answers, unsent rows excluded (2026-09-24)
 
 A whole-project review (`docs/hardening.md` §S) found the scorecards on the
-talk slides could be wrong in Loom's favour. The harnesses now hold every
+talk slides could be wrong in LoomCtx's favour. The harnesses now hold every
 condition to the same bar, and a row nobody answered is never a score.
 
 - **Equal tokens.** `vector@B` and `recency@B` fill the same budget B as
-  `loom@B` with the pack builder's own item accounting (was a fixed top-20,
+  `loomctx@B` with the pack builder's own item accounting (was a fixed top-20,
   ~320 tokens, against packs up to 3,200). `--k` is gone.
 - **`full` is everything.** It walks the scope and gathers with no
-  per-entity cap; `--full-cap` then applies by tokens. Loom keeps its
+  per-entity cap; `--full-cap` then applies by tokens. LoomCtx keeps its
   1,000-per-entity gather, and each question records whether its truth is
-  inside it (`in_loom_gather`); misses are listed with the table, never
-  filtered out (filtering would flatter Loom).
+  inside it (`in_loomctx_gather`); misses are listed with the table, never
+  filtered out (filtering would flatter LoomCtx).
 - **Unanswered rows** — over `--full-cap`, past `--max-cost`, provider
   errors, empty or `finish_reason=length` replies, failed context builds —
   are counted per condition in a *Not sent / errored* column and excluded
@@ -1976,7 +1978,7 @@ condition to the same bar, and a row nobody answered is never a score.
   both are re-run on this build. Equal tokens first narrowed the story
   (on the seed, vector caught up at 1,600; on the real corpus it won at
   400 and on multi-hop); D-061 and D-062 closed both gaps. Final, live,
-  real corpus: Loom 81 / 84 / 86 / 96 % against vector 75 / 77 / 79 / 87 %
+  real corpus: LoomCtx 81 / 84 / 86 / 96 % against vector 75 / 77 / 79 / 87 %
   at 400 / 800 / 1,600 / 3,200 tokens (`docs/evaluation.md`); agent
   scorecard: two of eighteen models 12/12 (`docs/models.md`).
 
@@ -1995,8 +1997,8 @@ condition to the same bar, and a row nobody answered is never a score.
 - **Subjects resolve to their canonical entity** at `build_pack`,
   `expand_pack` and scope entry (`resolve_refs`), so a merged-away name
   keeps its conflicts and does not reappear as a second subject.
-- **Scope walks are bounded**: `LOOM_MAX_SCOPE_ENTITIES` (2,000) and
-  `LOOM_MAX_SCOPE_OBSERVATIONS` (100,000); a cut is reported as
+- **Scope walks are bounded**: `LOOMCTX_MAX_SCOPE_ENTITIES` (2,000) and
+  `LOOMCTX_MAX_SCOPE_OBSERVATIONS` (100,000); a cut is reported as
   `ScopeTruncation.reason = "scope_cap"` (additive; `gather_limit` for the
   per-entity cap). Walks skip superseded edges. A scope expand predicate
   the question names ranks as the question's topic (the seed
@@ -2029,16 +2031,16 @@ condition to the same bar, and a row nobody answered is never a score.
   rebinding), a foreign `Origin` (403) and non-JSON bodies on `/v1` POSTs
   (415; a `text/plain` no-cors POST was a CSRF write). Allowed by default:
   IP literals, `localhost`, single-label names and the cluster suffixes
-  (`*.svc`, `*.cluster.local`, `*.internal`); `LOOM_ALLOWED_HOSTS` and
-  `LOOM_ALLOWED_ORIGINS` extend them, `*` disables the host check. The MCP
+  (`*.svc`, `*.cluster.local`, `*.internal`); `LOOMCTX_ALLOWED_HOSTS` and
+  `LOOMCTX_ALLOWED_ORIGINS` extend them, `*` disables the host check. The MCP
   server's `--host` defaults to 127.0.0.1.
 - **Citations are a write-side gate.** H-A6 let a type-scoped reader open a
   document once some visible fact cites it — but the citing key chose the
   citation. A type-gated key may now cite only a document it ingested or
   one already backing a fact inside its entity types. The engine records
-  the uploader in `attrs["loom.uploader"]` (reserved: a sender that
+  the uploader in `attrs["loomctx.uploader"]` (reserved: a sender that
   supplies it is refused). HTTP single and batch ingest, and the NATS
-  writer — which resolves the gateway-stamped `Loom-Principal` to a live
+  writer — which resolves the gateway-stamped `LoomCtx-Principal` to a live
   grant when the keys file is mounted on it — apply the same check.
   Extraction keeps claims from such a document inside the uploader's
   entity types.
@@ -2051,8 +2053,8 @@ condition to the same bar, and a row nobody answered is never a score.
   batch of n costs n tokens on the engine as on the gateway; a batch over
   the burst is 413, not a 429 a shipper retries forever. The gateway parses
   rate dials as floats (`0.5` silently meant unlimited) and fails start-up
-  on garbage, as the engine does. Compose passes `LOOM_RATE_*`,
-  `LOOM_MAX_BATCH`, `LOOM_ALLOWED_*` through. Buckets stay per process:
+  on garbage, as the engine does. Compose passes `LOOMCTX_RATE_*`,
+  `LOOMCTX_MAX_BATCH`, `LOOMCTX_ALLOWED_*` through. Buckets stay per process:
   the ceiling is rate × workers × replicas — documented, not a shared
   limiter.
 - **Scoped views:** type-scoped keys get a narrowed `GET /v1/schemas` and
@@ -2063,7 +2065,7 @@ condition to the same bar, and a row nobody answered is never a score.
 
 - **An unmerge sticks.** It records a decline for the pair; every
   resolution tier honours declines and re-reads them each job, so the
-  worker no longer re-merges within one tick. `python -m loom.enrich
+  worker no longer re-merges within one tick. `python -m loomctx.enrich
   distinct a b --namespace ns` marks two entities as different (splitting
   a current merge first); `lifecycle unmerge` gains `--allow-remerge`.
 - **Adjudication spend is bounded.** Every model call counts against
@@ -2082,13 +2084,13 @@ condition to the same bar, and a row nobody answered is never a score.
 - **The queue consumer settles per message**: a failed batch is re-written
   one message at a time so one poison envelope parks only itself, and a
   claim whose document has not arrived is redelivered with a growing delay
-  instead of dropped. `python -m loom.ingest` retries 429 / 5xx honouring
+  instead of dropped. `python -m loomctx.ingest` retries 429 / 5xx honouring
   `Retry-After`.
 - **Declined groups never starve a tier; a decline can be taken back.**
   Tier-2 (fuzzy) candidates skip settled groups — every pair of differing
   raw keys declined — as tier 1 does, grouped first by normalized key
   (41 ms on a 49.5k-entity SQLite store with 3.5k settled groups).
-  `GraphStore.forget_decline` and `python -m loom.enrich undistinct a b
+  `GraphStore.forget_decline` and `python -m loomctx.enrich undistinct a b
   --namespace ns` forget one pair, whoever declined it; nothing merges at
   that step — the next tick may merge or ask again. In a scope pack a fact
   pointing into a reached entity from outside the pack carries that
@@ -2110,9 +2112,9 @@ condition to the same bar, and a row nobody answered is never a score.
 
 On the embedded vulns corpus every KEV multihop question ("which CVEs that
 CISA lists as exploited in the wild affect software host:web-01 runs?")
-sat outside Loom's gather: the kernel product keeps its newest 1,000 of
+sat outside LoomCtx's gather: the kernel product keeps its newest 1,000 of
 ~2,785 `affects` edges and 26 of the 31 KEV CVEs are older. A token-matched
-vector baseline got 5/6 at 3,200 tokens; Loom got 0/6 at every budget.
+vector baseline got 5/6 at 3,200 tokens; LoomCtx got 0/6 at every budget.
 
 - **Topic.** A scope question's topic is the predicates it names — every
   content word of the predicate in the question — from the registry plus
@@ -2132,9 +2134,9 @@ vector baseline got 5/6 at 3,200 tokens; Loom got 0/6 at every budget.
   edge render four per item, citing each fact and edge (~56 tokens per
   CVE instead of ~127).
 - **Measured** (scripted reader, real corpus, `--namespaces netsec`):
-  loom@3200 multihop 0/6 → 6/6 (vector@3200 5/6), loom@3200 overall 85 % →
+  loomctx@3200 multihop 0/6 → 6/6 (vector@3200 5/6), loomctx@3200 overall 85 % →
   100 %; every other family at every budget unchanged; no multihop
-  question outside Loom's gather any more; build_pack p50 ~1.4 → ~1.55 s
+  question outside LoomCtx's gather any more; build_pack p50 ~1.4 → ~1.55 s
   on a shared host (roughly flat). `SqliteStore.observations_by_ids` now
   uses the primary key (255 → 4 ms per 500 ids). Seed demo numbers
   unchanged (verified live).
@@ -2147,7 +2149,7 @@ vector baseline got 5/6 at 3,200 tokens; Loom got 0/6 at every budget.
 
 ## D-062 · The asked attribute ships first; handle ids are plain text (2026-09-24)
 
-At 400 tokens Loom trailed a token-matched vector baseline (scripted 62 % vs
+At 400 tokens LoomCtx trailed a token-matched vector baseline (scripted 62 % vs
 72 % on the real corpus; live DeepSeek 68 % vs 74 %). Three packing faults
 and one cost fault, each with a concrete question behind it:
 
@@ -2170,7 +2172,7 @@ and one cost fault, each with a concrete question behind it:
   times in ISO basic form: 55–65 tokens. Prefixes, HMAC signing and
   decoding of old handles are unchanged (base64 never hid anything).
 - **Measured** (scripted, a rebuilt corpus of the same shape — the review
-  sandbox blocked copying the live scorecard volume): loom@400 68 % → 79 %
+  sandbox blocked copying the live scorecard volume): loomctx@400 68 % → 79 %
   (vector 77 %), conflict 9/9, numeric 12/12; 800 and above unchanged; no
   pack over budget (six multihop@400 packs had been charged 594–633).
   Live DeepSeek on lease/conflict/numeric at 400: 81 % → 100 %. Latency
@@ -2197,13 +2199,13 @@ is where most of what broke was hiding. Choices made fixing it:
   engine refuses any envelope, and advances the EPSS ledger only after a
   load that landed whole — a refused row must be re-offered, never
   recorded as sent.
-- **Worker pools.** `loom.enrich run --jobs` / `LOOM_ENRICH_JOBS`
+- **Worker pools.** `loomctx.enrich run --jobs` / `LOOMCTX_ENRICH_JOBS`
   (`vectors`, `llm`, or named jobs); a vector backlog drains without the
   interval sleep; LLM work keeps its pacing. One tick running everything
   in turn stays the default: split pools trade "embed after the merge" for
   throughput.
 - **Mounts and inputs are forgiving where operators trip:** keys mount at
-  `/etc/loom-keys` (not over an image's files), keys are stripped
+  `/etc/loomctx-keys` (not over an image's files), keys are stripped
   (`--from-file` newlines), the load generator takes a key.
 - **Nothing a scorecard or log prints carries a credential**
   (`redact_dsn`), and the MCP server closes its store on exit.
@@ -2214,7 +2216,7 @@ Measured (one cluster, one run each): load 605,803 envelopes at 435/s
 and a refresh at 724/s, both 0 refused; ingest 178/s; asks 201/s with
 auth, signing and semantic ranking on (D-052's 284/s had none of them);
 failover 12 s, 0 of 235 writes lost; drain 34 s, 0 of 470 readiness
-checks failed; retrieval on the cluster's corpus: Loom 69 / 83 / 83 /
+checks failed; retrieval on the cluster's corpus: LoomCtx 69 / 83 / 83 /
 92 % against vector 74 / 74 / 74 / 80 % at 400 / 800 / 1,600 / 3,200.
 Findings: `docs/hardening.md` S-35…S-45.
 
@@ -2223,14 +2225,14 @@ job on each drain iteration, and only `vulns` exited non-zero on refusals.
 Now a `Pacer` restricts drain ticks to the vector jobs until `interval` has
 elapsed since the last full tick and backs off a failed job (one interval,
 doubling, 10-minute cap); `ingest.fail_on_refusals` makes every loader
-(`loom.ingest`, `vulns`, `stix`, `ocsf`, `ldap`) fail on a refusal, and
+(`loomctx.ingest`, `vulns`, `stix`, `ocsf`, `ldap`) fail on a refusal, and
 `load_direct` counts store-side refusals.
 
 ## D-064 · Scope asks the agents actually make (2026-09-25)
 
 The 2026-09-24 agent scorecard's transcripts, not its pass counts, set
 this work: 45 of 54 two-hop exposure runs failed, and the failures were
-mostly Loom's ergonomics, not the models' reasoning.
+mostly LoomCtx's ergonomics, not the models' reasoning.
 
 - **The scope budget is measured, not remembered.** The ≤ 1,500 guidance
   predated D-058, when a scope pack was 2.2–3.6× its budget on the wire;
@@ -2270,7 +2272,7 @@ unchanged; the agent scorecard is re-run on this build.
 > the fixes were deferred out of this session. The DSN-redaction and
 > exit-code fixes (af65b92) did land.
 
-`loom.connectors.ldap` decodes a raw Active Directory export (canonical
+`loomctx.connectors.ldap` decodes a raw Active Directory export (canonical
 input LDIF, RFC 2849) into typed, cited, time-stamped claims in an `ad`
 namespace, so an agent can ask "what rights, trust and membership path
 connects user:X to domain:B?" over the existing scope walk.
@@ -2281,7 +2283,7 @@ connects user:X to domain:B?" over the existing scope walk.
   WriteDacl, WriteOwner, ForceChangePassword, AddMember,
   AllExtendedRights), `can_delegate_to`, `rbcd_from` — and
   userAccountControl / SPN attributes. It does no transitive
-  effective-admin computation and no attack-path ranking: Loom carries
+  effective-admin computation and no attack-path ranking: LoomCtx carries
   the evidence, the agent assembles the path, and group nesting is the
   walk's job at depth N. That is the line against BloodHound, whose output
   schema we chose not to track.
@@ -2316,7 +2318,7 @@ performs no directory operations.
 > generator's uniform density, not hub pressure. A blind re-measurement is
 > deferred. See the banner in [ad-eval.md](ad-eval.md).
 
-`loom.connectors.ad_gen` + `loom.ad_eval` are the AD analogue of the KEV
+`loomctx.connectors.ad_gen` + `loomctx.ad_eval` are the AD analogue of the KEV
 retrieval benchmark (D-053/D-061). A deterministic synthetic directory
 (`corp.local` root + a bidirectional-transitive `dev.local` child + a
 non-transitive `partner.local` and a SID-filtered `fabrikam.local` used
@@ -2362,7 +2364,7 @@ gather/walk machinery `build_pack`/`resolve_scope` use: `via` edges followed
 both directions (an `affects` edge stored cve→product is walked
 product→cve), simple paths only, capped by `depth` (≤ the scope cap 3, a
 longer request clamped and noted), `max_paths`, the token `budget` (charged
-per edge via `item_tokens`, like a pack) and `LOOM_MAX_SCOPE_*`. Endpoints
+per edge via `item_tokens`, like a pack) and `LOOMCTX_MAX_SCOPE_*`. Endpoints
 are alias-resolved (D-058); `as_of`/`valid_at` filter every edge and a
 superseded edge (D-050) never appears; a path through a type-gated entity is
 dropped. Cuts are reported in `truncated`, advice in `notes` (D-064).
@@ -2384,7 +2386,7 @@ call; tools are now registered through an alias-to-parameter mapper, and a
 test drives it over stdio. The search ran over paths, not entities, so a
 hub re-reached by many routes multiplied them (a 1,000-CVE hub at depth 3
 took 164 s and 2.2 GB); edge extensions are now capped at
-`LOOM_MAX_SCOPE_OBSERVATIONS` and reported as `scope_cap` (1.4 s, 42 MB),
+`LOOMCTX_MAX_SCOPE_OBSERVATIONS` and reported as `scope_cap` (1.4 s, 42 MB),
 and the last hop only checks reachability. Completed paths' edges are
 checked with `corrections_of` as of `as_of`, so a correction the walk never
 gathered still retires its edge. A canonical entity of a gated type reached
@@ -2396,7 +2398,7 @@ comma-split.
 
 ## D-068 · nmap scan-inventory connector (2026-09-26)
 
-`loom.connectors.nmap` parses an operator's `nmap -oX` XML report (a file;
+`loomctx.connectors.nmap` parses an operator's `nmap -oX` XML report (a file;
 the connector performs no scanning and no probing) into cited, timestamped
 inventory claims in `netsec`: a `host` keyed by hostname-else-IP (the seed
 convention), `listens_on_port` / `runs_service` per open port, and
@@ -2446,7 +2448,7 @@ purely because the product node did not merge.
 
 ## D-070 · OSV / GHSA advisory connector (2026-09-26)
 
-`loom.connectors.osv` parses OSV-schema JSON (osv.dev / GHSA / PyPI / Go /
+`loomctx.connectors.osv` parses OSV-schema JSON (osv.dev / GHSA / PyPI / Go /
 npm; a file, a directory, stdin, or a query/batch response — it fetches
 nothing) into cited, timestamped claims in `netsec`. **Fusion is by CVE id,
 not product:** a record whose `aliases` carry a CVE is keyed to the shared
@@ -2482,7 +2484,7 @@ repo; a fusion test confirms the cited detection on the same host+cve nodes.
 
 ## D-072 · Cloud inventory / config connector (terraform + AWS Config) (2026-09-26)
 
-`loom.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
+`loomctx.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
 AWS Config `configurationItems` snapshot (a file; no cloud API) into cited,
 timestamped inventory claims in a non-strict `cloud` namespace: a small
 generic vocabulary (`resource`, `vpc`, `subnet`, `security_group`,
@@ -2500,7 +2502,7 @@ contract or store change.
 
 ## D-073 · MITRE ATT&CK taxonomy connector (2026-09-26)
 
-Loom ingests the published MITRE ATT&CK knowledge base (STIX 2.1) as a cited
+LoomCtx ingests the published MITRE ATT&CK knowledge base (STIX 2.1) as a cited
 taxonomy in the `attack` namespace: technique/tactic/group/software/mitigation
 entities keyed by ATT&CK external id, and the catalog relationships MITRE
 publishes (`in_tactic`, `uses`, `mitigates`). **Scope is deliberately the
@@ -2515,7 +2517,7 @@ mitigations, cited.
 
 ## D-074 · LDAP connector S-50 deep fix (2026-09-26)
 
-Five decoding bugs in `loom.connectors.ldap` fixed (S-50 items from the
+Five decoding bugs in `loomctx.connectors.ldap` fixed (S-50 items from the
 2026-09-24 review):
 
 1. **Mapped GenericWrite**: AD stores GenericWrite as its mapped form
@@ -2537,7 +2539,7 @@ No contract change. Connector removed from experimental status.
 
 ## D-075 · Entra ID (Azure AD) connector (2026-09-26)
 
-`loom.connectors.entra` parses Microsoft Graph API JSON exports — users,
+`loomctx.connectors.entra` parses Microsoft Graph API JSON exports — users,
 groups, service principals, app registrations, directory roles, role
 assignments, app-role assignments and OAuth2 permission grants — into cited
 identity/RBAC claims in the `iam` namespace. Key edges: `member_of`,
@@ -2549,7 +2551,7 @@ no contract change. 26 tests including a scope walk + find_path round trip.
 
 ## D-076 · Okta directory connector (2026-09-26)
 
-`loom.connectors.okta` parses Okta API JSON exports — users, groups,
+`loomctx.connectors.okta` parses Okta API JSON exports — users, groups,
 applications and app-user assignments — into cited identity claims in the
 same `iam` namespace as the Entra connector. Key edges: `member_of`,
 `assigned_to` (app-user), `has_role` (admin role). Users carry `mfa_enrolled`
@@ -2561,9 +2563,9 @@ contract change.
 ## D-077 · Identity connectors checked at scale; four defects fixed (2026-09-26)
 
 D-075/D-076 were tested only on hand-written fixtures (three users each).
-`loom.connectors.iam_gen` now writes seeded Entra + Okta exports in the
+`loomctx.connectors.iam_gen` now writes seeded Entra + Okta exports in the
 shapes the real APIs return, up to 60,000 users with an every-user hub
-group, and `loom.iam_eval` checks every implied edge against the store.
+group, and `loomctx.iam_eval` checks every implied edge against the store.
 Run on SQLite locally and on GKE through lb → gateways → NATS →
 consumers → Postgres (`deploy/README.md`), it found four defects:
 
@@ -2584,7 +2586,7 @@ consumers → Postgres (`deploy/README.md`), it found four defects:
    and Okta `has_role → admin_role`, so whichever registered last made the
    registry reject the other's role claims on its next import (the
    overlapping nightly refresh). `member_of` / `has_role` are now declared
-   once in `loom.connectors.iam_schema` and used by both.
+   once in `loomctx.connectors.iam_schema` and used by both.
 
 After the fixes: every edge stored once (0 missing, 0 extra) at 2k, 20k
 and 60k users; re-import adds 0 rows; all planted role paths come back
@@ -2594,7 +2596,7 @@ scope walks through the hub groups (S-57).
 ## D-078 · Blind AD re-measurement (2026-09-26)
 
 S-51: the D-066 benchmark handed the walk the planted chain's predicates,
-depth and interior anchors. `loom.ad_eval --blind` knows only the two
+depth and interior anchors. `loomctx.ad_eval --blind` knows only the two
 endpoints the question names: one ask anchored at each over the fixed
 predicate set (`member_of, has_ace, trusts, contains, can_delegate_to,
 rbcd_from`) at the depth cap, an account-status ask on the start, and
@@ -2702,7 +2704,7 @@ A connector now records, per import, what its export carried: one cited
 claim per predicate, `coverage:collection -collected-> "<predicate>"` with
 attrs `source`, `scope`, `with`, `of`, `state` (complete / partial /
 absent) and, for status predicates, the entity `types` it applies to
-(`loom.coverage`). A connector records only absences its format makes
+(`loomctx.coverage`). A connector records only absences its format makes
 meaningful: every AD object has a security descriptor and every account a
 userAccountControl, so a missing one was not collected; `memberOf` may be
 absent because there are no groups, so membership is recorded only when the
@@ -2730,7 +2732,7 @@ connectors emitted `sam`, `upn`, `mail` "for resolution" but nothing read
 them, so `web-01` (a scan), `WEB-01$` / `web-01.corp.local` (AD) and
 `i-0abc…` (the cloud) stayed three machines, and `CORP\jdoe`, `jdoe@corp.com`
 and a SID three people. Connectors now state identifiers as edges to
-`identifier:<kind>:<normalized>` entities (`loom.identity`: fqdn, mac,
+`identifier:<kind>:<normalized>` entities (`loomctx.identity`: fqdn, mac,
 cloud_id, sid, upn, mail, `DOMAIN\account` strong; the short hostname —
 implied by every FQDN — weak), and a fourth resolution tier
 (`enrich.resolve_identities`, under the `resolve` job) folds entities of
@@ -2765,7 +2767,7 @@ change to `ClaimIn` / packs; a new store method with a generic default.
 
 ## D-084 · Host artifacts: processes and file listings (2026-09-27)
 
-`loom.connectors.endpoint` parses process lists and file listings
+`loomctx.connectors.endpoint` parses process lists and file listings
 collected on hosts (osquery rows and results logs, tasklist CSV,
 PowerShell Win32_Process / Get-Process / Get-ChildItem / Get-FileHash JSON,
 `ps -eo … lstart …`, `ps aux`, `ls -laR --time-style=full-iso`,
@@ -2793,20 +2795,20 @@ per-host coverage records, a newest-N read evicted the earlier shape and
 drift went silent (found on GKE); endpoint coverage is also recorded per
 import format now, not per host (read from the
 store for `--db`, through `/v1/entities/coverage/shapes/observations`
-for `--url` — or `LOOM_READ_URL` when `--url` is a gateway, which serves
-ingest only), and by `python -m loom.coverage drift`. LDAP, Entra, Okta,
+for `--url` — or `LOOMCTX_READ_URL` when `--url` is a gateway, which serves
+ingest only), and by `python -m loomctx.coverage drift`. LDAP, Entra, Okta,
 nmap, OCSF, endpoint and op logs record shapes. A re-import of the same
 export compares equal.
 
 ## D-086 · Red-team operation logs and purple correlation (2026-09-27)
 
-`loom.connectors.oplog` records an operation's actions — Atomic Red
+`loomctx.connectors.oplog` records an operation's actions — Atomic Red
 Team's execution log, the Attire JSON logger, or a CSV / JSON / JSONL with
 a time and a technique or target — as `activity` entities `in_operation`,
 with `uses_technique` (the ATT&CK connector's `technique:` keys),
 `targets`, `as_user`, `command` and friends. OCSF detections now link
 `indicates technique:<id>` from `finding_info.attacks[]` (the
-sub-technique when given). `loom.purple` (CLI and the MCP tool
+sub-technique when given). `loomctx.purple` (CLI and the MCP tool
 `purple_report`) sets each action against the detections on its target
 host from 5 minutes before to 24 hours after: detected (the technique, its
 parent or a sub-technique), host only, missed, or no target, with the
@@ -2859,6 +2861,34 @@ after the queue drained, one more pass found 75 left and folded them in
 (or none, with the stalled query). Every check held: 5,400/5,400
 machines and 3,000/3,000 accounts folded, 0 false merges, purple 600/600.
 
+## D-088 · The name is LoomCtx (2026-09-27, supersedes D-005)
+
+D-005 kept "Loom" and accepted the collision with Atlassian's Loom
+(loom.com). With a public release and a website coming, the collision
+costs discoverability: a search for "loom" finds the video product. The
+project is renamed **LoomCtx** before anything is public, so nothing
+outside the repo depends on the old names.
+
+- **Domain:** loomctx.dev. **Repo:** github.com/seahop/loomctx.
+  **Images:** `ghcr.io/seahop/loomctx`, `ghcr.io/seahop/loomctx-gateway`.
+- **Packages:** the Python import package is `loomctx` (`python -m
+  loomctx.seed`), the PyPI distribution `loomctx`, the Python SDK
+  `loomctx_sdk`, the npm package `loomctx-sdk`, the Go modules
+  `github.com/seahop/loomctx/{sdk/go,gateway}`. `loom` on PyPI belongs to
+  another project, so the old import name could also clash with it.
+- **Runtime names:** env vars `LOOMCTX_*`, compose service `loomctx`
+  (project name pinned to `loomctx`), k8s namespace and resources
+  `loomctx-*`, the scrape label `loomctx.dev/scrape`, Prometheus metrics
+  `loomctx_*`, API keys `loomctxk_…`, header `X-LoomCtx-Key`, MCP server
+  `loomctx`, default SQLite file `loomctx.db`, schema table `loomctx_meta`.
+- **Interchange:** STIX/OCSF extension properties are `x_loomctx_*` /
+  `loomctx_*`, and the STIX id namespace is derived from the new repo URL,
+  so re-exports get new deterministic ids.
+- **Not migrated:** existing stores, volumes, keys and clusters. Nothing is
+  released, so the path forward is a fresh load (seed, connectors) and a
+  fresh cluster. The saved demo transcripts under `demo/` are recordings
+  and keep the old tool names until the next rehearsal re-captures them.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
@@ -2875,9 +2905,9 @@ infrastructure-ecosystem norm. Canonical text in `LICENSE`.
   (D-013), the hashed keys file with data-scoping grants and hot reload, so
   rotation is a file update with no redeploy (D-013a), and the same key gate on
   the MCP http transports (D-024). A key-management *API* (as opposed to the
-  `loom.keys` CLI + a mounted Secret) is not planned.
+  `loomctx.keys` CLI + a mounted Secret) is not planned.
 - **OQ-4:** Embedding model choice + dimensionality (affects sqlite-vec schema).
 - **OQ-5:** ~~Retention/TTL policy~~ Mechanism shipped (D-016 purge/redact);
   remaining is per-team policy defaults and a scheduled sweep (cron/k8s Job).
-- **OQ-6:** ~~Public name~~ Settled: Loom (D-005, 2026-09-11).
+- **OQ-6:** ~~Public name~~ Settled: LoomCtx (D-005, 2026-09-11).
 - **OQ-7:** Retention for the `ghcr.io/…:ci-<sha>` candidate tags CI pushes on every commit to `main` (D-048): a package retention rule, or a periodic cleanup Job.

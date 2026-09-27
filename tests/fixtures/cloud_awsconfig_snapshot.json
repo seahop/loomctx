@@ -14,7 +14,7 @@
       "resourceName": null,
       "awsRegion": "us-east-2",
       "availabilityZone": "Not Applicable",
-      "tags": { "Name": "loom-demo-vpc" },
+      "tags": { "Name": "loomctx-demo-vpc" },
       "relatedEvents": [],
       "relationships": [
         {
@@ -44,7 +44,7 @@
       "resourceName": null,
       "awsRegion": "us-east-2",
       "availabilityZone": "us-east-2a",
-      "tags": { "Name": "loom-demo-subnet-a" },
+      "tags": { "Name": "loomctx-demo-subnet-a" },
       "relatedEvents": [],
       "relationships": [
         {
@@ -74,7 +74,7 @@
       "resourceName": null,
       "awsRegion": "us-east-2",
       "availabilityZone": "Not Applicable",
-      "tags": { "Name": "loom-demo-web-sg" },
+      "tags": { "Name": "loomctx-demo-web-sg" },
       "relatedEvents": [],
       "relationships": [
         {
@@ -85,7 +85,7 @@
         }
       ],
       "configuration": {
-        "groupName": "loom-demo-web-sg",
+        "groupName": "loomctx-demo-web-sg",
         "description": "web tier",
         "ipPermissions": [
           {
@@ -116,7 +116,7 @@
       "resourceName": null,
       "awsRegion": "us-east-2",
       "availabilityZone": "us-east-2a",
-      "tags": { "Name": "loom-demo-web-01" },
+      "tags": { "Name": "loomctx-demo-web-01" },
       "relatedEvents": [],
       "relationships": [
         {

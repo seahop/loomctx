@@ -1,4 +1,4 @@
-"""The MITRE ATT&CK taxonomy connector (loom.connectors.attack): parse the
+"""The MITRE ATT&CK taxonomy connector (loomctx.connectors.attack): parse the
 published `mitre-attack` STIX 2.1 knowledge base into cited, timestamped
 catalog claims — technique / tactic / group / software / mitigation entities
 keyed by their ATT&CK id, and the catalog edges MITRE publishes (in_tactic,
@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.connectors import attack, vulns
-from loom.context import build_pack, find_paths
-from loom.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import attack, vulns
+from loomctx.context import build_pack, find_paths
+from loomctx.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 FIX = Path(__file__).parent / "fixtures"
 SLICE = FIX / "attack_stix_slice.json"
@@ -179,7 +179,7 @@ def test_reimport_is_idempotent(tmp_path):
 
 def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
     """D-063 / S-36: a loader that saw any refusal must not exit 0."""
-    from loom import ingest
+    from loomctx import ingest
     monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
 
     def refusing(url, lines, size, key, timeout=60.0):
@@ -188,7 +188,7 @@ def test_import_exits_nonzero_when_the_engine_refuses(monkeypatch):
 
     monkeypatch.setattr(ingest, "post_batches", refusing)
     with pytest.raises(SystemExit) as exc:
-        attack.main(["import", str(SLICE), "--namespace", "attack", "--url", "http://loom.invalid"])
+        attack.main(["import", str(SLICE), "--namespace", "attack", "--url", "http://loomctx.invalid"])
     assert exc.value.code not in (0, None) and "3" in str(exc.value.code) and "refused" in str(exc.value.code)
 
 

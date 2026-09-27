@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom import coverage, enrich
-from loom.connectors import endpoint
-from loom.contracts import EntityRef
-from loom.store.sqlite import SqliteStore
+from loomctx import coverage, enrich
+from loomctx.connectors import endpoint
+from loomctx.contracts import EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 T0 = datetime(2026, 9, 20, 9, 0, tzinfo=timezone.utc)
 
@@ -128,7 +128,7 @@ def test_one_binary_on_two_hosts_is_one_hash(tmp_path):
 
 
 def test_a_process_account_folds_into_the_directory_user(tmp_path):
-    from loom import identity
+    from loomctx import identity
     store = SqliteStore(tmp_path / "u.db")
     store.put_schema(endpoint.schema("net"))
     ad_user = EntityRef(type="user", key="S-1-5-21-1-2-3-1105")

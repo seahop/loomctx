@@ -1,6 +1,6 @@
 # Security policy
 
-Loom is pre-1.0 and under active development ahead of a conference demo
+LoomCtx is pre-1.0 and under active development ahead of a conference demo
 (October 2026). It is designed to hold sensitive operational data — treat
 any deployment as such.
 

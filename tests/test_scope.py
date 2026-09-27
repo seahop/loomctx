@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
-from loom.context import build_pack, resolve_scope
-from loom.contracts import AskRequest, ClaimIn, EntityRef, ScopeSpec
-from loom.store.sqlite import SqliteStore
+from loomctx.context import build_pack, resolve_scope
+from loomctx.contracts import AskRequest, ClaimIn, EntityRef, ScopeSpec
+from loomctx.store.sqlite import SqliteStore
 
 
 def _at(day, hour=12):
@@ -187,7 +187,7 @@ def test_scope_subjects_are_bounded():
 # ------------------------------------------------ scope topics (D-061) #
 
 def test_a_predicate_is_named_when_every_word_of_it_is_asked():
-    from loom.context import named_predicates
+    from loomctx.context import named_predicates
     vocab = {"runs_software", "runs_os", "exploited_in_wild", "affects", "logged_in_by", "has_weakness"}
     q = "Which CVEs that CISA lists as exploited in the wild affect software that host:web-01 runs?"
     assert named_predicates(q, vocab) == {"runs_software", "exploited_in_wild", "affects"}
@@ -233,7 +233,7 @@ def test_a_reached_entitys_conflict_ships_only_when_the_question_is_about_it(tmp
 def _vuln_registry(namespace="v"):
     """A vulnerability registry as a connector would declare it: links carry
     object types, attributes carry descriptions."""
-    from loom.contracts import PredicateDef, SchemaRegistration
+    from loomctx.contracts import PredicateDef, SchemaRegistration
     return SchemaRegistration(namespace=namespace, predicates=[
         PredicateDef(name="runs_software", object_types=["product"], containment=True,
                      description="a host runs this product (scopes follow it by default)"),
@@ -254,7 +254,7 @@ def test_a_description_names_an_attribute_only_when_distinctive():
     of its words) is named — the best match only; one shared word, or
     two of a long description's dozen ("cite observation ids ... CISA"
     against cvss_score's), is not a match."""
-    from loom.context import described_predicates
+    from loomctx.context import described_predicates
     defs = _vuln_registry().predicates
     host = [EntityRef(type="host", key="web-01")]
     assert described_predicates("Which CVEs affect the software host:web-01 runs and are listed by CISA?",
@@ -316,8 +316,8 @@ def test_an_attribute_in_expand_is_the_topic_not_a_link(tmp_path, monkeypatch):
     ignored: the pack was the recency window, one KEV CVE of 32. An
     attribute in the expand list is the topic now (hub completion and
     topic-first selection), and the pack says so in `notes`."""
-    from loom import context
-    from loom.context import expand_attributes
+    from loomctx import context
+    from loomctx.context import expand_attributes
     monkeypatch.setattr(context, "_GATHER_LIMIT", 100)
     store, host, kev = _hub_store(tmp_path)
     q = "Which CVEs affect the software host:web-01 runs? Name every one."
@@ -340,7 +340,7 @@ def test_an_attribute_in_expand_is_the_topic_not_a_link(tmp_path, monkeypatch):
 
 
 def test_the_question_naming_the_attribute_by_its_description_completes_the_hub(tmp_path, monkeypatch):
-    from loom import context
+    from loomctx import context
     monkeypatch.setattr(context, "_GATHER_LIMIT", 100)
     store, host, kev = _hub_store(tmp_path)
     pack = build_pack(store, AskRequest(
@@ -353,7 +353,7 @@ def test_an_edge_registered_without_object_types_is_still_walked(tmp_path):
     """A STIX relationship is registered with no object types and is a
     link: seen with an entity at its far end, it is walked, not taken as
     a topic."""
-    from loom.contracts import PredicateDef, SchemaRegistration
+    from loomctx.contracts import PredicateDef, SchemaRegistration
     store = SqliteStore(tmp_path / "stix.db")
     store.put_schema(SchemaRegistration(namespace="s", predicates=[PredicateDef(name="uses")]))
     actor = EntityRef(type="threat-actor", key="apt-1")
@@ -372,7 +372,7 @@ def test_a_pack_names_what_it_could_not_do(tmp_path):
     name and description; a scope that stops a hop short of what the
     question names is told which link to add; the answer prompt carries
     the notes too."""
-    from loom.answer import render_user_prompt
+    from loomctx.answer import render_user_prompt
     store, host, _ = _hub_store(tmp_path, kev_per_product=(1,), per_product=3)
     q = "Which CVEs affect the software host:web-01 runs and are exploited in the wild?"
     pack = build_pack(store, AskRequest(namespace="v", question=q, budget=800, scope=ScopeSpec(
@@ -418,7 +418,7 @@ def test_the_scope_budget_carries_the_answer_within_the_mcp_limit(tmp_path, monk
         enc = tiktoken.get_encoding("cl100k_base")
     except Exception as exc:  # noqa: BLE001 — offline with no cached encoding
         pytest.skip(f"tiktoken encoding unavailable: {exc}")
-    from loom import context, mcp_server
+    from loomctx import context, mcp_server
     monkeypatch.setattr(context, "_GATHER_LIMIT", 100)
     store, host, kev = _hub_store(tmp_path)
     q = ("Is host web-01 exposed to any vulnerability that CISA lists as exploited in the wild? Name every "

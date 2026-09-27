@@ -10,7 +10,7 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      # the gateway caps the ingest stream at LOOM_STREAM_MAX_BYTES (1 GiB
+      # the gateway caps the ingest stream at LOOMCTX_STREAM_MAX_BYTES (1 GiB
       # here) and the consumer caps the dead-letter stream at 256 MiB; the
       # claim must hold both plus headroom
       storage: 2Gi

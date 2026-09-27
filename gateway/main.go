@@ -1,4 +1,4 @@
-// The Loom ingest gateway (docs/decisions.md D-010).
+// The LoomCtx ingest gateway (docs/decisions.md D-010).
 //
 // Stateless hot path: authenticate (phase 5), validate the ingestion envelope
 // against the JSON Schema exported from the Python contracts, rate-limit, and
@@ -33,7 +33,7 @@ type config struct {
 	rateBurst    int     // bucket size; 0 = the rate, rounded down (at least 1)
 	stream       streamConfig
 	// Host / Origin / Content-Type guard (D-059). loadConfig always sets
-	// it from LOOM_ALLOWED_HOSTS / LOOM_ALLOWED_ORIGINS; nil (unit tests
+	// it from LOOMCTX_ALLOWED_HOSTS / LOOMCTX_ALLOWED_ORIGINS; nil (unit tests
 	// that exercise the handlers alone) serves unguarded.
 	hosts *hostPolicy
 }
@@ -48,29 +48,29 @@ type streamConfig struct {
 }
 
 // loadConfig reads the env. A numeric dial that does not parse is an
-// error, never a silent fallback: LOOM_RATE_PER_SEC=0.5 used to go through
+// error, never a silent fallback: LOOMCTX_RATE_PER_SEC=0.5 used to go through
 // ParseInt, fail, and leave the gateway unlimited.
 func loadConfig() (config, error) {
 	p := envParser{}
 	hosts := hostPolicyFromEnv()
 	cfg := config{
-		listenAddr:   envOr("LOOM_GATEWAY_ADDR", ":8080"),
-		schemasPath:  envOr("LOOM_SCHEMAS_PATH", "/etc/loom/schemas.json"),
-		forwardURL:   envOr("LOOM_FORWARD_URL", "http://loom:8000"),
-		natsURL:      os.Getenv("LOOM_NATS_URL"),
-		maxBodyBytes: p.intVar("LOOM_MAX_BODY_BYTES", 1<<20),
-		maxBatch:     p.intVar("LOOM_MAX_BATCH", 1000),
-		ratePerSec:   p.floatVar("LOOM_RATE_PER_SEC", 0),
-		rateBurst:    int(p.intVar("LOOM_RATE_BURST", 0)),
+		listenAddr:   envOr("LOOMCTX_GATEWAY_ADDR", ":8080"),
+		schemasPath:  envOr("LOOMCTX_SCHEMAS_PATH", "/etc/loomctx/schemas.json"),
+		forwardURL:   envOr("LOOMCTX_FORWARD_URL", "http://loomctx:8000"),
+		natsURL:      os.Getenv("LOOMCTX_NATS_URL"),
+		maxBodyBytes: p.intVar("LOOMCTX_MAX_BODY_BYTES", 1<<20),
+		maxBatch:     p.intVar("LOOMCTX_MAX_BATCH", 1000),
+		ratePerSec:   p.floatVar("LOOMCTX_RATE_PER_SEC", 0),
+		rateBurst:    int(p.intVar("LOOMCTX_RATE_BURST", 0)),
 		stream: streamConfig{
-			replicas: int(p.intVar("LOOM_STREAM_REPLICAS", 1)),
-			maxBytes: p.intVar("LOOM_STREAM_MAX_BYTES", 1<<30),
-			discard:  envOr("LOOM_STREAM_DISCARD", "old"),
+			replicas: int(p.intVar("LOOMCTX_STREAM_REPLICAS", 1)),
+			maxBytes: p.intVar("LOOMCTX_STREAM_MAX_BYTES", 1<<30),
+			discard:  envOr("LOOMCTX_STREAM_DISCARD", "old"),
 		},
 		hosts: &hosts,
 	}
 	if cfg.ratePerSec < 0 || cfg.rateBurst < 0 {
-		p.errs = append(p.errs, "LOOM_RATE_PER_SEC / LOOM_RATE_BURST must not be negative (unset or 0 = unlimited)")
+		p.errs = append(p.errs, "LOOMCTX_RATE_PER_SEC / LOOMCTX_RATE_BURST must not be negative (unset or 0 = unlimited)")
 	}
 	if len(p.errs) > 0 {
 		return cfg, errors.New(strings.Join(p.errs, "; "))
@@ -135,9 +135,9 @@ func main() {
 		log.Printf("auth: %d key(s) from %s (hot-reloaded on change)",
 			len(auth.entries), auth.path)
 	case auth.enabled():
-		log.Printf("auth: %d key entries from LOOM_API_KEYS", len(auth.entries))
+		log.Printf("auth: %d key entries from LOOMCTX_API_KEYS", len(auth.entries))
 	default:
-		log.Printf("auth: no LOOM_AUTH_FILE / LOOM_API_KEYS — auth DISABLED (open dev mode)")
+		log.Printf("auth: no LOOMCTX_AUTH_FILE / LOOMCTX_API_KEYS — auth DISABLED (open dev mode)")
 	}
 
 	var fwd forwarder

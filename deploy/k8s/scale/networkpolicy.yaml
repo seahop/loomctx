@@ -7,7 +7,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: loom-gateway
+      app: loomctx-gateway
   policyTypes: [Ingress]
   ingress:
     # from a load balancer / Ingress controller anywhere, and from scrapers
@@ -29,20 +29,20 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: loom-gateway
+              app: loomctx-gateway
         - podSelector:
             matchLabels:
-              app: loom
+              app: loomctx
       ports:
         - port: 4222
           protocol: TCP
     # monitoring endpoint (/healthz, /varz, /jsz) only for pods that say
-    # they scrape, e.g. a Prometheus labelled loom.dev/scrape=true
+    # they scrape, e.g. a Prometheus labelled loomctx.dev/scrape=true
     - from:
         - namespaceSelector: {}
           podSelector:
             matchLabels:
-              loom.dev/scrape: "true"
+              loomctx.dev/scrape: "true"
       ports:
         - port: 8222
           protocol: TCP

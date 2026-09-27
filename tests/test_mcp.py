@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-import loom.mcp_server as mcp_server
-from loom.contracts import ClaimIn, EntityRef
-from loom.store.sqlite import SqliteStore
+import loomctx.mcp_server as mcp_server
+from loomctx.contracts import ClaimIn, EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 
 @pytest.fixture
@@ -134,8 +134,8 @@ def test_answer_without_llm_is_a_tool_error(store, monkeypatch):
     """Every tool fails one way — a ToolError — never an {"error": …}
     payload an agent could read as data."""
     from mcp.server.mcpserver.exceptions import ToolError
-    for var in ("LOOM_LLM_MODEL", "LOOM_LLM_PROVIDER",
-                "LOOM_LLM_BASE_URL", "LOOM_LLM_API_KEY"):
+    for var in ("LOOMCTX_LLM_MODEL", "LOOMCTX_LLM_PROVIDER",
+                "LOOMCTX_LLM_BASE_URL", "LOOMCTX_LLM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     mcp_server._llm_loaded = False
     try:
@@ -164,13 +164,13 @@ def test_call_tool_through_mcp_layer(store):
 
 class _Ctx:
     def __init__(self, key=None):
-        self.headers = {"x-loom-key": key} if key else {}
+        self.headers = {"x-loomctx-key": key} if key else {}
 
 
 def _keyed_auth(monkeypatch):
-    monkeypatch.setenv("LOOM_API_KEYS", "reader:default:r,writer:default:rw")
-    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
-    from loom.auth import AuthConfig
+    monkeypatch.setenv("LOOMCTX_API_KEYS", "reader:default:r,writer:default:rw")
+    monkeypatch.delenv("LOOMCTX_AUTH_FILE", raising=False)
+    from loomctx.auth import AuthConfig
     return AuthConfig.from_env()
 
 
@@ -229,15 +229,15 @@ def test_key_gate_middleware_rejects_before_mcp(monkeypatch):
         return out[0]["status"]
 
     assert asyncio.run(call([])) == 401
-    assert asyncio.run(call([(b"x-loom-key", b"bogus")])) == 403
+    assert asyncio.run(call([(b"x-loomctx-key", b"bogus")])) == 403
     assert asyncio.run(call([(b"authorization", b"Bearer reader")])) == 200
     assert seen == ["/mcp"]
 
 
 def test_find_related_by_meaning(store, monkeypatch):
-    from loom.enrich import embed_pending
-    from loom.llm import HashingEmbedder
-    monkeypatch.setenv("LOOM_EMBED_PROVIDER", "hashing")
+    from loomctx.enrich import embed_pending
+    from loomctx.llm import HashingEmbedder
+    monkeypatch.setenv("LOOMCTX_EMBED_PROVIDER", "hashing")
     mcp_server._embedder_loaded = False
     try:
         embed_pending(store, HashingEmbedder())
@@ -250,7 +250,7 @@ def test_find_related_by_meaning(store, monkeypatch):
 
 def test_list_and_describe_namespaces(store):
     """D-036: an agent can discover where the data is and how it connects."""
-    from loom.contracts import PredicateDef, SchemaRegistration
+    from loomctx.contracts import PredicateDef, SchemaRegistration
     store.put_schema(SchemaRegistration(namespace="default", predicates=[
         PredicateDef(name="member_of", object_types=["domain"], containment=True)]))
     listed = mcp_server.list_namespaces()
@@ -291,14 +291,14 @@ def test_describe_namespace_shows_each_types_links(store):
     assert "-> " in hint and "depth=2" in hint
     # a type-scoped key sees only links among its own types
     import hashlib
-    from loom.auth import AuthConfig, _parse_file
+    from loomctx.auth import AuthConfig, _parse_file
     auth = AuthConfig(_parse_file(json.dumps({"keys": [{
         "id": "k", "sha256": hashlib.sha256(b"k").hexdigest(), "namespaces": ["default"], "perms": "r",
         "entity_types": ["host", "product"]}]})))
     mcp_server.configure(store, auth=auth, transport="streamable-http")
 
     class Ctx:
-        headers = {"x-loom-key": "k"}
+        headers = {"x-loomctx-key": "k"}
     scoped = {t["name"]: t for t in mcp_server.describe_namespace("default", ctx=Ctx())["entity_types"]}
     assert set(scoped) == {"host", "product"}
     assert scoped["product"]["links"] == ["<-runs_software- host"]
@@ -307,7 +307,7 @@ def test_describe_namespace_shows_each_types_links(store):
 
 
 def test_describe_namespace_caps_a_types_links():
-    from loom.mcp_server import _LINKS_SHOWN, _capped
+    from loomctx.mcp_server import _LINKS_SHOWN, _capped
     many = [f"-p{i}-> t" for i in range(_LINKS_SHOWN + 3)]
     assert _capped(many, _LINKS_SHOWN) == many[:_LINKS_SHOWN] + ["+3 more"]
     assert _capped(many[:2], _LINKS_SHOWN) == many[:2]
@@ -351,17 +351,17 @@ def test_expand_explains_what_a_handle_is(store):
 
 def test_default_namespace_comes_from_the_environment(store, monkeypatch):
     import importlib
-    monkeypatch.setenv("LOOM_MCP_NAMESPACE", "default")
+    monkeypatch.setenv("LOOMCTX_MCP_NAMESPACE", "default")
     reloaded = importlib.reload(mcp_server)
     try:
         reloaded.configure(store)
         assert reloaded._DEFAULT_NS == "default"
         assert reloaded.find_entity("web-01")[0]["handle"] == "host:web-01"
-        monkeypatch.setenv("LOOM_MCP_NAMESPACE", "elsewhere")
+        monkeypatch.setenv("LOOMCTX_MCP_NAMESPACE", "elsewhere")
         reloaded = importlib.reload(mcp_server)
         assert reloaded.ask.__defaults__ is not None and "elsewhere" in reloaded.ask.__defaults__
     finally:
-        monkeypatch.delenv("LOOM_MCP_NAMESPACE", raising=False)
+        monkeypatch.delenv("LOOMCTX_MCP_NAMESPACE", raising=False)
         importlib.reload(mcp_server).configure(store)
 
 
@@ -383,7 +383,7 @@ def test_pack_view_is_shaped_for_agents(store):
 
 
 def test_agent_view_warns_about_partial_coverage(store, monkeypatch):
-    import loom.context as ctx
+    import loomctx.context as ctx
     monkeypatch.setattr(ctx, "_GATHER_LIMIT", 1)
     view = mcp_server.ask("host:web-01", "who?", budget=2000)
     assert view["truncated"][0]["entity"] == {"type": "host", "key": "web-01"}
@@ -432,9 +432,9 @@ def test_scoped_key_never_learns_other_namespaces(store, monkeypatch, tmp_path):
     store.record_claim(ClaimIn(
         namespace="secret", subject=EntityRef(type="host", key="vault-01"), predicate="runs_os",
         object="openbsd", observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc), source="inv"))
-    monkeypatch.setenv("LOOM_API_KEYS", "reader:default:r,admin:*:rw")
-    monkeypatch.delenv("LOOM_AUTH_FILE", raising=False)
-    from loom.auth import AuthConfig
+    monkeypatch.setenv("LOOMCTX_API_KEYS", "reader:default:r,admin:*:rw")
+    monkeypatch.delenv("LOOMCTX_AUTH_FILE", raising=False)
+    from loomctx.auth import AuthConfig
     mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
     assert [n["namespace"] for n in mcp_server.list_namespaces(ctx=_Ctx("reader"))] == ["default"]
     assert [n["namespace"] for n in mcp_server.list_namespaces(ctx=_Ctx("admin"))] == ["default", "secret"]
@@ -450,8 +450,8 @@ def test_scoped_key_never_learns_other_namespaces(store, monkeypatch, tmp_path):
     keys = tmp_path / "keys.json"
     keys.write_text(json.dumps({"keys": [{"id": "two", "sha256": hashlib.sha256(b"two").hexdigest(),
                                           "namespaces": ["default", "empty"], "perms": "r"}]}))
-    monkeypatch.delenv("LOOM_API_KEYS")
-    monkeypatch.setenv("LOOM_AUTH_FILE", str(keys))
+    monkeypatch.delenv("LOOMCTX_API_KEYS")
+    monkeypatch.setenv("LOOMCTX_AUTH_FILE", str(keys))
     mcp_server.configure(store, auth=AuthConfig.from_env(), transport="streamable-http")
     with pytest.raises(ValueError) as exc:
         mcp_server.find_entity("x", namespace="empty", ctx=_Ctx("two"))
@@ -515,7 +515,7 @@ def test_ask_scope_reads_a_list_sent_as_text(store):
     and the schema refused it twice. Through the MCP layer (the SDK
     validates arguments), bracketed list text — JSON, Python-style, or
     unquoted — is the list it spells; a bare string is one item."""
-    from loom.mcp_server import _listed
+    from loomctx.mcp_server import _listed
     assert _listed("['runs_software', 'affects']") == ["runs_software", "affects"]
     assert _listed('["member_of"]') == ["member_of"]
     assert _listed("[member_of, logged_in_by]") == ["member_of", "logged_in_by"]
@@ -648,7 +648,7 @@ def test_main_closes_the_store_on_the_way_out(monkeypatch):
     PythonFinalizationError after every stdio session; main() closes it,
     also when the server exits with an error."""
     import pytest
-    import loom.mcp_server as ms
+    import loomctx.mcp_server as ms
     closed = []
     fake = type("S", (), {"close": lambda self: closed.append(True)})()
 

@@ -1,5 +1,5 @@
-"""The synthetic AD generator (loom.connectors.ad_gen) and the object-level
-reachability benchmark (loom.ad_eval): the generator is deterministic and
+"""The synthetic AD generator (loomctx.connectors.ad_gen) and the object-level
+reachability benchmark (loomctx.ad_eval): the generator is deterministic and
 emits LDIF the raw-LDAP connector parses; a planted chain is recovered with
 every edge cited; a decoy dead-end is not reported as connecting; and the
 whole harness runs end to end on a small scale into a temp SQLite store. No
@@ -7,9 +7,9 @@ network — the scripted reader is the metric."""
 
 import pytest
 
-from loom import ad_eval
-from loom.connectors import ad_gen
-from loom.store.sqlite import SqliteStore
+from loomctx import ad_eval
+from loomctx.connectors import ad_gen
+from loomctx.store.sqlite import SqliteStore
 
 
 # ------------------------------------------------------------- generator #
@@ -25,7 +25,7 @@ def test_generator_is_deterministic():
 
 
 def test_generator_emits_parseable_ldif_with_the_planted_shape():
-    from loom.connectors import ldap
+    from loomctx.connectors import ldap
     ldif, truth = ad_gen.generate(7, "small")
     entries, export_at = ldap.parse_ldif(ldif)
     assert export_at is not None and len(entries) == truth["counts"]["objects"]
@@ -128,7 +128,7 @@ def test_cli_report_redacts_a_store_dsn_password(monkeypatch, tmp_path):
     store = SqliteStore(db)
     ad_eval.load_ldif(store, ldif, "ad")
     store.close()
-    monkeypatch.setattr("loom.store.factory.store_from_url", lambda url: SqliteStore(db))
+    monkeypatch.setattr("loomctx.store.factory.store_from_url", lambda url: SqliteStore(db))
     real_md = ad_eval.markdown
 
     def spy(summary, meta):
@@ -136,7 +136,7 @@ def test_cli_report_redacts_a_store_dsn_password(monkeypatch, tmp_path):
         return real_md(summary, meta)
 
     monkeypatch.setattr(ad_eval, "markdown", spy)
-    ad_eval.main(["--db", "postgresql://loom:s3cret@db:5432/loom", "--truth", str(truth_path),
+    ad_eval.main(["--db", "postgresql://loomctx:s3cret@db:5432/loomctx", "--truth", str(truth_path),
                   "--budgets", "1500", "--quiet", "--out", str(tmp_path / "r.md")])
     assert "s3cret" not in captured["meta"]["store"]
     assert "s3cret" not in (tmp_path / "r.md").read_text()

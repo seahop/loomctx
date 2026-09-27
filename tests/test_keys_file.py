@@ -1,4 +1,4 @@
-"""loom.keys writes its file atomically, private, under secrets/ by default."""
+"""loomctx.keys writes its file atomically, private, under secrets/ by default."""
 
 import json
 import os
@@ -7,11 +7,11 @@ import sys
 
 import pytest
 
-from loom import keys
+from loomctx import keys
 
 
 def _run(argv, capsys):
-    sys.argv = ["loom.keys", *argv]
+    sys.argv = ["loomctx.keys", *argv]
     keys.main()
     return capsys.readouterr()
 
@@ -19,12 +19,12 @@ def _run(argv, capsys):
 def test_generate_writes_0600_and_no_temp_files(tmp_path, capsys):
     path = tmp_path / "secrets" / "keys.json"   # parent does not exist yet
     out = _run(["--file", str(path), "generate", "--id", "a", "--namespace", "netsec", "--perms", "r"], capsys)
-    assert out.out.strip().startswith("loomk_")
+    assert out.out.strip().startswith("loomctxk_")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert sorted(os.listdir(path.parent)) == ["keys.json"]     # no .tmp left behind
     data = json.loads(path.read_text())
     assert [k["id"] for k in data["keys"]] == ["a"]
-    assert "loomk_" not in path.read_text()                      # hash only
+    assert "loomctxk_" not in path.read_text()                      # hash only
 
 
 def test_replace_is_atomic_on_failure(tmp_path, monkeypatch):
@@ -45,7 +45,7 @@ def test_replace_is_atomic_on_failure(tmp_path, monkeypatch):
 def test_rate_limit_fields_generate_update_list(tmp_path, capsys):
     """R-10: per-key rate overrides live beside the grant; the engine and
     the Go gateway read the same field names."""
-    from loom.auth import _parse_file
+    from loomctx.auth import _parse_file
 
     path = tmp_path / "keys.json"
     _run(["--file", str(path), "generate", "--id", "agent", "--namespace", "netsec", "--perms", "r",
@@ -63,7 +63,7 @@ def test_rate_limit_fields_generate_update_list(tmp_path, capsys):
     out = _run(["--file", str(path), "list"], capsys).out
     assert "rate=5/s burst=20" in out and "llm_rate=0.5/s" in out
 
-    # update: set, and 0 drops the override (the LOOM_RATE_* defaults apply)
+    # update: set, and 0 drops the override (the LOOMCTX_RATE_* defaults apply)
     _run(["--file", str(path), "update", "--id", "plain", "--rate-per-sec", "2"], capsys)
     _run(["--file", str(path), "update", "--id", "agent", "--rate-llm-per-sec", "0", "--rate-burst", "0"], capsys)
     entry = {k["id"]: k for k in json.loads(path.read_text())["keys"]}

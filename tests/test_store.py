@@ -1,6 +1,6 @@
 """GraphStore contract tests, run against every backend.
 
-SQLite always runs. Postgres runs when LOOM_TEST_POSTGRES_URL is set (CI
+SQLite always runs. Postgres runs when LOOMCTX_TEST_POSTGRES_URL is set (CI
 brings one up via the compose `pg` profile); otherwise those params skip.
 """
 
@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom.contracts import ClaimIn, EntityRef
-from loom.store.sqlite import SqliteStore
+from loomctx.contracts import ClaimIn, EntityRef
+from loomctx.store.sqlite import SqliteStore
 
 OBSERVED = datetime(2026, 9, 1, 14, 3, tzinfo=timezone.utc)
 
@@ -23,15 +23,15 @@ def store(request, tmp_path):
     elif request.param == "sharded":
         # two SQLite shards: namespaces the suite uses land on both sides,
         # so every contract test also exercises the routing (D-032)
-        from loom.store.sharded import ShardedStore
+        from loomctx.store.sharded import ShardedStore
         b = SqliteStore(tmp_path / "shard-b.db")
         s = ShardedStore(SqliteStore(tmp_path / "shard-a.db"),
                          {"team-b": b, "other": b, "other-ns": b, "vuln": b})
     else:
-        url = os.environ.get("LOOM_TEST_POSTGRES_URL")
+        url = os.environ.get("LOOMCTX_TEST_POSTGRES_URL")
         if not url:
-            pytest.skip("LOOM_TEST_POSTGRES_URL not set")
-        from loom.store.postgres import PostgresStore
+            pytest.skip("LOOMCTX_TEST_POSTGRES_URL not set")
+        from loomctx.store.postgres import PostgresStore
 
         s = PostgresStore(url)
         s.wipe()
@@ -59,8 +59,8 @@ def _reopen(store, tmp_path):
     """A second store instance on the same database (migration tests)."""
     if isinstance(store, SqliteStore):
         return SqliteStore(tmp_path / "test.db")
-    from loom.store.postgres import PostgresStore
-    return PostgresStore(os.environ["LOOM_TEST_POSTGRES_URL"])
+    from loomctx.store.postgres import PostgresStore
+    return PostgresStore(os.environ["LOOMCTX_TEST_POSTGRES_URL"])
 
 
 def login_claim(namespace="default"):
@@ -130,7 +130,7 @@ def test_unknown_entity_returns_empty(store):
 
 
 def test_artifact_roundtrip(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
 
     artifact = store.store_artifact(
         DocumentIn(
@@ -187,7 +187,7 @@ def test_claim_for_a_merged_away_ref_lands_on_the_canonical(store):
     """After ip_address:10.0.4.7 is folded into ip:10.0.4.7, a claim (or a
     restored observation) naming the old ref must attach to the canonical
     entity, not resurrect the folded node beside its own alias."""
-    from loom.contracts import Observation
+    from loomctx.contracts import Observation
     a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
     store.record_claim(ClaimIn(subject=a, predicate="noted", object="x", observed_at=OBSERVED, source="s"))
     store.record_claim(ClaimIn(subject=b, predicate="assigned_to", object=EntityRef(type="host", key="web-01"),
@@ -270,7 +270,7 @@ def test_event_id_is_namespace_scoped(store):
 
 
 def test_document_event_id_dedupes(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     doc = DocumentIn(text="report", source="ir", observed_at=OBSERVED, event_id="doc-1")
     first = store.store_artifact(doc)
     assert store.store_artifact(doc).id == first.id
@@ -287,7 +287,7 @@ def test_dedupe_survives_losing_the_insert_race(store, monkeypatch):
     """H-B2: when the pre-check misses (another writer landed the event_id
     between check and insert), ON CONFLICT hands back the winner instead of
     raising — and the store keeps working afterwards."""
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     first = store.record_claim(_claim(event_id="race-1"))
     real = store._existing_by_event
     calls = {"n": 0}
@@ -363,7 +363,7 @@ def test_replaying_a_redacted_event_returns_no_content(store):
 
 def test_retention_purge_cleans_derived_rows(store):
     from datetime import timedelta
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     old = OBSERVED - timedelta(days=400)
     keep = store.record_claim(_claim())
     gone = store.record_claim(_claim(observed=old))
@@ -383,8 +383,8 @@ def test_retention_purge_cleans_derived_rows(store):
 def test_export_import_keeps_redactions_and_aliases(store, tmp_path):
     """H-B4: a restore is faithful — redacted stays hidden, merged refs resolve."""
     import io
-    from loom.lifecycle import export_jsonl, import_jsonl
-    from loom.store.sqlite import SqliteStore
+    from loomctx.lifecycle import export_jsonl, import_jsonl
+    from loomctx.store.sqlite import SqliteStore
     secret = store.record_claim(_claim(event_id="evt-9", attrs={"k": "v"}))
     store.redact("default", secret.id, "spill")
     store.record_claim(_claim(event_id="evt-10", observed=OBSERVED))
@@ -419,7 +419,7 @@ def test_an_import_never_serves_a_redacted_row(store, tmp_path):
     put tombstones first, and an old-order dump that can be re-read gets
     its tombstones applied in a first pass."""
     import io
-    from loom.lifecycle import export_jsonl, import_jsonl
+    from loomctx.lifecycle import export_jsonl, import_jsonl
     secret = store.record_claim(_claim(event_id="evt-s"))
     store.redact("default", secret.id, "spill")
     buf = io.StringIO()
@@ -502,7 +502,7 @@ def test_merge_moves_dossier_and_rewrites_object_refs(store):
 def test_doc_chunks_are_keyed_by_model_and_carry_artifact_metadata(store):
     """H-D3/H-C1: chunks embedded under one model are invisible to another;
     each chunk carries what a citation needs."""
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     art = store.store_artifact(DocumentIn(text="hello world", filename="h.txt",
                                           source="wiki", observed_at=OBSERVED))
     blank = store.store_artifact(DocumentIn(text="   \n ", source="wiki",
@@ -528,7 +528,7 @@ def test_dossier_round_trips_its_citations(store):
 
 def test_count_and_artifact_citation_scope(store):
     """H-E3 / H-A6 store primitives."""
-    from loom.contracts import DocumentIn, Provenance
+    from loomctx.contracts import DocumentIn, Provenance
     host = EntityRef(type="host", key="web-01")
     assert store.count_observations("default", host) == 0
     a = store.record_claim(login_claim())
@@ -564,8 +564,8 @@ def test_find_paths_drops_an_edge_superseded_off_its_walk(store):
     """D-067 on every backend: walked from its object side, a retired edge's
     correction (same subject, other object) is never gathered — find_paths
     looks the path's edge ids up with corrections_of before returning."""
-    from loom.context import find_paths
-    from loom.contracts import PathRequest
+    from loomctx.context import find_paths
+    from loomctx.contracts import PathRequest
     b, c = EntityRef(type="host", key="b"), EntityRef(type="host", key="c")
     x = store.record_claim(ClaimIn(subject=b, predicate="link", object=c,
                                    observed_at=OBSERVED, source="g"))
@@ -645,7 +645,7 @@ def test_fuzzy_candidates_group_by_normalized_key(store):
 
 
 def test_schema_registry_merges_by_name(store):
-    from loom.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
+    from loomctx.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
     assert store.get_schema("netsec") is None
     first = store.put_schema(SchemaRegistration(
         namespace="netsec",
@@ -666,7 +666,7 @@ def test_schema_registry_merges_by_name(store):
 
 def test_extraction_backoff_is_persisted(store):
     from datetime import timedelta
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     a = store.store_artifact(DocumentIn(text="a", source="s", observed_at=OBSERVED))
     b = store.store_artifact(DocumentIn(text="b", source="s", observed_at=OBSERVED))
     now = OBSERVED
@@ -679,7 +679,7 @@ def test_extraction_backoff_is_persisted(store):
 
 
 def test_doc_chunks_by_seq(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     art = store.store_artifact(DocumentIn(text="abcdef", source="s", observed_at=OBSERVED))
     store.put_doc_chunks("default", art.id, "m", [
         (0, 0, 2, "ab", [1.0]), (1, 2, 4, "cd", [1.0]), (2, 4, 6, "ef", [1.0])])
@@ -754,7 +754,7 @@ def test_nearest_observations_rank_by_cosine(store):
 
 
 def test_nearest_chunks_filter_by_artifact(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     a = store.store_artifact(DocumentIn(text="aaaa bbbb", source="s", observed_at=OBSERVED))
     b = store.store_artifact(DocumentIn(text="cccc dddd", source="s", observed_at=OBSERVED))
     store.put_doc_chunks("default", a.id, "m", [(0, 0, 4, "aaaa", _unit(1, 0)), (1, 5, 9, "bbbb", _unit(0, 1))])
@@ -773,8 +773,8 @@ def test_nearest_chunks_filters_by_artifact_inside_the_index(store, monkeypatch)
     every cited artifact in Python. With an index the k nearest among the
     cited artifacts come from the index alone; chunks the index has not
     caught up with still count (the exact scan covers the lag)."""
-    from loom.contracts import DocumentIn
-    import loom.store.common as common
+    from loomctx.contracts import DocumentIn
+    import loomctx.store.common as common
     docs = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED,
                                             event_id=f"d{i}")) for i in range(6)]
     # five decoy documents sit right on the query; the cited one is off to the side
@@ -831,7 +831,7 @@ def test_vector_index_backfill_is_per_model_and_purge_drops_stale_rows(store):
     observations and chunks behind, still answering searches."""
     _raw(store)
     from datetime import timedelta
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     ids = [store.record_claim(login_claim().model_copy(update={
         "object": EntityRef(type="user", key=f"u{i}"), "event_id": f"pm{i}"})).id for i in range(3)]
     store.put_embeddings("default", "m2", [(oid, _unit(1, 0, 0)) for oid in ids])   # m2: indexed
@@ -868,7 +868,7 @@ def test_nearest_search_in_a_minority_namespace_is_complete(store):
     Both stores now widen the candidate set and fall back to an exact scan
     when the index returns fewer than `limit` rows."""
     import random
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     rng = random.Random(3)
 
     def vec():
@@ -925,13 +925,13 @@ def test_concurrent_writers_and_readers(store):
 
 
 def test_postgres_read_replica_pool(tmp_path):
-    """LOOM_DB_READ: reads go to the replica pool (here: the same server
+    """LOOMCTX_DB_READ: reads go to the replica pool (here: the same server
     under a different DSN), writes stay on the primary."""
-    url = os.environ.get("LOOM_TEST_POSTGRES_URL")
+    url = os.environ.get("LOOMCTX_TEST_POSTGRES_URL")
     if not url:
-        pytest.skip("LOOM_TEST_POSTGRES_URL not set")
-    from loom.store.postgres import PostgresStore
-    read_url = url + ("&" if "?" in url else "?") + "application_name=loom-reader"
+        pytest.skip("LOOMCTX_TEST_POSTGRES_URL not set")
+    from loomctx.store.postgres import PostgresStore
+    read_url = url + ("&" if "?" in url else "?") + "application_name=loomctx-reader"
     s = PostgresStore(url, read_dsn=read_url, pool_size=2)
     try:
         s.wipe()
@@ -943,7 +943,7 @@ def test_postgres_read_replica_pool(tmp_path):
         assert s.schema_version() >= 2
         with s._tx(read=True):
             who = s._q("SELECT current_setting('application_name') AS a")[0]["a"]
-        assert who == "loom-reader"
+        assert who == "loomctx-reader"
     finally:
         s.close()
     same = PostgresStore(url, read_dsn=url)   # identical DSN: no second pool
@@ -955,7 +955,7 @@ def test_postgres_read_replica_pool(tmp_path):
 
 def test_extraction_leases_are_exclusive_and_expire(store):
     from datetime import timedelta
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     ids = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED)).id
            for i in range(3)]
     now = OBSERVED
@@ -977,7 +977,7 @@ def test_extraction_leases_are_exclusive_and_expire(store):
 
 
 def test_chunk_and_dossier_leases(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     art = store.store_artifact(DocumentIn(text="hello world", source="s", observed_at=OBSERVED))
     assert [x.id for x in store.artifacts_needing_chunks("m", 4, lease=("a", 300))] == [art.id]
     assert store.artifacts_needing_chunks("m", 4, lease=("b", 300)) == []
@@ -1002,7 +1002,7 @@ def test_lease_release_honours_ownership(store):
     """A worker whose lease expired and was re-claimed must not clobber the
     new holder's state; a holder can renew per extraction window."""
     from datetime import timedelta
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     art = store.store_artifact(DocumentIn(text="doc", source="s", observed_at=OBSERVED))
     now = OBSERVED
     assert [a.id for a in store.pending_artifacts(1, now=now, lease=("a", 300))] == [art.id]
@@ -1023,7 +1023,7 @@ def test_lease_release_honours_ownership(store):
 
 
 def test_chunk_and_dossier_release_honour_ownership(store):
-    from loom.contracts import DocumentIn
+    from loomctx.contracts import DocumentIn
     art = store.store_artifact(DocumentIn(text="hello world", source="s", observed_at=OBSERVED))
     assert [x.id for x in store.artifacts_needing_chunks("m", 4, lease=("a", 300))] == [art.id]
     # a stranger's chunks land (idempotent rows) but the lease stays a's
@@ -1060,8 +1060,8 @@ def test_embedding_backlog_shards_partition_the_work(store):
 # -------------------------------------------------- namespace sharding (D-032) #
 
 def test_sharded_store_routes_and_fans_out(tmp_path):
-    from loom.contracts import DocumentIn
-    from loom.store.sharded import ShardedStore
+    from loomctx.contracts import DocumentIn
+    from loomctx.store.sharded import ShardedStore
     a, b = SqliteStore(tmp_path / "a.db"), SqliteStore(tmp_path / "b.db")
     s = ShardedStore(a, {"acme": b})
     assert s.describe() == {"acme": 1}
@@ -1082,47 +1082,47 @@ def test_sharded_store_routes_and_fans_out(tmp_path):
 
 
 def test_sharded_store_from_env(tmp_path, monkeypatch):
-    from loom.store.factory import store_from_env
-    from loom.store.sharded import ShardedStore
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "main.db"))
-    monkeypatch.setenv("LOOM_SHARDS", json.dumps({"acme": str(tmp_path / "acme.db"),
+    from loomctx.store.factory import store_from_env
+    from loomctx.store.sharded import ShardedStore
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "main.db"))
+    monkeypatch.setenv("LOOMCTX_SHARDS", json.dumps({"acme": str(tmp_path / "acme.db"),
                                                   "globex": str(tmp_path / "acme.db")}))
     s = store_from_env()
     assert isinstance(s, ShardedStore) and s.describe() == {"acme": 1, "globex": 1}
     s.close()
-    monkeypatch.delenv("LOOM_SHARDS")
+    monkeypatch.delenv("LOOMCTX_SHARDS")
     assert isinstance(store_from_env(), SqliteStore)
 
 
 def test_shards_never_inherit_the_default_read_replica(tmp_path, monkeypatch):
-    """LOOM_DB_READ names the replica of LOOM_DB. A Postgres shard on another
+    """LOOMCTX_DB_READ names the replica of LOOMCTX_DB. A Postgres shard on another
     cluster must not be handed that replica; it gets one only from its own
     {"dsn", "read"} entry."""
-    from loom.store import factory
-    from loom.store.sharded import ShardedStore
+    from loomctx.store import factory
+    from loomctx.store.sharded import ShardedStore
     made = []
 
     def fake_store_from_url(url, read_url=factory._FROM_ENV):
-        effective = os.environ.get("LOOM_DB_READ") if read_url is factory._FROM_ENV else read_url
+        effective = os.environ.get("LOOMCTX_DB_READ") if read_url is factory._FROM_ENV else read_url
         made.append((url, effective))
         return SqliteStore(tmp_path / f"{len(made)}.db")
 
     monkeypatch.setattr(factory, "store_from_url", fake_store_from_url)
-    monkeypatch.setenv("LOOM_DB", "postgresql://primary/loom")
-    monkeypatch.setenv("LOOM_DB_READ", "postgresql://replica/loom")
-    monkeypatch.setenv("LOOM_SHARDS", json.dumps({
-        "acme": "postgresql://acme-db/loom",
-        "globex": {"dsn": "postgresql://globex-db/loom", "read": "postgresql://globex-replica/loom"},
-        "initech": {"dsn": "postgresql://globex-db/loom"},
-        "home": "postgresql://primary/loom",
+    monkeypatch.setenv("LOOMCTX_DB", "postgresql://primary/loomctx")
+    monkeypatch.setenv("LOOMCTX_DB_READ", "postgresql://replica/loomctx")
+    monkeypatch.setenv("LOOMCTX_SHARDS", json.dumps({
+        "acme": "postgresql://acme-db/loomctx",
+        "globex": {"dsn": "postgresql://globex-db/loomctx", "read": "postgresql://globex-replica/loomctx"},
+        "initech": {"dsn": "postgresql://globex-db/loomctx"},
+        "home": "postgresql://primary/loomctx",
     }))
     s = factory.store_from_env()
     assert isinstance(s, ShardedStore)
-    assert made[0] == ("postgresql://primary/loom", "postgresql://replica/loom")   # LOOM_DB keeps its replica
-    assert ("postgresql://acme-db/loom", None) in made                              # a plain shard: no replica
-    assert ("postgresql://globex-db/loom", "postgresql://globex-replica/loom") in made
-    assert ("postgresql://globex-db/loom", None) in made                            # same dsn, no read: its own store
-    assert s.describe()["home"] == 0                                                 # LOOM_DB itself is shared, not reopened
+    assert made[0] == ("postgresql://primary/loomctx", "postgresql://replica/loomctx")   # LOOMCTX_DB keeps its replica
+    assert ("postgresql://acme-db/loomctx", None) in made                              # a plain shard: no replica
+    assert ("postgresql://globex-db/loomctx", "postgresql://globex-replica/loomctx") in made
+    assert ("postgresql://globex-db/loomctx", None) in made                            # same dsn, no read: its own store
+    assert s.describe()["home"] == 0                                                 # LOOMCTX_DB itself is shared, not reopened
     assert len(made) == 4
     s.close()
     assert factory.shard_specs('{"a": "x"}') == {"a": ("x", None)}
@@ -1174,7 +1174,7 @@ def test_namespace_summary_counts_entities_by_type(store):
 def test_claims_cite_documents_by_event_id(store):
     """D-039: provenance.artifact_event_id resolves to the artifact id at
     write time; a reference to a document never ingested is an error."""
-    from loom.contracts import DocumentIn, Provenance
+    from loomctx.contracts import DocumentIn, Provenance
     art = store.store_artifact(DocumentIn(namespace="ns", event_id="rep-1", text="scan report", source="scanner",
                                           observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)))
     claim = ClaimIn(namespace="ns", subject=EntityRef(type="host", key="h"), predicate="open_port", object=22,
@@ -1193,7 +1193,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     """D-039: 1,536-dim vectors as JSON text were ~30 KB each and grew a
     store to 10 GB; packed float32 is ~6 KB. Old rows keep decoding."""
     import random
-    from loom.store import common
+    from loomctx.store import common
     rng = random.Random(7)
     vec = [rng.uniform(-1, 1) for _ in range(1536)]          # realistic float text (~19 chars each)
     packed = common.pack_vector(vec)
@@ -1212,7 +1212,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
     """D-040: a passage found by meaning names the entities whose claims cite it."""
-    from loom.contracts import DocumentIn, Provenance
+    from loomctx.contracts import DocumentIn, Provenance
     t = datetime(2026, 9, 1, tzinfo=timezone.utc)
     a = store.store_artifact(DocumentIn(namespace="ns", event_id="adv-a", text="LockBit targets nginx", source="kev", observed_at=t))
     b = store.store_artifact(DocumentIn(namespace="ns", event_id="adv-b", text="unrelated", source="kev", observed_at=t))
@@ -1240,7 +1240,7 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
 def test_observations_by_prefix_resolves_cite_tokens(store):
     """A 12-hex token from a pack finds its observation; tombstoned rows
     and other namespaces never surface; the read is capped."""
-    from loom.contracts import Observation
+    from loomctx.contracts import Observation
     obs = [store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key=f"u{i}")}))
            for i in range(3)]
     assert [o.id for o in store.observations_by_prefix("default", obs[0].id[:12])] == [obs[0].id]
@@ -1268,7 +1268,7 @@ def test_postgres_retries_a_lost_deadlock_then_gives_up():
     store retries it, bounded."""
     pytest.importorskip("psycopg")
     from psycopg import errors
-    from loom.store.postgres import retry_on_deadlock
+    from loomctx.store.postgres import retry_on_deadlock
     calls = {"n": 0}
 
     def flaky():
@@ -1380,7 +1380,7 @@ def test_declines_are_stored_symmetrically(store):
 def test_norm_key_keeps_the_structure_of_numeric_keys():
     """web-01 / WEB_01 / web01 still collide; IPs, CIDRs and versions do not
     (10.0.4.7, 100.4.7 and 1.0.0.47 all normalized to 10047)."""
-    from loom.store.common import norm_key
+    from loomctx.store.common import norm_key
     assert norm_key("web-01") == norm_key("WEB_01") == norm_key("web01") == "web01"
     assert len({norm_key(k) for k in ("10.0.4.7", "100.4.7", "1.0.0.47")}) == 3
     assert norm_key("10.0.4.7") == norm_key(" 10.0.4.7 ") == "10.0.4.7"
@@ -1394,7 +1394,7 @@ def test_norm_key_keeps_the_structure_of_hex_keys():
     """v6: IPv6 and MAC addresses — hex digits with colons — keep their
     separators; case and whitespace still fold; a colon alone is not
     enough when letters outside a-f are present (that is spelling)."""
-    from loom.store.common import norm_key
+    from loomctx.store.common import norm_key
     assert norm_key("2001:DB8::1") == norm_key(" 2001:db8::1 ") == "2001:db8::1"
     assert len({norm_key(k) for k in ("2001:db8::1", "2001:db8::10", "2001:db8:0:0:0:0:0:1", "2001:db81::")}) == 4
     assert norm_key("fe80::1%eth0") == "fe801eth0"                # a zone id is not hex: spelling rule
@@ -1415,11 +1415,11 @@ def test_fuzzy_candidates_do_not_group_distinct_ips(store):
 
 def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _raw(store)
-    from loom.store.sqlite import SCHEMA_VERSION
+    from loomctx.store.sqlite import SCHEMA_VERSION
     store.upsert_entity("default", EntityRef(type="ip", key="10.0.4.7"))
     store.upsert_entity("default", EntityRef(type="host", key="web-01"))
     _exec(store, "UPDATE entities SET norm_key = '10047' WHERE key = '10.0.4.7'")   # as v4 wrote it
-    _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
+    _exec(store, "UPDATE loomctx_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
         assert again.schema_version() == SCHEMA_VERSION == 8
@@ -1441,7 +1441,7 @@ def test_two_processes_migrating_one_old_file_both_open(tmp_path):
     raw = sqlite3.connect(path)
     raw.execute("DROP INDEX idx_obs_supersedes")
     raw.execute("ALTER TABLE observations DROP COLUMN supersedes")
-    raw.execute("UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
+    raw.execute("UPDATE loomctx_meta SET value = '5' WHERE key = 'schema_version'")
     raw.commit()
     raw.close()
     barrier, opened, errors = threading.Barrier(4), [], []
@@ -1475,10 +1475,10 @@ def test_schema_version_is_never_written_down(store, tmp_path, caplog):
     """An older image opening a newer database serves what it understands,
     runs no DDL, warns — and leaves the version alone (H-B12)."""
     _raw(store)
-    from loom.store.sqlite import SCHEMA_VERSION
-    _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),))
+    from loomctx.store.sqlite import SCHEMA_VERSION
+    _exec(store, "UPDATE loomctx_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),))
     try:
-        with caplog.at_level("WARNING", logger="loom.store"):
+        with caplog.at_level("WARNING", logger="loomctx.store"):
             newer = _reopen(store, tmp_path)
         try:
             assert newer.schema_version() == SCHEMA_VERSION + 1
@@ -1488,7 +1488,7 @@ def test_schema_version_is_never_written_down(store, tmp_path, caplog):
         finally:
             newer.close()
     finally:
-        _exec(store, "UPDATE loom_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
+        _exec(store, "UPDATE loomctx_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
     assert store.schema_version() == SCHEMA_VERSION
 
 
@@ -1500,11 +1500,11 @@ def test_search_entities_uses_the_lower_key_index(store):
     assert [e.key for e in store.search_entities("default", "web-02")] == ["Web-02"]
     assert store.search_entities("default", "") != []           # empty prefix: everything
     if isinstance(store, SqliteStore):
-        from loom.store import sqlite as sq
+        from loomctx.store import sqlite as sq
         plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._SEARCH_SQL, ("default", "web", "web" + sq._PREFIX_END))
         assert any("idx_entity_lower_key" in r["detail"] for r in plan), plan
     else:
-        from loom.store import postgres as pg
+        from loomctx.store import postgres as pg
         assert _exec(store, "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_entity_lower_key'")
         # enough rows and fresh statistics that the planner has a real
         # choice: on a 3-row table with no stats every (namespace, ...)
@@ -1600,8 +1600,8 @@ def test_export_import_round_trips_schemas_declines_and_merges(store, tmp_path):
     memory and the merge log come along — and a merge stays reversible
     on the restored store."""
     import io
-    from loom.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
-    from loom.lifecycle import export_jsonl, import_jsonl
+    from loomctx.contracts import EntityTypeDef, PredicateDef, SchemaRegistration
+    from loomctx.lifecycle import export_jsonl, import_jsonl
     store.put_schema(SchemaRegistration(namespace="netsec", strict=True,
                                         entity_types=[EntityTypeDef(name="host")],
                                         predicates=[PredicateDef(name="runs_os")]))
@@ -1673,7 +1673,7 @@ def test_supersedes_is_recorded_and_round_trips(store, tmp_path):
     names — a redacted superseder no longer counts, an unknown target is
     a dangling pointer, not an error."""
     import io
-    from loom.lifecycle import export_jsonl, import_jsonl
+    from loomctx.lifecycle import export_jsonl, import_jsonl
     host = EntityRef(type="host", key="web-01")
     old = store.record_claim(login_claim().model_copy(update={"predicate": "runs_os", "object": "fedora-43"}))
     assert old.supersedes is None
@@ -1717,7 +1717,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     rows written before the column carry no supersession; norm_key is
     recomputed for the keys the hex rule changes (those carrying ':')."""
     _raw(store)
-    from loom.store.sqlite import SCHEMA_VERSION
+    from loomctx.store.sqlite import SCHEMA_VERSION
     before = store.record_claim(login_claim())
     store.upsert_entity("default", EntityRef(type="ip", key="2001:db8::1"))
     store.upsert_entity("default", EntityRef(type="mac", key="AA:BB:CC:DD:EE:FF"))
@@ -1725,7 +1725,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     _exec(store, "UPDATE entities SET norm_key = 'aabbccddeeff' WHERE key = 'AA:BB:CC:DD:EE:FF'")
     _exec(store, "DROP INDEX idx_obs_supersedes")
     _exec(store, "ALTER TABLE observations DROP COLUMN supersedes")
-    _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
+    _exec(store, "UPDATE loomctx_meta SET value = '5' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
         assert again.schema_version() == SCHEMA_VERSION == 8
@@ -1749,7 +1749,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
 # ------------------------------------------- worker tick scans (R-9) #
 
 def _meta(store, key):
-    rows = _exec(store, "SELECT value FROM loom_meta WHERE key = ?", (key,))
+    rows = _exec(store, "SELECT value FROM loomctx_meta WHERE key = ?", (key,))
     return rows[0]["value"] if rows else None
 
 
@@ -1765,7 +1765,7 @@ def test_embedding_backlog_scans_from_a_high_water_mark(store, tmp_path):
     mark (an import with an old recorded_at) is found by the periodic
     rescan within `_RESCAN_EVERY` ticks."""
     _raw(store)
-    from loom.contracts import Observation
+    from loomctx.contracts import Observation
     store._HWM_SLACK, store._RESCAN_EVERY = 2, 3
     ids = [store.record_claim(login_claim().model_copy(
         update={"object": EntityRef(type="user", key=f"u{i}")})).id for i in range(12)]
@@ -1782,7 +1782,7 @@ def test_embedding_backlog_scans_from_a_high_water_mark(store, tmp_path):
     assert mark is not None
     assert 0 < _examined(store, "observations", mark) <= store._HWM_SLACK + 5 < len(ids)
     if isinstance(store, SqliteStore):
-        from loom.store import sqlite as sq
+        from loomctx.store import sqlite as sq
         plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._EMBED_BACKLOG_SQL.format(shard=""), (mark, "m", 5))
         assert any("idx_obs_recorded" in r["detail"] for r in plan), plan
     assert tick() == []                         # tick 4: the periodic rescan, nothing pending
@@ -1803,7 +1803,7 @@ def uuid_hex():
 
 
 def test_chunk_backlog_scans_from_a_high_water_mark(store, tmp_path):
-    from loom.contracts import Artifact, DocumentIn
+    from loomctx.contracts import Artifact, DocumentIn
     _raw(store)
     store._HWM_SLACK, store._RESCAN_EVERY = 1, 3
     ids = [store.store_artifact(DocumentIn(text=f"doc {i}", source="s", observed_at=OBSERVED)).id
@@ -1847,7 +1847,7 @@ def test_dossier_candidates_are_incremental(store, tmp_path):
     mark = _meta(store, "hwm:dossier")
     assert mark is not None and _examined(store, "observations", mark) == 1
     if isinstance(store, SqliteStore):
-        from loom.store import sqlite as sq
+        from loomctx.store import sqlite as sq
         plan = _exec(store, "EXPLAIN QUERY PLAN " + sq._DOSSIER_SQL, (mark, "2099", 5, 3, 4))
         assert any("idx_obs_subject_recorded" in r["detail"] for r in plan), plan
     for i in range(3):                                   # three NEW rows: stale again
@@ -2039,7 +2039,7 @@ def test_relation_summary_counts_how_types_connect(store):
     visible rows), most frequent first — describe_namespace's links and
     attributes. Tombstoned rows and other namespaces do not count; the
     default implementation agrees with the backend's query."""
-    from loom.store.base import GraphStore
+    from loomctx.store.base import GraphStore
     t = datetime(2026, 9, 1, tzinfo=timezone.utc)
     host, product = EntityRef(type="host", key="h1"), EntityRef(type="product", key="p1")
     rows = store.record_claims([
@@ -2066,7 +2066,7 @@ def test_edges_to_carriers_joins_a_hubs_edges_to_the_far_attribute(store):
     newest edge first, within the edge limit and the as_of bound; redacted
     rows on either side drop out; the base implementation answers the same."""
     from datetime import timedelta
-    from loom.store.base import GraphStore
+    from loomctx.store.base import GraphStore
     t = datetime(2026, 9, 1, tzinfo=timezone.utc)
     hub = EntityRef(type="product", key="kernel")
     claims = [ClaimIn(namespace="m", subject=EntityRef(type="cve", key=f"c{i}"), predicate="affects",
@@ -2114,7 +2114,7 @@ def _kev_hub(store, n_edges=60, kev=(0, 1, 2), registry=True):
     CVE-2026-0000 oldest. The CVEs in `kev` carry exploited_in_wild; every
     CVE carries a cvss_score two scorers disagree on."""
     from datetime import timedelta
-    from loom.contracts import PredicateDef, SchemaRegistration
+    from loomctx.contracts import PredicateDef, SchemaRegistration
     t = datetime(2026, 1, 1, tzinfo=timezone.utc)
     host, hub = EntityRef(type="host", key="h1"), EntityRef(type="product", key="kernel")
     if registry:
@@ -2150,9 +2150,9 @@ def test_scope_walk_completes_a_truncated_hub_for_the_question(store, monkeypatc
     question, with one naming no attribute, or with no vocabulary naming
     the attribute (no registry, nothing gathered shows it), the walk is
     the recency window it always was."""
-    from loom import context
-    from loom.context import resolve_scope_paths
-    from loom.contracts import ScopeSpec
+    from loomctx import context
+    from loomctx.context import resolve_scope_paths
+    from loomctx.contracts import ScopeSpec
     monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
     host, _ = _kev_hub(store)
     scope = ScopeSpec(subjects=[host], **_KEV_SCOPE)
@@ -2180,9 +2180,9 @@ def test_hub_completion_learns_the_attribute_from_the_registry(store, monkeypatc
     has gathered: with no registry and nothing gathered showing the
     predicate, the carriers past the window stay out (the page handle still
     offers them)."""
-    from loom import context
-    from loom.context import resolve_scope_paths
-    from loom.contracts import ScopeSpec
+    from loomctx import context
+    from loomctx.context import resolve_scope_paths
+    from loomctx.contracts import ScopeSpec
     monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
     host, _ = _kev_hub(store, registry=False)
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE), question=_KEV_Q)
@@ -2193,11 +2193,11 @@ def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
     """With the entity cap binding, the walk cuts entities that do not
     carry the question's topic, not the ones that do (D-061); the cut is
     still reported as scope_cap."""
-    from loom import context
-    from loom.context import resolve_scope_paths
-    from loom.contracts import ScopeSpec
+    from loomctx import context
+    from loomctx.context import resolve_scope_paths
+    from loomctx.contracts import ScopeSpec
     monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
-    monkeypatch.setenv("LOOM_MAX_SCOPE_ENTITIES", "8")
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_ENTITIES", "8")
     host, _ = _kev_hub(store)
     truncated: dict = {}
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
@@ -2220,11 +2220,11 @@ def test_topic_pack_carries_the_hub_answer_with_its_edges(store, monkeypatch):
     reached CVEs are handed back as conflict handles instead of spending
     the budget; the pack stays inside its budget; and the scorecard's
     reader reads the grouped items back fact by fact (D-061)."""
-    from loom import context
-    from loom.answer import render_user_prompt
-    from loom.context import build_pack
-    from loom.contracts import AskRequest, ScopeSpec
-    from loom.retrieval_eval import parse_context
+    from loomctx import context
+    from loomctx.answer import render_user_prompt
+    from loomctx.context import build_pack
+    from loomctx.contracts import AskRequest, ScopeSpec
+    from loomctx.retrieval_eval import parse_context
     monkeypatch.setattr(context, "_GATHER_LIMIT", 20)
     host, _ = _kev_hub(store, kev=(0, 1, 2, 3, 4, 5))
     kev_rows = {}
@@ -2263,7 +2263,7 @@ def test_refresh_statistics_is_safe_after_a_load(store):
     store.refresh_statistics()
     store.refresh_statistics()
     assert store.observations_for("stats", EntityRef(type="host", key="web-01"))
-    from loom.store.postgres import PostgresStore
+    from loomctx.store.postgres import PostgresStore
     if isinstance(store, PostgresStore):
         with store._tx():
             opts = store._q("SELECT reloptions FROM pg_class WHERE relname = 'observations'")
@@ -2296,7 +2296,7 @@ def test_shared_identifier_groups(store):
 def test_foreign_key_child_columns_are_indexed(store):
     """S-63: deleting a merged-away entity checks nothing still points at it;
     without an index LED by each child column the check scanned the table."""
-    from loom.store.postgres import PostgresStore
+    from loomctx.store.postgres import PostgresStore
     if isinstance(store, PostgresStore):
         with store._tx():
             names = {r["indexname"] for r in store._q("SELECT indexname FROM pg_indexes")}

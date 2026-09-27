@@ -3,7 +3,7 @@
 # NVD has re-scored since yesterday records a NEW observation, so the
 # namespace accumulates real history and `as_of` questions mean something.
 #
-#   kubectl -n loom create secret generic loom-vulns-key --from-literal=key=loomk_...   # an rw key pinned to sources 'nvd,nvd:*,cisa-kev,first-epss,cisa-adp' (nvd:* = the per-scorer CVSS sources)
+#   kubectl -n loomctx create secret generic loomctx-vulns-key --from-literal=key=loomctxk_...   # an rw key pinned to sources 'nvd,nvd:*,cisa-kev,first-epss,cisa-adp' (nvd:* = the per-scorer CVSS sources)
 #
 # The key needs `r` as well as `w` (perms rw) on the namespace. The run
 # reads the registry first to see whether its schema is already there — a
@@ -19,23 +19,23 @@
 # from this CronJob cannot be pointed at another Secret):
 #
 #   read -rs OPKEY   # the ungated operator key; kept out of shell history
-#   kubectl -n loom run vulns-first-load --rm -i --restart=Never \
-#     --image=ghcr.io/seahop/loom:latest --env="LOOM_API_KEY=$OPKEY" -- \
-#     python -m loom.connectors.vulns load --url http://loom --cache /tmp/feeds \
+#   kubectl -n loomctx run vulns-first-load --rm -i --restart=Never \
+#     --image=ghcr.io/seahop/loomctx:latest --env="LOOMCTX_API_KEY=$OPKEY" -- \
+#     python -m loomctx.connectors.vulns load --url http://loomctx --cache /tmp/feeds \
 #       --namespace netsec --bridge-seed-hosts
 #
 # (the key is in that pod's spec until --rm deletes it). Every nightly run
 # after it finds the schema registered and needs only the pinned key (D-063):
 #
-#   kubectl -n loom apply -f deploy/k8s/jobs/vulns-refresh.yaml
-#   kubectl -n loom create job --from=cronjob/loom-vulns-refresh vulns-now   # run once, now
+#   kubectl -n loomctx apply -f deploy/k8s/jobs/vulns-refresh.yaml
+#   kubectl -n loomctx create job --from=cronjob/loomctx-vulns-refresh vulns-now   # run once, now
 #
 # The feed cache lives on a small PVC so unchanged feeds are not re-downloaded
 # (conditional GETs). Point --url at the gateway Service in the scale shapes.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: loom-feed-cache
+  name: loomctx-feed-cache
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -45,7 +45,7 @@ spec:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: loom-vulns-refresh
+  name: loomctx-vulns-refresh
 spec:
   schedule: "17 3 * * *"
   concurrencyPolicy: Forbid
@@ -68,19 +68,19 @@ spec:
               type: RuntimeDefault
           containers:
             - name: vulns
-              image: ghcr.io/seahop/loom:latest
-              command: ["python", "-m", "loom.connectors.vulns"]
-              args: ["load", "--url", "http://loom", "--cache", "/cache", "--namespace", "netsec"]
+              image: ghcr.io/seahop/loomctx:latest
+              command: ["python", "-m", "loomctx.connectors.vulns"]
+              args: ["load", "--url", "http://loomctx", "--cache", "/cache", "--namespace", "netsec"]
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
                 capabilities:
                   drop: [ALL]
               env:
-                - name: LOOM_API_KEY
+                - name: LOOMCTX_API_KEY
                   valueFrom:
                     secretKeyRef:
-                      name: loom-vulns-key
+                      name: loomctx-vulns-key
                       key: key
                       # REQUIRED on purpose: a job that loads a public feed
                       # into the store must not silently run keyless. In
@@ -100,6 +100,6 @@ spec:
           volumes:
             - name: cache
               persistentVolumeClaim:
-                claimName: loom-feed-cache
+                claimName: loomctx-feed-cache
             - name: tmp
               emptyDir: {}

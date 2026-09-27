@@ -1,5 +1,5 @@
-"""The lifecycle CLI (D-016) opens the engine's store: LOOM_DB plus
-LOOM_SHARDS and LOOM_BLOB_* — not a bare LOOM_DB — so an export of a
+"""The lifecycle CLI (D-016) opens the engine's store: LOOMCTX_DB plus
+LOOMCTX_SHARDS and LOOMCTX_BLOB_* — not a bare LOOMCTX_DB — so an export of a
 sharded, offloading deployment is complete; `--db` is the escape hatch."""
 
 import json
@@ -7,22 +7,22 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom.contracts import ClaimIn, DocumentIn, EntityRef
-from loom.lifecycle import main, parse_ref
-from loom.store.blobs import BlobOffloadStore
-from loom.store.factory import store_from_env
-from loom.store.sqlite import SqliteStore
+from loomctx.contracts import ClaimIn, DocumentIn, EntityRef
+from loomctx.lifecycle import main, parse_ref
+from loomctx.store.blobs import BlobOffloadStore
+from loomctx.store.factory import store_from_env
+from loomctx.store.sqlite import SqliteStore
 
 OBSERVED = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
 @pytest.fixture
 def offloading_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "main.db"))
-    monkeypatch.setenv("LOOM_SHARDS", json.dumps({"acme": str(tmp_path / "acme.db")}))
-    monkeypatch.setenv("LOOM_BLOB_THRESHOLD", "50")
-    monkeypatch.setenv("LOOM_BLOB_DIR", str(tmp_path / "blobs"))
-    monkeypatch.delenv("LOOM_DB_READ", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "main.db"))
+    monkeypatch.setenv("LOOMCTX_SHARDS", json.dumps({"acme": str(tmp_path / "acme.db")}))
+    monkeypatch.setenv("LOOMCTX_BLOB_THRESHOLD", "50")
+    monkeypatch.setenv("LOOMCTX_BLOB_DIR", str(tmp_path / "blobs"))
+    monkeypatch.delenv("LOOMCTX_DB_READ", raising=False)
     return tmp_path
 
 
@@ -74,9 +74,9 @@ def test_import_through_the_env_store_offloads_again(offloading_env, tmp_path, m
 
 
 def test_unmerge_subcommand(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "u.db"))
-    monkeypatch.delenv("LOOM_SHARDS", raising=False)
-    monkeypatch.delenv("LOOM_BLOB_THRESHOLD", raising=False)
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "u.db"))
+    monkeypatch.delenv("LOOMCTX_SHARDS", raising=False)
+    monkeypatch.delenv("LOOMCTX_BLOB_THRESHOLD", raising=False)
     s = SqliteStore(tmp_path / "u.db")
     a, b = EntityRef(type="ip_address", key="10.0.4.7"), EntityRef(type="ip", key="10.0.4.7")
     for ref in (a, b):

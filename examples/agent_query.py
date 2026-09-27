@@ -19,7 +19,7 @@ NAMESPACE = "vuln"
 def post(base, path, body, api_key):
     headers = {"content-type": "application/json"}
     if api_key:
-        headers["X-Loom-Key"] = api_key
+        headers["X-LoomCtx-Key"] = api_key
     req = urllib.request.Request(base.rstrip("/") + path,
                                  data=json.dumps(body).encode(),
                                  headers=headers, method="POST")

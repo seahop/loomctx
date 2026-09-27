@@ -800,7 +800,7 @@
       },
       "budget": {
         "default": 800,
-        "description": "token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)",
+        "description": "token budget; mandatory cap (LOOMCTX_MAX_BUDGET is the real ceiling)",
         "exclusiveMinimum": 0,
         "maximum": 1000000,
         "title": "Budget",
@@ -1050,7 +1050,7 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOMCTX_MAX_SCOPE_ENTITIES / LOOMCTX_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
               "scope_cap",
@@ -1263,7 +1263,7 @@
       },
       "budget": {
         "default": 800,
-        "description": "token budget, charged on the rendered path text plus citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)",
+        "description": "token budget, charged on the rendered path text plus citations exactly as a pack is (LOOMCTX_MAX_BUDGET is the ceiling)",
         "exclusiveMinimum": 0,
         "maximum": 1000000,
         "title": "Budget",
@@ -1527,7 +1527,7 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOMCTX_MAX_SCOPE_ENTITIES / LOOMCTX_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
               "scope_cap",
@@ -2074,7 +2074,7 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOMCTX_MAX_SCOPE_ENTITIES / LOOMCTX_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
               "scope_cap",

@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loom import enrich, identity
-from loom.connectors import entra, ldap, nmap, okta
-from loom.contracts import EntityRef, PredicateDef, SchemaRegistration
-from loom.store import common
-from loom.store.sqlite import SqliteStore
+from loomctx import enrich, identity
+from loomctx.connectors import entra, ldap, nmap, okta
+from loomctx.contracts import EntityRef, PredicateDef, SchemaRegistration
+from loomctx.store import common
+from loomctx.store.sqlite import SqliteStore
 
 T0 = datetime(2026, 9, 20, 9, 0, tzinfo=timezone.utc)
 
@@ -218,10 +218,10 @@ def test_replicas_share_the_pass_and_together_fold_everything(store, monkeypatch
         _say(store, a, ("mac", f"aa:bb:cc:dd:ee:{i:02x}"))
         _say(store, b, ("mac", f"aa:bb:cc:dd:ee:{i:02x}"))
         pairs.append((a, b))
-    monkeypatch.setenv("LOOM_WORKER_SHARD", "0/2")
+    monkeypatch.setenv("LOOMCTX_WORKER_SHARD", "0/2")
     first = enrich.resolve_identities(store)
     enrich._identity_seen_until.clear()
-    monkeypatch.setenv("LOOM_WORKER_SHARD", "1/2")
+    monkeypatch.setenv("LOOMCTX_WORKER_SHARD", "1/2")
     second = enrich.resolve_identities(store)
     assert first + second == 8                   # each pair folded once, by one replica
     assert all(_canon(store, a) == _canon(store, b) for a, b in pairs)

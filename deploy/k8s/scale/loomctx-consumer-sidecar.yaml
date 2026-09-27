@@ -1,0 +1,45 @@
+# Strategic-merge patch: run the writer consumer as a sidecar of the engine
+# pod so both containers share the SQLite volume (single-node write locality).
+# When the store moves to Postgres (D-008) the consumer graduates to its own
+# scalable Deployment (scale-pg/consumer.yaml); nothing else changes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loomctx
+spec:
+  template:
+    spec:
+      containers:
+        - name: consumer
+          image: ghcr.io/seahop/loomctx:latest
+          command: ["python", "-m", "loomctx.consumer"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: LOOMCTX_DB
+              value: /data/loomctx.db
+            - name: LOOMCTX_NATS_URL
+              value: nats://nats:4222
+            # --- auth (D-059): mount the same keys file the gateway uses so
+            # the writer applies each sender's citation / supersession gates
+            # (the gateway stamps the grant id on every message). Uncomment
+            # with the gateway's block once the `loomctx-keys` Secret exists.
+            # - name: LOOMCTX_AUTH_FILE
+            #   value: /etc/loomctx-keys/keys.json
+          volumeMounts:
+            # - name: keys
+            #   mountPath: /etc/loomctx-keys
+            #   readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

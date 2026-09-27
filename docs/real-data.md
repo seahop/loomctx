@@ -1,7 +1,7 @@
 # Real data: the vulnerability-intelligence connector (D-035)
 
 Everything before this page was tested against a corpus we wrote knowing
-the answers (592 seed claims, 5 documents). This is the first data Loom
+the answers (592 seed claims, 5 documents). This is the first data LoomCtx
 did not author: three public, keyless feeds, one command, loaded next to
 the seed hosts so the demo can ask a real question about them.
 
@@ -20,10 +20,10 @@ mean something.
 ## Run it
 
 ```bash
-docker compose up -d loom
-docker compose exec loom python -m loom.seed load                     # the demo hosts
-docker compose exec --user 10001 loom python -m loom.connectors.vulns load \
-    --db /data/loom.db --bridge-seed-hosts                             # ~2 minutes
+docker compose up -d loomctx
+docker compose exec loomctx python -m loomctx.seed load                     # the demo hosts
+docker compose exec --user 10001 loomctx python -m loomctx.connectors.vulns load \
+    --db /data/loomctx.db --bridge-seed-hosts                             # ~2 minutes
 ```
 
 `--bridge-seed-hosts` adds `runs_software` edges from the seed hosts to
@@ -31,15 +31,15 @@ common products (kernel, nginx, openssh, postgresql, chrome, …) so the
 demo question is a two-hop traversal. Other forms:
 
 ```bash
-python -m loom.connectors.vulns load --url http://loom:8000 --key loomk_…   # through the batch API
-python -m loom.connectors.vulns emit --years 2026,2025 > vulns.jsonl        # NDJSON for loom.ingest
-python -m loom.connectors.vulns pull                                        # refresh the cache only
-python -m loom.connectors.vulns schema                                      # the registry it declares
+python -m loomctx.connectors.vulns load --url http://loomctx:8000 --key loomctxk_…   # through the batch API
+python -m loomctx.connectors.vulns emit --years 2026,2025 > vulns.jsonl        # NDJSON for loomctx.ingest
+python -m loomctx.connectors.vulns pull                                        # refresh the cache only
+python -m loomctx.connectors.vulns schema                                      # the registry it declares
 ```
 
 Flags: `--years` (default: this year), `--sources kev,nvd,epss`, `--epss
 known|all|none`, `--epss-ledger auto|none|PATH`, `--cache DIR` (default
-`/data/feeds`, or `$LOOM_FEED_CACHE`), `--offline`. Feeds are fetched with
+`/data/feeds`, or `$LOOMCTX_FEED_CACHE`), `--offline`. Feeds are fetched with
 conditional GETs and streamed (`ijson`), never held in memory. On
 Kubernetes, `deploy/k8s/jobs/vulns-refresh.yaml` runs it nightly against
 the engine.
@@ -85,7 +85,7 @@ a new observation.
 
 Over `--url`, a batch the engine turns away for the moment (429 from the
 rate limiter, D-056; 5xx; a dropped connection) is retried with backoff
-that honors `Retry-After`, up to `LOOM_INGEST_ATTEMPTS` (default 6) tries —
+that honors `Retry-After`, up to `LOOMCTX_INGEST_ATTEMPTS` (default 6) tries —
 the schema registration too. A malformed NVD or KEV record (a
 `lastModified` in the future, a field of the wrong shape) is counted as
 `nvd_invalid` / `kev_invalid` and skipped rather than ending the load.
@@ -187,9 +187,9 @@ rendering of boolean facts is a small follow-up.
 
 ## An agent on its own (D-036, 2026-09-09)
 
-`/v1/answer` tests a model as a reader of a pack Loom built. The demo's
+`/v1/answer` tests a model as a reader of a pack LoomCtx built. The demo's
 promise is an agent that finds the data itself, so
-`python -m loom.agent_eval --db /data/loom.db` runs a real model over the
+`python -m loomctx.agent_eval --db /data/loomctx.db` runs a real model over the
 real MCP transport (stdio) with four tasks and no pre-built scope. Ground
 truth is computed from the store; a task passes only if the right entities
 are named, none are invented, and every cited id was seen in a tool result
@@ -212,7 +212,7 @@ What the runs changed in the MCP surface, each with a test:
   had no way to learn that `affects` or `exploited_in_wild` existed.
 - **An empty namespace is an error, not an empty list.** Run 1 lost twelve
   steps to a dropped argument; now the tool says which namespaces hold
-  data. `LOOM_MCP_NAMESPACE` makes the argument optional for a single-team
+  data. `LOOMCTX_MCP_NAMESPACE` makes the argument optional for a single-team
   server.
 - **The agent view of a pack.** Items first, no null citation fields,
   reached subjects summarized (20 shown + a total). The same two-hop pack
@@ -261,7 +261,7 @@ everything; the run took the afternoon and changed more than expected.
    be reloaded: observations are append-only and deduped by event id, so a
    citation cannot be retrofitted onto an existing row.
 2. **Vectors as JSON text bloated the store tenfold.** Schema v3 stores
-   packed float32 in both stores, reads legacy rows, and `LOOM_EMBED_DIM`
+   packed float32 in both stores, reads legacy rows, and `LOOMCTX_EMBED_DIM`
    asks Matryoshka models for a smaller output.
 3. **A `--once` worker exited on a failed first tick**, mistaking a locked
    database for a drained backlog. Failures are now distinct from "no
@@ -317,9 +317,9 @@ real-corpus result for that question is in the D-040 entry.
 
 ## Writing your own connector
 
-`src/loom/connectors/vulns.py` is the pattern: a `pull` step with a cache
+`src/loomctx/connectors/vulns.py` is the pattern: a `pull` step with a cache
 and conditional GETs, pure `*_envelopes()` mappers from a source record to
 `ClaimIn`/`DocumentIn` (unit-tested on trimmed real shapes), a `schema()`
 registration for the namespace, and `load` that streams through
-`loom.ingest`. The engine learns nothing about your domain; the schema
+`loomctx.ingest`. The engine learns nothing about your domain; the schema
 registration carries it.

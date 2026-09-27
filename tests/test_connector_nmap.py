@@ -1,4 +1,4 @@
-"""The nmap scan-inventory connector (loom.connectors.nmap): parse a genuine
+"""The nmap scan-inventory connector (loomctx.connectors.nmap): parse a genuine
 `nmap -oX` XML report into cited, timestamped inventory claims, and prove the
 scan data FUSES with the vuln graph — a scanned host reaches its product's
 KEV CVE, with the scan claim cited, over the D-067 path walk.
@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.connectors import nmap, vulns
-from loom.context import find_paths
-from loom.contracts import ClaimIn, EntityRef, PathRequest
-from loom.store.sqlite import SqliteStore
+from loomctx.connectors import nmap, vulns
+from loomctx.context import find_paths
+from loomctx.contracts import ClaimIn, EntityRef, PathRequest
+from loomctx.store.sqlite import SqliteStore
 
 FIX = Path(__file__).parent / "fixtures"
 INVENTORY = FIX / "nmap_inventory.xml"
@@ -90,7 +90,7 @@ def test_os_match_is_a_lower_confidence_claim():
 
 def test_os_guess_conflicts_with_an_authoritative_inventory(tmp_path):
     """The scan's OS guess and an asset-inventory OS record are both current
-    (append-only) — a conflict Loom surfaces, not a silent overwrite."""
+    (append-only) — a conflict LoomCtx surfaces, not a silent overwrite."""
     db = str(tmp_path / "osconflict.db")
     store = SqliteStore(db)
     store.record_claim(ClaimIn(namespace="netsec", subject=EntityRef(type="host", key="loomnm-nginx"),
@@ -181,7 +181,7 @@ def test_schema_registers_the_inventory_predicates():
 
 def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):
     """D-063 / S-36: a loader that saw any refusal must not exit 0."""
-    from loom import ingest
+    from loomctx import ingest
 
     monkeypatch.setattr(vulns, "register", lambda *a, **k: None)
 
@@ -191,7 +191,7 @@ def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):
 
     monkeypatch.setattr(ingest, "post_batches", refusing)
     with pytest.raises(SystemExit) as exc:
-        nmap.main(["import", str(INVENTORY), "--namespace", "netsec", "--url", "http://loom.invalid"])
+        nmap.main(["import", str(INVENTORY), "--namespace", "netsec", "--url", "http://loomctx.invalid"])
     assert exc.value.code not in (0, None)
     assert "3" in str(exc.value.code) and "refused" in str(exc.value.code)
 

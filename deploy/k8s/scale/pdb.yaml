@@ -4,9 +4,9 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: loom-gateway
+  name: loomctx-gateway
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: loom-gateway
+      app: loomctx-gateway

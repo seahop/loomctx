@@ -118,7 +118,7 @@
           },
           "budget": {
             "default": 800,
-            "description": "token budget; mandatory cap (LOOM_MAX_BUDGET is the real ceiling)",
+            "description": "token budget; mandatory cap (LOOMCTX_MAX_BUDGET is the real ceiling)",
             "exclusiveMinimum": 0.0,
             "maximum": 1000000.0,
             "title": "Budget",
@@ -1027,7 +1027,7 @@
           },
           "budget": {
             "default": 800,
-            "description": "token budget, charged on the rendered path text plus citations exactly as a pack is (LOOM_MAX_BUDGET is the ceiling)",
+            "description": "token budget, charged on the rendered path text plus citations exactly as a pack is (LOOMCTX_MAX_BUDGET is the ceiling)",
             "exclusiveMinimum": 0.0,
             "maximum": 1000000.0,
             "title": "Budget",
@@ -1275,7 +1275,7 @@
           },
           "reason": {
             "default": "gather_limit",
-            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOM_MAX_SCOPE_ENTITIES / LOOM_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
+            "description": "gather_limit: only the newest `gathered` of the `total` observations about `entity` that this caller may see were examined (D-038). scope_cap: the scope walk stopped at the entity cap (LOOMCTX_MAX_SCOPE_ENTITIES / LOOMCTX_MAX_SCOPE_OBSERVATIONS) while expanding `entity` \u2014 `gathered` entities are in the pack of at least `total` reached (D-058). max_paths: a path search found more connecting paths to `entity` (the `to` endpoint) than were returned \u2014 `gathered` of at least `total` (the cap, or the token budget, cut the rest, D-067). depth: the search reached the depth cap while the frontier still had unexplored entities, so a longer path may exist (D-067)",
             "enum": [
               "gather_limit",
               "scope_cap",
@@ -1391,8 +1391,8 @@
     }
   },
   "info": {
-    "description": "Loom context engine HTTP API. Generated from the FastAPI app; the Pydantic contracts in src/loom/contracts.py are the source of truth.",
-    "title": "Loom",
+    "description": "LoomCtx context engine HTTP API. Generated from the FastAPI app; the Pydantic contracts in src/loomctx/contracts.py are the source of truth.",
+    "title": "LoomCtx",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
@@ -1522,11 +1522,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }
@@ -1639,11 +1639,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }
@@ -1677,7 +1677,7 @@
     },
     "/v1/entities/semantic": {
       "get": {
-        "description": "Entities related to a question by meaning (D-025): needs an embedder\non the serving engine (LOOM_EMBED_*) and the worker to have embedded\nthe namespace; each match cites its best-matching fact.",
+        "description": "Entities related to a question by meaning (D-025): needs an embedder\non the serving engine (LOOMCTX_EMBED_*) and the worker to have embedded\nthe namespace; each match cites its best-matching fact.",
         "operationId": "semantic_entities_v1_entities_semantic_get",
         "parameters": [
           {
@@ -1719,11 +1719,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }
@@ -1844,11 +1844,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }
@@ -1971,7 +1971,7 @@
     },
     "/v1/ingest/batch": {
       "post": {
-        "description": "Many envelopes in one request (D-034): a JSON array or NDJSON, up to\nLOOM_MAX_BATCH items. Each item passes the same gates as /v1/ingest and\nis reported individually \u2014 one bad record never blocks the rest. Claims\nland in one transaction per store. Idempotent per item via event_id.",
+        "description": "Many envelopes in one request (D-034): a JSON array or NDJSON, up to\nLOOMCTX_MAX_BATCH items. Each item passes the same gates as /v1/ingest and\nis reported individually \u2014 one bad record never blocks the rest. Claims\nland in one transaction per store. Idempotent per item via event_id.",
         "operationId": "ingest_batch_v1_ingest_batch_post",
         "responses": {
           "200": {
@@ -2020,11 +2020,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }
@@ -2117,11 +2117,11 @@
           },
           {
             "in": "header",
-            "name": "X-Loom-Namespace",
+            "name": "X-LoomCtx-Namespace",
             "required": false,
             "schema": {
               "default": "default",
-              "title": "X-Loom-Namespace",
+              "title": "X-Loomctx-Namespace",
               "type": "string"
             }
           }

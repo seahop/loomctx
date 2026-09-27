@@ -1,13 +1,13 @@
 # Interop: STIX 2.1, OCSF, LDAP, Entra ID, Okta, host artifacts, red-team logs
 
-Loom's own shapes are the contracts in `src/loom/contracts.py`; the world
+LoomCtx's own shapes are the contracts in `src/loomctx/contracts.py`; the world
 speaks STIX (threat intelligence), OCSF (security events), raw LDAP,
 cloud identity providers (Entra ID, Okta), process and file listings
 (osquery, tasklist, PowerShell, ps, ls) and red-team operation logs
 (Atomic Red Team, Attire). Connectors translate at the
 edges, so a TIP's bundle, a scanner's findings, a directory export or an
 IdP's user/group/role JSON land as cited, time-windowed
-claims, and Loom's facts leave as records other tools accept. The engine
+claims, and LoomCtx's facts leave as records other tools accept. The engine
 learns nothing about any standard: the mapping is a connector plus a schema
 registration (hard constraint: domain specifics stay in the registry).
 
@@ -16,90 +16,90 @@ modification stamp: a re-import is a no-op, a *revised* record is a new
 observation — history, not overwrite) and runs through the same paths as
 any other connector: `--db` writes straight into a store, `--url` posts
 batches to an engine or gateway, `emit` writes NDJSON envelopes for
-`python -m loom.ingest`.
+`python -m loomctx.ingest`.
 
 ```bash
 # STIX 2.1
-python -m loom.connectors.stix import bundle.json --namespace netsec                  # LOOM_DB store
-python -m loom.connectors.stix import bundle.json --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.stix export --namespace netsec --out bundle.json            # or --db /data/loom.db; --history: every version
-python -m loom.connectors.stix emit bundle.json --namespace netsec > envelopes.jsonl
-python -m loom.connectors.stix schema --namespace netsec [--mapping map.json]
+python -m loomctx.connectors.stix import bundle.json --namespace netsec                  # LOOMCTX_DB store
+python -m loomctx.connectors.stix import bundle.json --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.stix export --namespace netsec --out bundle.json            # or --db /data/loomctx.db; --history: every version
+python -m loomctx.connectors.stix emit bundle.json --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.stix schema --namespace netsec [--mapping map.json]
 
 # OCSF vulnerability_finding (class_uid 2002)
-python -m loom.connectors.ocsf import findings.ndjson --namespace netsec              # NDJSON or a JSON array
-python -m loom.connectors.ocsf export --namespace netsec --out findings.ndjson       # --history: every version
-python -m loom.connectors.ocsf emit findings.ndjson --namespace netsec
-python -m loom.connectors.ocsf schema --namespace netsec
+python -m loomctx.connectors.ocsf import findings.ndjson --namespace netsec              # NDJSON or a JSON array
+python -m loomctx.connectors.ocsf export --namespace netsec --out findings.ndjson       # --history: every version
+python -m loomctx.connectors.ocsf emit findings.ndjson --namespace netsec
+python -m loomctx.connectors.ocsf schema --namespace netsec
 
 # raw LDAP / LDIF (Active Directory)
-python -m loom.connectors.ldap import export.ldif --namespace netsec                      # into the LOOM_DB store
-python -m loom.connectors.ldap import export.ldif --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.ldap emit export.ldif --namespace netsec > envelopes.jsonl
-python -m loom.connectors.ldap schema --namespace netsec [--as-of 2026-09-20T09:00:00Z]
+python -m loomctx.connectors.ldap import export.ldif --namespace netsec                      # into the LOOMCTX_DB store
+python -m loomctx.connectors.ldap import export.ldif --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.ldap emit export.ldif --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.ldap schema --namespace netsec [--as-of 2026-09-20T09:00:00Z]
 
 # nmap scan inventory (an `nmap -oX` XML report an operator already produced)
-python -m loom.connectors.nmap import report.xml --namespace netsec                   # into the LOOM_DB store
-python -m loom.connectors.nmap import report.xml --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.nmap emit report.xml --namespace netsec > envelopes.jsonl
-python -m loom.connectors.nmap schema --namespace netsec [--as-of 2026-09-26T15:00:00Z]
+python -m loomctx.connectors.nmap import report.xml --namespace netsec                   # into the LOOMCTX_DB store
+python -m loomctx.connectors.nmap import report.xml --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.nmap emit report.xml --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.nmap schema --namespace netsec [--as-of 2026-09-26T15:00:00Z]
 
 # OSV / GHSA advisories (an OSV-schema JSON file, or a directory of them)
-python -m loom.connectors.osv import advisory.json --namespace netsec         # or a directory of *.json
-python -m loom.connectors.osv import ./osv-db --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.osv emit advisory.json --namespace netsec > envelopes.jsonl
-python -m loom.connectors.osv schema --namespace netsec
+python -m loomctx.connectors.osv import advisory.json --namespace netsec         # or a directory of *.json
+python -m loomctx.connectors.osv import ./osv-db --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.osv emit advisory.json --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.osv schema --namespace netsec
 
 # cloud inventory / config (terraform show -json / .tfstate, or an AWS Config snapshot)
-python -m loom.connectors.cloud import state.json --format terraform --namespace netsec
-python -m loom.connectors.cloud import snapshot.json --format awsconfig --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.cloud schema --namespace netsec
+python -m loomctx.connectors.cloud import state.json --format terraform --namespace netsec
+python -m loomctx.connectors.cloud import snapshot.json --format awsconfig --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.cloud schema --namespace netsec
 
 # MITRE ATT&CK taxonomy (the published mitre-attack STIX 2.1 bundle)
-python -m loom.connectors.attack import enterprise-attack.json --namespace netsec
-python -m loom.connectors.attack schema --namespace netsec
+python -m loomctx.connectors.attack import enterprise-attack.json --namespace netsec
+python -m loomctx.connectors.attack schema --namespace netsec
 
 # Entra ID / Azure AD (a Microsoft Graph API JSON export)
-python -m loom.connectors.entra import users.json groups.json --namespace netsec
-python -m loom.connectors.entra import directory_export.json --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.entra emit users.json --namespace netsec > envelopes.jsonl
-python -m loom.connectors.entra schema --namespace netsec
+python -m loomctx.connectors.entra import users.json groups.json --namespace netsec
+python -m loomctx.connectors.entra import directory_export.json --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.entra emit users.json --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.entra schema --namespace netsec
 
 # Okta directory (an Okta API JSON export)
-python -m loom.connectors.okta import users.json groups.json --namespace netsec
-python -m loom.connectors.okta import directory.json --namespace netsec --url http://loom:8000 --key loomk_...
-python -m loom.connectors.okta emit users.json --namespace netsec > envelopes.jsonl
-python -m loom.connectors.okta schema --namespace netsec
+python -m loomctx.connectors.okta import users.json groups.json --namespace netsec
+python -m loomctx.connectors.okta import directory.json --namespace netsec --url http://loomctx:8000 --key loomctxk_...
+python -m loomctx.connectors.okta emit users.json --namespace netsec > envelopes.jsonl
+python -m loomctx.connectors.okta schema --namespace netsec
 
 # Host artifacts: process lists and file listings (D-084)
-python -m loom.connectors.endpoint import procs.csv --host WEB-01            # tasklist /v /fo csv
-python -m loom.connectors.endpoint import results.log                        # osqueryd results log
-python -m loom.connectors.endpoint import listing.txt --host web-01 --all-files
+python -m loomctx.connectors.endpoint import procs.csv --host WEB-01            # tasklist /v /fo csv
+python -m loomctx.connectors.endpoint import results.log                        # osqueryd results log
+python -m loomctx.connectors.endpoint import listing.txt --host web-01 --all-files
 
 # Red-team operation logs (D-086) and the purple report
-python -m loom.connectors.oplog import ExecutionLog.csv --operation q3-purple   # Atomic / Attire / CSV / JSONL
-python -m loom.purple q3-purple                                                 # red actions vs detections
+python -m loomctx.connectors.oplog import ExecutionLog.csv --operation q3-purple   # Atomic / Attire / CSV / JSONL
+python -m loomctx.purple q3-purple                                                 # red actions vs detections
 
 # What imports collected (D-082) and how their format drifted (D-085)
-python -m loom.coverage gaps --namespace netsec
-python -m loom.coverage drift --namespace netsec
+python -m loomctx.coverage gaps --namespace netsec
+python -m loomctx.coverage drift --namespace netsec
 ```
 
 Every connector writes into `netsec` by default: one namespace per
 environment or engagement (D-083, see "Registering the names").
 
 `examples/stix_import.py` is the same STIX import in ~100 lines of standard
-library, for a pipeline that cannot depend on the Loom package.
+library, for a pipeline that cannot depend on the LoomCtx package.
 
-## STIX 2.1 → Loom
+## STIX 2.1 → LoomCtx
 
 ### Entities
 
-A STIX object becomes a Loom entity `type:key`. The STIX type maps by the
+A STIX object becomes a LoomCtx entity `type:key`. The STIX type maps by the
 table; anything not listed keeps its name with hyphens as underscores
 (`intrusion-set` → `intrusion_set`, `attack-pattern` → `attack_pattern`).
 
-| STIX type | Loom type | key |
+| STIX type | LoomCtx type | key |
 | --- | --- | --- |
 | `ipv4-addr`, `ipv6-addr` | `ip` | `value` |
 | `domain-name` | `domain` | `value` |
@@ -109,20 +109,20 @@ table; anything not listed keeps its name with hyphens as underscores
 | `user-account` | `user` | `user_id`, else `account_login` / `display_name` |
 | `file` | `file` | `hashes.SHA-256`, else `name` |
 | `identity` | `identity` | `name` |
-| `vulnerability` with a `cve` external reference | `cve` | the CVE id (`CVE-2014-0160`) — **the same entity `loom.connectors.vulns` (NVD/KEV/EPSS) and the OCSF importer write to** |
+| `vulnerability` with a `cve` external reference | `cve` | the CVE id (`CVE-2014-0160`) — **the same entity `loomctx.connectors.vulns` (NVD/KEV/EPSS) and the OCSF importer write to** |
 | `vulnerability` without one | `vulnerability` | `name` |
 | any other SDO (`malware`, `indicator`, `intrusion-set`, `campaign`, `tool`, `infrastructure`, `attack-pattern`, `threat-actor`, `course-of-action`, `location`, `grouping`, `malware-analysis`) | the type, hyphens → underscores | `name` |
 
 A reference to an object that is not in the bundle keeps the edge, keyed
 by the STIX id (`ip:ipv4-addr--…`); the resolution worker (D-023) can
 merge it when the object arrives later. An object that carries
-`x_loom_entity_type` and `x_loom_entity_key` (Loom's own export) lands on
-that entity — `x-loom-host` back on `host:<key>`, an `identity` exported
+`x_loomctx_entity_type` and `x_loomctx_entity_key` (LoomCtx's own export) lands on
+that entity — `x-loomctx-host` back on `host:<key>`, an `identity` exported
 from `organization` back on `organization`.
 
 ### Relationships and sightings → relational claims
 
-| STIX | Loom claim |
+| STIX | LoomCtx claim |
 | --- | --- |
 | `relationship.source_ref` / `target_ref` | `subject` / `object` (entity refs as above) |
 | `relationship_type` | `predicate` — hyphens → underscores (`attributed-to` → `attributed_to`), or the mapping's `predicates` entry |
@@ -182,9 +182,9 @@ excerpt for those entities.
   `observed-data` (its SCOs are imported when they are bundle objects).
 - `x_` custom properties and non-CVE `external_references`: STIX-specific
   metadata, not facts about the entity. Add them to `mapping.properties`
-  if a namespace wants them. (Loom's own `x_loom_*` properties are read
-  back, see "Round trip" under Loom → STIX.)
-- `object_marking_refs` / `granular_markings`: Loom scopes data by
+  if a namespace wants them. (LoomCtx's own `x_loomctx_*` properties are read
+  back, see "Round trip" under LoomCtx → STIX.)
+- `object_marking_refs` / `granular_markings`: LoomCtx scopes data by
   namespace and grant (D-013a), not per-object marking. Import TLP:RED
   into its own namespace.
 - `revoked: true` on anything but a relationship or sighting (an SDO,
@@ -201,32 +201,32 @@ A `mapping` dict (`--mapping map.json`) merges over the defaults:
  "sighting": "seen_at"}
 ```
 
-`python -m loom.connectors.stix schema --namespace N --mapping map.json`
+`python -m loomctx.connectors.stix schema --namespace N --mapping map.json`
 prints the resulting registration; `import` registers it (non-strict —
 `object_types` are left open because STIX relationship types join many
 object kinds). To make the names authoritative for the namespace, register
 them with `strict: true` yourself (`POST /v1/schemas`, D-024) after the
 first import; a strict namespace then rejects any unmapped predicate.
 
-## Loom → STIX 2.1
+## LoomCtx → STIX 2.1
 
 `observations_to_bundle(observations, namespace)` / `export` writes a
 valid 2.1 bundle:
 
-| Loom | STIX |
+| LoomCtx | STIX |
 | --- | --- |
 | entity `ip` / `domain` / `url` / `email` / `mac` | SCO (`ipv4-addr` or `ipv6-addr` by shape, `domain-name`, …) with `value`; ids are the spec's deterministic UUIDv5 over the value |
 | entity `user`, `file` | `user-account` (`user_id`), `file` (`hashes.SHA-256` for a 64-hex key, else `name`) |
 | entity `cve` / `vulnerability` | `vulnerability` with `name` and `external_references: [{source_name: "cve", external_id}]` |
 | entity `identity` / `organization` | `identity` |
 | entity `malware`, `intrusion_set`, `threat_actor`, `attack_pattern`, `campaign`, `tool`, `infrastructure`, `indicator`, `course_of_action`, `location`, `grouping` | the SDO, `name` = key |
-| any other entity type (`host`, `product`, `alert`, …) | `x-loom-<type>` custom object, `name` = key |
-| every entity object | `x_loom_entity_type`, `x_loom_entity_key`, `x_loom_namespace`; `created` / `modified` from the earliest / latest observation touching it |
+| any other entity type (`host`, `product`, `alert`, …) | `x-loomctx-<type>` custom object, `name` = key |
+| every entity object | `x_loomctx_entity_type`, `x_loomctx_entity_key`, `x_loomctx_namespace`; `created` / `modified` from the earliest / latest observation touching it |
 | relational observation | `relationship` (`relationship_type` = predicate, underscores → hyphens, or the inverse mapping), `start_time` / `stop_time` from `valid_from` / `valid_to`, `confidence` 0–100, `created_by_ref` = the source's identity, `description` from attrs |
 | `sighted_by` observation | `sighting` (`sighting_of_ref`, `where_sighted_refs`, `first_seen` / `last_seen`, `count` from attrs) |
-| scalar observation | on the subject's object: the **newest** of each mapped predicate as the STIX property (`summary` → `description`, `pattern`, `aliases`, `malware_types`, …; unmapped predicates are *not* invented as properties), and **all of them** in `x_loom_observations[]` (`id`, `predicate`, `value`, `observed_at`, `source`, `confidence`, validity) |
-| every relationship / sighting | `x_loom_observation_id`, `x_loom_predicate`, `x_loom_source` — the citation |
-| each `source` | one `identity` (`identity_class: unknown`, `x_loom_source`) |
+| scalar observation | on the subject's object: the **newest** of each mapped predicate as the STIX property (`summary` → `description`, `pattern`, `aliases`, `malware_types`, …; unmapped predicates are *not* invented as properties), and **all of them** in `x_loomctx_observations[]` (`id`, `predicate`, `value`, `observed_at`, `source`, `confidence`, validity) |
+| every relationship / sighting | `x_loomctx_observation_id`, `x_loomctx_predicate`, `x_loomctx_source` — the citation |
+| each `source` | one `identity` (`identity_class: unknown`, `x_loomctx_source`) |
 
 Ids are deterministic (UUIDv5 over namespace, type and key; for
 relationships the imported STIX id, else UUIDv5 over the first
@@ -236,33 +236,33 @@ skipped.
 
 **Versions are STIX versions (S-30).** STIX 2.1 (§3.6) versions an object
 in place: every version keeps the object's `id` and `created` and carries
-a later `modified`; a consumer keeps the newest. Loom's versions of one
+a later `modified`; a consumer keeps the newest. LoomCtx's versions of one
 edge — the versions the importer chained, and any recorded supersession
 (D-050, `supersedes`) between relational observations of the same kind —
 are written exactly that way:
 
-| Loom | STIX |
+| LoomCtx | STIX |
 | --- | --- |
 | the versions of one relationship / sighting | one `id` (the imported `stix_id`, else derived from the chain's first observation), `created` = the first version's (its imported `created` when it has one), `modified` = each version's `observed_at` |
 | `export` (default) | the **newest** version of each object only — a superseded version never appears as a second current edge |
 | `export --history` | every version, oldest first, all under the same `id` (bundles may carry several versions of one object; the spec's consumers keep the newest) |
 | a revoked version (imported `revoked: true`, `attrs.revoked`) | `revoked: true` |
-| an edge whose newest version was superseded by something that is not a version of it (a correction into a scalar, a relationship turned sighting) | a final `revoked: true` version at the superseding row's time, `x_loom_superseded_by` |
-| each version | `x_loom_observation_id` (the citation), `x_loom_event_id` (the observation's own event id; `x_loom_event_ids[]`, aligned with `where_sighted_refs`, on a sighting), `x_loom_supersedes` |
-| a superseded scalar | still listed in `x_loom_observations` (with `superseded_by`), never the object's property |
+| an edge whose newest version was superseded by something that is not a version of it (a correction into a scalar, a relationship turned sighting) | a final `revoked: true` version at the superseding row's time, `x_loomctx_superseded_by` |
+| each version | `x_loomctx_observation_id` (the citation), `x_loomctx_event_id` (the observation's own event id; `x_loomctx_event_ids[]`, aligned with `where_sighted_refs`, on a sighting), `x_loomctx_supersedes` |
+| a superseded scalar | still listed in `x_loomctx_observations` (with `superseded_by`), never the object's property |
 
 A later version from a different `source` keeps the object's `id` with
 its own `created_by_ref`; STIX expects only the creator to version an
-object, Loom's supersession is recorded, not ownership-based — the
+object, LoomCtx's supersession is recorded, not ownership-based — the
 deviation is deliberate (one edge, one id).
 
 **Round trip.** An export restates observations; importing it records
 them as they were, not as new assertions: an entity object that carries
-`x_loom_namespace` contributes the rows in its `x_loom_observations`
+`x_loomctx_namespace` contributes the rows in its `x_loomctx_observations`
 (their predicate, value, time, source, confidence and `event_id`; a
 superseded one is skipped) instead of claims derived from its STIX
-properties, an edge version reuses its `x_loom_event_id`, and the
-per-source `identity` objects (`x_loom_source`) are not imported as
+properties, an edge version reuses its `x_loomctx_event_id`, and the
+per-source `identity` objects (`x_loomctx_source`) are not imported as
 entities. So import → export → import is stable: re-importing an export
 (either form) into the store it came from records nothing; importing it
 into an empty store reproduces the current versions (all of them with
@@ -272,11 +272,11 @@ revocation exported without its earlier versions has nothing to close in
 an empty store and is dropped, like any revocation of an edge never
 imported.
 
-## OCSF `vulnerability_finding` (class_uid 2002) → Loom
+## OCSF `vulnerability_finding` (class_uid 2002) → LoomCtx
 
 Other event classes are ignored (counted as `other_class`).
 
-| OCSF | Loom |
+| OCSF | LoomCtx |
 | --- | --- |
 | `device.hostname` / `name` / `uid`, else `resources[].hostname` / `name` / `uid`, else `device.ip` | the host entity `host:<name>` |
 | `vulnerabilities[].cve.uid` | the CVE entity `cve:<CVE-…>` (upper-cased; non-CVE uids are dropped) |
@@ -308,15 +308,15 @@ as `invalid` and skipped. `status_id` / `severity_id` sent as strings
 
 Not mapped: `observables`, `evidences`, `remediation`, `enrichments`,
 `actor`, cloud/`api` context, and anything under `unmapped`. Findings with
-no CVE uid produce nothing (Loom's vulnerability entity is the CVE).
+no CVE uid produce nothing (LoomCtx's vulnerability entity is the CVE).
 
-## Loom → OCSF
+## LoomCtx → OCSF
 
 `observations_to_findings` / `export` writes one `vulnerability_finding`
 per finding — the versions of a host→cve edge (`affected_by` or any
 host→cve relation) — plus one per CVE that has facts but no host:
 
-| Loom | OCSF |
+| LoomCtx | OCSF |
 | --- | --- |
 | the edge | `resources[{name, type: host}]`, `device.hostname`, `finding_info.uid` = the imported `finding_uid` (else the first observation of the edge's version chain), `first_seen_time` / `last_seen_time` from the validity window, `status_id` 4 (Resolved) when the window is closed, else the recorded status (Suppressed and In Progress round-trip) |
 | `cvss_score` (newest per source) with `attrs.version` / `vector` | `vulnerabilities[0].cve.cvss[]` |
@@ -325,9 +325,9 @@ host→cve relation) — plus one per CVE that has facts but no host:
 | `summary` | `cve.desc` |
 | `exploited_in_wild` (KEV) or `exploit_available`, `fix_available` | `is_exploit_available`, `is_fix_available` |
 | `affects` → product | `affected_packages[]` |
-| every contributing observation | `unmapped.loom_observation_ids[]` (the citation), `unmapped.loom_sources[]`, `unmapped.loom_namespace` |
-| the CVE facts it restates | `unmapped.loom_observations[]`: each as recorded (`subject`, `predicate`, `value`, `observed_at`, `source`, `confidence`, validity, `attrs`, `event_id`) |
-| the edge's own source and event id | `unmapped.loom_source`, `unmapped.loom_event_id` |
+| every contributing observation | `unmapped.loomctx_observation_ids[]` (the citation), `unmapped.loomctx_sources[]`, `unmapped.loomctx_namespace` |
+| the CVE facts it restates | `unmapped.loomctx_observations[]`: each as recorded (`subject`, `predicate`, `value`, `observed_at`, `source`, `confidence`, validity, `attrs`, `event_id`) |
+| the edge's own source and event id | `unmapped.loomctx_source`, `unmapped.loomctx_event_id` |
 
 The CVE block is built from current facts only: a superseded score,
 severity or package (D-050) is history and is not exported.
@@ -339,26 +339,26 @@ or chained by `supersedes` (a supersession that moves the finding to
 another host is a version; one that names another CVE is not) — share
 the uid:
 
-| Loom | OCSF |
+| LoomCtx | OCSF |
 | --- | --- |
 | `export` (default) | the **newest** version only, with its state and status — a resolved finding is one Resolved record, not an open one per earlier scan |
 | `export --history` | every version, oldest first: `activity_id` 1 (Create) for the first, 2 (Update) after, 3 (Close) for a version that closed the exposure |
-| a finding whose newest version was superseded by something that is not a version of it | a final Close with `status_id` 99 (Other), `status` "Superseded", `unmapped.loom_superseded_by` |
+| a finding whose newest version was superseded by something that is not a version of it | a final Close with `status_id` 99 (Other), `status` "Superseded", `unmapped.loomctx_superseded_by` |
 
 `type_uid` follows the activity (`200201` / `200202` / `200203`).
-Importing a record Loom exported (it carries `unmapped.loom_observations`)
-records the edge under `unmapped.loom_event_id` / `loom_source` and the
+Importing a record LoomCtx exported (it carries `unmapped.loomctx_observations`)
+records the edge under `unmapped.loomctx_event_id` / `loomctx_source` and the
 restated CVE facts as they were, instead of re-asserting the CVE block
-under the source `loom`: re-importing an export into the store it came
+under the source `loomctx`: re-importing an export into the store it came
 from records nothing, and importing it into an empty store gives the
 same findings (and CVE facts, with their sources) on the next export.
 
 Constants: `class_uid 2002`, `category_uid 2`, `metadata.version 1.3.0`,
-`metadata.product.name Loom`.
+`metadata.product.name LoomCtx`.
 
-## Raw LDAP / LDIF (Active Directory) → Loom
+## Raw LDAP / LDIF (Active Directory) → LoomCtx
 
-`loom.connectors.ldap` decodes a raw directory export — object by object,
+`loomctx.connectors.ldap` decodes a raw directory export — object by object,
 deterministically — into typed, cited claims in the environment's namespace (`netsec` by default, D-083), so an
 agent can ask **object-level reachability** questions over the ordinary
 scope walk: *"what rights / trust / membership path connects user:X to
@@ -367,7 +367,7 @@ no directory operations.
 
 **It is NOT BloodHound.** It performs no graph reasoning: no transitive or
 *effective* admin, no shortest / cheapest attack-path scoring, no edge
-exploitability weighting. Loom carries the evidence (the direct edges and
+exploitability weighting. LoomCtx carries the evidence (the direct edges and
 the decoded rights); the agent (or a later analysis layer) assembles and
 ranks the path. Group **nesting** is the scope walk's job at depth N, not
 the connector's.
@@ -375,7 +375,7 @@ the connector's.
 **The boundary — object-level only.** LDAP gives you ACL / membership /
 delegation / trust reachability. It does **not** contain sessions or
 local-admin-on-member-servers — those need host collection (what SharpHound
-does at the host), not the directory. So an LDAP-only Loom answers
+does at the host), not the directory. So an LDAP-only LoomCtx answers
 control-of-account, delegation, trust and GPO-control questions, but not
 session-based lateral movement. Load host/session data as its own claims
 later and the same walk extends over it; this connector does not invent it.
@@ -401,7 +401,7 @@ Within one export, `member` / `memberOf` DNs are resolved to the SID of the
 object they name, so the edges connect the SID-keyed entities directly. The
 object's type comes from `objectClass` (most specific wins):
 
-| objectClass | Loom type |
+| objectClass | LoomCtx type |
 | --- | --- |
 | `domainDNS` / `domain` | `domain` |
 | `computer` | `computer` |
@@ -416,7 +416,7 @@ domain, keyed by DNS name (`domain:dev.local`).
 
 ### Decode (deterministic, per-object)
 
-| Directory fact | Loom claim |
+| Directory fact | LoomCtx claim |
 | --- | --- |
 | `member` / `memberOf` | `member_of` (subject = principal, object = group) — **DIRECT only**; nesting is the walk's job |
 | DN parentage | `contains` (parent object → child), containment |
@@ -501,7 +501,7 @@ stored cve→product but walked product→cve), simple paths only (a cycle never
 loops, and no turning back along one predicate at an entity unless
 `siblings`), capped by `depth` (default 4, ≤ 6; a longer request is clamped
 and noted), `max_paths`, the token `budget`, and the
-`LOOM_MAX_SCOPE_*` caps. Each returned `PathEdge` is **cited** and carries
+`LOOMCTX_MAX_SCOPE_*` caps. Each returned `PathEdge` is **cited** and carries
 its `valid_from`/`valid_to`; `as_of`/`valid_at` filter every edge and a
 superseded one (D-050) never appears; a path through an entity outside a
 type-scoped grant is not returned. A cut — more paths than `max_paths` or
@@ -530,26 +530,26 @@ identical edges.
 
 Whether the scope walk actually surfaces the **full cited chain** — and how
 much of a realistically-sized directory it sorts through to do it — is a
-benchmark of its own: [ad-eval.md](ad-eval.md). `loom.connectors.ad_gen`
+benchmark of its own: [ad-eval.md](ad-eval.md). `loomctx.connectors.ad_gen`
 generates a synthetic directory at scale, plants known 2/3/4-hop chains
 (and decoys that dead-end at a non-transitive / SID-filtered trust or a
-disabled account) and buries them in benign noise; `loom.ad_eval` loads it
+disabled account) and buries them in benign noise; `loomctx.ad_eval` loads it
 through this connector and scores retrieval with a scripted reader (no LLM).
-On a `medium` directory (4,429 objects, 31k observations) Loom recovers and
+On a `medium` directory (4,429 objects, 31k observations) LoomCtx recovers and
 cites 100% of the planted chains while the walk pulls ~2.5% of the store's
 entities. It is synthetic and object-level only, and measures retrieval, not
 attack-path ranking.
 
-## Scan inventory (nmap) → Loom
+## Scan inventory (nmap) → LoomCtx
 
-`loom.connectors.nmap` parses the XML report an operator already produced
+`loomctx.connectors.nmap` parses the XML report an operator already produced
 with `nmap -oX` on authorized scope into cited, timestamped inventory
 claims in the `netsec` namespace (to line up with the vulns data). It reads
 a **file**: it performs **no scanning** and issues **no network probing** —
 it is a parser, exactly like the STIX / OCSF / vulns connectors. It stays
 strictly inventory/asset parsing: what hosts, ports, services and
 product/versions a scan report lists, as facts over time. **No exploitation
-logic, no attack-path scoring, no exposure ranking** — Loom carries the
+logic, no attack-path scoring, no exposure ranking** — LoomCtx carries the
 evidence (this host runs this software, this port is open, this OS was
 guessed) and reachability is the ordinary scope walk / `find_path` (D-067).
 
@@ -557,7 +557,7 @@ guessed) and reachability is the ordinary scope walk / `find_path` (D-067).
 
 Per `<host>` in the report:
 
-| nmap | Loom claim |
+| nmap | LoomCtx claim |
 | --- | --- |
 | the target: `<hostnames><hostname>` (user, else PTR), else `<address addrtype="ipv4">`, else `ipv6` | the host entity `host:<key>` (the seed's `host:web-01` convention); both IP and hostname (and mac, extra hostnames) ride in `attrs` |
 | each `<port>` with `<state state="open">` (or `open\|filtered`) | `listens_on_port <portid>` (a scalar int — the seed's own nmap port fact) **and** `runs_service tcp/<portid>` with attrs `port` / `protocol` / `state` / `service` / `product` |
@@ -603,9 +603,9 @@ port, a changed version, a new OS guess) as history, not duplicates. A host
 that cannot be parsed is counted `host_invalid` and skipped, not the whole
 report; source label `nmap`.
 
-## OSV / GHSA advisories → Loom
+## OSV / GHSA advisories → LoomCtx
 
-`loom.connectors.osv` parses records in the public **OSV schema**
+`loomctx.connectors.osv` parses records in the public **OSV schema**
 (<https://ossf.github.io/osv-schema/>) — the format osv.dev, the GitHub
 Advisory Database (`GHSA-…`), the PyPI Advisory Database (`PYSEC-…`), the Go
 vuln DB (`GO-…`), npm and others all publish. It reads a **file or a
@@ -626,7 +626,7 @@ duplicate node — and the OSV id and every alias ride in `attrs`. With no CVE
 alias (a malware advisory, a reserved GHSA) the record is keyed by its own id
 on an `advisory:<OSV-id>` node.
 
-| OSV | Loom |
+| OSV | LoomCtx |
 | --- | --- |
 | the first `CVE-…` in `aliases` | the subject `cve:<CVE-…>` (the shared node); `attrs.osv_id` + `attrs.aliases` keep the OSV/GHSA id and every alias |
 | no CVE alias | the subject `advisory:<OSV-id>` |
@@ -670,14 +670,14 @@ Source label `ghsa` / `osv` (`--source` overrides); a malformed record is
 counted `invalid` and skipped, not the end of a directory of thousands; the
 loader fails on refusals (D-063).
 
-## OCSF detections (`detection_finding` and friends) → Loom
+## OCSF detections (`detection_finding` and friends) → LoomCtx
 
 Beyond `vulnerability_finding` (class 2002), the connector ingests the
 detection classes a SIEM / EDR / XDR emits — `detection_finding` (2004),
 `security_finding` (2001), `incident_finding` (2005) — as a cited `finding`
 graph:
 
-| OCSF field | Loom claim |
+| OCSF field | LoomCtx claim |
 | --- | --- |
 | `finding_info.uid` | `finding:<uid>` entity |
 | `finding_info.title` / `desc` | `finding -title-> <text>` |
@@ -694,9 +694,9 @@ detection fuses onto the same `host:` and `cve:` nodes as the vuln and scan
 data, so a host's pack shows its detections beside its exposure. Import
 only; export stays `vulnerability_finding`.
 
-## Cloud inventory / config → Loom
+## Cloud inventory / config → LoomCtx
 
-`loom.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
+`loomctx.connectors.cloud` parses a `terraform show -json` / `.tfstate` or an
 AWS Config `configurationItems` snapshot (a file; it calls no cloud API)
 into cited, timestamped inventory claims in the environment's namespace — strictly
 inventory/config-as-facts, so an analyst can ask "what changed", "what is
@@ -714,15 +714,15 @@ exposed", "what is in this subnet" over the scope walk / `find_path`.
   drift (an opened port, an appeared/vanished resource) as history, queryable
   by `as_of` — never an overwrite.
 
-## MITRE ATT&CK taxonomy → Loom
+## MITRE ATT&CK taxonomy → LoomCtx
 
-`loom.connectors.attack` parses the public `mitre-attack` STIX 2.1 bundles
+`loomctx.connectors.attack` parses the public `mitre-attack` STIX 2.1 bundles
 (enterprise / mobile / ICS) into a cited, queryable catalog in the `attack`
 namespace. It is **defensive reference data** — names, ids, descriptions and
 the relationships MITRE publishes — kept strictly at the catalog level; the
 per-relationship procedure prose ATT&CK attaches is **not** imported.
 
-| STIX object | Loom entity (key) |
+| STIX object | LoomCtx entity (key) |
 | --- | --- |
 | attack-pattern | `technique:Txxxx` (sub-techniques included) |
 | x-mitre-tactic | `tactic:TAxxxx` |
@@ -738,9 +738,9 @@ use, and which mitigations address them?" as a cited scope walk / `path`.
 `attack` is its own namespace; a technique that names a CVE optionally links
 to the shared `cve:` node.
 
-## Entra ID / Azure AD → Loom
+## Entra ID / Azure AD → LoomCtx
 
-`loom.connectors.entra` parses a JSON export of Microsoft Entra ID (Azure AD)
+`loomctx.connectors.entra` parses a JSON export of Microsoft Entra ID (Azure AD)
 objects — users, groups, service principals, app registrations, directory
 roles and role assignments — into cited identity / RBAC claims. It reads a
 FILE: it does not call the Graph API.
@@ -752,7 +752,7 @@ array), a combined export with `users`/`groups`/`servicePrincipals`/
 The connector detects the object type from `@odata.type`, `userPrincipalName`,
 `securityEnabled`, `appId`, `roleTemplateId`, or the assignment shape.
 
-| Object | Loom entity (key = Entra object id) |
+| Object | LoomCtx entity (key = Entra object id) |
 | --- | --- |
 | user | `user` |
 | group | `group` |
@@ -778,14 +778,14 @@ user; the client id rides as an attr.
 
 The namespace is shared with the Okta connector (and every other source of the environment, D-083). The two predicates
 that carry object types, `member_of` and `has_role`, are declared once in
-`loom.connectors.iam_schema` and used by both: registration merges by
+`loomctx.connectors.iam_schema` and used by both: registration merges by
 predicate name with the later definition winning, so two different
 declarations would make each connector's registration reject the other's
 role claims.
 
-## Okta directory → Loom
+## Okta directory → LoomCtx
 
-`loom.connectors.okta` parses a JSON export of Okta directory objects —
+`loomctx.connectors.okta` parses a JSON export of Okta directory objects —
 users, groups, applications and app-user assignments — into cited identity
 claims. It reads a FILE: it does not call the Okta API.
 
@@ -794,7 +794,7 @@ Input is a JSON file with `users`/`groups`/`apps`/`appUsers`/
 connector detects the object type from `profile.login`, `signOnMode`, the
 presence of `userId`+`appId`, or the admin-role shape.
 
-| Object | Loom entity (key = Okta object id) |
+| Object | LoomCtx entity (key = Okta object id) |
 | --- | --- |
 | user | `user` |
 | group | `group` |
@@ -838,17 +838,17 @@ unknown, not assumed". Importing a fuller export later supersedes the gap;
 
 ### Checking the identity connectors at scale
 
-`loom.connectors.iam_gen` writes a seeded Entra + Okta export pair in the
+`loomctx.connectors.iam_gen` writes a seeded Entra + Okta export pair in the
 shapes the real APIs return (tiny / small / medium / large: 300 to 60,000
 users, an "All Staff" / "Everyone" hub group holding every user) with a
-truth sidecar; `loom.iam_eval` imports both into one namespace and checks
+truth sidecar; `loomctx.iam_eval` imports both into one namespace and checks
 every implied edge is stored once with the right types, that a re-import
 adds nothing, that the planted role paths come back cited, and how scope
 walks behave through the hubs. Results: `docs/hardening.md` S-52…S-57,
 `deploy/README.md` (GKE, 2026-09-26).
 
 ```bash
-python -m loom.iam_eval --db /data/iam.db --generate --scale medium
+python -m loomctx.iam_eval --db /data/iam.db --generate --scale medium
 ```
 
 ## One host, one person across tools (identity, D-083)
@@ -880,13 +880,13 @@ otherwise left alone: two domains can both have a `web-01`. An address is
 never grounds to merge (DHCP reuses it); it is a `has_ip` edge with its
 observation time, so `as_of` / `valid_at` answer who had it when. The same
 identifier on a user and a host is logged as a data error, not merged.
-Merges are reversible (`python -m loom.lifecycle unmerge`) and a decline
-sticks, as for every tier. `python -m loom.enrich resolve` runs the pass
+Merges are reversible (`python -m loomctx.lifecycle unmerge`) and a decline
+sticks, as for every tier. `python -m loomctx.enrich resolve` runs the pass
 on demand.
 
 ## Host artifacts: processes and files (D-084)
 
-`loom.connectors.endpoint` parses what was collected on a host — it runs
+`loomctx.connectors.endpoint` parses what was collected on a host — it runs
 nothing on any machine. Recognised, auto-detected: osquery rows
 (`osqueryi --json`) and osqueryd results logs; Windows `tasklist /v /fo csv`,
 PowerShell `Get-CimInstance Win32_Process | ConvertTo-Json`, `Get-Process |
@@ -921,16 +921,16 @@ source. A field present in at least 5 % of objects before and absent now
 (or the reverse) is reported in the import's output (`"drift": [...]`,
 and on stderr), whether it went straight to the store or to an engine;
 an import through a gateway (which serves ingest only) reads the earlier
-shapes from the engine named by `LOOM_READ_URL`, and says so when it is
+shapes from the engine named by `LOOMCTX_READ_URL`, and says so when it is
 unset. The same variable serves the OCSF and STIX importers' version
 chaining (prior versions of a finding are looked up before a new one is
 written); without it, a gateway import chains within the run only and
-warns. `python -m loom.coverage drift` lists drift afterwards. A re-import
+warns. `python -m loomctx.coverage drift` lists drift afterwards. A re-import
 of the same export is not drift.
 
 ## Red-team operation logs and purple correlation (D-086)
 
-`loom.connectors.oplog` records what an authorized red team did: Atomic
+`loomctx.connectors.oplog` records what an authorized red team did: Atomic
 Red Team's execution log (CSV), the Attire JSON logger, or any CSV / JSON /
 JSONL naming a time and a technique or target. Each action becomes
 `activity:<operation>:<id>` — `in_operation`, `performed_at`,
@@ -939,7 +939,7 @@ JSONL naming a time and a technique or target. Each action becomes
 `tool`. OCSF detections now carry `indicates technique:<id>` from
 `finding_info.attacks[]`.
 
-`python -m loom.purple <operation>` (and the MCP tool `purple_report`) sets
+`python -m loomctx.purple <operation>` (and the MCP tool `purple_report`) sets
 every action against the detections on its target host — matched by
 resolved identity, the short hostname included, since Atomic logs
 `WEB-01` where the EDR reports `web-01.corp.local` — from 5 minutes
@@ -987,10 +987,10 @@ Entra ID and Okta connectors still declare their shared predicates once
 (`iam_schema`). To pin a namespace to exactly these names:
 
 ```bash
-python -m loom.connectors.stix schema --namespace netsec > stix.json
-python -m loom.connectors.ocsf schema --namespace netsec > ocsf.json
+python -m loomctx.connectors.stix schema --namespace netsec > stix.json
+python -m loomctx.connectors.ocsf schema --namespace netsec > ocsf.json
 # merge, set "strict": true, then
-curl -X POST http://loom:8000/v1/schemas -H 'content-type: application/json' -H "X-Loom-Key: $KEY" -d @schema.json
+curl -X POST http://loomctx:8000/v1/schemas -H 'content-type: application/json' -H "X-LoomCtx-Key: $KEY" -d @schema.json
 ```
 
 Registration is additive by name (D-024, merging per predicate since D-083); with `strict` the namespace

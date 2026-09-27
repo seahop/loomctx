@@ -13,8 +13,8 @@ CLAIM = {
 
 
 def make_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_DB", str(tmp_path / "api.db"))
-    from loom.api.http import app
+    monkeypatch.setenv("LOOMCTX_DB", str(tmp_path / "api.db"))
+    from loomctx.api.http import app
 
     return TestClient(app)
 
@@ -111,7 +111,7 @@ def _ask_then_expand(client):
 
 
 def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.delenv("LOOM_HANDLE_SECRET", raising=False)
+    monkeypatch.delenv("LOOMCTX_HANDLE_SECRET", raising=False)
     with make_client(tmp_path, monkeypatch) as client:
         _, handle, _ = _ask_then_expand(client)
         assert handle["id"].startswith("h1_")
@@ -119,17 +119,17 @@ def test_ask_and_expand_roundtrip(tmp_path, monkeypatch):
 
 
 def test_ask_and_expand_roundtrip_signed(tmp_path, monkeypatch):
-    """With LOOM_HANDLE_SECRET set, issued handles are signed and expand;
+    """With LOOMCTX_HANDLE_SECRET set, issued handles are signed and expand;
     an unsigned handle for the same query is refused (D-021)."""
-    from loom.context import encode_handle
-    monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+    from loomctx.context import encode_handle
+    monkeypatch.setenv("LOOMCTX_HANDLE_SECRET", "roundtrip-secret")
     with make_client(tmp_path, monkeypatch) as client:
         _, handle, _ = _ask_then_expand(client)
         assert handle["id"].startswith("h2_")
-        monkeypatch.delenv("LOOM_HANDLE_SECRET")
-        from loom.contracts import EntityRef
+        monkeypatch.delenv("LOOMCTX_HANDLE_SECRET")
+        from loomctx.contracts import EntityRef
         unsigned = encode_handle("default", EntityRef(type="host", key="web-01"), "logged_in_by", None)
-        monkeypatch.setenv("LOOM_HANDLE_SECRET", "roundtrip-secret")
+        monkeypatch.setenv("LOOMCTX_HANDLE_SECRET", "roundtrip-secret")
         assert unsigned.startswith("h1_")
         assert client.post("/v1/expand", json={"handle": unsigned, "budget": 400}).status_code == 400
         tampered = handle["id"][:-3] + ("AAA" if not handle["id"].endswith("AAA") else "BBB")
@@ -192,16 +192,16 @@ def test_observation_prov_route(tmp_path, monkeypatch):
         body = prov.json()
         assert body["@context"]["prov"] == "http://www.w3.org/ns/prov#"
         nodes = {n["@id"]: n for n in body["@graph"]}
-        entity = nodes[f"loom:default/observation/{oid}"]
+        entity = nodes[f"loomctx:default/observation/{oid}"]
         assert entity["@type"] == "prov:Entity"
-        assert entity["prov:wasAttributedTo"]["@id"] == "loom:default/agent/doc%3Ainv.txt"
+        assert entity["prov:wasAttributedTo"]["@id"] == "loomctx:default/agent/doc%3Ainv.txt"
         assert entity["prov:generatedAtTime"]["@value"].startswith("2026-09-01T14:03")
-        assert entity["prov:wasDerivedFrom"]["@id"] == f"loom:default/artifact/{artifact_id}#char=0,21"
-        assert nodes[f"loom:default/artifact/{artifact_id}"]["loom:filename"] == "inv.txt"
+        assert entity["prov:wasDerivedFrom"]["@id"] == f"loomctx:default/artifact/{artifact_id}#char=0,21"
+        assert nodes[f"loomctx:default/artifact/{artifact_id}"]["loomctx:filename"] == "inv.txt"
         activity = nodes[entity["prov:wasGeneratedBy"]["@id"]]
-        assert activity["@type"] == "prov:Activity" and activity["loom:activity"] == "extraction"
-        assert activity["prov:used"]["@id"] == f"loom:default/artifact/{artifact_id}"
-        assert nodes[activity["prov:wasAssociatedWith"]["@id"]]["loom:model"] == "test/model"
+        assert activity["@type"] == "prov:Activity" and activity["loomctx:activity"] == "extraction"
+        assert activity["prov:used"]["@id"] == f"loomctx:default/artifact/{artifact_id}"
+        assert nodes[activity["prov:wasAssociatedWith"]["@id"]]["loomctx:model"] == "test/model"
         assert client.get("/v1/observations/nope/prov").status_code == 404
         assert client.get(f"/v1/observations/{oid}/prov?namespace=other").status_code == 404
 
@@ -212,8 +212,8 @@ def test_observation_prov_supersession_chain():
     for a plain sender-asserted claim."""
     from datetime import datetime, timezone
 
-    from loom.contracts import EntityRef, Observation
-    from loom.prov import observation_prov
+    from loomctx.contracts import EntityRef, Observation
+    from loomctx.prov import observation_prov
     when = datetime(2026, 9, 2, tzinfo=timezone.utc)
     obs = Observation(id="b" * 32, namespace="netsec", subject=EntityRef(type="host", key="web-01"),
                       predicate="runs_os", object="ubuntu-22.04", observed_at=when, recorded_at=when,
@@ -221,20 +221,20 @@ def test_observation_prov_supersession_chain():
                       valid_from=when)
     body = observation_prov(obs)
     nodes = {n["@id"]: n for n in body["@graph"]}
-    me = nodes["loom:netsec/observation/" + "b" * 32]
-    assert me["prov:wasRevisionOf"]["@id"] == "loom:netsec/observation/" + "a" * 32
-    assert me["loom:validFrom"]["@type"] == "xsd:dateTime" and "loom:validTo" not in me
-    assert me["loom:confidence"] == 0.9 and me["loom:object"] == "ubuntu-22.04"
-    old = nodes["loom:netsec/observation/" + "a" * 32]
+    me = nodes["loomctx:netsec/observation/" + "b" * 32]
+    assert me["prov:wasRevisionOf"]["@id"] == "loomctx:netsec/observation/" + "a" * 32
+    assert me["loomctx:validFrom"]["@type"] == "xsd:dateTime" and "loomctx:validTo" not in me
+    assert me["loomctx:confidence"] == 0.9 and me["loomctx:object"] == "ubuntu-22.04"
+    old = nodes["loomctx:netsec/observation/" + "a" * 32]
     invalidation = nodes[old["prov:wasInvalidatedBy"]["@id"]]
-    assert invalidation["loom:activity"] == "supersession"
-    assert invalidation["prov:wasAssociatedWith"]["@id"] == "loom:netsec/agent/asset-inventory"
+    assert invalidation["loomctx:activity"] == "supersession"
+    assert invalidation["prov:wasAssociatedWith"]["@id"] == "loomctx:netsec/agent/asset-inventory"
     assert not any(k in me for k in ("prov:wasDerivedFrom", "prov:wasGeneratedBy"))
-    assert all(n["@type"] != "prov:Activity" or n["loom:activity"] == "supersession" for n in body["@graph"])
+    assert all(n["@type"] != "prov:Activity" or n["loomctx:activity"] == "supersession" for n in body["@graph"])
     # an entity-valued object is a reference, not a string
     edge = obs.model_copy(update={"object": EntityRef(type="user", key="jdoe"), "supersedes": None})
-    me = {n["@id"]: n for n in observation_prov(edge)["@graph"]}["loom:netsec/observation/" + "b" * 32]
-    assert me["loom:object"] == {"@id": "loom:netsec/entity/user%3Ajdoe"}
+    me = {n["@id"]: n for n in observation_prov(edge)["@graph"]}["loomctx:netsec/observation/" + "b" * 32]
+    assert me["loomctx:object"] == {"@id": "loomctx:netsec/entity/user%3Ajdoe"}
     assert "prov:wasRevisionOf" not in me
 
 
@@ -261,13 +261,13 @@ def test_entity_search(tmp_path, monkeypatch):
 
 
 def test_answer_503_when_no_llm_configured(tmp_path, monkeypatch):
-    for var in ("LOOM_LLM_MODEL", "LOOM_LLM_PROVIDER",
-                "LOOM_LLM_BASE_URL", "LOOM_LLM_API_KEY"):
+    for var in ("LOOMCTX_LLM_MODEL", "LOOMCTX_LLM_PROVIDER",
+                "LOOMCTX_LLM_BASE_URL", "LOOMCTX_LLM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     with make_client(tmp_path, monkeypatch) as client:
         r = client.post("/v1/answer", json={"question": "anything?"})
         assert r.status_code == 503
-        assert "LOOM_LLM_MODEL" in r.json()["detail"]
+        assert "LOOMCTX_LLM_MODEL" in r.json()["detail"]
         # both a subject and a scope is ambiguous: 422, not a 500 (D-046)
         r = client.post("/v1/answer", json={
             "question": "anything?", "subject": {"type": "host", "key": "web-01"},
@@ -335,13 +335,13 @@ def test_readyz_reports_schema_version(tmp_path, monkeypatch):
 
 def test_semantic_entity_search(tmp_path, monkeypatch):
     """D-025: find entities by meaning; 503 without an embedder."""
-    from loom.enrich import embed_pending
-    from loom.llm import HashingEmbedder
-    from loom.store.sqlite import SqliteStore
-    monkeypatch.delenv("LOOM_EMBED_PROVIDER", raising=False)
+    from loomctx.enrich import embed_pending
+    from loomctx.llm import HashingEmbedder
+    from loomctx.store.sqlite import SqliteStore
+    monkeypatch.delenv("LOOMCTX_EMBED_PROVIDER", raising=False)
     with make_client(tmp_path, monkeypatch) as client:
         assert client.get("/v1/entities/semantic", params={"q": "x"}).status_code == 503
-    monkeypatch.setenv("LOOM_EMBED_PROVIDER", "hashing")
+    monkeypatch.setenv("LOOMCTX_EMBED_PROVIDER", "hashing")
     with make_client(tmp_path, monkeypatch) as client:
         for key, pred, obj in [("web-01", "runs_os", "ubuntu linux operating system"),
                                ("db-01", "listens_on_port", "5432 postgres database"),
@@ -358,8 +358,8 @@ def test_semantic_entity_search(tmp_path, monkeypatch):
         assert "vector_backend" in client.get("/readyz").json()
         # a failing embedder is a 503 with the short public form, not a 500
         # echoing the provider's body (D-046)
-        from loom.context import _query_cache
-        from loom.llm import LLMError
+        from loomctx.context import _query_cache
+        from loomctx.llm import LLMError
 
         class Down(HashingEmbedder):
             def embed_query(self, text):
@@ -398,26 +398,26 @@ def test_batch_ingest_array_and_ndjson(tmp_path, monkeypatch):
         r = client.post("/v1/ingest/batch", json={"items": [CLAIM]})
         assert r.json()["recorded"] == 1
         assert client.post("/v1/ingest/batch", content=b"not json", headers={"content-type": "application/json"}).status_code == 400
-        monkeypatch.setenv("LOOM_MAX_BATCH", "2")
+        monkeypatch.setenv("LOOMCTX_MAX_BATCH", "2")
         assert client.post("/v1/ingest/batch", json=items).status_code == 413
 
 
 def test_batch_ingest_applies_gates_per_item(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_API_KEYS", "w1:default:w,r1:default:r")
+    monkeypatch.setenv("LOOMCTX_API_KEYS", "w1:default:w,r1:default:r")
     with make_client(tmp_path, monkeypatch) as client:
         assert client.post("/v1/ingest/batch", json=[CLAIM]).status_code == 401
         r = client.post("/v1/ingest/batch", json=[CLAIM, {**CLAIM, "namespace": "other"}],
-                        headers={"X-Loom-Key": "w1"})
+                        headers={"X-LoomCtx-Key": "w1"})
         assert r.status_code == 200
         st = {x["index"]: x for x in r.json()["results"]}
         assert st[0]["status"] == "recorded" and st[1]["status"] == "rejected"
         assert "other" in st[1]["detail"]
-        r = client.post("/v1/ingest/batch", json=[CLAIM], headers={"X-Loom-Key": "r1"})
+        r = client.post("/v1/ingest/batch", json=[CLAIM], headers={"X-LoomCtx-Key": "r1"})
         assert r.json()["results"][0]["status"] == "rejected"
 
 
 def test_openapi_document_exports(tmp_path, monkeypatch):
-    from loom.schemas import openapi
+    from loomctx.schemas import openapi
     doc = openapi()
     assert doc["openapi"].startswith("3.")
     paths = set(doc["paths"])
@@ -453,7 +453,7 @@ def test_search_endpoints_take_namespace_as_a_query_parameter(tmp_path, monkeypa
         assert client.get("/v1/entities/search", params={"q": "web", "namespace": "netsec"}).json()["matches"]
         assert not client.get("/v1/entities/search", params={"q": "web"}).json()["matches"]
         assert client.get("/v1/entities/search", params={"q": "web"},
-                          headers={"X-Loom-Namespace": "netsec"}).json()["matches"]
+                          headers={"X-LoomCtx-Namespace": "netsec"}).json()["matches"]
         # the same on observations, artifacts and the schema
         assert client.get("/v1/entities/host/web-01/observations", params={"namespace": "netsec"}).json()["count"] == 1
         assert client.get("/v1/entities/host/web-01/observations").json()["count"] == 0
