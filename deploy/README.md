@@ -470,8 +470,17 @@ so it merged nothing (separate passes now); per-host endpoint coverage
 evicted the import shapes from a newest-N read and drift went silent
 (shapes on their own entity, coverage per format); and the identity pass
 merges ~5 entities/s on this Postgres, so a first 12,600-merge load folds
-over ~45 minutes in the background (S-63, open). The cluster was torn down
+over ~45 minutes in the background (S-63). The cluster was torn down
 volumes first.
+
+**S-63 follow-up (D-087).** A re-run with the fixes — foreign-key child
+indexes (schema v8, built in place), batched ranking, the strong identity
+pass as a drainable job sharded across the two worker replicas, and a
+stepwise candidate query — on the same estate: the workers folded 8,480
+identities while the gateway load was still arriving, finished about 20
+minutes in; after the drain one more pass found 75 left (48 s). Every
+check held (5,400/5,400 machines, 3,000/3,000 accounts, 0 false merges,
+purple 600/600, drift reported by the gateway import).
 
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 

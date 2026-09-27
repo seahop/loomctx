@@ -209,3 +209,19 @@ def test_weak_groups_do_not_starve_strong_ones(store):
     _say(store, y, ("mac", "aa:bb:cc:dd:ee:99"))
     assert enrich.resolve_identities(store, limit=3) == 1
     assert _canon(store, x) == _canon(store, y)
+
+
+def test_replicas_share_the_pass_and_together_fold_everything(store, monkeypatch):
+    pairs = []
+    for i in range(8):
+        a, b = EntityRef(type="host", key=f"p{i}"), EntityRef(type="host", key=f"q{i}")
+        _say(store, a, ("mac", f"aa:bb:cc:dd:ee:{i:02x}"))
+        _say(store, b, ("mac", f"aa:bb:cc:dd:ee:{i:02x}"))
+        pairs.append((a, b))
+    monkeypatch.setenv("LOOM_WORKER_SHARD", "0/2")
+    first = enrich.resolve_identities(store)
+    enrich._identity_seen_until.clear()
+    monkeypatch.setenv("LOOM_WORKER_SHARD", "1/2")
+    second = enrich.resolve_identities(store)
+    assert first + second == 8                   # each pair folded once, by one replica
+    assert all(_canon(store, a) == _canon(store, b) for a, b in pairs)

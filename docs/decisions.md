@@ -2816,6 +2816,49 @@ merge), by any shared identifier including the short hostname — Atomic
 logs `WEB-01` where the EDR has the FQDN. Coverage gaps behind the result
 are noted. MCP gains one read-only tool; no contract change.
 
+## D-087 · Identity-pass throughput (2026-09-27, S-63)
+
+The identity tier merged ~5 entities/s on the GKE Postgres, so a first
+bulk load's ~12,600 merges took ~45 min to fold. Profiled on the cluster,
+three causes, three fixes:
+
+1. **A foreign-key check scanned the table.** Deleting a merged-away entity
+   makes Postgres prove nothing still references it; `observations.
+   object_entity_id` was indexed only behind `namespace`, so that check
+   read the whole index (plan cost 9,828 vs 8.6), per merge, growing with
+   the store. Schema v8 adds `idx_obs_object_entity` (partial: edges only)
+   and `idx_alias_entity` (both stores; built in place on open).
+2. **Ranking and resolution were per member.** Two queries per candidate
+   (up to 50 rows fetched to count them, then a count) plus a resolve and
+   an entity fetch each. `GraphStore.rank_facts(namespace, refs)` returns
+   structured / total counts and creation time for many entities in one
+   query; the pass resolves every member once and folds its own merges
+   into a local map, so a chain sees the survivor and its absorbed counts.
+   On the same data: 22 -> 74 merges/s.
+3. **The worker ran resolution once per interval** (30 s, at most one
+   batch), capping any merge speed at ~7/s. The strong identity pass is
+   deterministic and free, so it is now its own job (`identities`,
+   enabled by `resolve` too) that drains back to back like embedding; the
+   weak pass, which asks the LLM, rides the paced `adjudicate` job.
+   Replicas share the pass by identifier (the embedding shard scheme), and
+   a merge that fails or finds a side already folded by the other replica
+   leaves the group for the next pass instead of skipping it for good.
+4. **The candidate query could stall.** Found on the next GKE run: both
+   workers sat 87 minutes in one `shared_identifier_groups` query — a
+   single join whose plan depended on row estimates for a namespace still
+   being loaded. It is now stepwise, every step on an index: the
+   identifiers touched since the watermark (`recorded_at`), then the edges
+   into them in chunks (`idx_obs_object_entity`), grouped and filtered by
+   kind in Python.
+
+Measured on GKE (`scale-pg-ha`, two worker replicas, the 6,000-machine
+estate through the gateway, 1.27M envelopes): the workers folded 8,480
+identities while the load was still arriving, done about 20 minutes in;
+after the queue drained, one more pass found 75 left and folded them in
+48 s. Before: ~5 merges/s and about a third of the work done after 1.7 h
+(or none, with the stalled query). Every check held: 5,400/5,400
+machines and 3,000/3,000 accounts folded, 0 false merges, purple 600/600.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

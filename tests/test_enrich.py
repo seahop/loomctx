@@ -1565,7 +1565,7 @@ def test_run_drains_a_vector_backlog_without_sleeping_between_batches(monkeypatc
                                   tick_cost=1.0)
     assert sleeps == [27.0, 30.0]                       # 30 s since the full tick at t=0
     assert jobs_run[0] == frozenset(en.JOBS)             # the first tick is a full one
-    assert jobs_run[1] == jobs_run[2] == {"embed", "index", "chunk"}   # the drain: vectors only
+    assert jobs_run[1] == jobs_run[2] == en._DRAIN_JOBS   # the drain: vectors + strong identities only
     assert jobs_run[3] == frozenset(en.JOBS)             # the interval elapsed: full again
 
 
@@ -1629,7 +1629,7 @@ def test_a_vector_drain_keeps_llm_jobs_at_the_interval_pace(monkeypatch):
     # 40 ticks x 2 s = 80 s of draining: LLM jobs ran at t=0, 30, 60 — not 40 times
     assert full == [0, 15, 30]
     assert all(jobs_run[i] == frozenset(en.JOBS) for i in full)
-    assert all(j == {"embed", "index", "chunk"} for i, j in enumerate(jobs_run) if i not in full)
+    assert all(j == en._DRAIN_JOBS for i, j in enumerate(jobs_run) if i not in full)
 
 
 def test_a_failing_job_backs_off_instead_of_retrying_every_iteration(monkeypatch):
@@ -1672,7 +1672,8 @@ def test_worker_pools_run_only_their_jobs(monkeypatch):
     import loom.enrich as en
     assert en.parse_jobs(None) == frozenset(en.JOBS) == en.parse_jobs("all")
     assert en.parse_jobs("vectors") == {"embed", "index", "chunk"}
-    assert en.parse_jobs("llm, resolve") == {"extract", "adjudicate", "aliases", "dossiers", "resolve"}
+    assert en.parse_jobs("llm, resolve") == {"extract", "adjudicate", "aliases", "dossiers", "resolve",
+                                             "identities"}      # resolve includes the identity tier
     with pytest.raises(SystemExit, match="unknown enrichment job 'embeddings'"):
         en.parse_jobs("embeddings")
 
@@ -1680,7 +1681,7 @@ def test_worker_pools_run_only_their_jobs(monkeypatch):
     for name, fn in (("extract_pending", "extract"), ("resolve_entities", "resolve"),
                      ("adjudicate_entities", "adjudicate"), ("embed_pending", "embed"),
                      ("index_pending", "index"), ("chunk_artifacts", "chunk"),
-                     ("refresh_dossiers", "dossiers")):
+                     ("refresh_dossiers", "dossiers"), ("resolve_identities", "identities")):
         monkeypatch.setattr(en, name, lambda *a, _n=fn, **k: called.append(_n) or 1)
     monkeypatch.setattr(en, "adjudicate_aliases", lambda *a, **k: called.append("aliases") or {"merged": 1})
     monkeypatch.setattr(en, "ALIAS_TYPES", ("product",))
@@ -1691,7 +1692,23 @@ def test_worker_pools_run_only_their_jobs(monkeypatch):
     assert counts["embedded"] == 1 and counts["extracted"] == 0 and counts["dossiers"] == 0
     called.clear()
     en.tick(None, embedder, llm, en.parse_jobs("llm"))
-    assert called == ["extract", "adjudicate", "aliases", "dossiers"]
+    assert called == ["extract", "adjudicate", "identities", "aliases", "dossiers"]   # the weak pass rides adjudication
     called.clear()
     en.tick(None, embedder, llm)                                  # default: everything, in order
-    assert called == ["extract", "resolve", "adjudicate", "aliases", "embed", "index", "chunk", "dossiers"]
+    assert called == ["extract", "resolve", "identities", "adjudicate", "identities", "aliases", "embed",
+                      "index", "chunk", "dossiers"]
+
+
+def test_a_strong_identity_backlog_drains_without_waiting(monkeypatch):
+    """S-63: resolution ran at most once per interval, which capped a first
+    bulk load's identity merges at ~7/s however fast a merge was. The strong
+    identity pass is deterministic and free, so it drains back to back like
+    embedding — and the LLM jobs keep their interval pace meanwhile."""
+    import loom.enrich as en
+    sleeps, jobs_run = _drive_run(monkeypatch, en, lambda jobs: {"identities": 500}
+                                  if "identities" in jobs else {}, interval=30.0,
+                                  tick_cost=3.0, max_ticks=21)
+    assert sleeps == []
+    full = [i for i, j in enumerate(jobs_run) if "adjudicate" in j]
+    assert full == [0, 10, 20]                           # every 30 s, not every tick
+    assert all("identities" in j for j in jobs_run)

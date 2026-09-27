@@ -215,6 +215,12 @@ CREATE INDEX IF NOT EXISTS idx_obs_supersedes
 -- worker tick scans (R-9): recorded_at ranges from a high-water mark, and a
 -- per-subject lookup that does not need the namespace
 CREATE INDEX IF NOT EXISTS idx_obs_subject_recorded ON observations (subject_id, recorded_at);
+-- the entity foreign keys' child columns, leading (v8, S-63): deleting a
+-- merged-away entity checks nothing still points at it, and without these
+-- the object-side and alias checks scanned the whole table per merge
+CREATE INDEX IF NOT EXISTS idx_obs_object_entity ON observations (object_entity_id)
+    WHERE object_entity_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_alias_entity ON aliases (entity_id);
 CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
     ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
@@ -237,7 +243,7 @@ _PREFIX_END = "\U0010ffff"
 # lease owners, lower(key) index, numeric norm_key rule (recompute);
 # v6: observations.supersedes (D-050); tick-scan indexes and high-water marks
 # (R-9); hex/colon norm_key rule (recompute keys carrying ':')
-SCHEMA_VERSION = 7  # v7 (D-081) changes Postgres storage settings only; SQLite just records it
+SCHEMA_VERSION = 8  # v7 (D-081) changes Postgres storage settings only; v8: FK child indexes (S-63)
 
 # Columns added after their table's first release: added on open when missing
 _WANTED_COLUMNS = {
@@ -1018,50 +1024,84 @@ class SqliteStore(GraphStore):
 
     def shared_identifier_groups(self, namespace, since=None, limit=200, predicate="identified_by",
                                  kinds=None):
-        """One query (D-083): identifier entities pointed at by two or more
-        distinct entities, among those an edge recorded after `since`
-        touched; tombstoned edges do not count."""
+        """Identifier entities pointed at by two or more distinct entities,
+        among those an edge recorded after `since` touched; tombstoned edges
+        do not count; `kinds` keeps identifiers keyed `<kind>:...` (D-083).
+        Stepwise, each step on an index, never one planner-dependent join:
+        a combined query ran 87 min on a freshly loaded namespace (S-63)."""
         live = "NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
-        # identifier keys are "<kind>:<value>": `kinds` keeps those groups only
-        # (the strong pass must not queue behind weak groups it never merges)
-        kind_sql = ""
-        if kinds:
-            kind_sql = (" AND object_entity_id IN (SELECT id FROM entities WHERE namespace = {p} AND ("
-                        + " OR ".join(["key LIKE {p}"] * len(kinds)) + "))")
-        touched = ("SELECT DISTINCT object_entity_id FROM observations"
-                   " WHERE namespace = {p} AND predicate = {p}"
-                   + (" AND recorded_at > {p}" if since is not None else "") + kind_sql)
-        sql = ("WITH touched AS (" + touched + "),"
-               " multi AS (SELECT o.object_entity_id AS ident FROM observations o"
-               "  JOIN touched t ON t.object_entity_id = o.object_entity_id"
-               "  WHERE o.namespace = {p} AND o.predicate = {p} AND " + live +
-               "  GROUP BY o.object_entity_id HAVING COUNT(DISTINCT o.subject_id) > 1"
-               "  ORDER BY o.object_entity_id LIMIT {p})"
-               " SELECT DISTINCT m.ident, o.subject_id FROM multi m JOIN observations o"
-               "  ON o.namespace = {p} AND o.object_entity_id = m.ident AND o.predicate = {p}"
-               "  AND " + live)
-        args = [namespace, predicate, *([common.iso(since)] if since is not None else []),
-                *([namespace, *(f"{k}:%" for k in kinds)] if kinds else []),
-                namespace, predicate, limit, namespace, predicate]
         with self._tx(read=True):
-            pairs = self._conn.execute(sql.format(p='?'), tuple(args)).fetchall()
-            ids = sorted({r["ident"] for r in pairs} | {r["subject_id"] for r in pairs})
-            rows = {}
+            if since is not None:
+                touched = {r["object_entity_id"] for r in self._conn.execute(
+                    "SELECT DISTINCT object_entity_id FROM observations"
+                    " WHERE recorded_at > {p} AND namespace = {p} AND predicate = {p}"
+                    " AND object_entity_id IS NOT NULL".format(p='?'),
+                    (common.iso(since), namespace, predicate)).fetchall()}
+            else:
+                touched = {r["object_entity_id"] for r in self._conn.execute(
+                    "SELECT DISTINCT object_entity_id FROM observations"
+                    " WHERE namespace = {p} AND predicate = {p} AND object_entity_id IS NOT NULL".format(p='?'),
+                    (namespace, predicate)).fetchall()}
+            ids = sorted(touched)
+            holders: dict[str, set[str]] = {}
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 marks = ",".join(['?'] * len(chunk))
-                found = self._conn.execute(f"SELECT * FROM entities WHERE id IN ({marks})",
-                                           tuple(chunk)).fetchall()
-                for r in found:
-                    rows[r["id"]] = common.row_to_entity(r)
-        groups: dict[str, list] = {}
-        for r in pairs:
-            groups.setdefault(r["ident"], []).append(r["subject_id"])
-        out = []
-        for ident, subjects in sorted(groups.items()):
-            members = sorted((rows[s] for s in set(subjects) if s in rows), key=lambda e: (e.type, e.key))
-            if ident in rows and len(members) > 1:
-                out.append((rows[ident], members))
+                for r in self._conn.execute(
+                        "SELECT o.object_entity_id AS ident, o.subject_id FROM observations o"
+                        " WHERE o.object_entity_id IN (" + marks + ") AND o.namespace = {p}"
+                        " AND o.predicate = {p} AND ".format(p='?') + live,
+                        (*chunk, namespace, predicate)).fetchall():
+                    holders.setdefault(r["ident"], set()).add(r["subject_id"])
+            multi = sorted(i for i, subs in holders.items() if len(subs) > 1)
+            rows: dict[str, Entity] = {}
+            wanted = {f"{k}:" for k in kinds} if kinds else None
+            out = []
+            for start in range(0, len(multi), 500):
+                chunk = multi[start:start + 500]
+                marks = ",".join(['?'] * len(chunk))
+                idents = {r["id"]: common.row_to_entity(r) for r in self._conn.execute(
+                    "SELECT * FROM entities WHERE id IN (" + marks + ")", tuple(chunk)).fetchall()}
+                keep = [i for i in chunk if i in idents and (
+                    wanted is None or any(idents[i].key.startswith(w) for w in wanted))]
+                subjects = sorted({s for i in keep for s in holders[i]} - set(rows))
+                for s_start in range(0, len(subjects), 500):
+                    s_chunk = subjects[s_start:s_start + 500]
+                    s_marks = ",".join(['?'] * len(s_chunk))
+                    for r in self._conn.execute("SELECT * FROM entities WHERE id IN (" + s_marks + ")", tuple(s_chunk)).fetchall():
+                        rows[r["id"]] = common.row_to_entity(r)
+                for i in keep:
+                    members = sorted((rows[s] for s in holders[i] if s in rows), key=lambda e: (e.type, e.key))
+                    if len(members) > 1:
+                        out.append((idents[i], members))
+                    if len(out) >= limit:
+                        return out
+        return out
+
+    def rank_facts(self, namespace, refs):
+        """One query per chunk (S-63): each entity's structured and total
+        observation counts, subject and object side, and its creation time."""
+        out = {}
+        uniq = list({(r.type, r.key): r for r in refs}.values())
+        doc = "o.source LIKE 'doc:%' OR o.attrs_json LIKE '%\"extracted\": true%'"
+        for start in range(0, len(uniq), 400):
+            chunk = uniq[start:start + 400]
+            pairs = " OR ".join(["(type = {p} AND key = {p})"] * len(chunk))
+            sql = ("WITH e AS (SELECT id, type, key, created_at FROM entities"
+                   " WHERE namespace = {p} AND (" + pairs + "))"
+                   " SELECT e.type, e.key, e.created_at,"
+                   " (SELECT count(*) FROM observations o WHERE o.subject_id = e.id) AS s_all,"
+                   " (SELECT count(*) FROM observations o WHERE o.subject_id = e.id AND (" + doc + ")) AS s_doc,"
+                   " (SELECT count(*) FROM observations o WHERE o.object_entity_id = e.id) AS o_all,"
+                   " (SELECT count(*) FROM observations o WHERE o.object_entity_id = e.id AND (" + doc + ")) AS o_doc"
+                   " FROM e")
+            args = [namespace, *(x for r in chunk for x in (r.type, r.key))]
+            with self._tx(read=True):
+                rows = self._conn.execute(sql.format(p="?"), tuple(args)).fetchall()
+            for r in rows:
+                total = int(r["s_all"]) + int(r["o_all"])
+                structured = total - int(r["s_doc"]) - int(r["o_doc"])
+                out[(r["type"], r["key"])] = (structured, total, common.parse(r["created_at"]))
         return out
 
     def fuzzy_merge_candidates(

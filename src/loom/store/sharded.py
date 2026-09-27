@@ -211,6 +211,9 @@ class ShardedStore(GraphStore):
         for s in self._all:
             s.wipe()
 
+    def rank_facts(self, namespace: str, *args, **kwargs):
+        return self.shard_for(namespace).rank_facts(namespace, *args, **kwargs)
+
     def shared_identifier_groups(self, namespace: str, *args, **kwargs):
         return self.shard_for(namespace).shared_identifier_groups(namespace, *args, **kwargs)
 

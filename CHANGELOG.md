@@ -8,6 +8,22 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Identity-pass throughput (D-087, closes S-63)
+
+- Schema v8 indexes the entity foreign keys' child columns
+  (`observations.object_entity_id`, `aliases.entity_id`): deleting a
+  merged-away entity no longer scans the table
+- `GraphStore.rank_facts` ranks merge candidates in one query; the identity
+  pass resolves once and tracks its own merges (22 -> 74 merges/s)
+- The strong identity pass is its own enrichment job, `identities`
+  (enabled by `resolve` too), draining a backlog back to back and sharded
+  across worker replicas; the LLM-backed weak pass stays paced with
+  adjudication; `LOOM_IDENTITY_BATCH` sets the groups per pass (500)
+- `shared_identifier_groups` runs as indexed steps (a single join stalled
+  87 min on a loading namespace)
+- GKE, 6,000-machine estate through the gateway: the workers folded 8,480
+  identities during ingest, 75 left after the drain (was ~5/s, ~45 min)
+
 ### Identity across tools, host artifacts, format drift, purple correlation (D-083…D-086)
 
 - Identity (D-083): connectors state what each tool calls a host or person
@@ -39,7 +55,7 @@ tag is v0.1.0).
 - Tested on GKE: 803 tests on SQLite and 896 on the Postgres lane, and a
   6,000-machine synthetic estate through the gateway — 5,400/5,400 machines
   and 3,000/3,000 accounts folded, 0 false merges, purple 600/600
-  (deploy/README.md); open: identity-pass throughput (S-63)
+  (deploy/README.md); identity-pass throughput followed in D-087
 
 ### Coverage: what an import collected (D-082)
 

@@ -1207,7 +1207,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -1372,7 +1372,7 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
 
 
 # ------------------------------------------------------- schema v5 #
@@ -1422,7 +1422,7 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 7
+        assert again.schema_version() == SCHEMA_VERSION == 8
         rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
@@ -1459,7 +1459,7 @@ def test_two_processes_migrating_one_old_file_both_open(tmp_path):
     for t in threads:
         t.join()
     assert errors == [] and len(opened) == 4
-    assert all(s.schema_version() == 7 for s in opened)
+    assert all(s.schema_version() == 8 for s in opened)
     for s in opened:
         s.close()
     # the losing side of a race that slipped past the check: tolerated
@@ -1728,7 +1728,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     _exec(store, "UPDATE loom_meta SET value = '5' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 7
+        assert again.schema_version() == SCHEMA_VERSION == 8
         rows = _exec(again, "SELECT key, norm_key FROM entities WHERE key <> 'web-01' AND key <> 'jdoe' ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [
             ("2001:db8::1", "2001:db8::1"), ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")]
@@ -2291,3 +2291,36 @@ def test_shared_identifier_groups(store):
     store.redact("ids", third.id, "test")
     [(_, members)] = store.shared_identifier_groups("ids")
     assert sorted(m.key for m in members) == ["S-1-5-21-1", "web-01"]
+
+
+def test_foreign_key_child_columns_are_indexed(store):
+    """S-63: deleting a merged-away entity checks nothing still points at it;
+    without an index LED by each child column the check scanned the table."""
+    from loom.store.postgres import PostgresStore
+    if isinstance(store, PostgresStore):
+        with store._tx():
+            names = {r["indexname"] for r in store._q("SELECT indexname FROM pg_indexes")}
+    elif isinstance(store, SqliteStore):
+        with store._tx(read=True):
+            names = {r["name"] for r in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    else:
+        pytest.skip("sharded: its shards are the stores above")
+    assert {"idx_obs_object_entity", "idx_alias_entity", "idx_obs_subject_recorded"} <= names
+
+
+def test_rank_facts_counts_structured_and_extracted(store):
+    """S-63: the resolution tiers rank candidates in one call — both sides of
+    an edge count, and a document-extracted row is not structured."""
+    ns = "rank"
+    a, b = EntityRef(type="host", key="a"), EntityRef(type="host", key="b")
+    now = datetime.now(timezone.utc)
+    store.record_claims([
+        ClaimIn(namespace=ns, subject=a, predicate="os", object="linux", observed_at=now, source="cmdb"),
+        ClaimIn(namespace=ns, subject=a, predicate="links", object=b, observed_at=now, source="scan"),
+        ClaimIn(namespace=ns, subject=b, predicate="os", object="bsd", observed_at=now, source="doc:x",
+                attrs={"extracted": True})])
+    got = store.rank_facts(ns, [a, b, EntityRef(type="host", key="nope")])
+    assert set(got) == {("host", "a"), ("host", "b")}
+    assert got[("host", "a")][:2] == (2, 2)
+    assert got[("host", "b")][:2] == (1, 2)          # the edge into it counts; the extracted row does not

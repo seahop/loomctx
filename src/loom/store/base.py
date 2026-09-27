@@ -117,6 +117,26 @@ class GraphStore(ABC):
                 break
         return out
 
+    def rank_facts(
+        self, namespace: str, refs: list[EntityRef],
+    ) -> dict[tuple[str, str], tuple[int, int, datetime]]:
+        """(type, key) -> (structured, total, created_at) for each entity
+        that exists: how many observations touch it (as subject or object),
+        how many of those a sender asserted rather than an LLM extracted
+        from a document, and when it was created — what the resolution
+        tiers rank merge candidates by, for many entities at once (S-63).
+        Backends override with one query; this default asks per entity."""
+        out = {}
+        for ref in refs:
+            entity = self.get_entity(namespace, ref)
+            if entity is None:
+                continue
+            rows = self.observations_for(namespace, ref, limit=100_000)
+            structured = sum(1 for o in rows if not (o.attrs.get("extracted")
+                                                     or o.source.startswith("doc:")))
+            out[(ref.type, ref.key)] = (structured, len(rows), entity.created_at)
+        return out
+
     # ------------------------------------------------ schema registry (D-024)
 
     @abstractmethod

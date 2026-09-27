@@ -809,10 +809,12 @@ def resolve_entities(store: GraphStore, limit: int = 50,
 
 
 _identity_seen_until: dict[tuple[str, str], datetime] = {}
+IDENTITY_BATCH = int(os.environ.get("LOOM_IDENTITY_BATCH", "500"))   # groups per pass
 
 
 def resolve_identities(store: GraphStore, limit: int = 200,
-                       llm: LLMClient | None = None) -> int:
+                       llm: LLMClient | None = None,
+                       passes: tuple[str, ...] = ("strong", "weak")) -> int:
     """Tier 4 (D-083): entities that share an identifier. A connector states
     what a tool calls a host or principal as `identified_by` edges
     (`loom.identity`); two entities of one family (host-like: host,
@@ -839,53 +841,107 @@ def resolve_identities(store: GraphStore, limit: int = 200,
     for namespace, types in store.namespace_summary().items():
         if identity.ENTITY_TYPE not in types:
             continue
-        merged += _identity_pass(store, namespace, "strong", strong, limit, None, budget)
-        if llm is not None:
+        if "strong" in passes:
+            merged += _identity_pass(store, namespace, "strong", strong, limit, None, budget)
+        if "weak" in passes and llm is not None:
             merged += _identity_pass(store, namespace, "weak", weak, limit, llm, budget)
     return merged
 
 
 def _identity_pass(store: GraphStore, namespace: str, name: str, kinds: list[str], limit: int,
                    llm: LLMClient | None, budget: dict) -> int:
+    """One pass over the groups new edges touched. Batched (S-63): every
+    member resolved to its canonical entity in one call and every candidate
+    ranked in one `rank_facts` call — per-member lookups cost ~30 ms a merge
+    on Postgres — with merges made in this pass folded into a local map, so
+    a later group (a chain) sees the survivor and its absorbed counts."""
     from . import identity
     started = datetime.now(timezone.utc)
     groups = store.shared_identifier_groups(
         namespace, since=_identity_seen_until.get((namespace, name)), limit=limit,
         predicate=identity.PREDICATE, kinds=kinds)
+    fetched = len(groups)
+    # several replicas share the pass by identifier (the embedding shard
+    # scheme): two workers never fold the same group at once
+    shard, of = worker_shard()
+    if of > 1:
+        groups = [g for g in groups
+                  if int(hashlib.md5(g[0].key.encode()).hexdigest(), 16) % of == shard]
+    all_refs = list({(m.type, m.key): EntityRef(type=m.type, key=m.key)
+                     for _, members in groups for m in members}.values())
+    canon: dict[tuple[str, str], EntityRef] = {}
+    for start in range(0, len(all_refs), 500):
+        canon.update(store.resolve_refs(namespace, all_refs[start:start + 500]))
+    ranks = store.rank_facts(namespace, list({(c.type, c.key): c for c in canon.values()}.values()))
+    folded: dict[tuple[str, str], tuple[str, str]] = {}   # merged away in this pass -> survivor
+
+    def current(key):
+        while key in folded:
+            key = folded[key]
+        return key
+
     merged = 0
+    failed = False
     for ident, members in groups:
         kind, _ = identity.split(ident.key)
-        refs = [EntityRef(type=m.type, key=m.key) for m in members]
-        canon = store.resolve_refs(namespace, refs)
-        current = {}
-        for ref in refs:
-            c = canon.get((ref.type, ref.key))
-            if c is not None and (e := store.get_entity(namespace, c)) is not None:
-                current[(e.type, e.key)] = e
+        keys = set()
+        for m in members:
+            c = canon.get((m.type, m.key))
+            if c is not None and (c.type, c.key) in ranks:
+                keys.add(current((c.type, c.key)))
         by_family: dict[str, list] = {}
-        for e in current.values():
-            fam = identity.family(e.type)
+        for k in keys:
+            fam = identity.family(k[0])
             if fam is not None:
-                by_family.setdefault(fam, []).append(e)
+                by_family.setdefault(fam, []).append(k)
         if len(by_family) > 1:
             log.info("identifier %s is claimed by different kinds of thing (%s); not merged",
-                     ident.key, ", ".join(sorted(_handle(e) for e in current.values())))
+                     ident.key, ", ".join(sorted(f"{t}:{k}" for t, k in keys)))
         for group in by_family.values():
             if len(group) < 2:
                 continue
-            canonical, *rest = _ranked(store, namespace, group)
-            if identity.KINDS.get(kind):
-                merged += _merge_all(store, namespace, canonical, rest)
-                continue
+            # structured-backed first, then most-connected, then earliest (as _ranked)
+            group.sort(key=lambda k: (-ranks[k][0], -ranks[k][1], ranks[k][2]))
+            survivor, *rest = group
+            into = EntityRef(type=survivor[0], key=survivor[1])
             for other in rest:
-                if (llm is None or budget["asked"] >= ADJUDICATIONS_PER_TICK or budget["outage"]
-                        or _is_declined(store, namespace, _handle(canonical), _handle(other))):
+                a, b = f"{survivor[0]}:{survivor[1]}", f"{other[0]}:{other[1]}"
+                if _is_declined(store, namespace, a, b):
                     continue
-                outcome = _adjudicate_pair(store, llm, namespace, canonical, other)
-                budget["asked"] += outcome in _ASKED
-                merged += outcome == "merged"
-                budget["outage"] = budget["outage"] or outcome == "outage"
-    if len(groups) < limit and not budget["outage"] and budget["asked"] < ADJUDICATIONS_PER_TICK:
+                if not identity.KINDS.get(kind):
+                    if llm is None or budget["asked"] >= ADJUDICATIONS_PER_TICK or budget["outage"]:
+                        continue
+                    left = store.get_entity(namespace, into)
+                    right = store.get_entity(namespace, EntityRef(type=other[0], key=other[1]))
+                    if left is None or right is None:
+                        continue
+                    outcome = _adjudicate_pair(store, llm, namespace, left, right)
+                    budget["asked"] += outcome in _ASKED
+                    budget["outage"] = budget["outage"] or outcome == "outage"
+                    if outcome != "merged":
+                        continue
+                    merged += 1
+                else:
+                    try:
+                        done = store.merge_entities(namespace, EntityRef(type=other[0], key=other[1]),
+                                                    into)
+                    except Exception as exc:  # noqa: BLE001 — a lock conflict: retried next pass
+                        log.warning("merge %s -> %s failed (%s); retried next pass", b, a, exc)
+                        failed = True
+                        continue
+                    if not done:
+                        # a side another replica folded meanwhile: revisit
+                        # the group next pass, under its new name
+                        failed = True
+                        continue
+                    log.info("merged %s -> %s (shared %s)", b, a, ident.key)
+                    merged += 1
+                folded[other] = survivor
+                s0, t0, c0 = ranks[survivor]
+                s1, t1, _ = ranks[other]
+                ranks[survivor] = (s0 + s1, t0 + t1, c0)
+    if (fetched < limit and not failed and not budget["outage"]
+            and budget["asked"] < ADJUDICATIONS_PER_TICK):
         _identity_seen_until[(namespace, name)] = started
     return merged
 
@@ -1453,7 +1509,8 @@ def once_should_stop(counts: dict[str, int], failures: int, max_failures: int = 
 # a worker given a subset runs only those, so one pool can drain vectors at
 # the embedder's pace while another does the paced LLM work (D-063).
 JOBS = {
-    "extract": "extracted", "resolve": "resolved", "adjudicate": "adjudicated",
+    "extract": "extracted", "resolve": "resolved", "identities": "identities",
+    "adjudicate": "adjudicated",
     "aliases": "aliases", "embed": "embedded", "index": "indexed", "chunk": "chunked",
     "dossiers": "dossiers",
 }
@@ -1476,6 +1533,8 @@ def parse_jobs(spec: str | None) -> frozenset[str]:
             names.update(JOB_GROUPS[part])
         elif part in JOBS:
             names.add(part)
+            if part == "resolve":      # resolution includes the identity tier (D-083)
+                names.add("identities")
         else:
             raise SystemExit(f"unknown enrichment job {part!r}; choose from "
                              f"{', '.join([*JOBS, *JOB_GROUPS])}")
@@ -1494,9 +1553,13 @@ def tick(store: GraphStore, embedder: Embedder | None, llm: LLMClient | None,
     return {
         "extracted": _guarded("extraction", extract_pending, store, llm) if llm and "extract" in on else 0,
         "resolved": _guarded("resolution", resolve_entities, store, 50, llm) if "resolve" in on else 0,
-        "identities": (_guarded("identities", resolve_identities, store, 200, llm)
-                       if "resolve" in on else 0),
-        "adjudicated": (_guarded("adjudication", adjudicate_entities, store, llm)
+        # the strong identity pass is deterministic and free: it drains a
+        # backlog back to back like embedding (S-63); the weak one asks the
+        # LLM, so it rides the paced adjudication job
+        "identities": (_guarded("identities", resolve_identities, store, IDENTITY_BATCH, None,
+                                ("strong",)) if "identities" in on else 0),
+        "adjudicated": (_guarded("adjudication", lambda s, l: adjudicate_entities(s, l)
+                                 + resolve_identities(s, IDENTITY_BATCH, l, ("weak",)), store, llm)
                         if llm and "adjudicate" in on else 0),
         "aliases": (_guarded("aliases", lambda s, l: adjudicate_aliases(s, l)["merged"], store, llm)
                     if llm and ALIAS_TYPES and "aliases" in on else 0),
@@ -1527,6 +1590,10 @@ def _open_store(attempts: int = 6) -> GraphStore:
 # jobs whose progress means "more of the same is waiting": embedding and
 # chunking are bounded by the backlog and cost cents, never an LLM call
 _VECTOR_JOBS = frozenset(JOB_GROUPS["vectors"])
+# jobs that drain a backlog back to back: the vector jobs, and the strong
+# identity pass — deterministic, no provider cost (S-63: once per interval
+# it capped a first bulk load at ~7 merges/s)
+_DRAIN_JOBS = _VECTOR_JOBS | {"identities"}
 _MAX_BACKOFF = 600.0   # a failing job is retried at least this often
 
 
@@ -1535,8 +1602,9 @@ def _clock() -> float:
 
 
 class Pacer:
-    """Continuous-mode scheduling (D-063, S-39). While a vector backlog is
-    draining, ticks run back to back — but only the vector jobs; the rest
+    """Continuous-mode scheduling (D-063, S-39). While a vector or strong-
+    identity backlog is draining, ticks run back to back — but only those
+    jobs (S-63); the rest
     (extraction, resolution, adjudication, aliases, dossiers) still run at
     most once per `interval`, exactly as with no backlog. A job that FAILED
     is benched with exponential backoff (interval, 2x, 4x … capped), so a
@@ -1560,7 +1628,7 @@ class Pacer:
         self.full = self.last_full is None or now - self.last_full >= self.interval
         if self.full:
             self.last_full = now
-        pool = self.jobs if self.full else self.jobs & _VECTOR_JOBS
+        pool = self.jobs if self.full else self.jobs & _DRAIN_JOBS
         return frozenset(j for j in pool if self.retry_at.get(j, now) <= now)
 
     def record(self, ran: frozenset[str], counts: dict[str, int]) -> float:
@@ -1576,7 +1644,7 @@ class Pacer:
             else:
                 self.failures.pop(job, None)
                 self.retry_at.pop(job, None)
-        if any(counts.get(JOBS[j], 0) > 0 for j in ran & _VECTOR_JOBS):
+        if any(counts.get(JOBS[j], 0) > 0 for j in ran & _DRAIN_JOBS):
             # a vector backlog drains at the embedder's pace, not one batch
             # per interval (128 per 30 s was ~20 h for a 600k corpus, D-063)
             return 0.0
