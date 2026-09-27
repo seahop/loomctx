@@ -8,6 +8,19 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Coverage: what an import collected (D-082)
+
+- Connectors record what their export carried (`loom.coverage`): LDAP per
+  domain (security descriptors, userAccountControl, membership when wholly
+  absent), Entra and Okta per tenant/org (expanded members / owners, account
+  state, MFA factors; role and app assignments for combined exports)
+- Scope asks and find_path add a `coverage:` note when a predicate they walk
+  was absent or partial in some import, so "no path" from a partial dump is
+  not read as "no access"; find_path notes path entities whose status is
+  unknown rather than leaving it to read as enabled
+- A later, fuller export supersedes the gap; the AD generator now gives
+  every object a security descriptor, as a real dump does
+
 ### Postgres planner statistics after bulk loads (D-081)
 
 - A new namespace loaded into a large Postgres store was queried with stale

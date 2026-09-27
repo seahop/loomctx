@@ -63,6 +63,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
+from .. import coverage
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
 from .iam_schema import SHARED_PREDICATES
@@ -516,12 +517,60 @@ def entra_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
                 stats["invalid"] = stats.get("invalid", 0) + 1
                 print(f"entra object {obj.get('id', '?')}: skipped: "
                       f"{str(exc).splitlines()[0][:200]}", file=sys.stderr)
+    yield from _coverage_envelopes(buckets, namespace, source, observed)
+
+
+_BUCKET_TYPES = {"users": "user", "groups": "group", "servicePrincipals": "service_principal",
+                 "appRegistrations": "app_registration", "directoryRoles": "directory_role"}
+
+
+def _coverage_envelopes(buckets: dict[str, list[dict]], ns: str, source: str,
+                        observed: datetime) -> Iterator[ClaimIn]:
+    """What this export carried (D-082). Per object: Graph returns
+    `members` / `owners` only when asked (`$expand`), so a group without the
+    key was not expanded — an empty list is an answer, a missing key is not;
+    `accountEnabled` only when selected. Per collection, and only for a
+    combined export (named keys): a missing `roleAssignments` /
+    `appRoleAssignments` / `oauth2PermissionGrants` was not exported; files
+    imported separately may carry them, so nothing is claimed for those."""
+    by_type: dict[str, list[dict]] = {}
+    for key, items in buckets.items():
+        for obj in items:
+            t = _BUCKET_TYPES.get(key) or _detect_type(obj)
+            if t:
+                by_type.setdefault(t, []).append(obj)
+    users, groups = by_type.get("user", []), by_type.get("group", [])
+    sps = by_type.get("service_principal", [])
+    scope = "tenant"
+
+    def has(objs: list[dict], field: str) -> int:
+        return sum(1 for o in objs if field in o)
+
+    if groups:
+        yield coverage.claim(ns, source, scope, "member_of", has(groups, "members"), len(groups),
+                             observed)
+    if groups or sps:
+        yield coverage.claim(ns, source, scope, "owner_of", has(groups + sps, "owners"),
+                             len(groups) + len(sps), observed)
+    if users or sps:
+        yield coverage.claim(ns, source, scope, "enabled", has(users + sps, "accountEnabled"),
+                             len(users) + len(sps), observed,
+                             types=[t for t, objs in (("user", users), ("service_principal", sps))
+                                    if objs])
+    if "auto" not in buckets and buckets:
+        roles = buckets.get("directoryRoles", [])
+        got = "roleAssignments" in buckets or any("members" in r for r in roles)
+        yield coverage.claim(ns, source, scope, "has_role", int(got), 1, observed)
+        for pred, key in (("has_app_role", "appRoleAssignments"),
+                          ("has_permission", "oauth2PermissionGrants")):
+            yield coverage.claim(ns, source, scope, pred, int(key in buckets), 1, observed)
 
 
 def schema(namespace: str) -> SchemaRegistration:
     return SchemaRegistration(
         namespace=namespace,
         entity_types=[
+            coverage.ENTITY_TYPE,
             EntityTypeDef(name="user", description="an Entra ID / Azure AD user"),
             EntityTypeDef(name="group", description="a security or M365 group"),
             EntityTypeDef(name="service_principal",

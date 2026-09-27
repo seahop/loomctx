@@ -66,6 +66,7 @@ from .contracts import (
     SemanticSearchResponse,
 )
 from .contracts import ExpansionHandle
+from . import coverage
 from .contracts import MAX_PATH_DEPTH, NodeStatus, PathEdge, PathPack, PathRequest
 from .store.base import GraphStore
 
@@ -1364,6 +1365,15 @@ def build_pack(
     notes = request_notes(store, req.namespace, req.scope, asked, observations,
                           {key for key in examined if not gathered.get(key)}, allowed_types,
                           question=req.question, hops=max((len(c) for c in paths.values()), default=0))
+    if req.scope is not None:
+        # a predicate the walk follows, or the question turns on, that an
+        # import did not fully collect: the pack says so (D-082)
+        gap_note = coverage.note(
+            coverage.gaps(store, req.namespace, scope_expand(store, req.namespace, req.scope) | topic,
+                          req.as_of),
+            "what the scope did not reach along it may be missing data, not absent")
+        if gap_note:
+            notes.append(gap_note)
     # A subject question's named attribute ("what is the has_severity of
     # CVE-X", "the largest invoiced_amount ever recorded") orders its
     # conflicts and ships before the orientation layers, exempt from the
@@ -1929,6 +1939,7 @@ def find_paths(
         rows = store.observations_for_many(ns, refs, limit=50, observed_before=req.as_of,
                                            predicates=sorted(status_preds))
         dropped_status = 0
+        on_record: set[tuple[str, str, str]] = set()   # (type, key, predicate) with a value
         for ref in refs:
             mine = [o for o in rows.get((ref.type, ref.key), [])
                     if o.predicate in status_preds and _is_subject(o, ref)
@@ -1941,6 +1952,7 @@ def find_paths(
                     newest.setdefault(o.predicate, o)
             for pred in sorted(newest):
                 o = newest[pred]
+                on_record.add((ref.type, ref.key, pred))
                 cost = item_tokens(ContextItem(kind="fact", text=_render_fact(o), score=1.0,
                                                citations=[_citation(o)]))
                 if charged + cost > budget:
@@ -1952,6 +1964,23 @@ def find_paths(
         if dropped_status:
             notes.append(f"{dropped_status} status fact(s) about entities on the returned paths "
                          "did not fit the token budget; raise budget")
+        # an entity whose kind carries a status predicate but which has no
+        # value on record is UNKNOWN, not fine (D-082): the kinds are those
+        # an import's coverage names, or that another entity on these paths
+        # has the value for
+        kinds: dict[str, set[str]] = {p: set() for p in status_preds}
+        for rec in coverage.records(store, ns, req.as_of):
+            if str(rec.object) in kinds:
+                kinds[str(rec.object)].update(rec.attrs.get("types") or ())
+        for t, _, p in on_record:
+            kinds[p].add(t)
+        for pred in sorted(status_preds):
+            unknown = [f"{r.type}:{r.key}" for r in refs
+                       if r.type in kinds[pred] and (r.type, r.key, pred) not in on_record]
+            if unknown:
+                more = f" and {len(unknown) - 5} more" if len(unknown) > 5 else ""
+                notes.append(f"no '{pred}' on record for {', '.join(unknown[:5])}{more} on these "
+                             "paths: their status is unknown, not assumed")
 
     # more paths existed than were returned: the max_paths cap or the budget
     # cut them — reported, never silently dropped
@@ -1979,6 +2008,13 @@ def find_paths(
     if not returned and searched:
         notes.append(f"no path found from {src.type}:{src.key} to {dst.type}:{dst.key} within "
                      f"depth {depth} along {', '.join(sorted(via_set))}")
+    if searched:
+        gap_note = coverage.note(
+            coverage.gaps(store, ns, via_set | status_preds, req.as_of),
+            "a path along it, or an entity's status, may be missing here because it was not "
+            "collected, not because it does not exist")
+        if gap_note:
+            notes.append(gap_note)
     if not via_set:
         notes.append(f"namespace '{ns}' registers no containment predicates and none were named "
                      "in 'via', so there was nothing to traverse")

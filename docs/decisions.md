@@ -2689,6 +2689,40 @@ Postgres, a no-op on SQLite, forwarded by the sharded store) runs when a
 direct bulk load finishes (`import --db`, `ingest` direct, the eval
 loaders), so a load is planned correctly the moment it returns.
 
+## D-082 · Coverage: what an import collected (2026-09-27)
+
+A partial export and a sparse environment looked the same once loaded: an
+LDAP dump without security descriptors (no READ_CONTROL, or an ldapsearch
+that did not ask for them) produced no `has_ace` edges, and find_path
+answered "no path" as if nobody held rights; a user with no `enabled` on
+record read as fine. Red and blue teams work from partial collection as a
+rule, so the absence has to be distinguishable.
+
+A connector now records, per import, what its export carried: one cited
+claim per predicate, `coverage:collection -collected-> "<predicate>"` with
+attrs `source`, `scope`, `with`, `of`, `state` (complete / partial /
+absent) and, for status predicates, the entity `types` it applies to
+(`loom.coverage`). A connector records only absences its format makes
+meaningful: every AD object has a security descriptor and every account a
+userAccountControl, so a missing one was not collected; `memberOf` may be
+absent because there are no groups, so membership is recorded only when the
+whole domain has none. Graph returns `members` / `owners` only when
+expanded, Okta's factors are a separate call — a missing key is "not
+asked", an empty list is an answer. Collection-level records (Entra role /
+app-role / consent grants, Okta role assignments / app users) are made only
+for a combined export; one file of several claims nothing about the others.
+
+Reads take the newest record per (source, scope, predicate), as of `as_of`:
+a scope ask or find_path over a predicate some import did not fully carry
+adds a `coverage:` note naming it, the source and scope, and how much was
+collected; find_path notes entities on its paths whose kind carries a
+status predicate but which have no value on record ("status unknown, not
+assumed"). A later, fuller export supersedes the gap. The core reads opaque
+predicate names only; which absences count is the connector's call. The
+synthetic AD generator now gives every object a security descriptor (an
+empty DACL for most), as a real dump does. No contract change: coverage
+records are ordinary claims.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

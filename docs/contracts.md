@@ -261,6 +261,11 @@ visible value of each predicate the registry marks `node_status` (an
 account's `enabled`), cited and charged: a path through a disabled account
 is returned — it may still matter — and says so.
 
+Coverage (D-082) rides as ordinary claims — `coverage:collection
+-collected-> "<predicate>"`, attrs `source`, `scope`, `with`, `of`, `state` —
+written by connectors; a pack's or a path's `notes` start `coverage:` when a
+predicate it walks (or a status it reports) was not fully collected.
+
 A scope walk (`ScopeSpec`) follows the same no-turn-back rule unless
 `siblings: true`: from a user, `member_of` climbs to its groups and their
 parents, not back down to every co-member (through a group holding every

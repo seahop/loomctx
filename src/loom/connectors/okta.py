@@ -54,6 +54,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
+from .. import coverage
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
 from .iam_schema import SHARED_PREDICATES
@@ -377,12 +378,49 @@ def okta_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
                 stats["invalid"] = stats.get("invalid", 0) + 1
                 print(f"okta object {obj.get('id', '?')}: skipped: "
                       f"{str(exc).splitlines()[0][:200]}", file=sys.stderr)
+    yield from _coverage_envelopes(buckets, namespace, source, observed)
+
+
+def _coverage_envelopes(buckets: dict[str, list[dict]], ns: str, source: str,
+                        observed: datetime) -> Iterator[ClaimIn]:
+    """What this export carried (D-082). Per user: `status` (the account
+    state), and `_embedded.factors` — the factors are a separate API call,
+    so a user without the key was not asked about, which is not the same as
+    no MFA. Membership from either side (`_groupIds` on users or `_members`
+    on groups). Per collection, only for a combined export: a missing
+    `roleAssignments` / `appUsers` was not exported."""
+    users, groups = [], []
+    for key, items in buckets.items():
+        for obj in items:
+            t = {"users": "user", "groups": "group"}.get(key) or _detect_type(obj)
+            (users if t == "user" else groups if t == "group" else []).append(obj)
+    scope = "org"
+    if users:
+        with_status = sum(1 for u in users if u.get("status"))
+        for pred in ("enabled", "status"):
+            yield coverage.claim(ns, source, scope, pred, with_status, len(users), observed,
+                                 types=["user"])
+        factors = sum(1 for u in users if isinstance(u.get("_embedded"), dict)
+                      and "factors" in u["_embedded"])
+        for pred in ("mfa_enrolled", "mfa_factor"):
+            yield coverage.claim(ns, source, scope, pred, factors, len(users), observed,
+                                 types=["user"] if pred == "mfa_enrolled" else None)
+    if any("_groupIds" in u for u in users):
+        yield coverage.claim(ns, source, scope, "member_of",
+                             sum(1 for u in users if "_groupIds" in u), len(users), observed)
+    elif groups:
+        yield coverage.claim(ns, source, scope, "member_of",
+                             sum(1 for g in groups if "_members" in g), len(groups), observed)
+    if "auto" not in buckets and buckets:
+        for pred, key in (("has_role", "roleAssignments"), ("assigned_to", "appUsers")):
+            yield coverage.claim(ns, source, scope, pred, int(key in buckets), 1, observed)
 
 
 def schema(namespace: str) -> SchemaRegistration:
     return SchemaRegistration(
         namespace=namespace,
         entity_types=[
+            coverage.ENTITY_TYPE,
             EntityTypeDef(name="user", description="an Okta user"),
             EntityTypeDef(name="group", description="an Okta group"),
             EntityTypeDef(name="app", description="an Okta application integration"),

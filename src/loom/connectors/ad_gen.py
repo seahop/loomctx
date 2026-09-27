@@ -166,7 +166,10 @@ class Obj:
             lines.append(f"{name}: {value}")
         for group_dn in self.member_of:
             lines.append(f"memberOf: {group_dn}")
-        if self.aces:
+        if self.sid is not None:
+            # every object of a real dump carries a descriptor, most with no
+            # grant the connector decodes; an empty DACL stands for those, so
+            # the export reads as fully collected (D-082)
             lines.append(f"nTSecurityDescriptor:: {b64(build_sd(self.aces))}")
         for name, raw in self.b64_attrs:
             lines.append(f"{name}:: {b64(raw)}")

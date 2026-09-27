@@ -793,6 +793,31 @@ stats rather than dropped silently. Users carry `mfa_enrolled` / `mfa_factor` (f
 `credential_provider` (OKTA / ACTIVE_DIRECTORY), `status` and `last_login`
 for hygiene questions ("who has no MFA?", "which accounts are suspended?").
 
+### What an import collected (coverage, D-082)
+
+Every connector above records what its export carried, so an agent can
+tell "not there" from "not collected". After an import, a scope ask or
+find_path that walks a predicate the export did not fully carry says so:
+
+```
+coverage: 'has_ace' was not collected by ad-export (domain:corp.local) — a path
+along it, or an entity's status, may be missing here because it was not
+collected, not because it does not exist
+```
+
+| Connector | Recorded (with / of) | Only when |
+| --- | --- | --- |
+| LDAP | `has_ace` (objects with an nTSecurityDescriptor / objects), `enabled` + the userAccountControl flags (accounts with it / accounts), per domain | always |
+| LDAP | `member_of` absent | no `member` / `memberOf` anywhere in the domain |
+| Entra | `member_of`, `owner_of` (groups / SPs with the expanded key), `enabled` (users + SPs with `accountEnabled`) | always |
+| Entra | `has_role`, `has_app_role`, `has_permission` (the collection present or not) | a combined export |
+| Okta | `enabled` / `status`, `mfa_enrolled` / `mfa_factor` (users with `_embedded.factors`), `member_of` | always |
+| Okta | `has_role`, `assigned_to` | a combined export |
+
+A path through an account with no status on record is noted as "status
+unknown, not assumed". Importing a fuller export later supersedes the gap;
+`as_of` still answers what was known before it.
+
 ### Checking the identity connectors at scale
 
 `loom.connectors.iam_gen` writes a seeded Entra + Okta export pair in the

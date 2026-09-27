@@ -88,9 +88,11 @@ import hashlib
 import os
 import struct
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Iterable, Iterator
 
+from .. import coverage
 from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
                          SchemaRegistration)
 
@@ -672,7 +674,9 @@ def ldif_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
     if observed > datetime.now(timezone.utc):
         observed = datetime.now(timezone.utc)
     directory = Directory(entries, observed, export=source)
+    counts: dict[str, Counter] = {}
     for entry in entries:
+        _count_coverage(entry, counts)
         try:
             n = 0
             for env in entry_envelopes(entry, directory, namespace, source):
@@ -682,6 +686,45 @@ def ldif_to_envelopes(text: str, namespace: str, source: str = SOURCE_DEFAULT,
         except (ValueError, TypeError, KeyError, struct.error) as exc:
             stats["invalid"] = stats.get("invalid", 0) + 1
             print(f"ldap object {entry.dn}: skipped: {str(exc).splitlines()[0][:200]}", file=sys.stderr)
+    yield from _coverage_envelopes(counts, namespace, source, observed)
+
+
+def _count_coverage(entry: LdifEntry, counts: dict[str, Counter]) -> None:
+    """Tally, per domain, the attributes every object of a kind carries in a
+    full dump — so their absence means "not collected" (D-082): every object
+    has an nTSecurityDescriptor (absent when the dump skipped it or the
+    reading account lacked READ_CONTROL), every account a
+    userAccountControl. Optional attributes (memberOf, SPNs) are not counted:
+    their absence may just mean none."""
+    if "trusteddomain" in {c.lower() for c in entry.texts("objectclass")}:
+        return
+    if _sid_from_entry(entry) is None:
+        return
+    at = entry.dn.lower().find("dc=")
+    domain = (_dn_to_domain(entry.dn[at:]) if at != -1 else None) or "unknown"
+    c = counts.setdefault(domain, Counter())
+    c["objects"] += 1
+    c["sd"] += bool(entry.raw("ntsecuritydescriptor"))
+    etype = entity_type_of(entry)
+    if etype in ("user", "computer"):
+        c["accounts"] += 1
+        c["uac"] += entry.text("useraccountcontrol") is not None
+    if etype in ("user", "computer", "group"):
+        c["principals"] += 1
+        c["membership"] += bool(entry.texts("member") or entry.texts("memberof"))
+
+
+def _coverage_envelopes(counts: dict[str, Counter], namespace: str, source: str,
+                        observed: datetime) -> Iterator[ClaimIn]:
+    for domain, c in sorted(counts.items()):
+        scope = f"domain:{domain}"
+        yield coverage.claim(namespace, source, scope, "has_ace", c["sd"], c["objects"], observed)
+        for pred in ("enabled", "unconstrained_delegation", "no_preauth", "is_dc"):
+            yield coverage.claim(namespace, source, scope, pred, c["uac"], c["accounts"], observed,
+                                 types=["computer", "user"] if pred == "enabled" else None)
+        if c["principals"] and not c["membership"]:
+            # no member / memberOf anywhere in the domain: not dumped
+            yield coverage.claim(namespace, source, scope, "member_of", 0, c["principals"], observed)
 
 
 # ------------------------------------------------------------------- schema #
@@ -700,8 +743,10 @@ def schema(namespace: str) -> SchemaRegistration:
             EntityTypeDef(name="gpo", description="a group policy container"),
             EntityTypeDef(name="container", description="a directory container"),
             EntityTypeDef(name="spn", description="a service principal name (delegation target)"),
+            coverage.ENTITY_TYPE,
         ],
         predicates=[
+            coverage.PREDICATE_DEF,
             PredicateDef(name="member_of", object_types=["group"], containment=True,
                          description="direct group membership (member / memberOf); nesting is the walk's job"),
             PredicateDef(name="contains", containment=True,

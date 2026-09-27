@@ -6,6 +6,7 @@ identically by every connector that writes it — otherwise whichever registered
 the other's claims on its next import.
 """
 
+from .. import coverage
 from ..contracts import PredicateDef
 
 SHARED_PREDICATES = [
@@ -14,6 +15,7 @@ SHARED_PREDICATES = [
     PredicateDef(name="has_role", object_types=["directory_role", "admin_role"],
                  description="a directory (Entra) or admin (Okta) role held by a "
                              "user, group or service principal"),
+    coverage.PREDICATE_DEF,
     PredicateDef(name="enabled", node_status=True,
                  description="the account or principal is enabled / active; "
                              "reported on every path that passes through it"),
