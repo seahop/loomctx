@@ -187,7 +187,7 @@ def test_trust_bidirectional_emits_both_edges(tmp_path):
     ldap.main(["import", str(FIXTURE), "--namespace", "ad", "--db", db])
     store = SqliteStore(db)
     try:
-        local_ref = EntityRef(type="domain", key=DOMAIN_SID)
+        local_ref = EntityRef(type="domain", key="corp.local")    # keyed by DNS name (D-099)
         partner_ref = EntityRef(type="domain", key="dev.local")
         local_trusts = [o for o in store.observations_for("ad", local_ref)
                         if o.predicate == "trusts" and o.subject == local_ref]
@@ -222,8 +222,8 @@ trustAttributes: 0
 """
     outbound_ldif = inbound_ldif.replace("trustDirection: 1", "trustDirection: 2")
     for ldif_text, expect_subj_key, expect_obj_key, expect_dir in [
-        (inbound_ldif, "S-1-5-21-111-222-333", "partner.local", "inbound"),
-        (outbound_ldif, "partner.local", "S-1-5-21-111-222-333", "outbound"),
+        (inbound_ldif, "corp.local", "partner.local", "inbound"),
+        (outbound_ldif, "partner.local", "corp.local", "outbound"),
     ]:
         envs = list(ldap.ldif_to_envelopes(ldif_text, "ad"))
         trusts = [e for e in envs if e.predicate == "trusts"]
@@ -232,6 +232,13 @@ trustAttributes: 0
         assert t.subject.key == expect_subj_key
         assert t.object.key == expect_obj_key
         assert t.attrs["direction"] == expect_dir
+        # D-098: the trust's properties as facts a pack shows, on the partner
+        facts = {e.predicate: e.object for e in envs if e.subject.key == "partner.local"
+                 and e.predicate.startswith("trust_")}
+        assert facts == {"trust_direction": expect_dir, "trust_transitive": True, "trust_sid_filtering": False}
+        # and one line on the exporting domain, for an ask about the domain itself
+        [summary] = [e.object for e in envs if e.predicate == "trust_properties"]
+        assert summary == f"partner.local: {expect_dir}, transitive, SID filtering off"
 
 
 def test_reimport_is_idempotent(tmp_path):
@@ -318,7 +325,7 @@ def test_find_path_user_to_domain_returns_the_cited_chain(tmp_path):
         keys = {(e.subject.type, e.subject.key) for e in best} | {
             (e.object.type, e.object.key) for e in best if isinstance(e.object, EntityRef)}
         assert ("group", DOMAIN_SID + "-512") in keys   # Domain Admins
-        assert ("domain", DOMAIN_SID) in keys           # corp.local
+        assert ("domain", "corp.local") in keys         # keyed by DNS name (D-099)
     finally:
         store.close()
 

@@ -16,7 +16,7 @@ CITE = "[abcdefab]"
 @pytest.fixture(scope="module")
 def store(tmp_path_factory):
     d = tmp_path_factory.mktemp("ext")
-    ext.main(["prepare", str(d)])
+    ext.main(["prepare", str(d), "--scale", "small"])
     db = str(d / "ext.db")
     ldap.main(["import", str(d / "forest.ldif"), "--db", db])
     ldap.main(["import", str(d / "lab.ldif"), "--db", db, "--source", "lab-export"])
@@ -123,3 +123,111 @@ def test_coverage_reads_typographic_apostrophes_and_fails_a_missed_account():
     gpt4o = (f"The account labsvc-backup in the lab.local domain does not have collected data regarding its "
              f"group memberships, which may indicate missing data rather than absence of group memberships {CITE}.")
     assert ext._score_coverage(gpt4o, truth, SEEN, None)["pass"]
+
+
+def test_the_new_truths_are_read_from_the_store(store):
+    g = ext._truth_groups(store)
+    assert g["groups"] == ["CORP-ERP-Access", "CORP-Finance-All", "CORP-Finance-Users", "CORP-Remote-Apps",
+                           "CORP-VPN-Users"]
+    assert g["direct"] == ["CORP-Finance-Users", "CORP-VPN-Users"]
+    assert g["distractors"] == ["CORP-Finance-Interns", "CORP-Finance-Managers"]
+    d = ext._truth_delegation(store)
+    assert d["hosts"] == ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"] and d["decoys"] == ["WEB-KCD04"]
+    assert d["dcs"] and all(n.startswith("DC") for n in d["dcs"])
+    t = ext._truth_trusts(store)["trusts"]
+    assert t["partner.local"]["transitive"] is False and t["fabrikam.local"]["sid_filtering"] is True
+    assert t["dev.local"] == {"direction": "bidirectional", "transitive": True, "sid_filtering": False}
+
+
+def test_groups_scores_the_closure_and_the_distractors():
+    truth = {"groups": ["CORP-ERP-Access", "CORP-Finance-All", "CORP-Finance-Users", "CORP-Remote-Apps",
+                        "CORP-VPN-Users"], "direct": [], "distractors": ["CORP-Finance-Interns", "CORP-Finance-Managers"]}
+    good = (f"mreyes belongs to {CITE}:\n- CORP-Finance-Users (direct)\n- CORP-VPN-Users (direct)\n"
+            "- CORP-Finance-All (via CORP-Finance-Users)\n- CORP-ERP-Access (via CORP-Finance-All)\n"
+            "- CORP-Remote-Apps (via CORP-ERP-Access)\n"
+            "CORP-Finance-Interns is nested into CORP-Finance-Users, so it is not one of mreyes's groups.")
+    assert ext._score_groups(good, truth, SEEN, None)["pass"]
+    short = good.replace("- CORP-Remote-Apps (via CORP-ERP-Access)\n", "")
+    assert not ext._score_groups(short, truth, SEEN, None)["pass"]
+    padded = good.replace("- CORP-VPN-Users (direct)\n", "- CORP-VPN-Users (direct)\n- CORP-Finance-Managers (nested)\n")
+    assert ext._score_groups(padded, truth, SEEN, None)["false_groups"] == ["CORP-Finance-Managers"]
+    by_sid = short + "- group:S-1-5-21-9-95007 (via CORP-ERP-Access)\n"
+    assert ext._score_groups(by_sid, {**truth, "keys": {"CORP-Remote-Apps": "S-1-5-21-9-95007"}}, SEEN, None)["pass"]
+
+
+def test_delegation_scores_the_servers_and_not_the_dcs():
+    truth = {"hosts": ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"], "dcs": ["DC00", "DC01"], "decoys": ["WEB-KCD04"]}
+    good = (f"Three non-DC computers are trusted for unconstrained delegation {CITE}:\n"
+            "- APP-LEGACY01\n- PRINT-HQ02\n- SQL-OLD03\n"
+            "DC00 and DC01 are domain controllers, which carry it by design. "
+            "WEB-KCD04 has constrained delegation only (HTTP/intranet.corp.local).")
+    assert ext._score_delegation(good, truth, SEEN, None)["pass"]
+    listed = good.replace("- SQL-OLD03\n", "- SQL-OLD03\n- WEB-KCD04\n- DC00\n")
+    assert ext._score_delegation(listed, truth, SEEN, None)["false_hosts"] == ["DC00", "WEB-KCD04"]
+    assert not ext._score_delegation(good.replace("- PRINT-HQ02\n", ""), truth, SEEN, None)["pass"]
+
+
+def test_trusts_scores_each_partner_property():
+    truth = {"trusts": {"dev.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": False},
+                        "partner.local": {"direction": "bidirectional", "transitive": False, "sid_filtering": False},
+                        "fabrikam.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": True}}}
+    good = (f"corp.local has three trusts {CITE}:\n"
+            "| Partner | Direction | Transitive | SID filtering |\n|---|---|---|---|\n"
+            "| dev.local | bidirectional | yes | no |\n| partner.local | bidirectional | **no** (non-transitive) | no |\n"
+            "| fabrikam.local | bidirectional | yes | enabled (quarantined) |")
+    r = ext._score_trusts(good, truth, SEEN, None)
+    assert r["pass"], r
+    wrong = good.replace("**no** (non-transitive)", "yes")
+    assert "partner.local: non-transitive not stated" in ext._score_trusts(wrong, truth, SEEN, None)["wrong"]
+    assert not ext._score_trusts(good.replace("enabled (quarantined)", "no"), truth, SEEN, None)["pass"]
+    # a table that says it by column: "No" under "Transitive", "Yes" under "SID filtering"
+    bare = (f"Trusts {CITE}:\n| Partner | Direction | Transitive | SID filtering |\n|---|---|---|---|\n"
+            "| dev.local | Bidirectional | Yes | No |\n| partner.local | Bidirectional | No | No |\n"
+            "| fabrikam.local | Bidirectional | Yes | Yes |")
+    assert ext._score_trusts(bare, truth, SEEN, None)["pass"]
+    assert not ext._score_trusts(bare.replace("| partner.local | Bidirectional | No |", "| partner.local | Bidirectional | Yes |"),
+                                 truth, SEEN, None)["pass"]
+    # "SID Filtering (Quarantine): Disabled" is off, whatever the label says
+    labelled = (f"Trusts {CITE}:\n1. partner.local\n   - Transitive: No\n   - SID Filtering (Quarantine): Disabled\n"
+                "2. dev.local\n   - Transitive: Yes\n   - SID Filtering (Quarantine): Disabled\n"
+                "3. fabrikam.local\n   - Transitive: Yes\n   - SID Filtering (Quarantine): Enabled")
+    assert ext._score_trusts(labelled, truth, SEEN, None)["pass"], ext._score_trusts(labelled, truth, SEEN, None)
+
+
+def test_new_scorers_read_the_full_run_answers():
+    """Patterns from the 2026-09-28 full run that the first scorers misread."""
+    trusts = {"trusts": {"dev.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": False},
+                         "partner.local": {"direction": "bidirectional", "transitive": False, "sid_filtering": False},
+                         "fabrikam.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": True}}}
+    # a table without outer pipes (GPT-5.2)
+    bare = (f"Partner domain | Trust direction | Transitive? | SID filtering (quarantine) enabled?\n---|---|---|---\n"
+            f"dev.local | bidirectional | True | False {CITE}\nfabrikam.local | bidirectional | True | True\n"
+            "partner.local | bidirectional | False | False")
+    assert ext._score_trusts(bare, trusts, SEEN, None)["pass"]
+    deleg = {"hosts": ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"], "dcs": ["DC00", "DC01"], "decoys": ["WEB-KCD04"]}
+    hosts = f"- SQL-OLD03$ {CITE}\n- PRINT-HQ02$\n- APP-LEGACY01$\n"
+    for ok in (
+        # DCs under a lead-in that calls them domain controllers (Gemini 2.5 Flash)
+        hosts + "\nThe following domain controllers are also trusted for unconstrained delegation:\n\n- DC00$\n- DC01$",
+        # the exclusion a sentence on (Claude Opus 5.5)
+        hosts + "\nDC00$–DC01$ also have unconstrained delegation set. DCs normally have this setting, so I didn't count them.",
+        # constrained, then unconstrained later on the line (Claude Opus 4.8)
+        "The Servers OU holds WEB-KCD04$ (constrained delegation), but the queries returned three flagged for "
+        "unconstrained delegation.\n" + hosts,
+        # named only as present (Qwen3-coder)
+        hosts + "Note that while other computers such as WEB-KCD04$ are also present, only the above three are "
+                "confirmed to have unconstrained delegation."):
+        assert ext._score_delegation(ok, deleg, SEEN, None)["pass"], ok
+    listed = f"Trusted for unconstrained delegation:\n- SQL-OLD03 {CITE}\n- PRINT-HQ02\n- APP-LEGACY01\n- WEB-KCD04"
+    assert ext._score_delegation(listed, deleg, SEEN, None)["false_hosts"] == ["WEB-KCD04"]
+    groups = {"account": "mreyes", "groups": ["CORP-Finance-Users", "CORP-VPN-Users"], "direct": [],
+              "distractors": ["CORP-Finance-Interns"]}
+    base = f"mreyes is in {CITE}:\n- CORP-Finance-Users\n- CORP-VPN-Users\n"
+    for ok in (
+        # a nested bullet under a parent that says "not" (Claude Opus 5.5)
+        base + "- Two other groups showed up but are **not** mreyes's groups:\n  - CORP-Finance-Interns is a member of CORP-Finance-Users.",
+        # the directory's structure, not a claim (GPT-4o)
+        base + "### Additional Group Relationships:\n- **CORP-Finance-Interns** (SID: S-1-5-21-9) is a member of **CORP-Finance-Users**"):
+        assert ext._score_groups(ok, groups, SEEN, None)["pass"], ok
+    inherited = base + "- CORP-Finance-Interns (inherited via CORP-Finance-Users)"
+    assert ext._score_groups(inherited, groups, SEEN, None)["false_groups"] == ["CORP-Finance-Interns"]

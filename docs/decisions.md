@@ -3143,6 +3143,108 @@ Domain Admins?" three before); the blind AD benchmark is unchanged (11/11 at
 1,500 / 3,000 / 4,000 / 6,000). A longer name costs its repeats first: each
 entity is still named at its first mention (D-094).
 
+## D-098 · A trust's properties are facts; the extended AD tasks run at scale (2026-09-28)
+
+A trust review asks what each trust *is*: its direction, whether it is
+transitive, whether SID filtering (quarantine) is on. The LDAP connector kept
+those only as attrs of the `trusts` edge, and attrs never reach a reader
+(D-046), so a pack said `corp.local trusts partner.local` and nothing an
+auditor needed. The connector now also records them as facts on the partner
+domain — `trust_direction`, `trust_transitive`, `trust_sid_filtering` (the
+exporting domain named in their attrs) — which render, rank and cite like any
+fact; the edge and its attrs are unchanged, so the AD benchmark and
+`find_path` read what they did.
+
+The extended agent tasks (still unpublished) move to the `large` generated
+forest — 10,000 users, 1,500 groups, 2,000 computers, nesting five deep —
+and gain three audits: a nested group-membership report for one account
+(five groups, the last four levels up, past the walk's depth cap), a
+Kerberos delegation hardening review (three non-DC servers trusted for
+unconstrained delegation among 2,000 computers; the domain controllers and a
+constrained-delegation server are distractors) and a trust review. The
+planted objects moved to RIDs 95000+: at `large`, the generator's own
+objects reach RID ~16,000 and had absorbed the old ones.
+
+## D-099 · A domain is keyed by its name; packs name what they mention; an empty walk widens (2026-09-28)
+
+A first run of the three new audits (six models × two) failed on the data,
+not the agents:
+
+- **Two corp.locals.** The LDAP connector keyed a domain object by its SID
+  and its trust partners by DNS name, and every other source names a
+  domain by DNS name too — so `domain:corp.local` (the scorecard corpus's
+  seed domain, its hosts) and `domain:S-1-5-21-…` (the export's domain, its
+  OUs and trusts) were two entities. Agents asked about `domain:corp.local`,
+  found only the seed's hosts, and reported no trusts and no delegation. A
+  domain object is now keyed by its DNS name, with its SID as an
+  identifier; `ad_gen`'s truth and the tests follow. Re-importing a store
+  loaded before this leaves the old SID-keyed domain beside the new one.
+- **Unnamed far ends.** Names came only from the label facts of entities a
+  walk gathered, so the group four levels above an account — mentioned by
+  the edge at the walk's last hop — read `group:S-…-95007` beside named
+  ones. A pack now looks up the labels of up to 256 entities it mentions
+  but did not gather, in one query.
+- **An empty walk.** `expand_predicates=["trusts_for_unconstrained_delegation"]`
+  from a domain reached nothing; the pack said the predicate was unknown
+  and the agent answered from nothing. A scope walk that reaches nothing
+  along what it names walks again with the namespace's containment
+  predicates added, and says so in its first note; a misspelled
+  `runs_sofware` now walks `runs_software` too, and the advice moves one
+  link on. A walk that reached anything is unchanged.
+
+A second run found three more:
+
+- **A walk that reached the wrong things.** Gemini's
+  `expand_predicates=["member_of", "trusted_for_unconstrained_delegation"]`
+  from `domain:corp.local` reached the scorecard seed's hosts (they joined
+  the domain) and none of the computers its OUs hold. When a walk named a
+  predicate it could not walk (unregistered, or an attribute) and nothing it
+  reached carries the question's topic, it is rebuilt with the containment
+  added and kept if that carries the topic. Gated on the unwalkable
+  predicate: an ungated version fired on the AD benchmark's own
+  `member_of / has_ace / trusts` walks (a "trust" question makes `trusts` a
+  topic) and cost it 11/11 → 8/11 at 1,500 tokens.
+- **Trusts on an entity ask.** The trust facts are on the partner domains,
+  so an ask about `domain:corp.local` alone never showed them. The exporting
+  domain now also carries one `trust_properties` line per trust
+  ("partner.local: bidirectional, non-transitive, SID filtering off"), a
+  set from one source at one instant, not a conflict.
+- **A key that is its own name** gets no annotation: `domain:corp.local
+  (DC=corp,DC=local)` read the DN beside a name that needed none.
+
+The AD benchmark is unchanged (11/11 at every budget); the delegation audit
+finds its three servers among 2,000 computers from `domain:corp.local`
+whatever the expand list names.
+
+## D-100 · A topic of many predicates filters on its rare ones (2026-09-28)
+
+The full extended run (35 models × 5 tasks × 3) scored delegation lowest,
+and step caps were most of it — GPT-5.2 in all three runs. Its first walk
+named seven attributes (`unconstrained_delegation`, `is_dc`, `enabled`,
+`dn_name`, `sam`, `principal`, `name`); all became the scope's topic, which
+ships first (D-061), and the names and enabled flags of two thousand
+reached accounts filled the pack before the thirteen computers that carry
+the flag. MiniMax's walk hit the entity cap, and the carriers the walk
+admitted were whichever computers came first — every computer carries a
+name. Agents then asked computer by computer until the step limit.
+
+When a topic names several predicates and some are carried by at most a
+fifth as many entities as the most common one, those rare ones are the
+question's filter and the rest its display fields: the walk admits the far
+ends carrying a rare one (both its hub completion and its entity-cap probe),
+and the pack's topic pass takes the rare facts first, then the display
+fields only for the entities that carry them. A label (a name) is never the
+filter. A topic whose predicates are about equally common — "which members,
+and are they enabled?" — is unchanged. Three strong models' first delegation
+calls, replayed on the large forest with the scorecard's seed hosts, now
+return the three servers; the AD benchmark is unchanged (11/11 at every
+budget).
+
+The run's scorer misses were fixed with it (13 verdicts, each read by hand):
+a table without outer pipes, a lead-in in a parent bullet or a heading, a
+domain controller set aside a sentence on, "constrained" beside a later
+"unconstrained", a distractor stated as nested *into* the account's group.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

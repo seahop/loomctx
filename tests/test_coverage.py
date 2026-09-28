@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from loomctx import coverage
 from loomctx.connectors import ad_gen, entra, ldap, okta
 from loomctx.context import build_pack, find_paths
-from loomctx.contracts import AskRequest, EntityRef, PathRequest, ScopeSpec
+from loomctx.contracts import AskRequest, ClaimIn, EntityRef, PathRequest, ScopeSpec
 from loomctx.store.sqlite import SqliteStore
 
 
@@ -57,7 +57,7 @@ def test_a_pack_names_the_opaque_keys_it_lists_within_budget(tmp_path):
     `user:S-… (dnguyen@dev.local)` (D-097: the name with its domain), and names fill only budget the facts left over."""
     import os
     from loomctx import agent_eval_ext as ext
-    ext.main(["prepare", str(tmp_path)])
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
     store = SqliteStore(tmp_path / "forest.db")
     _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
     for budget in (1500, 3000):
@@ -115,7 +115,7 @@ def test_a_walk_cut_by_its_depth_says_where_it_stopped(tmp_path):
     user's other memberships turn back at the user and are not onward."""
     import os
     from loomctx import agent_eval_ext as ext
-    ext.main(["prepare", str(tmp_path)])
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
     store = SqliteStore(tmp_path / "forest.db")
     _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
 
@@ -127,6 +127,69 @@ def test_a_walk_cut_by_its_depth_says_where_it_stopped(tmp_path):
     [note] = notes(2)
     assert f"group:{ext.DEV_SID}-1201 (DEV-Ops@dev.local) links onward along member_of" in note and "depth=3" in note
     assert notes(3) == []
+    store.close()
+
+
+def test_a_pack_names_what_it_mentions_and_a_walk_that_reached_nothing_widens(tmp_path):
+    """D-099: a group four levels up is named though the walk stopped a hop
+    short of it; a walk that reached nothing along what it named (an
+    invented predicate) also follows the containment and says so; the
+    LDAP domain is keyed by its DNS name."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+    pack = build_pack(store, AskRequest(namespace="ad", question="What groups does mreyes belong to?", budget=3000,
+                                        scope=ScopeSpec(subjects=[EntityRef(type="user", key=f"{ext.CORP_SID}-95101")],
+                                                        expand=["member_of"], depth=3)))
+    assert any(f"group:{ext.CORP_SID}-95007 (CORP-Remote-Apps@corp.local)" in i.text for i in pack.items)
+    pack = build_pack(store, AskRequest(namespace="ad", budget=3000,
+                                        question="which computer accounts are trusted for unconstrained delegation?",
+                                        scope=ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")],
+                                                        expand=["trusts_for_unconstrained_delegation"], depth=2)))
+    assert pack.notes[0].startswith("nothing was reached along trusts_for_unconstrained_delegation")
+    text = "\n".join(i.text for i in pack.items)
+    assert all(h in text for h in ("APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"))
+    # a walk that reached entities, none the question is about — hosts that
+    # joined the domain (member_of), not the computers its OUs hold — and
+    # named a predicate it could not walk (Gemini 2.5 Flash's call)
+    store.record_claims([ClaimIn(namespace="ad", subject=EntityRef(type="host", key=h), predicate="member_of",
+                                 object=EntityRef(type="domain", key="corp.local"), source="inventory",
+                                 observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)) for h in ("web-01", "db-01")])
+    pack = build_pack(store, AskRequest(namespace="ad", budget=3000,
+                                        question="which computer accounts are trusted for unconstrained delegation?",
+                                        scope=ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")],
+                                                        expand=["member_of", "trusted_for_unconstrained_delegation"],
+                                                        depth=2)))
+    assert pack.notes[0].startswith("nothing this walk reached along member_of, trusted_for_unconstrained_delegation "
+                                    "carries unconstrained_delegation")
+    assert all(h in "\n".join(i.text for i in pack.items) for h in ("APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"))
+    # a walk along real links only is never widened
+    plain = build_pack(store, AskRequest(namespace="ad", budget=3000,
+                                         question="which computer accounts are trusted for unconstrained delegation?",
+                                         scope=ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")],
+                                                         expand=["member_of"], depth=2)))
+    assert not any(n.startswith("nothing") for n in plain.notes)
+    store.close()
+
+
+def test_a_topic_of_many_predicates_filters_on_its_rare_ones(tmp_path):
+    """D-100: "unconstrained delegation — show name, DN, is_dc, OS, enabled"
+    made all six the topic, and every reached account's name filled the
+    pack before the computers carrying the flag."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+    pack = build_pack(store, AskRequest(namespace="ad", budget=1500, question=(
+        "List all computer accounts that have unconstrained delegation enabled (unconstrained_delegation=true). "
+        "For each computer, show its name, distinguishedName (dn_name), whether it is a DC (is_dc), and the OS."),
+        scope=ScopeSpec(subjects=[EntityRef(type="domain", key="corp.local")],
+                        expand=["contains", "unconstrained_delegation"], depth=2)))
+    text = "\n".join(i.text for i in pack.items)
+    assert all(h in text for h in ("APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03")), text[:2000]
     store.close()
 
 

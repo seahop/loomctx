@@ -29,6 +29,17 @@ tag is v0.1.0).
 - Packs name an account with its domain (`user:S-… (dlee@dev.local)`): new
   `PredicateDef.display`; LDAP records `principal` (sAMAccountName@domain), Entra's
   `upn` and Okta's `login` are marked display (D-097).
+- LDAP records a trust's direction, transitivity and SID filtering as facts on the
+  partner domain (`trust_direction`, `trust_transitive`, `trust_sid_filtering`);
+  the extended AD tasks run on the large generated forest and add groups,
+  delegation and trusts audits (D-098).
+- LDAP keys a domain by its DNS name (the SID is an identifier), so an export's
+  domain and the same domain from other sources are one entity; packs name the
+  entities they only mention; a scope walk that reaches nothing along what it
+  names also follows the containment, and says so (D-099).
+- A scope topic naming several predicates filters on its rare ones: the walk admits,
+  and the pack ships first, the entities carrying the filter, then their display
+  fields (D-100).
 - MCP `ask_scope` walks an over-deep request to the depth cap and says so.
 - `loomctx.agent_eval_ext`: two extended tasks (cross-domain admin audit,
   coverage honesty), run on demand and not part of the published

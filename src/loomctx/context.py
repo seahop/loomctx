@@ -236,20 +236,43 @@ def _object_text(obs: Observation) -> str:
 _NAMES: ContextVar[tuple[dict, frozenset] | None] = ContextVar("loomctx_pack_names", default=None)
 
 
+_NAME_LOOKUPS = 256   # entities a pack mentions but did not gather, named by one lookup (D-099)
+
+
 def _pack_names(store: GraphStore, namespace: str, observations: list[Observation]) -> tuple[dict, frozenset]:
     """Each entity's name for this pack: a `display` label's value when it
     has one (`dlee@dev.local`, D-097), else its shortest label — the
-    sAMAccountName, not the DN."""
+    sAMAccountName, not the DN. An entity the pack only mentions — the far
+    end of an edge at the walk's last hop — is named by one bounded lookup
+    of its labels (D-099): a group four levels up read `group:S-…-95007`
+    beside three named ones, and the agent could not say which it was."""
     labels = frozenset(label_predicates(store, namespace))
     shown = display_predicates(store, namespace)
     names: dict[tuple[str, str], tuple[bool, str]] = {}
-    for o in observations:
+    self_named: set[tuple[str, str]] = set()   # a key that is one of its names needs none
+
+    def offer(o: Observation) -> None:
+        if o.predicate in labels and isinstance(o.object, str) and o.object.lower() == o.subject.key.lower():
+            self_named.add((o.subject.type, o.subject.key))
         if o.predicate in labels and isinstance(o.object, str) and o.object and o.object.lower() != o.subject.key.lower():
             key = (o.subject.type, o.subject.key)
             rank = (o.predicate not in shown, len(o.object))
             if key not in names or rank < (not names[key][0], len(names[key][1])):
                 names[key] = (o.predicate in shown, o.object)
-    return {k: v for k, (_, v) in names.items()}, labels
+    for o in observations:
+        offer(o)
+    if labels:
+        mentioned = list(dict.fromkeys(
+            (r.type, r.key) for o in observations
+            for r in (o.subject, o.object) if isinstance(r, EntityRef)))
+        unnamed = [EntityRef(type=t, key=k) for t, k in mentioned if (t, k) not in names][:_NAME_LOOKUPS]
+        if unnamed:
+            rows = store.observations_for_many(namespace, unnamed, limit=20, predicates=sorted(labels))
+            for ref in unnamed:
+                for o in rows.get((ref.type, ref.key), []):
+                    if _is_subject(o, ref):
+                        offer(o)
+    return {k: v for k, (_, v) in names.items() if k not in self_named}, labels
 
 
 _REF = re.compile(r"\b([a-z][a-z0-9_]*):([^\s,;()\[\]]+)")
@@ -1427,6 +1450,7 @@ def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expa
                              if _in_scope(o, allowed_types)] + [rows[i] for i in edge_ids if i in rows])
     by_key = {(h.type, h.key): h for h in hubs}
     far: Reach = {}
+    carried: dict[tuple[str, str], set[str]] = {}
     for hub_key, edge_id, attr_id in pairs:
         edge, attr = rows.get(edge_id), rows.get(attr_id)
         hub = by_key.get(hub_key)
@@ -1437,6 +1461,11 @@ def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expa
         end = attr.subject
         if (end.type, end.key) not in seen:
             far.setdefault((end.type, end.key), (hub, end, edge))
+            carried.setdefault((end.type, end.key), set()).add(attr.predicate)
+    # a topic of several predicates admits the far ends that carry its rare
+    # ones — the filter — not every account that has a name (D-100)
+    keep = _rare_carriers(carried)
+    far = {k: v for k, v in far.items() if k in keep}
     for key, hub in by_key.items():
         mine = [k for k, (h, _, _) in far.items() if h is hub]
         t = truncated.get(key)
@@ -1462,11 +1491,69 @@ def _topic_carriers(store: GraphStore, namespace: str, candidates: Reach, topic:
                                         observed_before=_aware(as_of) if as_of is not None else None,
                                         predicates=sorted(topic))
     # the entity's own attribute (it is the row's subject), as the hub join reads it
-    carriers = {key: reach for key, reach in candidates.items()
-                if any(o.subject == reach[1] and _in_scope(o, allowed_types)
-                       and (valid_at is None or covers_valid_at(o, valid_at))
-                       for o in probe.get(key, []))}
+    carried = {key: {o.predicate for o in probe.get(key, [])
+                     if o.subject == reach[1] and _in_scope(o, allowed_types)
+                     and (valid_at is None or covers_valid_at(o, valid_at))}
+               for key, reach in candidates.items()}
+    keep = _rare_carriers(carried)
+    carriers = {key: reach for key, reach in candidates.items() if carried[key] and key in keep}
     return carriers, sum(len(rows) for rows in probe.values())
+
+
+def _rare_carriers(carried: dict[tuple[str, str], set[str]]) -> set[tuple[str, str]]:
+    """Of entities and the topic predicates each carries, the ones a
+    several-predicate topic admits (D-100): those carrying a rare predicate
+    (on at most a fifth as many entities as the most common one), when the
+    topic has one; else every carrier."""
+    counts: dict[str, int] = {}
+    for preds in carried.values():
+        for p in preds:
+            counts[p] = counts.get(p, 0) + 1
+    widest = max(counts.values(), default=0)
+    rare = {p for p, c in counts.items() if c <= _SELECTIVE_SHARE * widest}
+    if len(counts) > 1 and rare:
+        return {k for k, preds in carried.items() if preds & rare}
+    return {k for k, preds in carried.items() if preds}
+
+
+def _unwalkable(store: GraphStore, namespace: str, scope: ScopeSpec, observations: list[Observation]) -> bool:
+    """The scope named a predicate it could not walk: unregistered and never
+    seen here, or an attribute (D-064)."""
+    schema = _schema(store, namespace)
+    definitions = list(schema.predicates) if schema is not None else []
+    known = {d.name for d in definitions} | {o.predicate for o in observations}
+    return (any(p not in known for p in scope.expand)
+            or bool(expand_attributes(scope.expand, definitions, observations)))
+
+
+_SELECTIVE_SHARE = 0.2   # a topic predicate on at most this share of the most common one's carriers filters (D-100)
+_RARE_BOOST = 1000.0     # its facts rank ahead of the topic's display fields
+
+
+def _selective_topic(first: frozenset[str], pool: Pool):
+    """Which facts ship as the topic (D-061) when it names several
+    predicates (D-100): the rare ones are the question's filter, the common
+    ones its display fields. "Computer accounts with unconstrained_delegation
+    — show is_dc, enabled, dn_name, sam, name" made all seven the topic, and
+    the name of every one of thousands of reached accounts filled the pack
+    before the thirteen computers that carry the flag. When some topic
+    predicates are carried by at most a fifth as many entities as the most
+    common one, the topic is those facts plus the others only for the
+    entities that carry one; otherwise every topic fact, as before."""
+    carriers: dict[str, set[tuple[str, str]]] = {}
+    current = _NAMES.get()
+    labels = current[1] if current else frozenset()   # a name is a display field, never the filter
+    for e in pool:
+        obs = e[3]
+        if obs.predicate in first and obs.predicate not in labels:
+            carriers.setdefault(obs.predicate, set()).add((obs.subject.type, obs.subject.key))
+    widest = max((len(c) for c in carriers.values()), default=0)
+    rare = {p for p, c in carriers.items() if len(c) <= _SELECTIVE_SHARE * widest}
+    if len(carriers) < 2 or not rare:
+        return (lambda obs: obs.predicate in first), frozenset()
+    chosen = set().union(*(carriers[p] for p in rare))
+    return (lambda obs: obs.predicate in rare or (
+        obs.predicate in first and (obs.subject.type, obs.subject.key) in chosen)), frozenset(rare)
 
 
 def _status_predicates(store: GraphStore, namespace: str) -> frozenset[str]:
@@ -1544,17 +1631,40 @@ def _build_pack(
     embedder=None,
     allowed_types: tuple[str, ...] | None = None,
     absorb_names: bool = False,
+    widen: bool = True,
 ) -> ContextPack:
     from .config import max_scope_observations
     paths: Paths = {}
     truncated: Truncations = {}
     gathered: dict[tuple[str, str], list[Observation]] = {}
     asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
+    widened: list[str] = []
     if req.scope is not None:
         subjects, paths = resolve_scope_paths(
             store, req.namespace, req.scope, truncated,
             as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
             gathered_out=gathered, question=req.question)
+        if not paths and req.scope.expand and req.scope.depth > 0:
+            # a walk that reached nothing along what it named — an invented
+            # predicate, attributes only — walks the containment too (D-099):
+            # expand=["trusts_for_unconstrained_delegation"] from a domain
+            # reached nothing, and the agent answered from the empty pack
+            from .registry import containment_predicates
+            widened = [p for p in containment_predicates(store.get_schema(req.namespace))
+                       if p not in req.scope.expand]
+            if widened:
+                wider = req.scope.model_copy(update={"expand": [*req.scope.expand, *widened]})
+                more_truncated: Truncations = {}
+                more_gathered: dict[tuple[str, str], list[Observation]] = {}
+                more_subjects, more_paths = resolve_scope_paths(
+                    store, req.namespace, wider, more_truncated,
+                    as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
+                    gathered_out=more_gathered, question=req.question)
+                if more_paths:
+                    req = req.model_copy(update={"scope": wider})
+                    subjects, paths, truncated, gathered = more_subjects, more_paths, more_truncated, more_gathered
+                else:
+                    widened = []
     else:
         # the entity the name resolves to — a merged-away alias included (D-058)
         subjects = canonical_refs(store, req.namespace, [req.subject])
@@ -1606,11 +1716,38 @@ def _build_pack(
     # disabled member's status out, and the agent called every member enabled
     lead = (_exceptional_status(observations, _status_predicates(store, req.namespace))
             if req.scope is not None else frozenset())
+    if (widen and not widened and req.scope is not None and req.scope.depth > 0 and topic
+            and not any(o.predicate in topic for o in observations)
+            and _unwalkable(store, req.namespace, req.scope, observations)):
+        # the walk reached entities, but none the question is about, and it
+        # named something it could not walk: along `member_of` plus an
+        # invented predicate a domain reaches the hosts that joined it, not
+        # the computers its OUs hold, and "which computers are trusted for
+        # unconstrained delegation" came back with neither (D-099). Walk the
+        # containment too; keep that pack only if it carries the topic. A
+        # walk along real links (the AD benchmark's member_of / has_ace /
+        # trusts) is never widened.
+        from .registry import containment_predicates
+        extra = [p for p in containment_predicates(store.get_schema(req.namespace))
+                 if p not in scope_expand(store, req.namespace, req.scope)]
+        if extra:
+            wider = req.model_copy(update={"scope": req.scope.model_copy(
+                update={"expand": [*scope_expand(store, req.namespace, req.scope), *extra]})})
+            pack = _build_pack(store, wider, embedder, allowed_types, absorb_names, widen=False)
+            if any(re.search(rf"\b{re.escape(t)}\b", i.text) for i in pack.items for t in topic):
+                note = (f"nothing this walk reached along {', '.join(sorted(scope_expand(store, req.namespace, req.scope)))} "
+                        f"carries {', '.join(sorted(topic))}: it also followed {', '.join(extra)} "
+                        "(the namespace's containment) to reach what does")
+                return pack.model_copy(update={"notes": [note, *pack.notes]})
     names, labels = _pack_names(store, req.namespace, observations)
     _NAMES.set((names, labels))    # read by build_pack after selection
     notes = request_notes(store, req.namespace, req.scope, asked, observations,
                           {key for key in examined if not gathered.get(key)}, allowed_types,
                           question=req.question, hops=max((len(c) for c in paths.values()), default=0))
+    if widened:
+        named = [p for p in req.scope.expand if p not in widened]
+        notes.insert(0, f"nothing was reached along {', '.join(named)}: the walk also followed "
+                        f"{', '.join(widened)} (the namespace's containment) to reach what the question is about")
     if req.scope is not None:
         # a predicate the walk follows, or the question turns on, that an
         # import did not fully collect: the pack says so (D-082)
@@ -2631,9 +2768,15 @@ def _pack(
     first = topic | attribute
     if first or lead:
         # an exceptional status (`lead`, D-095) ships with the topic
-        topic_pool = [e for e in pool if e[3].predicate in first or e[3].id in lead]
+        in_first, rare = _selective_topic(first, pool)
+        topic_pool = [e for e in pool if in_first(e[3]) or e[3].id in lead]
         if topic_pool:
-            pool = [e for e in pool if not (e[3].predicate in first or e[3].id in lead)]
+            pool = [e for e in pool if not (in_first(e[3]) or e[3].id in lead)]
+            # the filter's facts before the display fields (D-100): thirteen
+            # `unconstrained_delegation True` rows, then their names and OSes
+            # (the score too: a groupable fact's density is re-derived from it)
+            topic_pool = [(e[0] * _RARE_BOOST, e[1] * _RARE_BOOST, *e[2:]) if e[3].predicate in rare else e
+                          for e in topic_pool]
             groups = {e[3].id: g for e in topic_pool
                       if (g := _group_key(e[3], e[5], by_id, superseded_by, subject_keys)) is not None}
             topic_pool = _grouped_density(topic_pool, groups)

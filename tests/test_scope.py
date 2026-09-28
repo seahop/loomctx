@@ -377,14 +377,19 @@ def test_a_pack_names_what_it_could_not_do(tmp_path):
     q = "Which CVEs affect the software host:web-01 runs and are exploited in the wild?"
     pack = build_pack(store, AskRequest(namespace="v", question=q, budget=800, scope=ScopeSpec(
         subjects=[host], expand=["runs_sofware", "cisa_known_exploited_vulnerability"], depth=2)))
-    assert len(pack.notes) == 3, pack.notes
-    assert pack.notes[0].startswith("expand predicate 'runs_sofware' is not registered in namespace 'v'")
-    assert "closest: runs_software" in pack.notes[0]
-    assert "closest: exploited_in_wild" in pack.notes[1]
-    # the walk stopped at the root, not at its depth: the link is the advice, not a deeper walk
-    assert pack.notes[2] == ("the question names 'affects', 'exploited_in_wild', which nothing this scope reached "
-                             "carries, and 'runs_software', a link the reached entities have that it does "
-                             "not follow: add that to expand_predicates to reach what carries the rest")
+    assert len(pack.notes) == 4, pack.notes
+    # D-099: nothing was reached along what it named, so the walk also
+    # followed the containment (runs_software here) and says so first
+    assert pack.notes[0] == ("nothing was reached along runs_sofware, cisa_known_exploited_vulnerability: the "
+                             "walk also followed runs_software (the namespace's containment) to reach what the "
+                             "question is about")
+    assert pack.notes[1].startswith("expand predicate 'runs_sofware' is not registered in namespace 'v'")
+    assert "closest: runs_software" in pack.notes[1]
+    assert "closest: exploited_in_wild" in pack.notes[2]
+    # it reached the software: the next link is the advice
+    assert pack.notes[3] == ("the question names 'exploited_in_wild', which nothing this scope reached "
+                             "carries, and 'affects', a link the reached entities have that it does not "
+                             "follow: add that to expand_predicates to reach what carries the rest")
     assert "- note: expand predicate 'runs_sofware'" in render_user_prompt(q, pack)
     short = build_pack(store, AskRequest(namespace="v", question=q, budget=800, scope=ScopeSpec(
         subjects=[host], expand=["runs_software"], depth=1)))

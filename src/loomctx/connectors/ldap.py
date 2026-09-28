@@ -428,9 +428,19 @@ def entity_type_of(entry: LdifEntry) -> str:
     return "container"
 
 
+def _entity_key(dn: str, sid: str, etype: str) -> str:
+    """An object's entity key: its SID — except a domain, keyed by its DNS
+    name (D-099), as its trust partners already were and as every other
+    source names it: keyed by SID, `corp.local` from the export and
+    `corp.local` from anywhere else were two entities."""
+    if etype == "domain":
+        return _dn_to_domain(dn) or sid
+    return sid
+
+
 class Directory:
-    """One export, indexed for resolution: DN (lower-cased) -> (sid, type),
-    SID -> (sid, type), and the export's observation time."""
+    """One export, indexed for resolution: DN (lower-cased) -> (key, type),
+    SID -> (type, key), and the export's observation time."""
 
     def __init__(self, entries: list[LdifEntry], observed_at: datetime,
                  export: str = SOURCE_DEFAULT):
@@ -438,13 +448,14 @@ class Directory:
         self.observed_at = observed_at
         self.export = export
         self.by_dn: dict[str, tuple[str, str]] = {}
-        self.by_sid: dict[str, str] = {}
+        self.by_sid: dict[str, tuple[str, str]] = {}
         for e in entries:
             sid = _sid_from_entry(e)
             if sid and e.dn:
                 etype = entity_type_of(e)
-                self.by_dn[e.dn.lower()] = (sid, etype)
-                self.by_sid[sid] = etype
+                key = _entity_key(e.dn, sid, etype)
+                self.by_dn[e.dn.lower()] = (key, etype)
+                self.by_sid[sid] = (etype, key)
 
     def ref_for_dn(self, dn: str | None) -> EntityRef | None:
         if not dn:
@@ -457,9 +468,9 @@ class Directory:
     def ref_for_sid(self, sid: str | None, default_type: str = "group") -> EntityRef | None:
         if not sid:
             return None
-        etype = self.by_sid.get(sid)
-        if etype is not None:
-            return EntityRef(type=etype, key=sid)
+        hit = self.by_sid.get(sid)
+        if hit is not None:
+            return EntityRef(type=hit[0], key=hit[1])
         return EntityRef(type=default_type, key=sid)
 
 
@@ -497,7 +508,7 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
     if sid is None:
         return
     etype = entity_type_of(entry)
-    ref = EntityRef(type=etype, key=sid)
+    ref = EntityRef(type=etype, key=_entity_key(dn, sid, etype))
     base_attrs = {"dn": dn, "export": directory.export}
 
     def claim(pred: str, obj, tag: str = "", **kw) -> ClaimIn:
@@ -526,6 +537,9 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
 
     # what other tools call this account or machine (D-083): the SID, the
     # UPN and DOMAIN\sam a Windows host prints, the DNS name a scanner sees
+    if etype == "domain" and ref.key != sid:
+        # keyed by name (D-099): the SID still finds it
+        yield from ident.claims(namespace, ref, [("sid", sid)], observed, source, base_attrs)
     if etype in ("user", "computer"):
         pairs = [("sid", sid), ("upn", entry.text("userprincipalname")), ("mail", entry.text("mail"))]
         if sam and dns_domain:
@@ -661,6 +675,22 @@ def _trust_envelopes(entry: LdifEntry, directory: Directory, namespace: str, sou
     else:
         yield _trust_edge(local, partner, raw_dir)
 
+    # what the trust IS, as facts on the partner domain (D-098): the edge's
+    # attrs never reach a reader (D-046), so a trust review saw
+    # `corp.local trusts partner.local` and not that it is non-transitive
+    for pred, value in (("trust_direction", raw_dir), ("trust_transitive", base_attrs["transitive"]),
+                        ("trust_sid_filtering", base_attrs["sid_filtering"])):
+        yield ClaimIn(namespace=namespace, event_id=_eid(f"ldap:trust:{partner.key}:{pred}:{stamp}"),
+                      subject=partner, predicate=pred, object=value, observed_at=observed,
+                      source=source, attrs={**base_attrs, "local": local.key})
+    # and on the exporting domain, one line per trust: an ask about the
+    # domain itself — not a walk to its partners — shows what its trusts are
+    summary = (f"{partner_name}: {raw_dir}, {'transitive' if base_attrs['transitive'] else 'non-transitive'}, "
+               f"SID filtering {'on' if base_attrs['sid_filtering'] else 'off'}")
+    yield ClaimIn(namespace=namespace, event_id=_eid(f"ldap:trust:{local.key}:{partner.key}:properties:{stamp}"),
+                  subject=local, predicate="trust_properties", object=summary, observed_at=observed,
+                  source=source, attrs={**base_attrs, "local": local.key})
+
 
 def _dn_to_domain(dn: str | None) -> str | None:
     """`DC=corp,DC=local` -> `corp.local`."""
@@ -775,6 +805,15 @@ def schema(namespace: str) -> SchemaRegistration:
                          description="DN parentage: this object contains the child"),
             PredicateDef(name="trusts", object_types=["domain"],
                          description="a domain trust; attrs direction, transitive, sid_filtering, partner"),
+            PredicateDef(name="trust_properties",
+                         description="one of this domain's trusts: the partner, its direction, whether it is "
+                                     "transitive and whether SID filtering (quarantine) is on"),
+            PredicateDef(name="trust_direction",
+                         description="the trust direction with this partner domain: inbound, outbound or bidirectional"),
+            PredicateDef(name="trust_transitive",
+                         description="whether the trust with this partner domain is transitive"),
+            PredicateDef(name="trust_sid_filtering",
+                         description="whether SID filtering (quarantine) is enabled on the trust with this partner domain"),
             PredicateDef(name="has_ace",
                          description="a DACL grant: the trustee holds attrs.right over this object "
                                      "(GenericAll/GenericWrite/WriteDacl/WriteOwner/ForceChangePassword/"

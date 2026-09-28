@@ -70,6 +70,7 @@ UAC_DISABLED = UAC_NORMAL | ldap.UAC_ACCOUNTDISABLE   # enabled == False
 UAC_DC = 0x0200 | ldap.UAC_SERVER_TRUST_ACCOUNT | ldap.UAC_TRUSTED_FOR_DELEGATION
 UAC_WORKSTATION = 0x1000                              # WORKSTATION_TRUST_ACCOUNT
 
+CORP_DOMAIN = "corp.local"
 DEV_DOMAIN = "dev.local"
 PARTNER_NONTRANSITIVE = "partner.local"
 PARTNER_SIDFILTERED = "fabrikam.local"
@@ -353,13 +354,15 @@ class Generator:
 
     def _grant(self, group: Obj, target: Obj, target_type: str, right: str) -> dict:
         target.aces.append(ace_for_right(group.sid, right))
-        return _edge(_ref("group", group.sid), "has_ace", _ref(target_type, target.sid), right)
+        # a domain is keyed by its DNS name (D-099), everything else by SID
+        key = CORP_DOMAIN if target_type == "domain" else target.sid
+        return _edge(_ref("group", group.sid), "has_ace", _ref(target_type, key), right)
 
     def _trust(self, partner: str, attributes: int, direction: int = 3) -> dict:
         self._add(Obj(f"CN={partner},CN=System,DC=corp,DC=local", ["top", "trustedDomain"],
                       attrs=[("name", partner), ("trustPartner", partner),
                              ("trustDirection", str(direction)), ("trustAttributes", str(attributes))]))
-        return _edge(_ref("domain", self.corp_sid), "trusts", _ref("domain", partner))
+        return _edge(_ref("domain", CORP_DOMAIN), "trusts", _ref("domain", partner))
 
     def _target(self, kind: str) -> tuple[Obj, str]:
         if kind == "dc":
