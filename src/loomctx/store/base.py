@@ -262,12 +262,16 @@ class GraphStore(ABC):
     def search_entities(
         self, namespace: str, query: str, limit: int = 10,
         types: tuple[str, ...] | None = None,
+        labels: tuple[str, ...] = (),
     ) -> list[Entity]:
         """Entities whose key matches the query exactly or by prefix
         (case-insensitive; LIKE metacharacters in the query are literal).
         `types` restricts to those entity types *inside* the query so a
-        scoped caller still gets `limit` results (H-C8). Used to resolve
-        entity names mentioned inside a free-form question."""
+        scoped caller still gets `limit` results (H-C8). `labels` are the
+        namespace's label predicates (D-091): an entity whose value of one
+        of them matches — exactly, then by prefix — is found by that name,
+        after the key matches. Used to resolve entity names mentioned inside
+        a free-form question."""
 
     @abstractmethod
     def count_observations(

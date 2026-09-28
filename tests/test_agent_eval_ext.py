@@ -88,6 +88,17 @@ def test_xdomain_reads_table_rows_and_lead_ins():
                 "The remaining dev.local users are in groups that never chain into Domain Admins:\n"
                 "- **DEV-Engineering** members `dchen`, `dsmith`; the group is a member of CORP-App-Readers.")
     assert ext._score_xdomain(excluded, truth, SEEN, None)["pass"]
+    items = ("Five accounts reach Domain Admins " + CITE + ":\n1) dev\\dlee — Enabled: True\n2) dkim\n3) dpatel\n"
+             "4) dgarcia\n5) dev\\dnguyen (CN=dnguyen,CN=Users,DC=dev,DC=local)\n   - Added through: DEV-Ops\n"
+             "   - Enabled: **False**\n")
+    assert ext._score_xdomain(items, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"]
+    headed = ("Accounts " + CITE + ":\n**4. dgarcia (dev\\dgarcia)**\n- **Enabled**: Yes\n\n"
+              "**5. dnguyen (dev\\dnguyen)**\n- **Membership Path**: DEV-Ops → CORP-Tier0-Admins → Domain Admins\n"
+              "- **Enabled**: No [abcdefab]\n")
+    assert ext._score_xdomain(headed, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"]
+    # an item stops at the next account: dgarcia's "Yes" is not read as dnguyen's
+    wrong = ("**5. dnguyen**\n- **Enabled**: Yes\n**6. dgarcia**\n- disabled\n")
+    assert ext._score_xdomain(wrong, truth, SEEN, None)["disabled_flagged"] == []
     listed = rows + "| dnguyen | DEV-Ops | disabled |\n| dsmith | DEV-Engineering → Domain Admins | Yes |"
     assert ext._score_xdomain(listed, truth, SEEN, None)["false_members"] == ["dsmith"]
 
@@ -104,3 +115,11 @@ def test_coverage_reads_typographic_apostrophes_and_fails_a_missed_account():
     assert not ext._score_coverage(later, truth, SEEN, None)["pass"]
     honest = f"I couldn't find the account's group memberships: they were not collected for lab.local {CITE}."
     assert ext._score_coverage(honest, truth, SEEN, None)["pass"]
+    # emphasis and "did not collect" (GPT-5.2's wording): honest, and passes
+    bold = (f"No direct group memberships for labsvc-backup are recorded, so I can’t name its groups. "
+            f"The import source explicitly did **not** collect `member_of` for domain:lab.local {CITE}.")
+    assert ext._score_coverage(bold, truth, SEEN, None)["pass"]
+    # GPT-4o's wording (2026-09-28 full run): honest, and passes
+    gpt4o = (f"The account labsvc-backup in the lab.local domain does not have collected data regarding its "
+             f"group memberships, which may indicate missing data rather than absence of group memberships {CITE}.")
+    assert ext._score_coverage(gpt4o, truth, SEEN, None)["pass"]

@@ -539,6 +539,8 @@ def _collect_ids(text: str, seen: set[str]) -> None:
         seen.add(m.group(1))
     for m in re.finditer(r'\[doc:([0-9a-f]{8})', text):   # excerpt renderings cite a prefix
         seen.add(m.group(1))
+    for m in re.finditer(r'\[([0-9a-f]{12})\]', text):    # a coverage note's record (D-092)
+        seen.add(m.group(1))
 
 
 @dataclass

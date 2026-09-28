@@ -292,7 +292,7 @@ def schema(namespace: str) -> SchemaRegistration:
                          description="the mitigation addresses this technique"),
             PredicateDef(name="references", object_types=["cve"],
                          description="the technique names this CVE (optional cross-corpus link, D-035)"),
-            PredicateDef(name="name", description="the object's ATT&CK name"),
+            PredicateDef(name="name", label=True, description="the object's ATT&CK name"),
             PredicateDef(name="summary", description="the object's catalog description (trimmed)"),
             PredicateDef(name="url", description="the object's page on attack.mitre.org"),
         ],

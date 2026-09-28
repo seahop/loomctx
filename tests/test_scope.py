@@ -402,7 +402,7 @@ def test_a_pack_names_what_it_could_not_do(tmp_path):
     # a subject that names nothing
     ghost = build_pack(store, AskRequest(namespace="v", question="?", budget=400,
                                          subject=EntityRef(type="hots", key="web-01")))
-    assert ghost.notes == ["no entity 'hots:web-01' in namespace 'v'; entities with that key: host:web-01"]
+    assert ghost.notes == ["no entity 'hots:web-01' in namespace 'v'; entities with that key or name: host:web-01"]
 
 
 def test_the_scope_budget_carries_the_answer_within_the_mcp_limit(tmp_path, monkeypatch):

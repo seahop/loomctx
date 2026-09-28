@@ -422,6 +422,8 @@ def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retri
     ae._collect_ids('{"citations":[{"artifact_id":"0123456789abcdef0123456789abcdef","span_start":1}]} "[doc:deadbeef @0-10]"'
                     ' {"cite":"fedcba987654","source":"s"}', seen)
     assert {"0123456789abcdef0123456789abcdef", "deadbeef", "fedcba987654"} <= seen
+    ae._collect_ids('"coverage: \'member_of\' was not collected by lab-export (domain:lab.local) [bc94e86d8f1b] — x"', seen)
+    assert "bc94e86d8f1b" in seen          # a coverage note's record is shown, so citable (D-092)
     ae._collect_ids('{"cites":["a1b2c3d4e5f6 nmap-scan 2026-08-07",'
                     '"00112233445566778899aabbccddeeff @0-10 ir 2026-09-01"]}', seen)
     assert {"a1b2c3d4e5f6", "00112233445566778899aabbccddeeff"} <= seen

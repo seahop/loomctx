@@ -8,6 +8,32 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Find entities by name; coverage gaps on entity asks (D-091, D-092)
+
+- A predicate the registry marks `label` names its subject; entity search
+  (`/v1/entities/search`, MCP `find_entity`) matches label values as well
+  as keys, so a directory object keyed by a SID is found by its name
+  (schema v9 adds the index). LDAP, Entra, Okta and ATT&CK mark theirs.
+- A single-entity ask notes the collection gaps of the sources that
+  supplied the entity; coverage notes carry the record's id to cite.
+- Packs render opaque keys with their names (`user:S-… (dnguyen)`) in budget the facts
+  leave over, reserving up to a fifth when a pack has names to show (D-093).
+  A walked-to entity's name facts ride as that annotation instead of as items,
+  so the budget goes to facts (D-094).
+- A scope walk ships a reached entity's status when it differs from the rest
+  (the one disabled member), asked or not, and ranks its own path edges first
+  among equally dense facts; entity search resolves
+  `name@realm` / `REALM\name` to the bare name when the whole query matches nothing (D-095).
+- A scope walk whose last hop links onward says where it stopped and what depth
+  reaches further (D-096).
+- Packs name an account with its domain (`user:S-… (dlee@dev.local)`): new
+  `PredicateDef.display`; LDAP records `principal` (sAMAccountName@domain), Entra's
+  `upn` and Okta's `login` are marked display (D-097).
+- MCP `ask_scope` walks an over-deep request to the depth cap and says so.
+- `loomctx.agent_eval_ext`: two extended tasks (cross-domain admin audit,
+  coverage honesty), run on demand and not part of the published
+  scorecard.
+
 ### Agent scorecard fixed and re-run; GKE re-validation (D-089, D-090)
 
 - The agent harness gives models 8,000 output tokens per turn on the

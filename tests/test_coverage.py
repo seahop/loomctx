@@ -18,6 +18,135 @@ def _strip(ldif: str, *attrs: str) -> str:
     return "\n".join(line for line in ldif.splitlines() if not line.lower().startswith(drop))
 
 
+def test_an_entity_ask_says_what_its_source_did_not_collect(tmp_path):
+    """D-092: agents asking about one account never saw a gap noted only on
+    scope asks and find_path; an entity ask from a source that did not
+    collect membership says so, citing the coverage record."""
+    from loomctx import agent_eval_ext as ext
+    store = SqliteStore(tmp_path / "lab.db")
+    _load_ldif(store, ext.lab_ldif())
+    pack = build_pack(store, AskRequest(namespace="ad", subject=EntityRef(type="user", key=f"{ext.LAB_SID}-1102"),
+                                        question="which groups is it a member of?", budget=1500))
+    note = next(n for n in pack.notes if n.startswith("coverage:"))
+    assert "'member_of' was not collected" in note and "domain:lab.local" in note and "[" in note
+    # a source that collected everything adds nothing
+    ldif, _ = ad_gen.generate(7, "small")
+    full = SqliteStore(tmp_path / "full.db")
+    _load_ldif(full, ldif)
+    da = build_pack(full, AskRequest(namespace="ad", subject=EntityRef(type="group", key=f"{ext.CORP_SID}-512"),
+                                     question="who are its members?", budget=1500))
+    assert not any(n.startswith("coverage:") for n in da.notes)
+    # both exports in one store: a walk through corp.local does not report
+    # the lab export's gap; the lab account's ask still does
+    for rec in ldap.ldif_to_envelopes(ext.lab_ldif(), "ad", source="lab-export"):
+        full.record_claims([rec])
+    walk = build_pack(full, AskRequest(namespace="ad", question="who are its members?", budget=2000,
+                                       scope=ScopeSpec(subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                                       expand=["member_of"], depth=2)))
+    assert not any("lab-export" in n for n in walk.notes)
+    lab = build_pack(full, AskRequest(namespace="ad", subject=EntityRef(type="user", key=f"{ext.LAB_SID}-1102"),
+                                      question="which groups?", budget=1500))
+    assert any(n.startswith("coverage:") and "lab-export" in n for n in lab.notes)
+    store.close()
+    full.close()
+
+
+def test_a_pack_names_the_opaque_keys_it_lists_within_budget(tmp_path):
+    """D-093: a Domain Admins walk listed its child-domain members as bare
+    SIDs, their names in separate facts; the pack now reads
+    `user:S-… (dnguyen@dev.local)` (D-097: the name with its domain), and names fill only budget the facts left over."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    ext.main(["prepare", str(tmp_path)])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+    for budget in (1500, 3000):
+        pack = build_pack(store, AskRequest(namespace="ad", question="which dev.local accounts are effective members of Domain Admins, and are they enabled?",
+                                            budget=budget, scope=ScopeSpec(
+                                                subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                                expand=["member_of"], depth=3)))
+        assert pack.charged_tokens <= budget
+        sid = f"{ext.DEV_SID}-1105"
+        listed = [i.text for i in pack.items if sid in i.text]
+        # every entity is named at its first mention; repeats only from what is left
+        assert not listed or f"{sid} (dnguyen@dev.local)" in listed[0], budget
+        assert listed or budget < 3000                    # the whole chain fits at the default budget
+    # the question an agent sent, at ask_scope's default budget: a walked-to
+    # account's name rides on its mentions instead of shipping as its own
+    # item, and the room that frees reaches all five dev.local members at
+    # hop three, each with its enabled state; the asked group keeps its name facts
+    pack = build_pack(store, AskRequest(namespace="ad", budget=3000, question=(
+        "Which accounts from dev.local are effective members of the Domain Admins group in corp.local, "
+        "directly or through nested groups? For each account, name the group it is added through and "
+        "say whether the account is enabled."), scope=ScopeSpec(
+            subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")], expand=["member_of"], depth=3)))
+    assert pack.charged_tokens <= 3000
+    for name in ("dlee", "dkim", "dpatel", "dgarcia", "dnguyen"):
+        ref = f"user:{ext.DEV_SID}-{ext.DEV_USERS[name][0]} ({name}@dev.local)"
+        assert any(ref in i.text and "enabled" in i.text for i in pack.items), name
+    assert not any(f" name {n} (" in i.text for i in pack.items for n in ext.DEV_USERS)
+    assert any(" name Domain Admins (" in i.text for i in pack.items)
+    # D-095: a question that never says "enabled" still gets the one member
+    # whose status differs from the rest, with the edge that reached it
+    for budget in (800, 3000):
+        pack = build_pack(store, AskRequest(namespace="ad", budget=budget, question=(
+            "Which accounts from dev.local are effective members of the Domain Admins group in "
+            "corp.local, directly or through nested groups?"), scope=ScopeSpec(
+                subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")], expand=["member_of"], depth=3)))
+        assert any(f"{ext.DEV_SID}-1105" in i.text and "enabled False" in i.text for i in pack.items), budget
+    # the walk's own edges before the reached admins' other memberships; and
+    # a topic nothing reached carries (`is_dc`, by its description "a domain
+    # controller machine account") does not take the walk's focus (D-096)
+    for question in ("Show all members of this group, including nested group membership",
+                     "Which accounts are members of the Domain Admins group in corp.local, "
+                     "directly or through nested groups?"):
+        pack = build_pack(store, AskRequest(namespace="ad", budget=3000, question=question,
+                                            scope=ScopeSpec(subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                                            expand=["member_of"], depth=3)))
+        text = "\n".join(i.text for i in pack.items)
+        assert all(f"{ext.DEV_SID}-{ext.DEV_USERS[n][0]}" in text
+                   for n in ("dlee", "dkim", "dpatel", "dgarcia", "dnguyen")), question
+    store.close()
+
+
+def test_a_walk_cut_by_its_depth_says_where_it_stopped(tmp_path):
+    """D-096: two hops from Domain Admins reach DEV-Ops, not its members;
+    the pack says DEV-Ops links onward and that depth=3 walks there. A
+    user's other memberships turn back at the user and are not onward."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    ext.main(["prepare", str(tmp_path)])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+
+    def notes(depth):
+        pack = build_pack(store, AskRequest(namespace="ad", question="show all effective members", budget=2000,
+                                            scope=ScopeSpec(subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                                            expand=["member_of"], depth=depth)))
+        return [n for n in pack.notes if n.startswith("the walk stopped")]
+    [note] = notes(2)
+    assert f"group:{ext.DEV_SID}-1201 (DEV-Ops@dev.local) links onward along member_of" in note and "depth=3" in note
+    assert notes(3) == []
+    store.close()
+
+
+def test_the_exceptional_status_is_the_minority_value():
+    from datetime import datetime, timezone
+    from loomctx.context import _exceptional_status
+    from loomctx.contracts import Observation
+
+    def obs(key, value, i):
+        return Observation(id=f"o{i}", namespace="ad", subject=EntityRef(type="user", key=key),
+                           predicate="enabled", object=value, source="ad-export",
+                           observed_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
+                           recorded_at=datetime(2026, 9, 20, tzinfo=timezone.utc), confidence=1.0)
+    many = [obs(f"u{i}", True, i) for i in range(5)] + [obs("off", False, 9)]
+    assert _exceptional_status(many, frozenset({"enabled"})) == {"o9"}
+    assert _exceptional_status(many[:5], frozenset({"enabled"})) == frozenset()      # all agree
+    assert _exceptional_status([many[0], many[5]], frozenset({"enabled"})) == {"o0", "o9"}   # a tie
+    assert _exceptional_status(many, frozenset()) == frozenset()
+
+
 def _load_ldif(store, text):
     store.put_schema(ldap.schema("ad"))
     store.record_claims(list(ldap.ldif_to_envelopes(text, "ad")))

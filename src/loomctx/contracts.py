@@ -588,6 +588,20 @@ class PredicateDef(BaseModel):
         "(an account's `enabled`): find_path reports each path entity's "
         "current value of it, cited (D-080)",
     )
+    label: bool = Field(
+        default=False,
+        description="a scalar that names its subject (a sAMAccountName, "
+        "displayName, UPN, login): entity search matches its values as well "
+        "as keys, so an entity keyed by an opaque id (a SID, a GUID) can be "
+        "found by name (D-091)",
+    )
+    display: bool = Field(
+        default=False,
+        description="the label a pack shows beside its subject's opaque key, "
+        "over the namespace's other labels: a name that says where the entity "
+        "lives (`dlee@dev.local`, a UPN) rather than a bare login that reads "
+        "the same in every domain (D-097)",
+    )
 
 
 class SchemaRegistration(BaseModel):

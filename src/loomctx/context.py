@@ -38,6 +38,7 @@ sees "their universe", not an error.
 from __future__ import annotations
 
 import base64
+from contextvars import ContextVar
 import logging
 import hashlib
 import heapq
@@ -225,6 +226,110 @@ def _object_text(obs: Observation) -> str:
     if isinstance(obs.object, EntityRef):
         return f"{obs.object.type}:{obs.object.key}"
     return str(obs.object)
+
+
+# Display names (D-093): the entities whose own label facts a pack gathered
+# (a sAMAccountName, a displayName) read `type:key (name)` in its items, so
+# an opaque key reads as the account or group it is — added after selection,
+# in the budget the pack left over (`_with_names`), never instead of a fact.
+# Scoring, matching and the handles use the bare key.
+_NAMES: ContextVar[tuple[dict, frozenset] | None] = ContextVar("loomctx_pack_names", default=None)
+
+
+def _pack_names(store: GraphStore, namespace: str, observations: list[Observation]) -> tuple[dict, frozenset]:
+    """Each entity's name for this pack: a `display` label's value when it
+    has one (`dlee@dev.local`, D-097), else its shortest label — the
+    sAMAccountName, not the DN."""
+    labels = frozenset(label_predicates(store, namespace))
+    shown = display_predicates(store, namespace)
+    names: dict[tuple[str, str], tuple[bool, str]] = {}
+    for o in observations:
+        if o.predicate in labels and isinstance(o.object, str) and o.object and o.object.lower() != o.subject.key.lower():
+            key = (o.subject.type, o.subject.key)
+            rank = (o.predicate not in shown, len(o.object))
+            if key not in names or rank < (not names[key][0], len(names[key][1])):
+                names[key] = (o.predicate in shown, o.object)
+    return {k: v for k, (_, v) in names.items()}, labels
+
+
+_REF = re.compile(r"\b([a-z][a-z0-9_]*):([^\s,;()\[\]]+)")
+
+
+def _name_refs(text: str, names: dict) -> str:
+    """`type:key` -> `type:key (name)` for every entity the pack has a name
+    for, where the text does not already say it."""
+    def sub(m: re.Match) -> str:
+        name = names.get((m.group(1), m.group(2)))
+        if not name or text[m.end():m.end() + len(name) + 3] == f" ({name})":
+            return m.group(0)
+        return f"{m.group(0)} ({name})"
+    return _REF.sub(sub, text)
+
+
+_NAME_RESERVE_SHARE = 5       # names may take up to a fifth of a pack's budget (D-093)
+
+
+def _names_cost(pack: ContextPack, names: dict) -> int:
+    """The tokens naming each entity in the pack's items once — at its
+    first mention — would add; repeats are named only from what is left."""
+    if not names:
+        return 0
+    cost, done = 0, set()
+    for i in pack.items:
+        mentioned = {(m.group(1), m.group(2)) for m in _REF.finditer(i.text)} & names.keys()
+        if fresh := mentioned - done:
+            cost += _charge(_name_refs(i.text, {k: names[k] for k in fresh}), i.citations) - _charge(i.text, i.citations)
+            done |= fresh
+    return cost
+
+
+def _with_names(pack: ContextPack, names: dict, budget: int) -> ContextPack:
+    """Names ride in the budget a pack left over (D-093): each item, in pack
+    order, is re-rendered with its entities' names only while the pack
+    stays within budget — a name never displaces a fact. Every entity's
+    first mention is named before any repeat is, so a tight pack still
+    names each entity once."""
+    if not names or not pack.items:
+        return pack
+    charged, items = pack.charged_tokens, list(pack.items)
+
+    def offer(i: int, subset: dict) -> bool:
+        nonlocal charged
+        named = _name_refs(items[i].text, subset)
+        if named == items[i].text:
+            return False
+        extra = _charge(named, items[i].citations) - _charge(items[i].text, items[i].citations)
+        if charged + extra > budget:
+            return False
+        items[i] = items[i].model_copy(update={"text": named})
+        charged += extra
+        return True
+
+    done: set[tuple[str, str]] = set()
+    for i, item in enumerate(items):
+        mentioned = {(m.group(1), m.group(2)) for m in _REF.finditer(item.text)} & names.keys()
+        if mentioned - done and offer(i, {k: names[k] for k in mentioned - done}):
+            done |= mentioned
+    for i in range(len(items)):
+        offer(i, names)
+    return pack.model_copy(update={"items": items, "charged_tokens": charged})
+
+
+def _absorbed(observations: list[Observation], labels: frozenset, roots: list[EntityRef]) -> set[str]:
+    """The label facts a named pack need not ship as items (D-093): a walked-to
+    entity's name, when another fact mentions that entity, reads as that
+    mention's annotation instead — fifteen `user:S-1-5-… name u00483` rows
+    had pushed a walk's third hop out of its budget. An asked entity's own
+    name facts stay items."""
+    kept = {(r.type, r.key) for r in roots}
+    mentioned: set[tuple[str, str]] = set()
+    for o in observations:
+        if o.predicate not in labels:
+            mentioned.add((o.subject.type, o.subject.key))
+        if isinstance(o.object, EntityRef):
+            mentioned.add((o.object.type, o.object.key))
+    return {o.id for o in observations
+            if o.predicate in labels and (o.subject.type, o.subject.key) in mentioned - kept}
 
 
 def _render_fact(obs: Observation, superseded_by: Observation | None = None) -> str:
@@ -913,6 +1018,39 @@ def _schema(store: GraphStore, namespace: str):
     return getter(namespace) if callable(getter) else None
 
 
+def label_predicates(store: GraphStore, namespace: str) -> tuple[str, ...]:
+    """The namespace's label predicates (D-091): values that name their
+    subject, so entity search can find an opaque-keyed entity by name."""
+    schema = _schema(store, namespace)
+    return tuple(sorted(p.name for p in schema.predicates if p.label)) if schema is not None else ()
+
+
+_PRINCIPAL = re.compile(r"^(?:[^\\@\s]+\\)?([^\\@\s]+)(?:@[^\\@\s]+)?$")
+
+
+def search_by_name(store: GraphStore, namespace: str, query: str, limit: int = 10,
+                   types: tuple[str, ...] | None = None) -> tuple[list, str]:
+    """Entity search by key or name (D-091), and the query it matched on. A
+    principal written with its realm (`labsvc-backup@lab.local`,
+    `LAB\\labsvc-backup`) that matches nothing is retried as the bare
+    account name (D-095): an agent spelled the account that way, found
+    nothing, and settled on an unrelated `svc-backup`."""
+    labels = label_predicates(store, namespace)
+    found = store.search_entities(namespace, query, limit=limit, types=types, labels=labels)
+    m = _PRINCIPAL.match(query.strip())
+    if not found and m and m.group(1) != query.strip():
+        found = store.search_entities(namespace, m.group(1), limit=limit, types=types, labels=labels)
+        if found:
+            return found, m.group(1)
+    return found, query
+
+
+def display_predicates(store: GraphStore, namespace: str) -> frozenset[str]:
+    """The labels a pack prefers to show beside an opaque key (D-097)."""
+    schema = _schema(store, namespace)
+    return frozenset(p.name for p in schema.predicates if p.display) if schema is not None else frozenset()
+
+
 def _registry_predicates(store: GraphStore, namespace: str) -> set[str]:
     schema = _schema(store, namespace)
     return {p.name for p in schema.predicates} if schema is not None else set()
@@ -1038,7 +1176,49 @@ def scope_topic(store: GraphStore, namespace: str, scope: ScopeSpec | None, ques
     topic = named_predicates(question, vocabulary - edges, roots) | attributes
     if expand_attributes(topic, definitions, seen):
         return topic   # an attribute named by its name: descriptions are only the fallback
-    return topic | described_predicates(question, definitions, roots, exclude=edges | topic)
+    # a label is never the topic by its description (D-097): "the account or
+    # group with the domain it lives in" matched every "which accounts in
+    # corp.local" question, and a name is not what such a question asks for
+    return topic | described_predicates(question, [d for d in definitions if not d.label], roots,
+                                        exclude=edges | topic)
+
+
+_CUT_EXAMPLES = 3
+_SCOPE_DEPTH_CAP = next(m.le for m in ScopeSpec.model_fields["depth"].metadata if getattr(m, "le", None) is not None)
+
+
+def _depth_cut_note(scope: ScopeSpec, expand: set[str], paths: Paths,
+                    gathered: dict[tuple[str, str], list[Observation]], names: dict) -> str | None:
+    """A walk that stopped at its depth while entities at that depth link
+    onward along the walked predicates says so (D-096): walked two hops
+    from Domain Admins, a pack reached DEV-Ops and not its members, and
+    two agents reported the direct and one-group-deep members as the whole
+    answer. An edge that turns back at the entity (a user's other
+    memberships, D-080) is not onward."""
+    reached = set(paths) | {(r.type, r.key) for r in scope.subjects}
+    onward: list[tuple[str, str]] = []
+    for key, chain in paths.items():
+        if len(chain) != scope.depth:
+            continue
+        ref = EntityRef(type=key[0], key=key[1])
+        for obs in gathered.get(key, []):
+            if obs.predicate not in expand or not isinstance(obs.object, EntityRef) or _is_extracted(obs):
+                continue
+            far = obs.object if _is_subject(obs, ref) else obs.subject
+            if (far.type, far.key) in reached or (not scope.siblings and _turns(chain[-1], obs, ref)):
+                continue
+            onward.append(key)
+            break
+    if not onward:
+        return None
+    shown = ", ".join(f"{t}:{k}" + (f" ({names[(t, k)]})" if (t, k) in names else "")
+                      for t, k in onward[:_CUT_EXAMPLES])
+    more = f" and {len(onward) - _CUT_EXAMPLES} more" if len(onward) > _CUT_EXAMPLES else ""
+    step = (f"depth={scope.depth + 1} walks one hop further" if scope.depth < _SCOPE_DEPTH_CAP
+            else "an ask_scope from them walks further")
+    verb = "links" if len(onward) == 1 else "link"
+    return (f"the walk stopped at depth {scope.depth}: {shown}{more} {verb} onward along "
+            f"{', '.join(sorted(expand))} to entities it did not reach; {step}")
 
 
 def _record_scope_cap(truncated: Truncations, at: EntityRef, kept: int, reached: int) -> None:
@@ -1289,6 +1469,34 @@ def _topic_carriers(store: GraphStore, namespace: str, candidates: Reach, topic:
     return carriers, sum(len(rows) for rows in probe.values())
 
 
+def _status_predicates(store: GraphStore, namespace: str) -> frozenset[str]:
+    schema = _schema(store, namespace)
+    return frozenset(d.name for d in (schema.predicates if schema is not None else []) if d.node_status)
+
+
+def _exceptional_status(observations: list[Observation], predicates: frozenset[str]) -> frozenset[str]:
+    """The current status facts whose value is not the one most entities in
+    the set carry — one `enabled False` among two dozen `True`s. Every
+    value is exceptional in a tie; none is when all agree."""
+    if not predicates:
+        return frozenset()
+    retired = _supersession([o for o in observations if o.predicate in predicates])
+    newest: dict[tuple[str, str, str], Observation] = {}
+    for o in sorted(observations, key=lambda o: _aware(o.observed_at), reverse=True):
+        if o.predicate in predicates and o.id not in retired and not isinstance(o.object, EntityRef):
+            newest.setdefault((o.subject.type, o.subject.key, o.predicate), o)
+    out: set[str] = set()
+    for pred in predicates:
+        rows = [o for (_, _, p), o in newest.items() if p == pred]
+        counts = Counter(json.dumps(o.object, sort_keys=True, default=str) for o in rows)
+        if len(counts) < 2:
+            continue
+        top = counts.most_common(2)
+        usual = None if top[0][1] == top[1][1] else top[0][0]
+        out |= {o.id for o in rows if json.dumps(o.object, sort_keys=True, default=str) != usual}
+    return frozenset(out)
+
+
 def _focus(scope: ScopeSpec | None, question: str | None) -> frozenset[str]:
     """The scope's own expand predicates that the question names — its
     words, stemmed, stopwords aside: `logged_in_by` for "which users
@@ -1306,6 +1514,36 @@ def build_pack(
     req: AskRequest,
     embedder=None,
     allowed_types: tuple[str, ...] | None = None,
+) -> ContextPack:
+    """The pack for one ask (see `_build_pack`); display names (D-093) are
+    set for this build only and always cleared after it."""
+    token = _NAMES.set(None)
+    try:
+        pack = _build_pack(store, req, embedder, allowed_types)
+        current = _NAMES.get()
+        names = current[0] if current else {}
+        cost = _names_cost(pack, names)
+        if cost:
+            # its items name entities it has names for: keep room for them
+            # (at most a fifth of the budget) and fill that room with names
+            # and a walked-to entity's name facts ride as those names
+            reserve = min(cost, req.budget // _NAME_RESERVE_SHARE)
+            _NAMES.set(None)
+            pack = _build_pack(store, req.model_copy(update={"budget": req.budget - reserve}),
+                               embedder, allowed_types, absorb_names=True)
+            current = _NAMES.get()
+            names = current[0] if current else {}
+        return _with_names(pack, names, req.budget)
+    finally:
+        _NAMES.reset(token)
+
+
+def _build_pack(
+    store: GraphStore,
+    req: AskRequest,
+    embedder=None,
+    allowed_types: tuple[str, ...] | None = None,
+    absorb_names: bool = False,
 ) -> ContextPack:
     from .config import max_scope_observations
     paths: Paths = {}
@@ -1362,16 +1600,47 @@ def build_pack(
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
     topic = (scope_topic(store, req.namespace, req.scope, req.question, observations)
              if req.scope is not None else frozenset())
+    # a reached entity whose status (an account's `enabled`, D-080) differs
+    # from what the rest of the walk carries ships with its edges, asked or
+    # not (D-095): "who is effectively in Domain Admins" left the one
+    # disabled member's status out, and the agent called every member enabled
+    lead = (_exceptional_status(observations, _status_predicates(store, req.namespace))
+            if req.scope is not None else frozenset())
+    names, labels = _pack_names(store, req.namespace, observations)
+    _NAMES.set((names, labels))    # read by build_pack after selection
     notes = request_notes(store, req.namespace, req.scope, asked, observations,
                           {key for key in examined if not gathered.get(key)}, allowed_types,
                           question=req.question, hops=max((len(c) for c in paths.values()), default=0))
     if req.scope is not None:
         # a predicate the walk follows, or the question turns on, that an
         # import did not fully collect: the pack says so (D-082)
+        # only the gaps of sources the walk drew on (D-092): a lab export's
+        # missing membership is not news on a walk through another domain.
+        # A walk that gathered nothing keeps every gap — its emptiness may be one.
+        drawn = {o.source for o in observations}
         gap_note = coverage.note(
-            coverage.gaps(store, req.namespace, scope_expand(store, req.namespace, req.scope) | topic,
-                          req.as_of),
+            [g for g in coverage.gaps(store, req.namespace,
+                                      scope_expand(store, req.namespace, req.scope) | topic, req.as_of)
+             if not drawn or g.source in drawn],
             "what the scope did not reach along it may be missing data, not absent")
+        if gap_note:
+            notes.append(gap_note)
+        cut_note = _depth_cut_note(req.scope, scope_expand(store, req.namespace, req.scope),
+                                   paths, gathered, names)
+        if cut_note:
+            notes.append(cut_note)
+    elif observations:
+        # one entity, loaded by a source whose import did not fully collect a
+        # predicate (D-092): the pack says so, citing the coverage record, so
+        # a fact the entity lacks is not read as "none". Only the gaps of the
+        # sources that supplied it, and a status predicate's gap only for the
+        # entity types it applies to.
+        sources = {o.source for o in observations}
+        kinds = {r.type for r in asked}
+        gap_note = coverage.note(
+            [g for g in coverage.gaps(store, req.namespace, None, req.as_of)
+             if g.source in sources and (not g.types or kinds & set(g.types))],
+            "a fact about this entity that those records would carry may be missing data, not absent")
         if gap_note:
             notes.append(gap_note)
     # A subject question's named attribute ("what is the has_severity of
@@ -1458,6 +1727,12 @@ def build_pack(
             if cited:
                 briefs.append((ref, dossier["brief"], cited))
 
+    # both spellings are the frame, not the topic: the name asked and
+    # the entity it resolved to
+    roots = asked + [s for s in subjects if (s.type, s.key) not in paths]
+    if absorb_names and names and req.scope is not None:
+        absorbed = _absorbed(observations, labels, roots)
+        observations = [o for o in observations if o.id not in absorbed]
     return _pack(
         namespace=req.namespace,
         subjects=subjects,
@@ -1474,15 +1749,17 @@ def build_pack(
         briefs=briefs,
         withheld_briefs=withheld,
         # the attribute a scope question names is its topic; with none, the
-        # walk's own edges it names are (D-058)
-        focus=topic or _focus(req.scope, req.question),
+        # walk's own edges it names are (D-058). A topic nothing reached
+        # carries is no focus (D-096): "which accounts are members of Domain
+        # Admins" named `is_dc` by its description ("a domain controller
+        # machine account"), and the walk's member_of edges lost theirs
+        focus=(topic & {o.predicate for o in observations}) or _focus(req.scope, req.question),
         topic=topic,
+        lead=lead,
         attribute=attribute,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
-        # both spellings are the frame, not the topic: the name asked and
-        # the entity it resolved to
-        roots=asked + [s for s in subjects if (s.type, s.key) not in paths],
+        roots=roots,
         truncated=list(truncated.values()),
         page_cursors=_oldest(gathered),
         notes=notes,
@@ -1567,9 +1844,10 @@ def request_notes(store: GraphStore, namespace: str, scope: ScopeSpec | None, as
             if (ref.type, ref.key) not in empty or (ref.type, ref.key) in mapping:
                 continue   # it had rows, or it names an entity (canonical or merged away)
             similar = [f"{e.type}:{e.key}" for e in store.search_entities(
-                namespace, ref.key, limit=_MAX_SUGGESTIONS, types=allowed_types)]
+                namespace, ref.key, limit=_MAX_SUGGESTIONS, types=allowed_types,
+                labels=label_predicates(store, namespace))]
             notes.append(f"no entity '{ref.type}:{ref.key}' in namespace '{namespace}'"
-                         + (f"; entities with that key: {', '.join(similar)}" if similar else ""))
+                         + (f"; entities with that key or name: {', '.join(similar)}" if similar else ""))
     return notes
 
 
@@ -2036,9 +2314,10 @@ def find_paths(
         if (named.type, named.key) not in mapping and (
                 allowed_types is None or named.type in allowed_types):
             similar = [f"{e.type}:{e.key}" for e in store.search_entities(
-                ns, named.key, limit=_MAX_SUGGESTIONS, types=allowed_types)]
+                ns, named.key, limit=_MAX_SUGGESTIONS, types=allowed_types,
+                labels=label_predicates(store, ns))]
             notes.append(f"the {label} entity '{named.type}:{named.key}' is not in namespace "
-                         f"'{ns}'" + (f"; entities with that key: {', '.join(similar)}"
+                         f"'{ns}'" + (f"; entities with that key or name: {', '.join(similar)}"
                                       if similar else ""))
 
     return PathPack(
@@ -2182,6 +2461,7 @@ def _pack(
     topic: frozenset[str] = frozenset(),
     attribute: frozenset[str] = frozenset(),
     notes: list[str] | None = None,
+    lead: frozenset[str] = frozenset(),
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -2349,10 +2629,11 @@ def _pack(
     topic_inbound: set[tuple[str, str, str]] = set()
     held_back = 0
     first = topic | attribute
-    if first:
-        topic_pool = [e for e in pool if e[3].predicate in first]
+    if first or lead:
+        # an exceptional status (`lead`, D-095) ships with the topic
+        topic_pool = [e for e in pool if e[3].predicate in first or e[3].id in lead]
         if topic_pool:
-            pool = [e for e in pool if e[3].predicate not in first]
+            pool = [e for e in pool if not (e[3].predicate in first or e[3].id in lead)]
             groups = {e[3].id: g for e in topic_pool
                       if (g := _group_key(e[3], e[5], by_id, superseded_by, subject_keys)) is not None}
             topic_pool = _grouped_density(topic_pool, groups)
@@ -2572,7 +2853,12 @@ def _fact_pool(
         text = _render_fact(obs, superseded_by.get(obs.id))
         cost = _charge(text, [_citation(obs)])
         pool.append((score / cost, score, cost, obs, text, path))
-    pool.sort(key=lambda e: e[0], reverse=True)
+    # among facts of equal density, the walk's own edges first (D-095):
+    # walked from Domain Admins over member_of, the reached admins' two
+    # dozen memberships in other groups (away from the root) tie with the
+    # hop-three members' edges into DEV-Ops, and came first by hop order
+    walked = {pid for chain in paths.values() for pid in chain}
+    pool.sort(key=lambda e: (e[0], e[3].id in walked), reverse=True)
     return pool
 
 

@@ -25,6 +25,7 @@ from ..auth import AuthConfig, Grant, extract_key
 from ..context import (
     _in_scope,
     build_pack,
+    search_by_name,
     covers_valid_at,
     decode_handle,
     expand_pack,
@@ -634,9 +635,9 @@ def search_entities(
     grant = _authorize(request, namespace, "r")
     # scoped keys see a scoped world, not an error — filtered inside the
     # query so they still get `limit` results (H-C8)
-    matches = request.app.state.store.search_entities(
-        namespace, q, limit=limit, types=_allowed_types(grant)
-    )
+    store = request.app.state.store
+    # a name finds an opaque-keyed entity (D-091); user@realm, the bare name (D-095)
+    matches, _ = search_by_name(store, namespace, q, limit=limit, types=_allowed_types(grant))
     return {
         "query": q,
         "matches": [m.model_dump(mode="json") for m in matches],

@@ -503,6 +503,14 @@ export interface PredicateDef {
    * a scalar that qualifies an entity as a step on a path (an account's `enabled`): find_path reports each path entity's current value of it, cited (D-080)
    */
   node_status?: boolean;
+  /**
+   * a scalar that names its subject (a sAMAccountName, displayName, UPN, login): entity search matches its values as well as keys, so an entity keyed by an opaque id (a SID, a GUID) can be found by name (D-091)
+   */
+  label?: boolean;
+  /**
+   * the label a pack shows beside its subject's opaque key, over the namespace's other labels: a name that says where the entity lives (`dlee@dev.local`, a UPN) rather than a bare login that reads the same in every domain (D-097)
+   */
+  display?: boolean;
 }
 export interface IngestBatchResponse {
   total: number;

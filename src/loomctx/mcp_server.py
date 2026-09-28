@@ -55,7 +55,7 @@ except ImportError:  # pragma: no cover - older SDK layout
 from .answer import UnresolvedQuestionError, build_answer
 from .auth import AuthConfig, Grant, extract_key
 from .context import (build_pack, cite_text, decode_handle, expand_pack, find_paths,
-                     semantic_search)
+                     label_predicates, search_by_name, semantic_search)
 from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, EntityRef,
                         ExpansionHandle,
                         Observation, PathRequest, PredicateDef, ScopeSpec, ScopeTruncation,
@@ -238,19 +238,25 @@ class KeyGate:
 # measures the synthetic-hub equivalent at 1500/3000/4000/6000.
 SCOPE_BUDGET_DEFAULT = 3000
 SCOPE_BUDGET_HINT = 4000
+SCOPE_DEPTH_CAP = next(m.le for m in ScopeSpec.model_fields["depth"].metadata
+                       if getattr(m, "le", None) is not None)       # the contract's own cap (3)
 
 INSTRUCTIONS = (
     "LoomCtx is a provenance-tracked context engine. Start with "
     "list_namespaces and describe_namespace to learn what data exists "
     "(entity types, predicates, and which relations to expand). Use "
-    "find_entity to turn names into 'type:key' handles (find_related when "
+    "find_entity to turn names into 'type:key' handles — a key, or a name "
+    "the entity carries (a group's or account's name, login, UPN), so an "
+    "opaque key such as a SID is found by its name (find_related when "
     "you only know what you're looking for, not its name). ask = budgeted, "
     "cited context about ONE entity; ask_scope = several entities and/or "
     "relation hops (multi-hop questions are ask_scope with "
     "expand_predicates: chain the `links` describe_namespace lists per "
     "type, and name the attribute the answer turns on as well). A pack's "
     "`notes` say what it could not do as asked (an unknown predicate, with "
-    "the closest known ones). Expand pulls a thread deeper via the "
+    "the closest known ones), and a `coverage:` note says what an import did "
+    "not collect: report that as not collected (citing the note's id), never "
+    "as none. Expand pulls a thread deeper via the "
     f"handles a pack returns. ask_scope's default budget ({SCOPE_BUDGET_DEFAULT}) "
     "carries ~30 facts with the links that reached them; keep it at "
     f"budget<={SCOPE_BUDGET_HINT} and expand handles for more — a bigger "
@@ -502,6 +508,7 @@ class EntityMatch(TypedDict):
     type: str
     key: str
     provisional: bool
+    name: NotRequired[str]      # the label value it was found by (D-091): an opaque key's name
 
 
 class RecordClaimResult(TypedDict):
@@ -720,19 +727,36 @@ def _path_hint(relations: list[tuple[str, str, str | None, int]]) -> str:
 
 def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
                 ctx: Context = None) -> list[EntityMatch]:
-    """Resolve a name or key fragment to entity handles. Returns matches as
-    'type:key' handles usable with the other tools (exact match first)."""
+    """Resolve a name or key fragment to entity handles: an entity's key, or
+    a name it carries (a group's or account's name, sAMAccountName, UPN,
+    login — whatever the namespace's schema marks as a label). Returns
+    'type:key' handles usable with the other tools, exact matches first;
+    `name` shows the name an opaque key (a SID, a GUID) was found by."""
     grant = _grant(ctx, namespace, "r")
     _known_namespace(namespace, grant)
+    store = _get_store()
+    labels = label_predicates(store, namespace)
+    found, matched = search_by_name(store, namespace, query, limit=limit, types=_allowed(grant))
+    names: dict[tuple[str, str], str] = {}
+    lowered = matched.lower()
+    by_name = [EntityRef(type=e.type, key=e.key) for e in found if not e.key.lower().startswith(lowered)]
+    if by_name and labels:
+        rows = store.observations_for_many(namespace, by_name, limit=20, predicates=list(labels))
+        for ref in by_name:
+            values = [str(o.object) for o in rows.get((ref.type, ref.key), [])
+                      if isinstance(o.object, str) and o.subject.key == ref.key]
+            hit = next((v for v in values if v.lower().startswith(lowered)), values[0] if values else None)
+            if hit is not None:
+                names[(ref.type, ref.key)] = hit
     return [
         {
             "handle": f"{e.type}:{e.key}",
             "type": e.type,
             "key": e.key,
             "provisional": e.provisional,
+            **({"name": names[(e.type, e.key)]} if (e.type, e.key) in names else {}),
         }
-        for e in _get_store().search_entities(namespace, query, limit=limit,
-                                              types=_allowed(grant))
+        for e in found
     ]
 
 
@@ -748,7 +772,7 @@ def find_related(question: str, namespace: str = _DEFAULT_NS, limit: int = 10,
     embedder = _get_embedder()
     if embedder is None:
         raise ToolError("no embedder configured on this LoomCtx (set LOOMCTX_EMBED_*);"
-                        " use find_entity with a key fragment instead")
+                        " use find_entity with a name or key fragment instead")
     _known_namespace(namespace, grant)
     _throttle(ctx, grant, llm=True)   # embeds the question: the LLM bucket, as /v1/entities/semantic
     return semantic_search(_get_store(), namespace, embedder, question,
@@ -856,6 +880,9 @@ def ask_scope(
     for ref in refs:
         _gate_type(grant, ref.type)
     _known_namespace(namespace, grant)
+    # a depth past the cap is walked to the cap and said so, not refused:
+    # agents read a refusal as "cannot be done" and gave up (D-092)
+    asked_depth, depth = depth, min(max(depth, 0), SCOPE_DEPTH_CAP)
     req = AskRequest(
         namespace=namespace,
         scope=ScopeSpec(subjects=refs, expand=_listed(expand_predicates), depth=depth,
@@ -865,8 +892,13 @@ def ask_scope(
         as_of=_parse_time(as_of),
         valid_at=_parse_time(valid_at),
     )
-    return _agent_view(build_pack(
+    view = _agent_view(build_pack(
         _get_store(), req, embedder=_get_embedder(), allowed_types=_allowed(grant)), format)
+    if asked_depth > SCOPE_DEPTH_CAP:
+        view["notes"] = [f"depth {asked_depth} is above the cap of {SCOPE_DEPTH_CAP}: walked "
+                         f"{SCOPE_DEPTH_CAP} hops; for a longer chain, ask_scope again from the "
+                         "entities this one ends at", *view.get("notes", [])]
+    return view
 
 
 def _path_arrow(pack, edges) -> str:

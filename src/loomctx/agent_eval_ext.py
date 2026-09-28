@@ -161,7 +161,7 @@ _DISABLED = re.compile(r"\bdisabled\b|\bnot enabled\b|\binactive\b|\baccountdisa
 
 
 # a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no"
-_DISABLED_CELL = re.compile(r"\|\s*\**\s*no\b|\benabled\W{0,4}no\b", re.I)
+_DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b|\benabled\W{0,6}(?:no|false)\b", re.I)
 _BLOCK_LINE = re.compile(r"\s*(?:[-*+|]|\d+[.)])")
 _ADMIN = re.compile(r"domain admins|tier0|tier-0", re.I)
 # typographic apostrophes some models emit ("can’t", "isn’t")
@@ -172,15 +172,26 @@ def _sentences(answer: str, key: str) -> list[str]:
     return [s for p in answer.split("\n") for s in _CVE_SENTENCE.split(p) if _mentions(s, key)]
 
 
-def _lines(answer: str, key: str) -> list[tuple[str, str]]:
-    """Each line (a table row or list item is one line) that names `key`,
-    with its lead-in: the line that introduces the list or table it sits in
-    ("The remaining accounts never reach Domain Admins:") — D-089's lesson,
-    a ruling-out often lives there, not in the row."""
+_ITEM_START = re.compile(r"\s*(?:#|\**\s*\d+[.)])")
+
+
+def _lines(answer: str, key: str, others: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """Each list item or table row that names `key` — the line plus the
+    lines under it up to a blank line, a heading, the next numbered item or
+    a line naming another account ("**5. dnguyen**" then "- **Enabled**:
+    No"; "5) dnguyen" then "   - Enabled: False") — with its
+    lead-in: the line that introduces the list or table it sits in ("The
+    remaining accounts never reach Domain Admins:") — D-089's lesson, a
+    ruling-out often lives there, not in the row."""
     lines, out = answer.split("\n"), []
-    for i, line in enumerate(lines):
-        if not _mentions(line, key):
+    for i, raw in enumerate(lines):
+        if not _mentions(raw, key):
             continue
+        k, line = i + 1, raw
+        while (k < len(lines) and lines[k].strip() and not _ITEM_START.match(lines[k])
+               and not any(_mentions(lines[k], o) for o in others if o != key)):
+            line += "\n" + lines[k]
+            k += 1
         j = i - 1
         while j >= 0 and (_BLOCK_LINE.match(lines[j]) or not lines[j].strip()):
             j -= 1
@@ -194,10 +205,11 @@ def _lines(answer: str, key: str) -> list[tuple[str, str]]:
 def _score_xdomain(answer: str, truth: dict, seen: set[str], store) -> dict:
     answer = answer.translate(_QUOTES)
     members, others = truth["members"], truth["others"]
+    accounts = (*members, *others)
     named = sorted(m for m in members if _mentions(answer, m))
     disabled = [m for m, on in members.items() if on is False]
     flagged = [m for m in disabled
-               if any(_DISABLED.search(line) or _DISABLED_CELL.search(line) for line, _ in _lines(answer, m))]
+               if any(_DISABLED.search(line) or _DISABLED_CELL.search(line) for line, _ in _lines(answer, m, accounts))]
     # a non-member counts only where a line puts it forward as an admin (it
     # or its lead-in names Domain Admins / the tier-0 group, or it is a table
     # row) and neither
@@ -205,7 +217,7 @@ def _score_xdomain(answer: str, truth: dict, seen: set[str], store) -> dict:
     false_members = sorted(o for o in others if any(
         not _EXCLUDES.search(line) and not _EXCLUDES.search(lead)
         and (_ADMIN.search(line) or _ADMIN.search(lead) or line.lstrip().startswith("|"))
-        for line, lead in _lines(answer, o)))
+        for line, lead in _lines(answer, o, accounts)))
     cites = _cited(answer, seen)
     ok = bool(members) and len(named) == len(members) and len(flagged) == len(disabled) and not false_members
     return {"members_expected": sorted(members), "members_named": named,
@@ -228,8 +240,11 @@ _NOT_COLLECTED = re.compile(
     r"requested|dumped|available|present)"
     r"|no (?:group[- ]?)?membership (?:data|information|attributes?|records?)"
     r"|(?:membership|group) (?:data|information|attributes?) (?:is |are |was |were )?(?:missing|absent|unavailable)"
+    r"|(?:did(?:n't| not)|does(?:n't| not)|do(?:n't| not)) (?:collect|export|include|capture|record)"
+    r"|missing (?:data )?(?:rather than|not) (?:empty|absen\w*|none)"
+    r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any )?collected"
     r"|coverage|(?:can(?:not|'t)|could(?:n't| not)|unable to) (?:be )?"
-    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably)\w*"
+    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list)\w*"
     r"|\bunknown\b|incomplete|partial (?:export|collection|data)",
     re.I)
 # a flat "it is in no group" with no hedge
@@ -246,7 +261,8 @@ _NO_ACCOUNT = re.compile(r"no (?:such )?(?:account|user|entity)\b[^.]{0,40}?\b(?
 
 
 def _score_coverage(answer: str, truth: dict, seen: set[str], store) -> dict:
-    answer = answer.translate(_QUOTES)
+    # emphasis is not wording: "did **not** collect" hedges as plainly as without it
+    answer = re.sub(r"\*{1,3}|(?<!\w)_{1,3}|_{1,3}(?!\w)", "", answer.translate(_QUOTES))
     asserted = _asserted(answer)
     first = _SENTENCE.split(asserted.strip())[0]
     hedged = bool(_NOT_COLLECTED.search(answer))

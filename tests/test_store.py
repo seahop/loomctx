@@ -146,6 +146,16 @@ def test_artifact_roundtrip(store):
     assert store.get_artifact("default", "missing") is None
 
 
+def test_schema_merge_keeps_a_label_either_side_sets():
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    from loomctx.store.common import merge_schema
+    a = SchemaRegistration(namespace="n", predicates=[PredicateDef(name="name", label=True)])
+    b = SchemaRegistration(namespace="n", predicates=[PredicateDef(name="name", description="display name")])
+    assert merge_schema(a, b).predicates[0].label and merge_schema(b, a).predicates[0].label
+    c = SchemaRegistration(namespace="n", predicates=[PredicateDef(name="name", label=True, display=True)])
+    assert merge_schema(c, b).predicates[0].display and merge_schema(b, c).predicates[0].display   # D-097
+
+
 def test_search_entities_exact_and_prefix(store):
     store.record_claim(login_claim())  # creates host web-01 + user jdoe
     exact = store.search_entities("default", "web-01")
@@ -154,6 +164,27 @@ def test_search_entities_exact_and_prefix(store):
     assert [e.key for e in prefix] == ["web-01"]
     assert store.search_entities("default", "zzz") == []
     assert store.search_entities("other-ns", "web-01") == []
+
+
+def test_search_entities_by_label(store):
+    """D-091: an entity keyed by an opaque id (a SID) is found by the value
+    of a label predicate — exact first, then prefix, case-insensitive —
+    after key matches, within the type filter; no labels means keys only."""
+    def fact(key, etype, predicate, value):
+        store.record_claim(ClaimIn(namespace="ad", subject=EntityRef(type=etype, key=key), predicate=predicate,
+                                   object=value, observed_at=OBSERVED, source="ldap"))
+    fact("S-1-5-21-9-512", "group", "name", "Domain Admins")
+    fact("S-1-5-21-9-1101", "user", "sam", "dlee")
+    fact("S-1-5-21-9-1102", "user", "sam", "dleeson")
+    fact("S-1-5-21-9-1103", "user", "os", "domain controller")        # not a label
+    labels = ("name", "sam")
+    keys = lambda q, **kw: [e.key for e in store.search_entities("ad", q, labels=labels, **kw)]  # noqa: E731
+    assert keys("Domain Admins") == ["S-1-5-21-9-512"]
+    assert keys("domain") == ["S-1-5-21-9-512"]
+    assert keys("dlee") == ["S-1-5-21-9-1101", "S-1-5-21-9-1102"]
+    assert keys("dlee", types=("group",)) == []
+    assert keys("S-1-5-21-9-5") == ["S-1-5-21-9-512"]                   # keys still match
+    assert store.search_entities("ad", "Domain Admins") == []
 
 
 def test_merge_folds_and_aliases_resolve(store):
@@ -1207,7 +1238,7 @@ def test_vectors_are_stored_packed_and_legacy_json_still_reads(store):
     store.put_embeddings("v", "m", [(ref, vec)])
     got = store.embeddings_for("v", [ref], "m")[ref]
     assert len(got) == 1536 and abs(got[1535] - vec[1535]) < 1e-3
-    assert store.schema_version() == 8
+    assert store.schema_version() == 9
 
 
 def test_subjects_citing_maps_documents_back_to_entities(store):
@@ -1372,7 +1403,7 @@ def test_declines_are_stored_symmetrically(store):
     assert store.declined_pairs("ns") == {("product:a", "product:b")}
     store.remember_decline("ns", "product:a", "product:b", "still no")     # idempotent
     assert len(store.declined_pairs("ns")) == 1 and store.declined_pairs("other") == set()
-    assert store.schema_version() == 8
+    assert store.schema_version() == 9
 
 
 # ------------------------------------------------------- schema v5 #
@@ -1422,7 +1453,7 @@ def test_v5_migration_recomputes_numeric_norm_keys(store, tmp_path):
     _exec(store, "UPDATE loomctx_meta SET value = '4' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 8
+        assert again.schema_version() == SCHEMA_VERSION == 9
         rows = _exec(again, "SELECT key, norm_key FROM entities ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [("10.0.4.7", "10.0.4.7"), ("web-01", "web01")]
     finally:
@@ -1459,7 +1490,7 @@ def test_two_processes_migrating_one_old_file_both_open(tmp_path):
     for t in threads:
         t.join()
     assert errors == [] and len(opened) == 4
-    assert all(s.schema_version() == 8 for s in opened)
+    assert all(s.schema_version() == 9 for s in opened)
     for s in opened:
         s.close()
     # the losing side of a race that slipped past the check: tolerated
@@ -1728,7 +1759,7 @@ def test_v6_migration_adds_supersedes_to_an_existing_database(store, tmp_path):
     _exec(store, "UPDATE loomctx_meta SET value = '5' WHERE key = 'schema_version'")
     again = _reopen(store, tmp_path)
     try:
-        assert again.schema_version() == SCHEMA_VERSION == 8
+        assert again.schema_version() == SCHEMA_VERSION == 9
         rows = _exec(again, "SELECT key, norm_key FROM entities WHERE key <> 'web-01' AND key <> 'jdoe' ORDER BY key")
         assert [(r["key"], r["norm_key"]) for r in rows] == [
             ("2001:db8::1", "2001:db8::1"), ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")]

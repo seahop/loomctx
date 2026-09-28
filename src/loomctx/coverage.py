@@ -75,7 +75,9 @@ class Gap:
     observation_id: str
 
     def text(self) -> str:
-        where = f"{self.source} ({self.scope})"
+        # the coverage record's id, cite-shaped: an agent reporting the gap
+        # can cite it like any fact (D-092)
+        where = f"{self.source} ({self.scope}) [{self.observation_id[:12]}]"
         if self.state == "absent":
             return f"'{self.predicate}' was not collected by {where}"
         return (f"'{self.predicate}' was collected by {where} for only "
@@ -96,14 +98,14 @@ def records(store, namespace: str, as_of: datetime | None = None) -> list[Observ
 
 
 def gaps(store, namespace: str, predicates, as_of: datetime | None = None) -> list[Gap]:
-    """Coverage short of complete for any of `predicates`."""
-    wanted = set(predicates)
-    if not wanted:
+    """Coverage short of complete for any of `predicates` (None: any)."""
+    wanted = None if predicates is None else set(predicates)
+    if wanted is not None and not wanted:
         return []
     out = []
     for obs in records(store, namespace, as_of):
         state = obs.attrs.get("state")
-        if str(obs.object) not in wanted or state not in ("absent", "partial"):
+        if (wanted is not None and str(obs.object) not in wanted) or state not in ("absent", "partial"):
             continue
         out.append(Gap(predicate=str(obs.object), source=str(obs.attrs.get("source", obs.source)),
                        scope=str(obs.attrs.get("scope", "")), state=str(state),

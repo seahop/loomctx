@@ -914,9 +914,10 @@ class _FakeStore:
     def __init__(self, rows):
         self.rows = rows
 
-    def observations_for_many(self, namespace, refs, limit=100, observed_before=None):
+    def observations_for_many(self, namespace, refs, limit=100, observed_before=None, predicates=None):
         rows = [o for o in self.rows
-                if observed_before is None or o.observed_at <= observed_before]
+                if (observed_before is None or o.observed_at <= observed_before)
+                and (predicates is None or o.predicate in predicates)]
         return {(r.type, r.key): [o for o in rows if o.subject == r] for r in refs}
 
     def count_observations(self, namespace, ref, observed_before=None, allowed_types=None):

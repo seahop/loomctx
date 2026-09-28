@@ -174,6 +174,8 @@ def test_useraccountcontrol_bits_decode(tmp_path):
         # constrained delegation target from msDS-AllowedToDelegateTo
         web = _facts(store, EntityRef(type="computer", key=DOMAIN_SID + "-1101"))
         assert any(p == "can_delegate_to" for p, _ in web)
+        # D-097: the account's name with its domain, from the DN
+        assert ("principal", '"svc-sql@corp.local"') in svc
     finally:
         store.close()
 
@@ -329,6 +331,8 @@ def test_schema_registers_the_object_level_predicates():
     types = {t.name for t in reg.entity_types}
     assert {"domain", "computer", "user", "group", "ou", "gpo", "container"} <= types
     assert reg.strict is False
+    principal = next(p for p in reg.predicates if p.name == "principal")
+    assert principal.label and principal.display          # shown beside the SID in packs (D-097)
 
 
 def test_import_exits_nonzero_when_the_engine_refuses_envelopes(monkeypatch):

@@ -264,7 +264,20 @@ is returned — it may still matter — and says so.
 Coverage (D-082) rides as ordinary claims — `coverage:collection
 -collected-> "<predicate>"`, attrs `source`, `scope`, `with`, `of`, `state` —
 written by connectors; a pack's or a path's `notes` start `coverage:` when a
-predicate it walks (or a status it reports) was not fully collected. So do
+predicate it walks (or a status it reports) was not fully collected — and a
+single-entity ask carries the gaps of the sources that supplied that entity
+(D-092). Each gap names its coverage record's id in brackets, so an answer
+can cite "not collected" like any fact.
+
+A predicate the registry marks `label` (a sAMAccountName, displayName, UPN,
+login) names its subject: `GET /v1/entities/search` and MCP `find_entity`
+match its values as well as keys — exact key, exact name, key prefix, name
+prefix — so an entity keyed by an opaque id (a SID, a GUID) is found by name
+(D-091). `find_entity` returns the matched `name` beside such a handle. A
+pack shows an opaque key with its entity's name, `user:S-… (dlee@dev.local)`:
+the value of a label the registry also marks `display` (LDAP's `principal`,
+sAMAccountName@domain; Entra's `upn`; Okta's `login`), else the shortest label
+(D-093, D-097). So do
 import shapes (D-085, `coverage:shapes -shape-> "<source kind>"`, attrs
 `fields`, `objects`) and identifiers (D-083: `<entity> -identified_by->
 identifier:<kind>:<value>`, `<host> -has_ip-> ip:<address>`) — conventions

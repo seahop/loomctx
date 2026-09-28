@@ -225,6 +225,12 @@ CREATE INDEX IF NOT EXISTS idx_art_recorded ON artifacts (recorded_at);
 CREATE INDEX IF NOT EXISTS idx_entity_dossier_lease
     ON entities (dossier_claimed_until) WHERE dossier_claimed_until IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_entity_created ON entities (namespace, created_at);
+-- label search (v9, D-091): scalar values by predicate, lower-cased JSON
+-- text capped at 200 characters, so an entity keyed by an opaque id is
+-- found by the value of a label predicate (a sAMAccountName, a displayName)
+CREATE INDEX IF NOT EXISTS idx_obs_label
+    ON observations (namespace, predicate, lower(substr(object_json, 1, 200)))
+    WHERE object_entity_id IS NULL;
 """
 
 # search_entities: a half-open range on the indexed expression (the LIKE
@@ -236,6 +242,13 @@ _SEARCH_SQL = (
     "   AND lower(key) >= ? AND lower(key) < ?"
 )
 _PREFIX_END = "\U0010ffff"
+# label search (D-091): the indexed expression, verbatim, so the index applies
+_LABEL_SQL = (
+    "SELECT e.*, min(lower(substr(o.object_json, 1, 200)) != ?) AS inexact"
+    " FROM observations o JOIN entities e ON e.id = o.subject_id"
+    " WHERE o.namespace = ? AND o.object_entity_id IS NULL AND o.predicate IN ({preds})"
+    "   AND lower(substr(o.object_json, 1, 200)) >= ? AND lower(substr(o.object_json, 1, 200)) < ?"
+)
 
 # Versioned migrations (H-B12): capability checks add columns idempotently;
 # anything that must run exactly once (a backfill) is keyed by version here.
@@ -243,7 +256,7 @@ _PREFIX_END = "\U0010ffff"
 # lease owners, lower(key) index, numeric norm_key rule (recompute);
 # v6: observations.supersedes (D-050); tick-scan indexes and high-water marks
 # (R-9); hex/colon norm_key rule (recompute keys carrying ':')
-SCHEMA_VERSION = 8  # v7 (D-081) changes Postgres storage settings only; v8: FK child indexes (S-63)
+SCHEMA_VERSION = 9  # v7 (D-081) changes Postgres storage settings only; v8: FK child indexes (S-63); v9: label index (D-091)
 
 # Columns added after their table's first release: added on open when missing
 _WANTED_COLUMNS = {
@@ -1183,6 +1196,7 @@ class SqliteStore(GraphStore):
     def search_entities(
         self, namespace: str, query: str, limit: int = 10,
         types: tuple[str, ...] | None = None,
+        labels: tuple[str, ...] = (),
     ) -> list[Entity]:
         lowered = query.lower()
         type_sql, type_args = "", ()
@@ -1194,7 +1208,17 @@ class SqliteStore(GraphStore):
                 _SEARCH_SQL + type_sql + " ORDER BY (lower(key) != ?), type, key LIMIT ?",
                 (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             ).fetchall()
-        return [common.row_to_entity(r) for r in rows]
+            label_rows = []
+            if labels and lowered:
+                exact = json.dumps(lowered)                 # '"domain admins"', as stored lower-cased
+                start = exact[:-1]                         # the value's prefix, opening quote kept
+                label_rows = self._conn.execute(
+                    _LABEL_SQL.format(preds=",".join("?" * len(labels)))
+                    + type_sql.replace("type IN", "e.type IN")
+                    + " GROUP BY e.id ORDER BY inexact, e.type, e.key LIMIT ?",
+                    (exact, namespace, *labels, start, start + _PREFIX_END, *type_args, limit),
+                ).fetchall()
+        return common.merge_search(rows, label_rows, lowered, limit)
 
     def count_observations(
         self, namespace: str, ref: EntityRef, observed_before: datetime | None = None,

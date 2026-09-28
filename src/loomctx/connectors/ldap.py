@@ -509,8 +509,14 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
     # identity / alias attributes so entity resolution can fold DN + sam
     yield claim("dn_name", dn)
     sam = entry.text("samaccountname")
+    at = dn.lower().find("dc=")
+    dns_domain = _dn_to_domain(dn[at:]) if at != -1 else None
     if sam:
         yield claim("sam", sam)
+        if dns_domain:
+            # the name with its domain (D-097): `dlee` reads the same in every
+            # domain of a forest; `dlee@dev.local` says which one
+            yield claim("principal", f"{sam}@{dns_domain}")
     friendly = entry.text("name") or entry.text("cn")
     if friendly:
         yield claim("name", friendly)
@@ -521,8 +527,6 @@ def entry_envelopes(entry: LdifEntry, directory: Directory, namespace: str,
     # what other tools call this account or machine (D-083): the SID, the
     # UPN and DOMAIN\sam a Windows host prints, the DNS name a scanner sees
     if etype in ("user", "computer"):
-        at = dn.lower().find("dc=")
-        dns_domain = _dn_to_domain(dn[at:]) if at != -1 else None
         pairs = [("sid", sid), ("upn", entry.text("userprincipalname")), ("mail", entry.text("mail"))]
         if sam and dns_domain:
             pairs.append(("account", f"{dns_domain}\\{sam}"))
@@ -788,9 +792,11 @@ def schema(namespace: str) -> SchemaRegistration:
             PredicateDef(name="no_preauth", description="AS-REP roastable (DONT_REQ_PREAUTH 0x400000)"),
             PredicateDef(name="kerberoastable", description="a user with a servicePrincipalName"),
             PredicateDef(name="spn", description="a servicePrincipalName registered on the account"),
-            PredicateDef(name="sam", description="sAMAccountName"),
-            PredicateDef(name="dn_name", description="distinguishedName (alias for entity resolution)"),
-            PredicateDef(name="name", description="friendly name (cn / name)"),
+            PredicateDef(name="sam", label=True, description="sAMAccountName"),
+            PredicateDef(name="principal", label=True, display=True,
+                         description="sAMAccountName@domain: the account or group with the domain it lives in"),
+            PredicateDef(name="dn_name", label=True, description="distinguishedName (alias for entity resolution)"),
+            PredicateDef(name="name", label=True, description="friendly name (cn / name)"),
             PredicateDef(name="os", description="operatingSystem"),
         ],
     )

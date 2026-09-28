@@ -218,6 +218,11 @@ CREATE INDEX IF NOT EXISTS idx_chunk_by_artifact ON doc_chunks (artifact_id);
 CREATE INDEX IF NOT EXISTS idx_entity_key ON entities (namespace, key);
 CREATE INDEX IF NOT EXISTS idx_entity_norm ON entities (namespace, norm_key);
 CREATE INDEX IF NOT EXISTS idx_entity_lower_key ON entities (namespace, lower(key) text_pattern_ops);
+-- label search (v9, D-091): scalar values by predicate, lower-cased JSON
+-- text capped at 200 characters (a B-tree entry has a size ceiling)
+CREATE INDEX IF NOT EXISTS idx_obs_label
+    ON observations (namespace, predicate, lower(left(object_json, 200)) text_pattern_ops)
+    WHERE object_entity_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_merge_from ON merge_log (namespace, from_type, from_key);
 CREATE INDEX IF NOT EXISTS idx_obs_supersedes
     ON observations (namespace, supersedes) WHERE supersedes IS NOT NULL;
@@ -250,8 +255,15 @@ _SEARCH_SQL = (
     "   AND lower(key) ~>=~ %s AND lower(key) ~<~ %s"
 )
 _PREFIX_END = "\U0010ffff"
+# label search (D-091): the indexed expression, verbatim, so the index applies
+_LABEL_SQL = (
+    "SELECT e.*, bool_and(lower(left(o.object_json, 200)) <> %s) AS inexact"
+    " FROM observations o JOIN entities e ON e.id = o.subject_id"
+    " WHERE o.namespace = %s AND o.object_entity_id IS NULL AND o.predicate = ANY(%s)"
+    "   AND lower(left(o.object_json, 200)) ~>=~ %s AND lower(left(o.object_json, 200)) ~<~ %s"
+)
 
-SCHEMA_VERSION = 8  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key; v7: analyze thresholds, D-081; v8: FK child indexes, S-63)
+SCHEMA_VERSION = 9  # keep in step with sqlite.py (v6: observations.supersedes, D-050; tick-scan indexes, R-9; hex norm_key; v7: analyze thresholds, D-081; v8: FK child indexes, S-63; v9: label index, D-091)
 
 _NOT_TOMBSTONED = (
     " AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.observation_id = o.id)"
@@ -1101,6 +1113,7 @@ class PostgresStore(GraphStore):
     def search_entities(
         self, namespace: str, query: str, limit: int = 10,
         types: tuple[str, ...] | None = None,
+        labels: tuple[str, ...] = (),
     ) -> list[Entity]:
         lowered = query.lower()
         type_sql, type_args = "", ()
@@ -1111,7 +1124,16 @@ class PostgresStore(GraphStore):
                 _SEARCH_SQL + type_sql + " ORDER BY (lower(key) <> %s), type, key LIMIT %s",
                 (namespace, lowered, lowered + _PREFIX_END, *type_args, lowered, limit),
             )
-        return [common.row_to_entity(r) for r in rows]
+            label_rows = []
+            if labels and lowered:
+                exact = json.dumps(lowered)                 # '"domain admins"', as stored lower-cased
+                start = exact[:-1]
+                label_rows = self._q(
+                    _LABEL_SQL + type_sql.replace("type =", "e.type =")
+                    + " GROUP BY e.id ORDER BY inexact, e.type, e.key LIMIT %s",
+                    (exact, namespace, list(labels), start, start + _PREFIX_END, *type_args, limit),
+                )
+        return common.merge_search(rows, label_rows, lowered, limit)
 
     def count_observations(
         self, namespace: str, ref: EntityRef, observed_before: datetime | None = None,

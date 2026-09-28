@@ -82,6 +82,30 @@ def test_find_entity_returns_handles(store):
     assert matches[0]["handle"] == "host:web-01"
 
 
+def test_ask_scope_walks_an_over_deep_request_to_the_cap_and_says_so(store):
+    """D-092: depth=5 was a validation error, and agents read it as 'this
+    cannot be done'. It is walked at the cap, with a note."""
+    view = mcp_server.ask_scope(["host:web-01"], "who logged in?", expand_predicates=["logged_in_by"], depth=5)
+    assert view["notes"][0].startswith(f"depth 5 is above the cap of {mcp_server.SCOPE_DEPTH_CAP}")
+    assert mcp_server.SCOPE_DEPTH_CAP == 3
+
+
+def test_find_entity_finds_an_opaque_key_by_name_and_shows_it(store):
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[PredicateDef(name="sam", label=True)]))
+    store.record_claim(ClaimIn(subject=EntityRef(type="user", key="S-1-5-21-9-1101"), predicate="sam",
+                               object="dlee", observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                               source="ldap"))
+    [match] = mcp_server.find_entity("dlee")
+    assert match["handle"] == "user:S-1-5-21-9-1101" and match["name"] == "dlee"
+    assert "name" not in mcp_server.find_entity("web-01")[0]     # found by its key: nothing to add
+    # D-095: the account written with its realm, as agents write it
+    for spelled in ("dlee@dev.local", "DEV\\dlee"):
+        [match] = mcp_server.find_entity(spelled)
+        assert match["handle"] == "user:S-1-5-21-9-1101" and match["name"] == "dlee", spelled
+    assert mcp_server.find_entity("nobody@dev.local") == []
+
+
 def test_ask_and_expand_roundtrip(store):
     pack = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
     assert any("jdoe" in i["text"] for i in pack["items"])
@@ -326,7 +350,7 @@ def test_scope_pack_notes_reach_the_agent(store):
     assert "notes" not in plain
     missing = mcp_server.ask("hostt:web-01", "who logged in?")
     assert missing["notes"] == ["no entity 'hostt:web-01' in namespace 'default'; "
-                                "entities with that key: host:web-01"]
+                                "entities with that key or name: host:web-01"]
 
 
 def test_unknown_namespace_is_an_error_not_an_empty_answer(store):

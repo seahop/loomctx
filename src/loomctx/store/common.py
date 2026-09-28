@@ -190,6 +190,24 @@ def row_to_entity(row: Mapping[str, Any]) -> Entity:
     )
 
 
+def merge_search(key_rows, label_rows, lowered: str, limit: int) -> list[Entity]:
+    """One ranking for entity search (D-091): exact key, then exact label
+    (a group's name, an account's login), then key prefix, then label
+    prefix — each entity once. Key rows arrive exact-first; label rows carry
+    `inexact` (0 when the label equals the query)."""
+    key_exact = [r for r in key_rows if r["key"].lower() == lowered]
+    key_prefix = [r for r in key_rows if r["key"].lower() != lowered]
+    label_exact = [r for r in label_rows if not r["inexact"]]
+    label_prefix = [r for r in label_rows if r["inexact"]]
+    out: list[Entity] = []
+    seen: set[str] = set()
+    for r in (*key_exact, *label_exact, *key_prefix, *label_prefix):
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            out.append(row_to_entity(r))
+    return out[:limit]
+
+
 def row_to_observation(row: Mapping[str, Any]) -> Observation:
     obj = json.loads(row["object_json"])
     if isinstance(obj, dict):
@@ -353,7 +371,7 @@ def merge_schema(existing: SchemaRegistration | None,
     seed's `host member_of domain`, and each identity connector's `has_role`
     the other's (S-55). Now a predicate's object types are the union (empty
     — any — stays any), `containment` and `node_status` hold if either side
-    sets them, and the description is the incoming one when it has one;
+    sets them (and `label`, D-091, and `display`, D-097), and the description is the incoming one when it has one;
     `strict` takes the incoming value."""
     if existing is None:
         return incoming
@@ -373,6 +391,8 @@ def merge_schema(existing: SchemaRegistration | None,
             "object_types": objects,
             "containment": old.containment or p.containment,
             "node_status": old.node_status or p.node_status,
+            "label": old.label or p.label,
+            "display": old.display or p.display,
             "description": p.description or old.description})
     return SchemaRegistration(
         namespace=incoming.namespace,

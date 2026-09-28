@@ -2971,6 +2971,178 @@ says how many export keys it compared under a merged identity. On that
 run, re-reported after the identity pass drained: every predicate 0 / 0,
 all 41,973 shared-address identities merged.
 
+## D-091 · Find an entity by its name: registry `label` predicates (2026-09-28)
+
+The first run of the extended agent tasks (the cross-domain Domain Admins
+audit, the lab.local coverage question) failed mostly on lookup, not
+reasoning: `find_entity("Domain Admins")` returned nothing. Entity search
+matched key prefixes only, and a directory object is keyed by its SID (an
+Entra object by a GUID, an Okta one by an id), so nothing in a directory
+could be found by the name an analyst — or an agent — knows it by. 25 of
+the audit runs and 21 of the coverage runs spent all 20 turns searching;
+11 coverage answers concluded the account did not exist.
+
+`PredicateDef.label` (contract field, default false) marks a scalar that
+names its subject. Entity search (`GET /v1/entities/search`, MCP
+`find_entity`, the "no entity" notes' suggestions) matches the values of a
+namespace's label predicates as well as keys, ranked exact key, exact
+name, key prefix, name prefix, within a scoped key's types. It is read at
+query time from the registry — domain specifics stay there — over a new
+partial expression index on scalar observations (schema v9: namespace,
+predicate, the lower-cased JSON value capped at 200 characters; built on
+first start, no backfill). A registration merge keeps `label` if either
+side sets it. Connectors mark their names: LDAP `sam`, `name`, `dn_name`;
+Entra `upn`, `name`, `mail`; Okta `login`, `name`, `mail`; ATT&CK `name`.
+`find_entity` returns the matched `name` next to an opaque handle.
+Question auto-resolution in `/v1/answer` still takes exact keys only; it
+must never guess. Case folding of a non-ASCII name is not matched (the
+JSON text escapes it).
+
+## D-092 · Coverage gaps on a single-entity ask, cited (2026-09-28)
+
+D-082 noted a collection gap on scope asks and find_path. An agent asking
+about one account — the usual first move — never saw it, and either
+searched until the turn cap or answered "no groups". A single-entity pack
+now carries the gaps recorded by the sources that supplied its
+observations (a status predicate's gap only for the types it applies to):
+generic — the core does not know what a domain is, only which import
+brought the entity in. Every coverage note names its record's id in
+brackets, so "not collected" is citable like a fact, and the MCP server
+instructions say to report a `coverage:` note as not collected, never as
+none.
+
+## D-093 · Packs name the opaque keys they list, in budget left for it (2026-09-28)
+
+A Domain Admins walk returned the right child-domain members — as bare
+SIDs (`user:S-1-5-21-…-1105 (2026-09-20) enabled False; each member_of
+group:S-…-1201`), with the names in separate `sam` / `identified_by` facts
+for the agent to join. Weaker models stopped at the directly placed
+accounts. A pack's items now read `user:S-…-1105 (dnguyen) … each
+member_of group:S-…-1201 (DEV-Ops)` for every entity whose label facts
+(D-091) the pack gathered — the shortest label, not the DN.
+
+Names cost tokens, and rendering them inline cost the blind AD benchmark
+chains at small budgets (11/11 → 9/11 at 1,500, 10/11 at 3,000). So they
+never displace a fact: the pack is selected first; if its items reference
+named entities, it is re-selected with room for their names (at most a
+fifth of the budget) and the names fill that room. Recall is unchanged at
+every budget (11/11 at 1,500 / 3,000 / 4,000 / 6,000), and the Domain
+Admins pack at 3,000 carries names on 21 of 21 items with all five members.
+A pack with nothing to name (CVEs, hosts) is built once, as before.
+Rendering only: scoring, matching, handles and citations use the bare key.
+
+## D-094 · A walked-to entity's name rides on its mentions, not as its own item (2026-09-28)
+
+D-093's reserve made room for names, but every account a walk reached still
+shipped its label facts as items — a Domain Admins walk at `ask_scope`'s
+default 3,000 tokens spent fifteen items on `user:S-… (u00483) name u00483`
+for the corp.local admins, and the child domain's hop-three members
+(`DEV-Ops` → `CORP-Tier0-Admins` → Domain Admins) fell out: Gemini 2.5 Flash
+named three of five in both runs. The question's "name the group" made
+`name` the scope's topic (D-061), which ranked those rows first.
+
+In a named scope pack, a label fact about an entity the walk reached is no
+longer an item when another gathered fact mentions that entity: its value
+reads as the annotation on those mentions. The asked subjects keep their
+label facts as items (the pack about Domain Admins still cites its name).
+Names still come from every gathered label fact. The reserve is sized for
+naming each entity once, and first mentions are named before repeats, so a
+tight pack still names everything it lists.
+
+The same walk at 3,000 now lists all five dev.local members, each with
+`enabled`, and at 2,000 it does too (was two). The blind AD benchmark is
+unchanged (11/11 at every budget). At 800–1,200 the hop-one admins'
+`enabled` facts (the topic, cheapest first) fill the pack with or without
+this; a three-hop question at that size answers through its handles.
+Rendering only: the absorbed facts are still served by `expand` and entity
+asks, and matching, handles and citations are unchanged.
+
+## D-095 · A walk surfaces the exceptional status and its own edges first; a realm-qualified account name resolves (2026-09-28)
+
+Three misses from the extended agent tasks:
+
+- **Status.** Asked "which dev.local accounts are effective members of Domain
+  Admins", without the word "enabled", a 3,000-token walk listed all five
+  members and none of their `enabled` facts; the agent called every member
+  enabled, one of them disabled. `find_path` reports each path entity's
+  status (D-080), a scope walk did not. Shipping every reached entity's
+  status (the registry's `node_status` predicates as scope topic) fixed it
+  at 2,000+ but cost the blind AD benchmark at 1,500 (11/11 → 8/11): two
+  dozen `enabled True` rows are not news. So only the exception ships
+  early: per status predicate, the current values that are not the one most
+  reached entities carry (every value, on a tie; none, when all agree) join
+  the topic's first pass with the edges that reached them. The disabled
+  member's `enabled False` is in the pack at every budget from 800; the AD
+  benchmark is unchanged (11/11 at 1,500 / 3,000 / 4,000 / 6,000).
+- **Realm-qualified names.** An agent searched `labsvc-backup@lab.local`,
+  found nothing, and answered about an unrelated `user:svc-backup`. Entity
+  search (`find_entity`, `/v1/entities/search`) retries a query written as
+  `name@realm` or `REALM\name` that matches nothing as the bare name.
+  Nothing matches for a name no entity carries; an exact match on the
+  whole query still wins.
+- **The walk's own edges.** "Show all members of this group, including
+  nested group membership", walked three hops from Domain Admins, scored
+  every `member_of` fact alike, and the reached admins' two dozen
+  memberships in other groups (pointing away from the root) came first by
+  hop order: the pack held three of the five dev.local members at every
+  budget. Among facts of equal density the walk's path edges now rank
+  first; five of five at 3,000, AD benchmark unchanged.
+
+## D-096 · A walk cut by its depth says where it stopped (2026-09-28)
+
+Nova 2 Lite and GLM 4.6v walked Domain Admins with `depth=2`, reached
+`DEV-Ops` (a dev.local group nested in CORP-Tier0-Admins) and not its
+members, and answered with the direct and one-group-deep members as the
+whole list. Nothing in the pack said the walk had been cut: `find_path`
+reports a depth cut (D-067), a scope walk did not.
+
+A scope pack now notes when entities at the walk's last hop link onward
+along the walked predicates to entities it did not reach: `the walk stopped
+at depth 2: group:S-…-1201 (DEV-Ops) links onward along member_of to
+entities it did not reach; depth=3 walks one hop further` (at the depth cap,
+an ask_scope from them). An edge that turns back at the entity — a reached
+user's other group memberships, a CVE's other products (D-080) — is not
+onward, so a walk that reached everything says nothing. It reads only rows
+the pack already gathered for its last hop.
+
+Also: a scope topic that nothing the walk reached carries no longer takes
+the walk's focus. "Which accounts are members of the Domain Admins group …,
+directly or through nested groups?" named `is_dc` by its registry
+description ("a domain controller machine account"); no reached entity
+carries it, yet as the topic it replaced the focus on `member_of` (D-058),
+and the pack held two of the five dev.local members at 3,000 tokens. The
+focus is now the topic predicates the gathered facts carry, else the walk's
+named edges: five of five, AD benchmark unchanged.
+
+## D-097 · Packs name an account with its domain (2026-09-28)
+
+The full extended-task run (35 models × 3) left two failure shapes that point
+at one gap: five runs listed every nested dev.local member of Domain Admins
+and skipped `dlee`, the one placed directly (GPT-4o, Qwen3-coder, Mistral
+Large); four listed corp.local's own admins as dev.local accounts (Nova 2
+Lite, Codestral). A pack wrote `user:S-…-1101 (dlee)` beside
+`user:S-…-2741 (u00483)`: which domain an account lives in was only in the
+SID's prefix.
+
+- **Contract:** `PredicateDef.display` — a label a pack shows beside its
+  subject's opaque key in preference to the namespace's other labels. Merged
+  like `label` (either side sets it). Additive; schema version unchanged.
+- **LDAP** records `principal`, `sAMAccountName@domain` from the object's DN
+  (`dlee@dev.local`, `Domain Admins@corp.local`), a `label` and `display`
+  predicate; so it is also found by entity search as written. Entra's `upn`
+  and Okta's `login` are marked `display`.
+- **Topic:** a label is never a scope question's topic by its registry
+  description. `principal`'s ("the account or group with the domain it lives
+  in") matched every "which accounts … in corp.local" question and took the
+  walk's focus (two of five members at 3,000); a question that names the
+  predicate still makes it the topic.
+
+Every question phrasing collected from the runs reaches all five dev.local
+members at 3,000 tokens (the generic "which accounts are effective members of
+Domain Admins?" three before); the blind AD benchmark is unchanged (11/11 at
+1,500 / 3,000 / 4,000 / 6,000). A longer name costs its repeats first: each
+entity is still named at its first mention (D-094).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
