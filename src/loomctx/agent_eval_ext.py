@@ -206,7 +206,7 @@ _DISABLED = re.compile(r"\bdisabled\b|\bnot enabled\b|\binactive\b|\baccountdisa
 
 # a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no"
 _DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b|\benabled\W{0,6}(?:no|false)\b", re.I)
-_BLOCK_LINE = re.compile(r"\s*(?:[-*+|]|\d+[.)])")
+_BLOCK_LINE = re.compile(r"\s*(?:[-+|]|\*(?!\*)|\d+[.)])")     # "**Bold:**" is a lead-in, not a bullet
 _ADMIN = re.compile(r"domain admins|tier0|tier-0", re.I)
 # typographic apostrophes some models emit ("can’t", "isn’t")
 _QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'"})
@@ -217,6 +217,12 @@ def _sentences(answer: str, key: str) -> list[str]:
 
 
 _ITEM_START = re.compile(r"\s*(?:#|\**\s*\d+[.)])")
+
+
+def _marker(line: str) -> str:
+    """A list line's kind: numbered, table row, or bullet."""
+    t = line.lstrip().lstrip("*").lstrip()
+    return "num" if re.match(r"\d+[.)]", t) else "row" if line.lstrip().startswith("|") else "bullet"
 
 
 def _lines(answer: str, key: str, others: tuple[str, ...] = ()) -> list[tuple[str, str]]:
@@ -232,7 +238,15 @@ def _lines(answer: str, key: str, others: tuple[str, ...] = ()) -> list[tuple[st
         if not _mentions(raw, key):
             continue
         k, line = i + 1, raw
-        while (k < len(lines) and lines[k].strip() and not _ITEM_START.match(lines[k])
+        heading = bool(re.match(r"\s*(?:#|\*\*\s*\d+[.)])", raw))   # "### 2. fabrikam.local", "**3. partner.local**"
+        while (k < len(lines) and (lines[k].strip() or heading)
+               and not (heading and re.match(r"\s*(?:#|\*\*\s*\d+[.)])", lines[k]))
+               and not (not heading and _ITEM_START.match(lines[k]))
+               # the next list item of the same kind at this level is its own
+               # line; a numbered item's "- field" bullets and sub-bullets stay
+               and not (not heading and _BLOCK_LINE.match(lines[k]) and _BLOCK_LINE.match(raw)
+                        and _marker(lines[k]) == _marker(raw)
+                        and len(lines[k]) - len(lines[k].lstrip()) <= len(raw) - len(raw.lstrip()))
                and not any(_mentions(lines[k], o) for o in others if o != key)):
             line += "\n" + lines[k]
             k += 1
@@ -419,7 +433,10 @@ def _score_delegation(answer: str, truth: dict, seen: set[str], store) -> dict:
 
     def put_forward(line: str, lead: str, name: str, dc: bool) -> bool:
         c = clause(line, name)
+        sentences = [x for x in re.split(r"(?<=[.;!?])\s+", line) if _mentions(x, name)]
         if (_EXCLUDES.search(c) or _EXCLUDES.search(lead)
+                or any(_EXCLUDES.search(x) or re.search(r"\bonly\b|\bother (?:computers|hosts|accounts|servers|machines|members)\b"
+                                                          r"|(?<!un)constrained[- ]delegation host", x, re.I) for x in sentences)
                 or re.search(r"\bonly\b|\bother (?:computers|hosts|accounts|servers|machines)\b", c, re.I)):
             return False
         # a domain controller named as one anywhere on its line or in its
@@ -433,8 +450,11 @@ def _score_delegation(answer: str, truth: dict, seen: set[str], store) -> dict:
             return False
         if re.search(r"unconstrained|trusted for", c, re.I):
             return True
-        # a bare list item or table row under a findings lead-in
-        return bool(_BLOCK_LINE.match(line)) and bool(re.search(r"unconstrained|trusted for|finding", lead, re.I))
+        # a bare list item or table row under a findings lead-in — a short
+        # item naming the host, not a sentence of advice that mentions it
+        bare = re.sub(r"\[[^\]]*\]|[`*_]|\([^)]*\)", "", c).strip(" -|.:")
+        return (bool(_BLOCK_LINE.match(line)) and len(bare) <= 60
+                and bool(re.search(r"unconstrained|trusted for|finding", lead, re.I)))
     false_hosts = sorted(d for d in (*truth["dcs"], *truth["decoys"]) if any(
         put_forward(line, lead, d, d in truth["dcs"]) for line, lead in _lines(answer, d, names)))
     cites = _cited(answer, seen)
@@ -521,7 +541,9 @@ def _score_trusts(answer: str, truth: dict, seen: set[str], store) -> dict:
         # a field ("Transitive: No", "SID Filtering Enabled: No") or a table
         # cell says it by its label, and outranks the free text
         fields = [(m.group(1).lower(), m.group(2)) for ln in solo
-                  if (m := _FIELD.match(ln.replace("`", ""))) is not None]
+                  for part in re.split(r";\s*|,\s+(?=[A-Za-z ()]{3,40}:)", ln.replace("`", ""))
+                  if (m := _FIELD.match(part)) is not None
+                  and len(m.group(1)) <= 45 and "forest" not in m.group(1).lower()]
         for head, cell in [*fields, *rows.get(p, {}).items()]:
             if "non-transitiv" in head or "nontransitiv" in head:
                 says_nt = says_nt or bool(_YES.search(cell))

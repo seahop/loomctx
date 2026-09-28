@@ -231,3 +231,40 @@ def test_new_scorers_read_the_full_run_answers():
         assert ext._score_groups(ok, groups, SEEN, None)["pass"], ok
     inherited = base + "- CORP-Finance-Interns (inherited via CORP-Finance-Users)"
     assert ext._score_groups(inherited, groups, SEEN, None)["false_groups"] == ["CORP-Finance-Interns"]
+
+
+def test_scorers_read_the_five_run_answers():
+    """Patterns from the 2026-09-28 five-run pass the scorers first misread."""
+    trusts = {"trusts": {"dev.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": False},
+                         "partner.local": {"direction": "bidirectional", "transitive": False, "sid_filtering": False},
+                         "fabrikam.local": {"direction": "bidirectional", "transitive": True, "sid_filtering": True}}}
+    # several fields on one line (GPT-5.2)
+    inline = (f"corp.local trusts {CITE}:\n"
+              "- partner.local — direction: **bidirectional**; transitive: **no (non-transitive)**; SID filtering (quarantine) enabled: **no**.\n"
+              "- dev.local — direction: **bidirectional**; transitive: **yes**; SID filtering (quarantine) enabled: **no**.\n"
+              "- fabrikam.local — direction: **bidirectional**; transitive: **yes**; SID filtering (quarantine) enabled: **yes**.")
+    assert ext._score_trusts(inline, trusts, SEEN, None)["pass"]
+    # a numbered header with "- field" bullets under it (Claude Sonnet 5)
+    numbered = (f"Trusts {CITE}:\n\n**1. corp.local ↔ dev.local**\n- Transitive: Yes\n- SID filtering (quarantine): Off\n\n"
+                "**2. corp.local ↔ fabrikam.local**\n- Transitive: Yes\n- SID filtering (quarantine): On/enabled\n\n"
+                "**3. corp.local ↔ partner.local**\n- Transitive: No (non-transitive)\n- SID filtering (quarantine): Off")
+    assert ext._score_trusts(numbered, trusts, SEEN, None)["pass"]
+    # a later sentence about an attribute named *_transitive is not the field (Grok 4.7)
+    later = (f"1. partner.local — trust is **not** transitive; SID filtering **off**. {CITE}\n"
+             "2. dev.local — transitive; SID filtering off.\n3. fabrikam.local — transitive; SID filtering **on**.\n"
+             "The same observations carry `forest_transitive: true` for all three (including partner.local).")
+    assert ext._score_trusts(later, trusts, SEEN, None)["pass"]
+    groups = {"account": "mreyes", "groups": ["CORP-Finance-Users"], "direct": [], "distractors": ["CORP-Finance-Interns"]}
+    # a bold lead-in that says "Not" (Qwen 3.8 Flash)
+    bold = (f"- CORP-Finance-Users {CITE}\n\n**Not mreyes memberships (do not count):**\n"
+            "- CORP-Finance-Interns@corp.local is itself a member of CORP-Finance-Users; its member is iwalsh.")
+    assert ext._score_groups(bold, groups, SEEN, None)["pass"]
+    deleg = {"hosts": ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"], "dcs": ["DC00", "DC09"], "decoys": ["WEB-KCD04"]}
+    hosts = f"## Non-DC computers trusted for unconstrained delegation\n- APP-LEGACY01$ {CITE}\n- PRINT-HQ02$\n- SQL-OLD03$\n"
+    for ok in (hosts + "3. **Treat the hosts as Tier-0-adjacent:** monitor for TGTs from DC00$–DC09$ landing on them, and audit local admins.",
+               hosts + "- Servers OU was examined; its other members — e.g., WEB-KCD04$, SRV01986 — carry no flag."):
+        assert ext._score_delegation(ok, deleg, SEEN, None)["pass"], ok
+    # a list of findings that includes the constrained server stays wrong (Qwen3-coder)
+    listed = ("The following computer accounts, other than domain controllers, are trusted for unconstrained delegation:\n"
+              f"- APP-LEGACY01$ {CITE}\n- PRINT-HQ02$\n- SQL-OLD03$\n- WEB-KCD04$@corp.local [4a33ed837fb0]\n- SRV01989$")
+    assert ext._score_delegation(listed, deleg, SEEN, None)["false_hosts"] == ["WEB-KCD04"]
