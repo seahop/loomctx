@@ -39,6 +39,7 @@ import argparse
 import hashlib
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
@@ -285,10 +286,15 @@ mcp = MCPServer("loomctx", instructions=INSTRUCTIONS)
 _store: GraphStore | None = None
 
 
+_store_lock = threading.Lock()
+
+
 def _get_store() -> GraphStore:
     global _store
     if _store is None:
-        _store = store_from_env()
+        with _store_lock:   # the start-up warm-up and a first tool call race here
+            if _store is None:
+                _store = store_from_env()
     return _store
 
 
@@ -680,16 +686,32 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
 # documents carries dozens of one-off predicates)
 _LINKS_SHOWN = 8
 _ATTRIBUTES_SHOWN = 10
-_RELATIONS_TTL = 60.0   # a GROUP BY over the namespace's observations (~1 s at 600k rows)
+_RELATIONS_TTL = 600.0  # a GROUP BY over the namespace's observations (~1-3 s at 600k+ rows); a map, not facts
+_relations_lock = threading.Lock()
 _relations_cache: dict[str, tuple[float, list[tuple[str, str, str | None, int]]]] = {}
 
 
 def _relations(namespace: str) -> list[tuple[str, str, str | None, int]]:
-    now = time.monotonic()
     hit = _relations_cache.get(namespace)
-    if hit is None or hit[0] <= now:
-        hit = _relations_cache[namespace] = (now + _RELATIONS_TTL, _get_store().relation_summary(namespace))
+    if hit is None or hit[0] <= time.monotonic():
+        with _relations_lock:   # a call during the warm-up waits for it, not a second GROUP BY
+            hit = _relations_cache.get(namespace)
+            if hit is None or hit[0] <= time.monotonic():
+                summary = _get_store().relation_summary(namespace)
+                hit = _relations_cache[namespace] = (time.monotonic() + _RELATIONS_TTL, summary)
     return hit[1]
+
+
+def _warm() -> None:
+    """Compute what describe_namespace reads while the agent's first model
+    turn runs (D-102): a stdio server starts per session, and its first
+    describe_namespace paid the namespace's GROUP BY (~3 s on the scorecard
+    corpus) every time. Failures are left to the tool call to report."""
+    try:
+        _summary()
+        _relations(_DEFAULT_NS)
+    except Exception:  # noqa: BLE001 — a warm-up never takes the server down
+        pass
 
 
 def _capped(values: list[str], cap: int) -> list[str]:
@@ -1410,6 +1432,7 @@ def _main() -> None:
     args = _arg_parser().parse_args()
     global _transport
     _transport = args.transport
+    threading.Thread(target=_warm, name="loomctx-warm", daemon=True).start()
     if args.transport == "stdio":
         mcp.run(transport="stdio")
         return

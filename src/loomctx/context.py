@@ -351,8 +351,9 @@ def _absorbed(observations: list[Observation], labels: frozenset, roots: list[En
             mentioned.add((o.subject.type, o.subject.key))
         if isinstance(o.object, EntityRef):
             mentioned.add((o.object.type, o.object.key))
+    named = mentioned - kept
     return {o.id for o in observations
-            if o.predicate in labels and (o.subject.type, o.subject.key) in mentioned - kept}
+            if o.predicate in labels and (o.subject.type, o.subject.key) in named}
 
 
 def _render_fact(obs: Observation, superseded_by: Observation | None = None) -> str:
@@ -1479,8 +1480,30 @@ def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expa
     if not hubs:
         return {}, 0
     before = _aware(as_of) if as_of is not None else None
-    pairs = store.edges_to_carriers(namespace, hubs, sorted(expand), sorted(topic),
-                                    limit=_HUB_EDGE_LIMIT, observed_before=before)
+    if len(topic) > 1:
+        # one join per topic predicate, counted before any row is loaded
+        # (D-102): the rare ones are the filter (D-100), and loading every
+        # carrier of `name` and `enabled` to keep thirteen computers read
+        # two hundred thousand rows
+        per = {p: store.edges_to_carriers(namespace, hubs, sorted(expand), [p],
+                                          limit=_HUB_EDGE_LIMIT, observed_before=before)
+               for p in sorted(topic)}
+        counts = {p: len({attr for _, _, attr in got}) for p, got in per.items() if got}
+        widest = max(counts.values(), default=0)
+        rare = [p for p, c in counts.items() if c <= _SELECTIVE_SHARE * widest]
+        chosen = rare if len(counts) > 1 and rare else list(counts)
+        pairs = [pair for p in chosen for pair in per[p]]
+    else:
+        pairs = store.edges_to_carriers(namespace, hubs, sorted(expand), sorted(topic),
+                                        limit=_HUB_EDGE_LIMIT, observed_before=before)
+    # a hub most of whose far ends carry the topic keeps its window (below):
+    # decided on the counts, before loading rows that would be thrown away
+    per_hub: dict[tuple[str, str], set[str]] = {}
+    for hub_key, _, attr in pairs:
+        per_hub.setdefault(hub_key, set()).add(attr)
+    dense = {k for k, attrs in per_hub.items()
+             if (t := truncated.get(k)) is not None and 2 * len(attrs) > t.total}
+    pairs = [pair for pair in pairs if pair[0] not in dense]
     if not pairs:
         return {}, 0
     rows = {o.id: o for o in store.observations_by_ids(
@@ -1645,6 +1668,7 @@ def build_pack(
     """The pack for one ask (see `_build_pack`); display names (D-093) are
     set for this build only and always cleared after it."""
     token = _NAMES.set(None)
+    walks = _WALKS.set({})
     try:
         pack = _build_pack(store, req, embedder, allowed_types)
         current = _NAMES.get()
@@ -1663,21 +1687,31 @@ def build_pack(
         return _with_names(pack, names, req.budget)
     finally:
         _NAMES.reset(token)
+        _WALKS.reset(walks)
 
 
-def _build_pack(
-    store: GraphStore,
-    req: AskRequest,
-    embedder=None,
-    allowed_types: tuple[str, ...] | None = None,
-    absorb_names: bool = False,
-    widen: bool = True,
-) -> ContextPack:
+# One build_pack call builds a pack twice (the second with room for names,
+# D-093): the walk and gather are the same both times, and were half the
+# cost of a delegation audit's pack (D-102). Keyed by everything they read.
+_WALKS: ContextVar[dict | None] = ContextVar("loomctx_walks", default=None)
+
+
+def _walk_and_gather(store: GraphStore, req: AskRequest, allowed_types: tuple[str, ...] | None):
+    """The scope walk (or the one entity) and every row the pack draws on,
+    sorted newest first — memoized within one `build_pack`."""
+    memo = _WALKS.get()
+    memo_key = (req.namespace, req.scope.model_dump_json() if req.scope is not None else None,
+           req.subject.model_dump_json() if req.subject is not None else None,
+           req.as_of, req.valid_at, allowed_types, req.question)
+    if memo is not None and memo_key in memo:
+        hit = memo[memo_key]
+        # the caller's request (its budget), with the scope the walk settled on
+        return (req.model_copy(update={"scope": hit[0].scope}), hit[1], hit[2], dict(hit[3]), hit[4], hit[5],
+                hit[6], hit[7], list(hit[8]))
     from .config import max_scope_observations
     paths: Paths = {}
     truncated: Truncations = {}
     gathered: dict[tuple[str, str], list[Observation]] = {}
-    asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     widened: list[str] = []
     core: set[tuple[str, str]] = set()
     if req.scope is not None:
@@ -1749,6 +1783,23 @@ def _build_pack(
                 seen_ids.add(obs.id)
                 observations.append(obs)
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
+    out = (req, subjects, paths, truncated, gathered, examined, core, widened, observations)
+    if memo is not None:
+        memo[memo_key] = (req, subjects, paths, dict(truncated), gathered, examined, core, widened, list(observations))
+    return out
+
+
+def _build_pack(
+    store: GraphStore,
+    req: AskRequest,
+    embedder=None,
+    allowed_types: tuple[str, ...] | None = None,
+    absorb_names: bool = False,
+    widen: bool = True,
+) -> ContextPack:
+    (req, subjects, paths, truncated, gathered, examined, core, widened,
+     observations) = _walk_and_gather(store, req, allowed_types)
+    asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     topic = (scope_topic(store, req.namespace, req.scope, req.question, observations)
              if req.scope is not None else frozenset())
     # a reached entity whose status (an account's `enabled`, D-080) differs

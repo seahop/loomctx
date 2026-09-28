@@ -212,6 +212,29 @@ def test_a_sibling_walk_keeps_the_chain_when_the_cap_binds(tmp_path, monkeypatch
     store.close()
 
 
+def test_one_pack_walks_once(tmp_path, monkeypatch):
+    """D-102: build_pack builds twice (the second with room for names) and
+    walked twice; the walk and gather are memoized within one call, and the
+    second build keeps its own budget."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    from loomctx import context
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+    walks = []
+    real = context._walk_scope
+    monkeypatch.setattr(context, "_walk_scope", lambda *a, **k: walks.append(1) or real(*a, **k))
+    req = AskRequest(namespace="ad", budget=2000, question="which dev.local accounts are members of Domain Admins?",
+                     scope=ScopeSpec(subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                     expand=["member_of"], depth=3))
+    pack = build_pack(store, req)
+    assert len(walks) == 1 and pack.charged_tokens <= 2000
+    assert build_pack(store, req).items == pack.items     # and a second call walks afresh, the same
+    assert len(walks) == 2
+    store.close()
+
+
 def test_the_exceptional_status_is_the_minority_value():
     from datetime import datetime, timezone
     from loomctx.context import _exceptional_status

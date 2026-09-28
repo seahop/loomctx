@@ -683,3 +683,16 @@ def test_main_closes_the_store_on_the_way_out(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         ms.main()
     assert closed == [True] and ms._store is None
+
+
+def test_start_up_warms_what_describe_namespace_reads(store, monkeypatch):
+    """D-102: a stdio server starts per session; the warm-up computes the
+    relation summary while the agent's first turn runs, and a concurrent
+    describe_namespace reuses it instead of running its own GROUP BY."""
+    calls = []
+    real = store.relation_summary
+    monkeypatch.setattr(store, "relation_summary", lambda ns: calls.append(ns) or real(ns))
+    mcp_server._warm()
+    assert calls == [mcp_server._DEFAULT_NS]
+    mcp_server.describe_namespace(mcp_server._DEFAULT_NS)
+    assert calls == [mcp_server._DEFAULT_NS]          # served from the warm cache

@@ -3262,6 +3262,37 @@ dozen other groups had outranked the hop-three members. A walk without
 `siblings` is unchanged. Haiku's call now returns all five members; the AD
 benchmark is unchanged (11/11 at every budget).
 
+## D-102 · Delegation-shape walks and describe_namespace, faster (2026-09-28)
+
+Timing the five-run extended pass: LoomCtx is 6–14% of an agent's wall time
+on four of the five AD tasks (`find_entity` 25 ms, `ask` 0.3 s, `ask_scope`
+0.5 s median) — the model's own turns are the rest. The exceptions were the
+"which computers under this domain carry flag X" walks (delegation: a
+median 10.5 s per `ask_scope`, up to 47 s, 42% of the task's time) and
+`describe_namespace` (2.9 s median). Profiled on the large forest:
+
+- **One walk per pack.** `build_pack` builds twice (the second with room
+  for names, D-093) and walked and gathered twice; the walk and gather are
+  now memoized within one call (the second build keeps its own budget).
+- **Rare carriers counted before loaded.** A hub's topic carriers were
+  loaded for every topic predicate — every computer's `name` and `enabled`,
+  two hundred thousand rows — and filtered to the rare ones (D-100) after.
+  Each predicate's carriers are now counted in its own join first and only
+  the rare ones' rows loaded; a hub most of whose far ends carry the topic
+  keeps its window on the counts, before any row is read.
+- **`_absorbed`** recomputed a set difference per observation.
+- **describe_namespace** reads a relation summary (a GROUP BY over the
+  namespace) cached in-process — but a stdio server starts per session, so
+  the first call always paid it. The server now computes it in a
+  background thread at start-up, while the agent's first turn runs; a call
+  that arrives mid-warm-up waits for that computation rather than starting
+  a second. Its TTL goes from 60 s to 10 minutes (a map of the namespace's
+  types and links, not facts).
+
+Delegation-shape packs from the domain: 12.0 s → 4.4 s and 10.7 s → 4.2 s on
+the large forest (same packs, same three servers); the AD benchmark is
+unchanged (11/11 at every budget).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
