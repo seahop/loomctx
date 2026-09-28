@@ -71,7 +71,13 @@ _EXPOSURE_ALL_UNDER = 4
 _ASIDE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]")
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 # sentence boundary: a period not inside a dotted token (10.0.4.7, 22.04)
-_SENTENCE = re.compile(r"(?<!\d)\.(?!\d)|\n")
+# a period ends a sentence when whitespace follows: "on 2026-08-20. The…"
+# ends there (D-089: a trailing date used to glue the next sentence on),
+# a dotted IP (10.0.4.7) does not
+_SENTENCE = re.compile(r"\.(?=\s|$)|\n")
+# typographic hyphens and spaces some models emit ("laptop‑17", U+2011)
+_PLAIN = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+                        "\u00a0": " ", "\u202f": " ", "\u2009": " "})
 
 SYSTEM = (
     "You are a security analyst agent. You have tools that query LoomCtx, a "
@@ -139,16 +145,33 @@ def _product_named(answer: str, key: str) -> bool:
 
 # a sentence that rules a CVE out as KEV / exploited ("non-KEV", "none are
 # KEV-listed", "no exploited_in_wild observation"), negation first
-_NOT_KEV = re.compile(r"non-?KEV|(?:\b(?:not|no|none|never|without)\b|n't\b)[^.;\n]{0,80}?"
-                      r"(?:KEV|exploited|exploitation|listed)", re.I)
-_CVE_SENTENCE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!etc\.)(?<=[.!?])\s+|\n")   # "e.g." / "etc." end no sentence
+_NOT_KEV = re.compile(r"non-?KEV|(?:\b(?:not|no|none|neither|nor|never|without)\b|n't\b)[^.;\n]{0,80}?"
+                      r"(?:KEV|exploit\w*|list\w*|touch\w*|run\w*|affect\w*|count\w*)"
+                      # an explicit exclusion: "ruled them out", "one near-miss", "none of which web-01 runs"
+                      r"|\bruled\b[^.;\n]{0,20}\bout\b|\bnear[- ]miss|\bnot counted\b|\bnone of which\b", re.I)
+_CVE_SENTENCE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!etc\.)(?<=[.!?])\s+")   # "e.g." / "etc." end no sentence
+# "Examples include X": an example sentence continues the one before it
+_EXAMPLE_CUE = re.compile(r"^\W*(?:examples?\b|for example|e\.g\.|such as|including|these include|they include)", re.I)
 
 
 def _ruled_out(answer: str, cve: str) -> bool:
-    """Every sentence naming `cve` says it is not KEV-listed / exploited: a
-    careful answer that excludes it is not claiming it (D-089)."""
-    sentences = [x for x in _CVE_SENTENCE.split(answer) if cve in x]
-    return bool(sentences) and all(_NOT_KEV.search(x) for x in sentences)
+    """Every sentence naming `cve` says it is not KEV-listed / exploited — or
+    is an example sentence right after one that does ("none is marked as
+    exploited. Examples include X") — so a careful answer that excludes it
+    is not claiming it (D-089)."""
+    found = False
+    for paragraph in answer.split("\n"):
+        sentences = _CVE_SENTENCE.split(paragraph)
+        for i, sentence in enumerate(sentences):
+            if cve not in sentence:
+                continue
+            found = True
+            if _NOT_KEV.search(sentence):
+                continue
+            if i and _EXAMPLE_CUE.match(sentence) and _NOT_KEV.search(sentences[i - 1]):
+                continue
+            return False
+    return found
 
 
 def _score_cves(answer: str, truth: dict, seen: set[str], store) -> dict:
@@ -228,12 +251,16 @@ _HISTORY_BEFORE = re.compile(
 _HISTORY_AFTER = re.compile(r"^\W{0,3}until\b")
 _STILL_HOLDER = re.compile(r"^\W*(?:still|now|currently|again|took|takes|retook|reclaimed|holds|has|kept|keeps)\b")
 _NEGATION = re.compile(r"\b(?:never|not|no)\b|n't\b")
+# the mention itself rejected: "held by laptop-17, not web-01" (D-089)
+_REJECTED_BEFORE = re.compile(r"\b(?:not|rather\s+than|instead\s+of)\W*(?:\w+:)?$")
 
 
 def _history_mention(text: str, start: int, end: int) -> bool:
     """Is the mention text[start:end] marked as the lease's past?"""
     clause = re.split(r"[,;]", text[:start])[-1][-80:]       # the clause leading up to it
     after = re.split(r"[,;]", text[end:end + 40])[0]          # and the rest of it
+    if _REJECTED_BEFORE.search(clause):
+        return True       # "not web-01" names it only to reject it: not an assertion
     if _NEGATION.search(clause) or _STILL_HOLDER.search(after):
         return False
     return bool(_HISTORY_BEFORE.search(clause) or _HISTORY_AFTER.search(after))
@@ -588,7 +615,7 @@ async def run_task(session, provider: Provider, task: Task, store,
         result.error = result.error or "empty completion twice"
     result.seconds = round(time.monotonic() - t0, 1)
     result.truth = task.truth(store)
-    result.score = task.score(result.answer, result.truth, seen, store)
+    result.score = task.score(result.answer.translate(_PLAIN), result.truth, seen, store)
     if result.error:
         result.score["pass"] = False
     return result

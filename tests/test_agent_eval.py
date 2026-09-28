@@ -161,13 +161,21 @@ def test_a_cve_the_answer_rules_out_is_not_a_false_kev_claim():
     for aside in ("OpenSSL does carry non-KEV CVEs (e.g. CVE-2026-9001, CVE-2026-9002) but none are KEV-listed.",
                   "The data shows NVD edges for openssh (e.g. CVE-2026-9001) but **no** `exploited_in_wild` observations.",
                   "CVE-2026-9001 affects openssh; it is not on the KEV list.",
+                  "The CVEs I saw for openssh had no such listing, for example CVE-2026-9001 [abcdefab].",
+                  "**openssh: none found.** Its CVEs came back fully checked, and none is marked as exploited "
+                  "in the wild. Examples include CVE-2026-9001 [abcdefab].",
+                  "I checked KEV CVEs search surfaced and ruled them out: CVE-2026-9001 affects adobe:acrobat.",
+                  "One near-miss: CVE-2026-9001 is KEV-listed but affects android:kernel, which web-01 does not run.",
+                  "Two other OpenSSL CVEs were found — CVE-2026-9001 and CVE-2026-9002 — but neither has a CISA KEV listing.",
+                  "I verified each points at other products — none touches web-01's software (e.g. CVE-2026-9001 → debian).",
                   "A scan of openssh CVEs (e.g., CVE-2026-9001, CVE-2026-9002, etc. — [abcdefab]) found **no** "
                   "entries flagged `exploited_in_wild = True`."):
         r = ae._score_cves(f"{listed}\n{aside}", truth, seen, Store())
         assert r["pass"] and r["false_kev"] == 0 and r["ruled_out"] >= 1 and r["precision"] == 1.0, aside
     # a claim is still a claim — even next to an unrelated "not"
     for claim in ("CVE-2026-9001 is exploited in the wild and not yet patched.",
-                  "CVE-2026-9001 is KEV-listed. Elsewhere, CVE-2026-9001 is not exploited."):
+                  "CVE-2026-9001 is KEV-listed. Elsewhere, CVE-2026-9001 is not exploited.",
+                  "OpenSSL has no patch listed. CVE-2026-9001 is exploited in the wild."):
         r = ae._score_cves(f"{listed}\n{claim}", truth, seen, Store())
         assert not r["pass"] and r["false_kev"] == 1, claim
 
@@ -457,6 +465,31 @@ def test_openai_path_leaves_room_for_reasoning_and_reads_why_the_reply_ended(mon
     turn = ae.call_model(p, "sys", [{"role": "user", "content": "q"}], [_Tool("ask")])
     assert sent[-1]["max_tokens"] == ae.AGENT_MAX_TOKENS == 8000
     assert turn.stop == "length" and turn.text == "" and not turn.calls
+
+
+def test_lease_first_sentence_ends_after_a_date_and_a_rejection_is_not_an_assertion(seeded_db):
+    """D-089, found reading the 2026-09-27 failures: "laptop-17 held it on
+    2026-08-20. The prior assignment to web-01 ended…" glued the second
+    sentence on (no split after a digit), "held by laptop-17, not web-01"
+    counted as naming web-01, and "laptop‑17" (U+2011) did not match."""
+    truth = {"expect": ["laptop-17"], "reject": ["web-01"]}
+    for ok in ("**laptop-17** held 10.0.4.7 on 2026-08-20. The DHCP assignment began on 2026-08-10; "
+               "the prior assignment to web-01 ended that day.",
+               "On 2026-08-20, ip 10.0.4.7 was held by **host:laptop-17**, not web-01.",
+               "**answer: `host:laptop-17` held 10.0.4.7 during the incident — not `host:web-01`, which held it before.",
+               "It was laptop-17 rather than web-01 on 2026-08-20."):
+        r = ae._score_lease(ok, truth, set(), None)
+        assert r["rejected_in_answer"] == [] and r["names_expected"] == ["laptop-17"], ok
+    # the dotted IP still does not end a sentence, and an assertion still fails
+    assert ae._score_lease("web-01 held 10.0.4.7 on 2026-08-20, not laptop-17.", truth, set(), None)["rejected_in_answer"] == ["web-01"]
+
+    def final(messages):
+        pack = json.loads(_last_tool_output(messages))
+        cite = next(i for i in pack["items"] if "laptop-17" in i["text"])["cites"][0].split()[0]
+        return f"The address was assigned to host laptop\u201117 on 2026\u201108\u201120 [{cite}]."
+    model = Scripted([[("ask", {"subject": "ip:10.0.4.7", "question": "which host?", "namespace": "netsec",
+                                "valid_at": "2026-08-20T00:00:00Z", "budget": 600})], final])
+    assert ae.evaluate(seeded_db, ["lease"], model="fake", caller=model)[0].score["pass"]
 
 
 def test_lease_history_in_the_first_sentence_is_not_an_assertion():

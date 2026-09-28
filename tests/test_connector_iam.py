@@ -428,3 +428,22 @@ def test_generated_exports_round_trip_every_edge(tmp_path):
             assert row["edges_stored"] and row["find_path"], row
     finally:
         store.close()
+
+
+def test_iam_eval_compares_edges_through_identity_merges():
+    """D-090: after D-083 merges an Entra and an Okta user, their edges read
+    under the surviving key; diffed by raw export key every merge looked
+    like one missing plus one extra edge."""
+    from types import SimpleNamespace
+    from loomctx.iam_eval import canonical_edges, fidelity
+
+    class Store:
+        def get_entity(self, ns, ref):
+            key = {"entra-uid": "okta-uid"}.get(ref.key, ref.key)   # the Entra user merged into the Okta one
+            return SimpleNamespace(type=ref.type, key=key)
+    truth = [["user", "entra-uid", "member_of", "group", "g1"], ["user", "other", "member_of", "group", "g1"]]
+    got = {("user", "okta-uid", "member_of", "group", "g1"), ("user", "other", "member_of", "group", "g1")}
+    assert fidelity(truth, got)["member_of"]["missing"] == 1          # the old, raw-key diff
+    edges, merged = canonical_edges(Store(), "iam", truth)
+    row = fidelity(edges, got)["member_of"]
+    assert row["missing"] == 0 and row["extra"] == 0 and merged == 1

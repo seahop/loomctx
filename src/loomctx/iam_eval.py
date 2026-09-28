@@ -105,6 +105,26 @@ def stored_edges(store, namespace: str) -> dict[str, set[tuple]]:
     return out
 
 
+def canonical_edges(store, namespace: str, truth_edges: list[list]) -> tuple[list[list], int]:
+    """The export's edges with each endpoint as the store resolves it today.
+    Cross-IdP identity resolution (D-083) merges the Entra and Okta records of
+    one person, so their edges read under the surviving entity's key; diffed
+    by raw export key, every merge looked like a missing plus an extra edge
+    (D-090). Returns the edges and how many endpoint keys resolved elsewhere."""
+    cache: dict[tuple, tuple] = {}
+
+    def canon(t: str, k: str) -> tuple:
+        if (t, k) not in cache:
+            e = store.get_entity(namespace, EntityRef(type=t, key=k))
+            cache[(t, k)] = (t, k) if e is None else (e.type, e.key)
+        return cache[(t, k)]
+    out = []
+    for st, sk, p, ot, ok in truth_edges:
+        (a, b), (c, d) = canon(st, sk), canon(ot, ok)
+        out.append([a, b, p, c, d])
+    return out, sum(1 for key, v in cache.items() if v != key)
+
+
 def fidelity(truth_edges: list[list], got: set[tuple]) -> dict:
     want = {tuple(e) for e in truth_edges}
     preds = sorted({e[2] for e in want} | {e[2] for e in got})
@@ -256,6 +276,9 @@ def markdown(r: dict) -> str:
         L.append(f"| {h['depth']} | {h['n']} | {h['p50_ms']} | {h['p95_ms']} | {h['max_ms']} | "
                  f"{h['truncated']} ({', '.join(f'{k} {v}' for k, v in h['reasons'].items()) or '-'}) | "
                  f"{h['gathered_mean']} |")
+    if "merged_endpoints" in r:
+        L += ["", f"Endpoints are compared as the store resolves them (D-090): "
+                  f"{r['merged_endpoints']:,} export keys read under a merged cross-IdP identity."]
     L += ["", f"Cross-IdP: {r['shared_mail']:,} mail values present from both exports "
           f"(generator planted {r['truth_shared_mail']:,}).",
           f"Peak RSS: {r['peak_rss_mb']} MB."]
@@ -336,8 +359,11 @@ def main(argv: list[str] | None = None) -> None:
                 del envs
         report["observations"] = visible_observations(store, args.namespace)
         got = stored_edges(store, args.namespace)
-        report["fidelity"] = {k: fidelity(truth[f"{k}_edges"], got[SOURCES[k]])
-                              for k in SOURCES}
+        report["fidelity"], report["merged_endpoints"] = {}, 0
+        for k in SOURCES:
+            edges, merged = canonical_edges(store, args.namespace, truth[f"{k}_edges"])
+            report["fidelity"][k] = fidelity(edges, got[SOURCES[k]])
+            report["merged_endpoints"] += merged
         del got
         report["paths"] = [check_path(store, args.namespace, p, args.budget)
                            for p in truth["paths"]]
