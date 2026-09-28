@@ -3293,6 +3293,30 @@ Delegation-shape packs from the domain: 12.0 s → 4.4 s and 10.7 s → 4.2 s on
 the large forest (same packs, same three servers); the AD benchmark is
 unchanged (11/11 at every budget).
 
+## D-103 · The exposure scorer reads an exclusion a sentence away (2026-09-28)
+
+Reading the 2026-09-28 scorecard's failures by hand: three `claude-opus-5.5`
+exposure answers named every KEV CVE and failed on precision for CVEs they
+had ruled out — "**OpenSSH, nginx:** I saw no KEV entries for them. Their
+CVEs appear only with NVD or EPSS data, such as CVE-2026-3497"; "…found one
+extra kernel-related KEV CVE, CVE-2024-36971. The data ties it to the
+Android kernel only, with no route to web-01, so it is not counted"; "newer
+CVEs that are not in the catalogue, such as CVE-2026-63073". A
+`nemotron-3-super` answer followed a quoted fact with "But that is not
+marked exploited_in_wild." D-089 counted an exclusion only in the sentence
+naming the CVE, or in the one before when the CVE's sentence began as an
+example ("Examples include…").
+
+An exclusion now also counts in the sentence before when the CVE's sentence
+points back at it ("Their…", "…such as…", "e.g."; the one before must be
+about KEV or exploitation, and the CVE's own sentence must not assert it
+exploited), and in the sentence after when that one points back ("But that
+is not…", "…so it is not counted"); "catalog(ue)" and "included" join the
+exclusion words. A claim next to an unrelated "not" ("CVE-X is exploited.
+It is not patched yet.") is still a claim. Re-scored with the fix, four
+2026-09-28 runs flip to pass (three Opus 5.5, one Nemotron); none of the
+2026-09-27 run's answers change.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

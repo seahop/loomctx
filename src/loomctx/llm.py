@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -88,6 +89,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect())
 
 
+# a key or account out of spending room, as a provider words it
+_SPENT = re.compile(r"limit exceeded|insufficient (?:credit|funds|balance)|quota exceeded|out of credit", re.I)
+
+
 def _urlopen(req: urllib.request.Request, timeout: float):
     """The one place provider requests leave the process (tests stub it)."""
     return _opener.open(req, timeout=timeout)
@@ -147,10 +152,12 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
             except Exception:  # noqa: BLE001 — a synthetic HTTPError may carry no body
                 detail = ""
             # 402 (out of credit) says nothing about the request either —
-            # not worth retrying, but never the model's answer in an eval
+            # not worth retrying, but never the model's answer in an eval;
+            # nor does a 403 for a spent key ("Key limit exceeded")
+            spent = exc.code == 402 or (exc.code == 403 and _SPENT.search(detail) is not None)
             last = LLMError(f"provider returned {exc.code}: {detail}",
                             public=f"LLM provider returned HTTP {exc.code}",
-                            transient=exc.code in _RETRYABLE or exc.code == 402)
+                            transient=exc.code in _RETRYABLE or spent)
             if exc.code not in _RETRYABLE:
                 raise last from exc
             retry_after = _retry_after_seconds(

@@ -146,12 +146,17 @@ def _product_named(answer: str, key: str) -> bool:
 # a sentence that rules a CVE out as KEV / exploited ("non-KEV", "none are
 # KEV-listed", "no exploited_in_wild observation"), negation first
 _NOT_KEV = re.compile(r"non-?KEV|(?:\b(?:not|no|none|neither|nor|never|without)\b|n't\b)[^.;\n]{0,80}?"
-                      r"(?:KEV|exploit\w*|list\w*|touch\w*|run\w*|affect\w*|count\w*)"
+                      r"(?:KEV|exploit\w*|list\w*|touch\w*|run\w*|affect\w*|count\w*|catalog\w*|includ\w*)"
                       # an explicit exclusion: "ruled them out", "one near-miss", "none of which web-01 runs"
                       r"|\bruled\b[^.;\n]{0,20}\bout\b|\bnear[- ]miss|\bnot counted\b|\bnone of which\b", re.I)
 _CVE_SENTENCE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!etc\.)(?<=[.!?])\s+")   # "e.g." / "etc." end no sentence
 # "Examples include X": an example sentence continues the one before it
 _EXAMPLE_CUE = re.compile(r"^\W*(?:examples?\b|for example|e\.g\.|such as|including|these include|they include)", re.I)
+# ...or a sentence that points back at it: "I saw no KEV entries for them.
+# Their CVEs appear only with NVD or EPSS data, such as CVE-X" (Claude Opus 5.5)
+_CONTINUES = re.compile(r"^\W*(?:their|these|those|they|its)\b|\bsuch as\b|\bfor example\b|\be\.g\.", re.I)
+_POINTS_BACK = re.compile(r"^\W*(?:but\s+)?(?:that|this|it|they|these|those|so\b|not\b|the data ties it)", re.I)
+_ASSERTS_KEV = re.compile(r"\b(?:is|are|was|were|been)\b[^.;]{0,30}\b(?:exploited|KEV[- ]listed|on the KEV)", re.I)
 
 
 def _ruled_out(answer: str, cve: str) -> bool:
@@ -169,6 +174,14 @@ def _ruled_out(answer: str, cve: str) -> bool:
             if _NOT_KEV.search(sentence):
                 continue
             if i and _EXAMPLE_CUE.match(sentence) and _NOT_KEV.search(sentences[i - 1]):
+                continue
+            if (i and _CONTINUES.search(sentence) and _NOT_KEV.search(sentences[i - 1])
+                    and re.search(r"KEV|exploit", sentences[i - 1], re.I) and not _ASSERTS_KEV.search(sentence)):
+                continue
+            # ...or the next sentence rules it out, pointing back at it: "…,
+            # CVE-X. The data ties it to Android only, so it is not counted."
+            nxt = sentences[i + 1] if i + 1 < len(sentences) else ""
+            if nxt and _POINTS_BACK.match(nxt) and _NOT_KEV.search(nxt) and not _ASSERTS_KEV.search(sentence):
                 continue
             return False
     return found

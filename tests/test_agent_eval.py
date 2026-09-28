@@ -169,13 +169,23 @@ def test_a_cve_the_answer_rules_out_is_not_a_false_kev_claim():
                   "Two other OpenSSL CVEs were found — CVE-2026-9001 and CVE-2026-9002 — but neither has a CISA KEV listing.",
                   "I verified each points at other products — none touches web-01's software (e.g. CVE-2026-9001 → debian).",
                   "A scan of openssh CVEs (e.g., CVE-2026-9001, CVE-2026-9002, etc. — [abcdefab]) found **no** "
-                  "entries flagged `exploited_in_wild = True`."):
+                  "entries flagged `exploited_in_wild = True`.",
+                  # the exclusion one sentence back (Claude Opus 5.5, 2026-09-28)
+                  "**OpenSSH, nginx:** I saw no KEV entries for them. Their CVEs appear only with NVD or EPSS data, "
+                  "such as CVE-2026-9001 [abcdefab] and CVE-2026-9002.",
+                  # ruled out in the next sentence, or as "not in the catalogue"
+                  "A separate search found one extra KEV CVE, CVE-2026-9001 [abcdefab]. The data ties it to the "
+                  "Android kernel only, with no route to web-01, so it is not counted.",
+                  "There was a fact: cve:CVE-2026-9001 affects openssl [abcdefab]. But that is not marked exploited_in_wild.",
+                  "OpenSSL also has newer CVEs that are not in the catalogue, such as CVE-2026-9001 [abcdefab]."):
         r = ae._score_cves(f"{listed}\n{aside}", truth, seen, Store())
         assert r["pass"] and r["false_kev"] == 0 and r["ruled_out"] >= 1 and r["precision"] == 1.0, aside
     # a claim is still a claim — even next to an unrelated "not"
     for claim in ("CVE-2026-9001 is exploited in the wild and not yet patched.",
                   "CVE-2026-9001 is KEV-listed. Elsewhere, CVE-2026-9001 is not exploited.",
-                  "OpenSSL has no patch listed. CVE-2026-9001 is exploited in the wild."):
+                  "OpenSSL has no patch listed. CVE-2026-9001 is exploited in the wild.",
+                  "No KEV entry was missed. Critical CVEs such as CVE-2026-9001 are exploited in the wild.",
+                  "CVE-2026-9001 is exploited in the wild. It is not patched yet."):
         r = ae._score_cves(f"{listed}\n{claim}", truth, seen, Store())
         assert not r["pass"] and r["false_kev"] == 1, claim
 
@@ -415,6 +425,20 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
             assert exc.transient and call.call_count == 1
         else:
             raise AssertionError("402 must raise")
+    # a spent key (OpenRouter: 403 "Key limit exceeded") is the account's problem too
+    spent = urllib.error.HTTPError("https://x/v1", 403, "Forbidden", {},
+                                   io.BytesIO(b'{"error":{"message":"Key limit exceeded (total limit)","code":403}}'))
+    with mock.patch.object(_llm, "_urlopen", side_effect=spent):
+        try:
+            _llm._post_json("https://x/v1", {}, {})
+        except LLMError as exc:
+            assert exc.transient
+    denied = urllib.error.HTTPError("https://x/v1", 403, "Forbidden", {}, io.BytesIO(b'{"error":"model not allowed"}'))
+    with mock.patch.object(_llm, "_urlopen", side_effect=denied):
+        try:
+            _llm._post_json("https://x/v1", {}, {})
+        except LLMError as exc:
+            assert not exc.transient
 
 
 def test_excerpt_and_artifact_citations_count_as_seen_and_empty_completion_retries(seeded_db):

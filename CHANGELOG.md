@@ -45,6 +45,8 @@ tag is v0.1.0).
 - Faster: one walk per pack (memoized across the name-room rebuild), rare topic
   carriers counted before rows load, and describe_namespace's summary warmed at MCP
   start-up (D-102).
+- Agent scorecard: the exposure scorer counts an exclusion one sentence before or
+  after a CVE it rules out (D-103). Scorecard re-run 2026-09-28 (docs/models.md).
 - MCP `ask_scope` walks an over-deep request to the depth cap and says so.
 - `loomctx.agent_eval_ext`: two extended tasks (cross-domain admin audit,
   coverage honesty), run on demand and not part of the published
