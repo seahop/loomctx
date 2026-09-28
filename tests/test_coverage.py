@@ -193,6 +193,25 @@ def test_a_topic_of_many_predicates_filters_on_its_rare_ones(tmp_path):
     store.close()
 
 
+def test_a_sibling_walk_keeps_the_chain_when_the_cap_binds(tmp_path, monkeypatch):
+    """D-101: `siblings: true` from Domain Admins fanned out through every
+    co-member's other groups and filled the entity cap before the members
+    three hops down; the chain is now walked first and ranked first."""
+    import os
+    from loomctx import agent_eval_ext as ext
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_ENTITIES", "60")
+    ext.main(["prepare", str(tmp_path), "--scale", "small"])
+    store = SqliteStore(tmp_path / "forest.db")
+    _load_ldif(store, open(os.path.join(tmp_path, "forest.ldif")).read())
+    pack = build_pack(store, AskRequest(namespace="ad", budget=4000,
+                                        question="Which users and groups are members of Domain Admins, directly or through nested groups?",
+                                        scope=ScopeSpec(subjects=[EntityRef(type="group", key=f"{ext.CORP_SID}-512")],
+                                                        expand=["member_of"], depth=3, siblings=True)))
+    text = "\n".join(i.text for i in pack.items)
+    assert all(f"{ext.DEV_SID}-{ext.DEV_USERS[n][0]}" in text for n in ("dlee", "dkim", "dpatel", "dgarcia", "dnguyen"))
+    store.close()
+
+
 def test_the_exceptional_status_is_the_minority_value():
     from datetime import datetime, timezone
     from loomctx.context import _exceptional_status

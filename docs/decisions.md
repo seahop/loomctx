@@ -3245,6 +3245,23 @@ a table without outer pipes, a lead-in in a parent bullet or a heading, a
 domain controller set aside a sentence on, "constrained" beside a later
 "unconstrained", a distractor stated as nested *into* the account's group.
 
+## D-101 · A sibling walk keeps its chain (2026-09-28)
+
+In the five-run extended pass Claude Haiku 4.5 asked every xdomain question
+with `siblings: true` and scored 0/5. Sideways from Domain Admins through
+ten thousand accounts, every co-member's other groups filled the entity cap
+at the second hop, and the child-domain members three hops down were never
+reached; replayed without `siblings`, the same call listed all five.
+
+A walk with `siblings` is now two: the no-turn-back walk (D-080), then the
+sibling walk's other entities in what room the cap leaves (a cut still
+recorded as `scope_cap`). The pack ranks, first, the edges of the chain the
+no-turn-back walk found, then those entities' facts that stay inside it,
+then what the sibling walk added — the reached admins' memberships in two
+dozen other groups had outranked the hop-three members. A walk without
+`siblings` is unchanged. Haiku's call now returns all five members; the AD
+benchmark is unchanged (11/11 at every budget).
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

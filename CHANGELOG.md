@@ -40,6 +40,8 @@ tag is v0.1.0).
 - A scope topic naming several predicates filters on its rare ones: the walk admits,
   and the pack ships first, the entities carrying the filter, then their display
   fields (D-100).
+- A `siblings` scope walks the no-turn-back chain first and ranks it first; the
+  sibling walk fills what room the entity cap leaves (D-101).
 - MCP `ask_scope` walks an over-deep request to the depth cap and says so.
 - `loomctx.agent_eval_ext`: two extended tasks (cross-domain admin audit,
   coverage honesty), run on demand and not part of the published

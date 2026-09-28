@@ -1258,6 +1258,46 @@ def resolve_scope_paths(
     allowed_types: tuple[str, ...] | None = None,
     gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
     question: str | None = None,
+    core_out: set[tuple[str, str]] | None = None,
+) -> tuple[list[EntityRef], Paths]:
+    """The scope walk (`_walk_scope`). A walk with `siblings` is two (D-101):
+    the no-turn-back walk first, then the sibling walk's other entities in
+    what room the entity cap leaves. Walked sideways from Domain Admins
+    through ten thousand accounts, every co-member's other groups filled the
+    cap at the second hop, and the child-domain members three hops down —
+    the answer — were never reached."""
+    if not scope.siblings:
+        return _walk_scope(store, namespace, scope, truncated, as_of, valid_at, allowed_types,
+                           gathered_out, question)
+    from .config import max_scope_entities
+    truncated = truncated if truncated is not None else {}
+    base, base_paths = _walk_scope(store, namespace, scope.model_copy(update={"siblings": False}), truncated,
+                                   as_of, valid_at, allowed_types, gathered_out, question)
+    if core_out is not None:   # the pack ships these entities' facts first
+        core_out.update((r.type, r.key) for r in base)
+    wide_truncated: Truncations = {}
+    wide, wide_paths = _walk_scope(store, namespace, scope, wide_truncated, as_of, valid_at, allowed_types,
+                                   gathered_out, question)
+    have = {(r.type, r.key) for r in base}
+    room = max(0, max_scope_entities() - len(base))
+    extra = [r for r in wide if (r.type, r.key) not in have]
+    kept = extra[:room]
+    paths = {**{(r.type, r.key): wide_paths[(r.type, r.key)] for r in kept if (r.type, r.key) in wide_paths},
+             **base_paths}
+    for key, t in wide_truncated.items():
+        truncated.setdefault(key, t)
+    if len(extra) > room:
+        _record_scope_cap(truncated, extra[room], len(base) + room, len(base) + len(extra))
+    return base + kept, paths
+
+
+def _walk_scope(
+    store: GraphStore, namespace: str, scope: ScopeSpec,
+    truncated: Truncations | None = None,
+    as_of: datetime | None = None, valid_at: datetime | None = None,
+    allowed_types: tuple[str, ...] | None = None,
+    gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
+    question: str | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
@@ -1639,11 +1679,12 @@ def _build_pack(
     gathered: dict[tuple[str, str], list[Observation]] = {}
     asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     widened: list[str] = []
+    core: set[tuple[str, str]] = set()
     if req.scope is not None:
         subjects, paths = resolve_scope_paths(
             store, req.namespace, req.scope, truncated,
             as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
-            gathered_out=gathered, question=req.question)
+            gathered_out=gathered, question=req.question, core_out=core)
         if not paths and req.scope.expand and req.scope.depth > 0:
             # a walk that reached nothing along what it named — an invented
             # predicate, attributes only — walks the containment too (D-099):
@@ -1893,6 +1934,7 @@ def _build_pack(
         focus=(topic & {o.predicate for o in observations}) or _focus(req.scope, req.question),
         topic=topic,
         lead=lead,
+        core=frozenset(core),
         attribute=attribute,
         excerpts=excerpts,
         paths={key: [o.id for o in chain] for key, chain in paths.items()},
@@ -2599,6 +2641,7 @@ def _pack(
     attribute: frozenset[str] = frozenset(),
     notes: list[str] | None = None,
     lead: frozenset[str] = frozenset(),
+    core: frozenset[tuple[str, str]] = frozenset(),
 ) -> ContextPack:
     """Rank, then fill the budget (D-051). Order of business: conflicts
     (never silently dropped, capped at `conflict_share` of the budget),
@@ -2756,7 +2799,7 @@ def _pack(
     # the CVE's epss_percentile, and not one fact shipped.
     subject_keys = {(s.type, s.key) for s in subjects}
     by_id = {o.id: o for o in observations} if paths else {}
-    pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys)
+    pool = _fact_pool(scored, paths or {}, by_id, superseded_by, subject_keys, core)
     edge_costs: dict[str, int] = {}
     page_handles = _page_handles(namespace, truncated, page_cursors, as_of, valid_at,
                                  page_before, page_predicate, question)
@@ -2975,9 +3018,11 @@ def _fact_pool(
     by_id: dict[str, Observation],
     superseded_by: dict[str, Observation],
     subject_keys: set[tuple[str, str]],
+    core: frozenset[tuple[str, str]] = frozenset(),
 ) -> Pool:
     """Every candidate fact rendered and priced once per pack, densest
-    first: (score per token, score, cost, obs, text, path).
+    first: (score per token, score, cost, obs, text, path). With `core` (a
+    sibling walk's no-turn-back entities, D-101), their facts come first.
 
     The path is the chain of the pack subject the fact was gathered on:
     its subject's, or — for an edge pointing INTO a reached entity from
@@ -3001,7 +3046,18 @@ def _fact_pool(
     # dozen memberships in other groups (away from the root) tie with the
     # hop-three members' edges into DEV-Ops, and came first by hop order
     walked = {pid for chain in paths.values() for pid in chain}
-    pool.sort(key=lambda e: (e[0], e[3].id in walked), reverse=True)
+    if core:
+        # the chain's own edges, then its entities' facts that stay inside
+        # it, then everything the sibling walk added
+        chain = {pid for key, ids in paths.items() if key in core for pid in ids}
+
+        def inside(obs: Observation) -> bool:
+            if (obs.subject.type, obs.subject.key) not in core:
+                return False
+            return not isinstance(obs.object, EntityRef) or (obs.object.type, obs.object.key) in core
+        pool.sort(key=lambda e: (e[3].id in chain, inside(e[3]), e[0], e[3].id in walked), reverse=True)
+    else:
+        pool.sort(key=lambda e: (e[0], e[3].id in walked), reverse=True)
     return pool
 
 
