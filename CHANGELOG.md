@@ -8,6 +8,26 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Agent scorecard fixed and re-run; GKE re-validation (D-089, D-090)
+
+- The agent harness gives models 8,000 output tokens per turn on the
+  OpenAI-compatible path too (it ran OpenRouter models at 1,500, which a
+  reasoning model's hidden thinking spent before answering), records why
+  each reply ended, and reports a second empty reply as an error instead
+  of an empty answer.
+- The scorers judge what an answer claims: a CVE named to rule it out, a
+  former lease holder named to reject it ("not web-01"), a first sentence
+  ending in a date, and typographic hyphens no longer fail a right answer.
+- `docs/models.md`: 36 models × 5 runs on GKE, 19 pass every task every
+  run; 0 unseen citations in 695 task-runs.
+- `iam_eval` compares edges through cross-IdP identity merges (D-090); the
+  large IAM run is 0 missing / 0 extra on every predicate.
+- Re-validated on GKE after the rename (`deploy/README.md`): tests, 25/25
+  security checks, load, failover (15 s, 0 of 233 writes lost), identity
+  and estate at scale, retrieval scorecard. An A/B of the initial load on
+  identical stacks: the current build 633/s against 361/s for the
+  2026-09-25 build.
+
 ### Renamed to LoomCtx (D-088)
 
 - The project is **LoomCtx**: repo `seahop/loomctx`, Python package

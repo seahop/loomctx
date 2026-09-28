@@ -2889,7 +2889,7 @@ outside the repo depends on the old names.
   fresh cluster. The saved demo transcripts under `demo/` are recordings
   and keep the old tool names until the next rehearsal re-captures them.
 
-## D-089 · Agent scorecard: room to think, empty replies are errors, ruled-out CVEs are not claims (2026-09-27)
+## D-089 · Agent scorecard: room to think, empty replies are errors, answers scored on what they claim (2026-09-27)
 
 The 2026-09-27 scorecard (36 models × 5 runs on GKE, the first on the
 renamed build) came back with 45 empty answers across 16 models — mostly
@@ -2914,15 +2914,62 @@ harness defects, all fixed before any number was published:
    wrong for "OpenSSL does carry non-KEV CVEs, e.g. X, but none are
    KEV-listed", which careful models write. A non-KEV CVE now counts
    against the answer only when some sentence naming it does not rule it
-   out as KEV / exploited (`_ruled_out`); precision is over the CVEs the
-   answer claims. A claim next to an unrelated "not" ("exploited in the
-   wild and not yet patched") still fails.
+   out (`_ruled_out`): a negation followed by KEV / exploited / listed /
+   runs / affects / touches ("neither has a CISA KEV listing", "none
+   touches web-01's software"), an explicit exclusion ("ruled them out",
+   "one near-miss", "none of which web-01 runs"), or an "Examples include
+   X" sentence right after one of those. Precision is over the CVEs the
+   answer claims. A claim still fails: next to an unrelated "not"
+   ("exploited in the wild and not yet patched"), after an unrelated "no"
+   ("no patch listed. X is exploited"), or as a bare list item or table
+   cell under an exposure heading.
 
 Verified on the five worst-affected models before the re-run: GPT-5.2 and
 Kimi K3 went from empty answers to passes naming all 32 KEV CVEs; GLM-5.3
 and Qwen3.8 Max answered in full and passed once the ruled-out rule held.
+Reading the re-run's failures one by one turned up four more scorer
+defects of the same kind — a correct answer failed on its wording:
+
+4. **The ruled-out forms.** "no such listing", "neither has a CISA KEV
+   listing", "none touches web-01's software", "ruled them out", "one
+   near-miss … not counted", and "Examples include X" after a sentence that
+   rules them out. All now count as ruling a CVE out (the forms in 3).
+5. **A lease answer ending in a date.** The first-sentence split skipped a
+   period after a digit (to keep 10.0.4.7 whole), so "laptop-17 held it on
+   2026-08-20. The prior assignment to web-01 ended…" read as one sentence
+   naming web-01. A period followed by whitespace now ends the sentence.
+6. **"not web-01".** "held by laptop-17, not web-01" named the former
+   holder only to reject it; a mention right after "not", "rather than" or
+   "instead of" is no longer an assertion. "was never reassigned from
+   web-01" still is (S-43).
+7. **Typographic hyphens.** Some models write `laptop‑17` and `CVE‑2010‑3904`
+   with U+2011; answers are scored with typographic hyphens and spaces
+   mapped to plain ones.
+
 The first table was not published; the scorecard in `docs/models.md` is the
-re-run on this harness.
+re-run on this harness, its transcripts re-scored with these scorers
+(each task's own scorer on the stored answer and truth, the run-time
+citation check kept). That flipped fifteen runs to pass and none to fail.
+Every failure left was read by hand and is the model's: a non-KEV CVE
+listed as part of the exposure (14 runs in four models), too few of the
+32 KEV CVEs named, no citation or a CVE that does not exist, the wrong CVE
+asked about, the 8,000-token cap (`glm-5.3`), or tool calls written as text
+(`llama-4-maverick` on OpenRouter).
+
+## D-090 · The IAM scale check compares edges through identity merges (2026-09-27)
+
+The first `large` IAM run after D-083 (GKE, 60,000 Entra + 41,973 Okta
+users, 1,585,591 observations) reported tens of thousands of edges as both
+missing and extra — `member_of` 60,967 of 208,231 on the Entra side — with
+Expected equal to Stored for every predicate. Nothing was lost: D-083
+resolves the Entra and Okta records of one person (shared mail) into one
+entity, so their edges read under the surviving key, while `iam_eval`
+diffed by the raw export key. Every merge looked like one missing plus one
+extra edge. Mapping each expected endpoint through the store first
+(`canonical_edges`) gives 0 missing / 0 extra on both sides; the report now
+says how many export keys it compared under a merged identity. On that
+run, re-reported after the identity pass drained: every predicate 0 / 0,
+all 41,973 shared-address identities merged.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

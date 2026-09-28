@@ -44,7 +44,7 @@ without touching LoomCtx's code.
 | Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
 | A graph database | traversal power, but the agent talks to the graph and gets whatever the query returns | the graph is the index, not the payload: the agent gets a question-scoped pack, and a multi-hop question is one `ask_scope` call |
 | SIEM search | fast search over events; entities are a pivot, not a memory | entity-centric memory across sources with provenance, conflict detection and time travel built into every read |
-| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that catches an invented one: one unseen citation in 216 task-runs across eighteen models, caught and failed (`docs/models.md`) |
+| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that fails an invented one: across 695 task-runs on 35 models no answer cited an id it was not shown, and the runs that named a CVE that does not exist were failed (`docs/models.md`) |
 
 ## Repository layout
 

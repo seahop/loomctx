@@ -482,6 +482,44 @@ minutes in; after the drain one more pass found 75 left (48 s). Every
 check held (5,400/5,400 machines, 3,000/3,000 accounts, 0 false merges,
 purple 600/600, drift reported by the gateway import).
 
+### Re-validated after the rename to LoomCtx (2026-09-27, D-088…D-090)
+
+The first run on the renamed build (`354c3d9`, then the D-089 harness
+fixes): project `<PROJECT_ID>`, a fresh `3 × e2-standard-4` cluster with
+Dataplane V2 plus a two-node `eval` pool (tainted) for the scorecards,
+CloudNativePG 1.26, `scale-pg-ha` with auth, signed handles and provider
+keys, images from the new `loomctx` Artifact Registry repo, pinned by
+digest. Every name, env var, key prefix, metric and k8s resource is the
+new one; nothing was migrated from an older cluster.
+
+| Check | Result |
+| --- | --- |
+| Test suites as Jobs | SQLite and Postgres lanes green on every image of the run; the live e2e answer test passes against OpenRouter |
+| Browser guards, auth, signed handles, write gates (engine, gateway, queue) | 25 / 25 checks pass |
+| Initial load (`vulns load --bridge-seed-hosts`) | 612,805 envelopes, 0 refused, 235/s — with both enrichment pools embedding and writing dossiers alongside; 185/s into a second namespace of a store already holding 3.4M rows, enrichment off. See the A/B below |
+| Ingest, lb → 2 gateways → JetStream → 2 consumers → Postgres | 5,000 at concurrency 32: **237/s, p50 93 ms, p99 568 ms, 0 errors**, 5,000/5,000 rows (D-063: 178/s) |
+| Asks, auth + signed handles + semantic ranking | 3,000 at concurrency 16: **186/s, p50 83 ms, p99 135 ms, 0 errors** (D-063: 201/s, p99 202 ms) |
+| Primary deleted under a 2/s write probe | promoted in **15 s**; **0 of 233 writes failed**; 233/233 rows present |
+| Identity at scale (`iam_eval`, large: 60,000 Entra + 41,973 Okta users) | 1,585,591 observations, 0 refused; posted in 3,123 s, drained at 4,896 s; re-import adds 0 rows; every planted path found and cited; edge fidelity 0 missing / 0 extra on every predicate once compared through identity merges (D-090; all 41,973 shared-address identities merged) |
+| Estate (`estate_eval`, large: 6,000 machines) | 1,274,653 envelopes, 0 refused; posted in 2,627 s, drained in 5,610 s (D-087 run: 2,727 / 6,343 s); 5,400 / 5,400 machines folded, 0 false merges; 3,000 / 3,000 accounts; purple 600 / 600; drift and coverage gaps reported |
+| Retrieval scorecard (542,100-observation corpus, `deepseek-chat-v3.1` reader, 3 runs) | LoomCtx 77 / 84 / 87 / 96 % vs vector 75 / 76 / 79 / 85 % at 400 / 800 / 1,600 / 3,200 tokens; multi-hop 15/18 at 3,200 — reproduces `docs/evaluation.md` |
+| Agent scorecard (36 models × 5 runs as six parallel Jobs) | 19 models 20/20 — `docs/models.md` (D-089) |
+
+**The load-rate A/B.** The 235/s initial load sat far below D-063's 435/s,
+so the same load ran into two identical fresh stacks side by side — one
+engine, one Postgres, one loader per node, nothing else on them — one on
+the 2026-09-25 build (`e74ef8d`, the D-063 code), one on this one:
+
+| Build | Envelopes | Seconds | Rate |
+| --- | --- | --- | --- |
+| `e74ef8d` (2026-09-25) | 612,788, 0 refused | 1,699 | 361/s |
+| current | 612,788, 0 refused | 968 | **633/s** |
+
+The code got faster, not slower. The shortfall on the HA stack is its
+conditions that day — concurrent enrichment writes on the first load, a
+store already carrying millions of rows on the second, and the auth and
+replica layers the A/B stacks do not have — not isolated further.
+
 ### Local cluster (kind/minikube/Rancher Desktop) without GHCR
 
 ```bash

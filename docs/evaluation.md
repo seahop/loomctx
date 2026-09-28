@@ -274,6 +274,13 @@ across the eighteen models), and this scorecard never has an agent phrase
 one — the harness builds each pack itself and the live reader
 (`deepseek-chat-v3.1`) only reads it.
 
+The 2026-09-27 run on GKE — the first on the renamed build, the corpus
+migrated to `loomctx.db` (schema v8), run as a Job — reproduced it again:
+`loomctx` 77 / 84 / 87 / 96 %, `vector` 75 / 76 / 79 / 85 %, `recency`
+50 / 75 / 75 / 78 %, multi-hop 15/18 at 3,200, no hallucination on the 24
+abstention rows; `full` 98 % on the 47 questions it could send. About
+$1.20 of reader calls.
+
 ## Caveats
 
 - **One corpus, or two.** The seed is small and synthetic; the vulns corpus
