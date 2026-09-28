@@ -636,6 +636,22 @@ async def _session(db: str | None, fn):
             return await fn(session, getattr(init, "instructions", None) or "")
 
 
+def select_tasks(names: list[str] | None) -> list[Task]:
+    """The four scorecard tasks by default; a named task not among them is
+    looked up in the extended set (`agent_eval_ext`), which is never part
+    of a default run or the published scorecard."""
+    if not names:
+        return list(TASKS)
+    pool = list(TASKS)
+    if set(names) - {t.name for t in TASKS}:
+        from .agent_eval_ext import EXTENDED_TASKS
+        pool += EXTENDED_TASKS
+    unknown = set(names) - {t.name for t in pool}
+    if unknown:
+        raise SystemExit(f"unknown task(s): {', '.join(sorted(unknown))}")
+    return [t for t in pool if t.name in names]
+
+
 def evaluate(db: str | None, task_names: list[str] | None, model: str | None = None,
              caller: Callable = call_model,
              on_result: Callable[[RunResult], None] | None = None) -> list[RunResult]:
@@ -646,7 +662,7 @@ def evaluate(db: str | None, task_names: list[str] | None, model: str | None = N
     # must not need one to exercise the loop
     provider = (Provider.from_env(model) if caller is call_model
                 else Provider("openai", "scripted://", model or "scripted", None))
-    tasks = [t for t in TASKS if not task_names or t.name in task_names]
+    tasks = select_tasks(task_names)
     store = store_from_url(db) if db else store_from_env()
     try:
         async def run_all(session, instructions):
@@ -767,7 +783,8 @@ def main(argv: list[str] | None = None) -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", help="explicit store URL/path; bypasses LOOMCTX_SHARDS / LOOMCTX_BLOB_* "
                                      "(default: the store LOOMCTX_DB and friends configure)")
-    parser.add_argument("--tasks", help="comma-separated subset of: " + ",".join(t.name for t in TASKS))
+    parser.add_argument("--tasks", help="comma-separated subset of: " + ",".join(t.name for t in TASKS)
+                        + " (or the extended, unpublished tasks in loomctx.agent_eval_ext: xdomain, coverage)")
     parser.add_argument("--model", help="override LOOMCTX_AGENT_MODEL / LOOMCTX_LLM_MODEL")
     parser.add_argument("--models", help="comma-separated models to compare (a scorecard run)")
     parser.add_argument("--repeat", type=int, default=1, help="scorecard runs: full runs per model (pass rates)")
@@ -791,7 +808,7 @@ def main(argv: list[str] | None = None) -> None:
                 except Exception as exc:  # a model that cannot even start still gets a row
                     batch = [RunResult(task=t.name, answer="", steps=0, error=f"{type(exc).__name__}: {exc}",
                                        score={"pass": False}, infra=True)
-                             for t in TASKS if not names or t.name in names]
+                             for t in select_tasks(names)]
                 # the callback appended what finished; a start-up failure appends the error rows
                 del runs[model][done:]
                 runs[model].extend(batch)
