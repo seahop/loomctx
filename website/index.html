@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoomCtx</title>
+<meta name="description" content="LoomCtx is an open-source context engine for AI agents in security operations. It remembers what every source said about a host, IP, account or CVE, and hands agents small, cited, token-budgeted context packs.">
+<meta property="og:title" content="LoomCtx — context engine for AI agents">
+<meta property="og:description" content="Cited, token-budgeted, time-aware context packs for red and blue team agents. Apache-2.0.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://loomctx.dev/">
+<link rel="canonical" href="https://loomctx.dev/">
+<meta name="theme-color" content="#0e1120">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e1120'/%3E%3Cg stroke-width='3.2' stroke-linecap='round'%3E%3Cpath d='M8 7v18M16 7v18M24 7v18' stroke='%236d97ff'/%3E%3Cpath d='M6 11h6M20 11h6M6 21h6M20 21h6M12 16h8' stroke='%23ec7556'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap">
+<link rel="stylesheet" href="assets/site.css?v=dce2a2f390">
+<script>
+  // apply a remembered theme before first paint
+  try { var t = localStorage.getItem("loomctx-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="LoomCtx home">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="7" fill="var(--ink)"/>
+        <g stroke-width="3.2" stroke-linecap="round">
+          <path d="M8 7v18M16 7v18M24 7v18" stroke="var(--woad)"/>
+          <path d="M6 11h6M20 11h6M6 21h6M20 21h6M12 16h8" stroke="var(--madder)"/>
+        </g>
+      </svg>
+      loomctx
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#pack">Context packs</a>
+      <a href="#teams">Red &amp; blue</a>
+      <a href="#evidence">Results</a>
+      <a href="#models">Models</a>
+      <a href="#connect">Connectors</a>
+      <a href="#run">Run it</a>
+    </nav>
+    <div class="nav-cta">
+      <button class="theme-btn" id="theme-toggle" type="button" aria-label="Switch color theme">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.5v10a5 5 0 0 1 0-10Z"/></svg>
+      </button>
+      <a class="btn btn-primary btn-sm" href="https://github.com/seahop/loomctx">GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <span class="eyebrow rise">Open-source context engine · Apache-2.0</span>
+      <h1 class="rise d1">Your agent needs <span class="thin">the right</span> 400&nbsp;tokens, <em>with receipts.</em></h1>
+      <p class="lede rise d2">
+        LoomCtx remembers everything your tools have said about a host, an IP, an account or a CVE, and when it was true.
+        When an agent asks, LoomCtx answers with a small, cited, time-aware <b>context pack</b> that fits the token budget
+        the agent gave it. Sources that disagree come first. Anything cut is listed so the agent can fetch it.
+      </p>
+      <div class="hero-actions rise d3">
+        <a class="btn btn-primary" href="#run">Run it in 5 minutes →</a>
+        <a class="btn btn-ghost" href="#pack">See a context pack</a>
+      </div>
+      <div class="hero-meta rise d4">
+        <span><i></i>MCP · HTTP · Python / TS / Go SDKs</span>
+        <span><i style="background:var(--madder)"></i>Built for red and blue teams</span>
+        <span><i style="background:var(--weld)"></i>SQLite on a laptop → Postgres on k8s</span>
+      </div>
+    </div>
+
+    <figure class="loomctx-figure rise d2" aria-labelledby="loomctx-cap" style="margin:0">
+      <div class="loomctx-head">
+        <span><b>host:web-01</b> · every source, over time</span>
+        <span>ask · budget <b>400</b></span>
+      </div>
+      <div class="weave-wrap">
+        <canvas id="weave" role="img" aria-label="Source threads running across time. A budget window selects a handful of observations, including a conflict between two sources."></canvas>
+      </div>
+      <div class="weave-legend" id="loomctx-cap">
+        <span><i class="sw sw-knot"></i>observation</span>
+        <span><i class="sw sw-sel"></i>packed</span>
+        <span><i class="sw sw-conf"></i>sources disagree</span>
+        <span><i class="sw sw-win"></i>351 of 400 tokens spent</span>
+      </div>
+<pre class="pack" aria-label="The context pack LoomCtx returns"><span class="c">// POST /v1/ask → "what operating system does this run?"  (abridged)</span>
+{
+  <span class="k">"items"</span>: [
+    <span class="hl-conf">{ <span class="k">"kind"</span>: <span class="s">"conflict"</span>,</span>
+      <span class="k">"text"</span>: <span class="s">"CONFLICT on host:web-01 runs_os: nmap-scan says
+        'ubuntu-22.04' as of 2026-08-18; asset-inventory
+        says 'fedora-44' as of 2026-07-03"</span>,
+      <span class="k">"citations"</span>: [ <span class="s">"obs_7f3a…"</span>, <span class="s">"obs_2c91…"</span> ] },
+    { <span class="k">"kind"</span>: <span class="s">"fact"</span>, <span class="k">"text"</span>: <span class="s">"web-01 listens_on_port 443"</span>, … }
+  ],
+  <span class="k">"handles"</span>: [{ <span class="k">"hint"</span>: <span class="s">"76 more 'logged_in_by' observations"</span> }],
+  <span class="k">"omitted_handles"</span>: <span class="n">4</span>,
+  <span class="k">"charged_tokens"</span>: <span class="n">351</span>
+}</pre>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ PROBLEM ============ -->
+<section class="band" id="problem">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">The problem</span>
+      <h2>Agents get nothing, or they get everything.</h2>
+      <p class="lede">
+        Security teams hold years of facts about the same things, spread across scanners, inventories, identity providers,
+        DHCP logs and advisories. An agent asked about one host gets either a blank or a dump of rows. LoomCtx sits in between:
+        <em>“what do we know about web-01 that matters to Tuesday's alert, in under 800 tokens, with citations.”</em>
+      </p>
+    </div>
+    <div class="contrast">
+      <div>
+        <div class="big red">127,715<small>tokens</small></div>
+        <p>Mean prompt when the model is handed the full record for each question. The largest ran to 1.87 million tokens, and six multi-hop questions were too big to send at all.</p>
+        <span class="src">full-context baseline · 95% on the 47 it could send</span>
+      </div>
+      <div>
+        <div class="big blue">611<small>tokens</small></div>
+        <p>Mean prompt for a LoomCtx context pack at a 3,200-token budget. Accuracy: 96% on all 53 questions, including the multi-hop ones.</p>
+        <span class="src">loomctx@3200 · same corpus, same reader model</span>
+      </div>
+      <div>
+        <div class="big">15<small>of 18</small></div>
+        <p>“Which CISA-KEV CVEs affect software this host runs?” LoomCtx answered it in 15 of 18 runs. Vector search, recency and full context got 0 of 18.</p>
+        <span class="src">542,099 real observations: CISA KEV + NVD + EPSS</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HOW ============ -->
+<section class="band band-alt" id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">How it works</span>
+      <h2>The write path is greedy. The read path is stingy.</h2>
+      <p class="lede">Take in everything with its provenance, enrich it in the background, then answer each read from cheap precomputed material, inside the budget the caller set.</p>
+    </div>
+
+    <div class="principles">
+      <div class="principle">
+        <h3>Two front doors, one model</h3>
+        <p>Structured <b>claims</b> become observations directly. <b>Documents</b> are stored verbatim, then mined for claims with character-level provenance. Retrieval never cares which door a fact came through.</p>
+      </div>
+      <div class="principle">
+        <h3>Bitemporal from day one</h3>
+        <p>Every fact records when it was true and when LoomCtx learned it. “Which host had 10.0.4.7 during the incident window?” is one query, and it returns laptop-17, not web-01, which held the lease until August 10.</p>
+      </div>
+      <div class="principle">
+        <h3>The graph is the index, not the payload</h3>
+        <p>Agents never query the graph. They ask a question with a budget and get a pack. A multi-hop question (“KEV CVEs on software this host runs”) is a single scoped ask.</p>
+      </div>
+      <div class="principle">
+        <h3>Append-only, never silently wrong</h3>
+        <p>Observations are never edited, only superseded, and corrections are recorded. Redaction suppresses history and never rewrites it. When LoomCtx didn't look at everything, the pack says so.</p>
+      </div>
+      <div class="principle">
+        <h3>Malleable by construction</h3>
+        <p>Register your own entity types and predicates per namespace, swap SQLite for Postgres, plug in your own enrichers. None of it needs a fork. The tutorial builds a vuln-management domain without touching core code.</p>
+      </div>
+      <div class="principle">
+        <h3>Every derived fact is cited</h3>
+        <p>Each pack item carries the observation ids behind it. A faithfulness check fails any answer that cites an id the model was never shown.</p>
+      </div>
+    </div>
+
+    <div class="paths">
+      <div class="path write">
+        <div class="path-title"><h3>Write path</h3><span class="tag">greedy</span></div>
+        <ol class="steps">
+          <li><div><b>One envelope</b><span><code>kind: claim</code> or <code>kind: document</code> via HTTP, batch NDJSON, Kafka, Fluent Bit, Vector or the Go gateway.</span></div></li>
+          <li><div><b>Append an observation</b><span>Subject, predicate, object, source, confidence, <code>valid_from/valid_to</code> and <code>recorded_at</code>. Idempotent on <code>event_id</code>.</span></div></li>
+          <li><div><b>Enrich asynchronously</b><span>Chunk and embed documents, extract claims with an LLM, resolve entities (natural keys → aliases → embeddings → adjudication). Merges are reversible.</span></div></li>
+          <li><div><b>Precompute</b><span>A bitemporal graph with time-bounded edges, plus cited per-entity dossiers so reads stay cheap.</span></div></li>
+        </ol>
+      </div>
+      <div class="path read">
+        <div class="path-title"><h3>Read path</h3><span class="tag">stingy</span></div>
+        <ol class="steps">
+          <li><div><b>Resolve the scope</b><span>One subject, or a bounded walk over containment and relation edges. Hub entities are never silently sampled.</span></div></li>
+          <li><div><b>Rank</b><span>BM25 and embedding similarity fused by reciprocal rank, weighted by recency and source confidence.</span></div></li>
+          <li><div><b>Conflicts first</b><span>When independent sources disagree on the same instant, that disagreement leads the pack. LoomCtx never picks a side silently.</span></div></li>
+          <li><div><b>Pack to budget</b><span>Value-per-token selection up to the budget. Every item is cited. What didn't fit becomes a signed expansion handle, and <code>charged_tokens</code> reports what was spent.</span></div></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ANATOMY ============ -->
+<section class="band" id="pack">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">The retrieval contract</span>
+      <h2>Anatomy of a context pack.</h2>
+      <p class="lede">The pack is the API. MCP, HTTP and all three SDKs serialize this same shape, and it is published as JSON Schema and OpenAPI, drift-checked in CI.</p>
+    </div>
+    <div class="anatomy">
+<pre class="pack" aria-label="Example context pack with numbered annotations"><span class="c">POST /v1/ask</span>
+{ <span class="k">"namespace"</span>: <span class="s">"netsec"</span>,
+  <span class="k">"subject"</span>: { <span class="k">"type"</span>: <span class="s">"host"</span>, <span class="k">"key"</span>: <span class="s">"web-01"</span> },
+  <span class="k">"question"</span>: <span class="s">"who logged in this week?"</span>,
+  <span class="k">"as_of"</span>: <span class="n">null</span>,  <span class="k">"valid_at"</span>: <span class="n">null</span>,          <span class="pin">1</span>
+  <span class="k">"budget"</span>: <span class="n">800</span> }                               <span class="pin">2</span>
+
+<span class="c">200 OK</span>
+{ <span class="k">"items"</span>: [
+    { <span class="k">"kind"</span>: <span class="s">"fact"</span>,                                 <span class="pin">3</span>
+      <span class="k">"text"</span>: <span class="s">"jdoe logged into web-01 on 2026-09-01 14:03 UTC."</span>,
+      <span class="k">"score"</span>: <span class="n">0.92</span>,
+      <span class="k">"citations"</span>: [{ <span class="k">"observation_id"</span>: <span class="s">"…"</span>,             <span class="pin">4</span>
+                      <span class="k">"source"</span>: <span class="s">"auth-log"</span>,
+                      <span class="k">"observed_at"</span>: <span class="s">"2026-09-01T14:03:00Z"</span> }] }
+  ],
+  <span class="k">"handles"</span>: [                                          <span class="pin">5</span>
+    { <span class="k">"id"</span>: <span class="s">"h2_…"</span>, <span class="k">"kind"</span>: <span class="s">"more"</span>, <span class="k">"est_tokens"</span>: <span class="n">2664</span>,
+      <span class="k">"hint"</span>: <span class="s">"74 more 'logged_in_by' observations for host:web-01"</span> },
+    { <span class="k">"id"</span>: <span class="s">"h2_…"</span>, <span class="k">"kind"</span>: <span class="s">"conflict"</span>, <span class="k">"est_tokens"</span>: <span class="n">71</span>,
+      <span class="k">"hint"</span>: <span class="s">"CONFLICT on host:web-01 runs_os did not fit the budget"</span> }
+  ],
+  <span class="k">"omitted_handles"</span>: <span class="n">3</span>,
+  <span class="k">"truncated"</span>: [{ <span class="k">"entity"</span>: { <span class="k">"type"</span>: <span class="s">"product"</span>,        <span class="pin">6</span>
+                             <span class="k">"key"</span>: <span class="s">"linux:linux_kernel"</span> },
+                 <span class="k">"gathered"</span>: <span class="n">1000</span>, <span class="k">"total"</span>: <span class="n">2740</span> }],
+  <span class="k">"charged_tokens"</span>: <span class="n">781</span> }                               <span class="pin">7</span></pre>
+      <ol class="notes">
+        <li><span class="pin">1</span><div><b>Time travel on every read</b><span><code>valid_at</code> asks what was true at a moment. <code>as_of</code> asks what LoomCtx knew at a moment. Incident timelines get both.</span></div></li>
+        <li><span class="pin">2</span><div><b>The budget is mandatory</b><span>There is no read without one. Small budgets get the densest facts. LoomCtx packs by value per token, not by position.</span></div></li>
+        <li><span class="pin">3</span><div><b>Typed items</b><span><code>brief</code>, <code>fact</code>, <code>relation</code>, <code>doc_excerpt</code> or <code>conflict</code>. Conflicts ship first, so the agent sees a disagreement before anything else.</span></div></li>
+        <li><span class="pin">4</span><div><b>Citations on everything</b><span>Every item points at the observations behind it, with source and time. <code>GET /v1/observations/{id}/prov</code> exports W3C PROV-O.</span></div></li>
+        <li><span class="pin">5</span><div><b>Expansion handles</b><span>What didn't fit becomes a stateless, HMAC-signed handle with a token estimate. The agent calls <code>expand</code> to pull one thread deeper.</span></div></li>
+        <li><span class="pin">6</span><div><b>Honest truncation</b><span>If LoomCtx stopped gathering before it saw everything, the pack says how much it read. An agent never mistakes a partial read for a full one.</span></div></li>
+        <li><span class="pin">7</span><div><b>What it actually cost</b><span><code>charged_tokens</code> is what the pack spent, always within the budget. A lease lookup with a budget of 600 cost 60.</span></div></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TEAMS ============ -->
+<section class="band band-alt" id="teams">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">One store, both sides of the line</span>
+      <h2>Blue asks what happened. Red asks what's reachable.</h2>
+    </div>
+    <div class="teams">
+      <div class="team blue">
+        <div><h3>Blue team</h3><span class="who">SOC · IR · vuln management · detection engineering</span></div>
+        <ul class="qs">
+          <li><q>Which host held 10.0.4.7 on August 20th?</q><span>A bitemporal read over DHCP leases. The answer is cited to <code>dhcp-log</code>, not guessed from the current state.</span></li>
+          <li><q>Which KEV-listed CVEs affect software web-01 runs?</q><span>A scope walk from host → software → CVE, filtered by CISA KEV and scored with EPSS, delivered as one pack.</span></li>
+          <li><q>Is CVE-2026-0544 a 9.8 or a 5.5?</q><span>NIST and the CNA disagree. LoomCtx puts that disagreement first and cites both, rather than quietly picking one.</span></li>
+        </ul>
+      </div>
+      <div class="team red">
+        <div><h3>Red team</h3><span class="who">pentest · adversary emulation · attack-path analysis</span></div>
+        <ul class="qs">
+          <li><q>What can this account reach?</q><span><code>find_path</code> walks group membership → ACE → trust from raw LDAP/LDIF, Entra ID and Okta exports. Every hop is cited, and disabled accounts are flagged on the path.</span></li>
+          <li><q>Which exposed services run exploitable versions?</q><span>nmap service fingerprints joined to NVD, OSV and KEV through cross-vendor product resolution.</span></li>
+          <li><q>What's in the cloud estate, and what does it connect to?</q><span>Terraform state or an AWS Config snapshot, read into the same graph as the scans and identities.</span></li>
+        </ul>
+      </div>
+    </div>
+    <p class="team-foot">Both teams use the same engine and the same packs. Each API key is scoped by namespace, read/write, entity type, source and expiry, so an engagement's data stays inside that engagement.</p>
+  </div>
+</section>
+
+<!-- ============ DIFFERENCE ============ -->
+<section class="band" id="diff">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Where it fits</span>
+      <h2>Not another vector database.</h2>
+      <p class="lede">LoomCtx doesn't replace your SIEM, your graph or your RAG pipeline. It's the layer that decides what an agent actually gets to read.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">Instead of</th><th scope="col">You get</th><th scope="col">With LoomCtx</th></tr></thead>
+        <tbody>
+          <tr><td>Vector DB / RAG</td><td>Top-k chunks by similarity. No idea when a fact held, who asserted it, or that two sources disagree.</td><td>Append-only, bitemporal observations. Conflicts lead the pack, and every item cites the observations behind it.</td></tr>
+          <tr><td>Postgres + SQL</td><td>Exact answers to questions you already know how to phrase, and however many rows come back.</td><td>A mandatory budget on every read, ranked slices, handles for what was cut, and <code>truncated</code> when the read was partial.</td></tr>
+          <tr><td>A graph database</td><td>Traversal power, but the agent talks to the graph and gets whatever the query returns.</td><td>The graph is the index. A multi-hop question is one <code>ask_scope</code> call, and the answer comes back as a budgeted pack.</td></tr>
+          <tr><td>SIEM search</td><td>Fast search over events. Entities are a pivot, not a memory.</td><td>Entity-centric memory across sources, with provenance, conflict detection and time travel on every read.</td></tr>
+          <tr><td>“Give the agent the DB”</td><td>Full access, a context window full of rows, and no record of what the model saw.</td><td>Scoped keys, budgets, handles, per-item citations, and a check that catches an invented citation.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ EVIDENCE ============ -->
+<section class="band band-alt" id="evidence">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Measured, not claimed</span>
+      <h2>The numbers, with the method in the repo.</h2>
+      <p class="lede">Every figure here comes from a scorecard or load test you can re-run from the repository. The method, the corpus and the misses are written up next to the results.</p>
+    </div>
+
+    <div class="evidence">
+      <div class="card">
+        <h3>Retrieval accuracy by token budget</h3>
+        <p class="sub">53 questions over 542,099 real vulnerability observations. The reader is deepseek-chat-v3.1; each figure is the mean of 3 runs, and every condition gets the same token budget.</p>
+        <div class="chart-legend" aria-hidden="true">
+          <span><i class="dot" style="background:var(--woad)"></i>LoomCtx context pack</span>
+          <span><i class="dot" style="background:var(--muted)"></i>Vector top-k</span>
+          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)"></i>Most recent</span>
+        </div>
+        <div class="chart-box">
+          <svg id="scorechart" viewBox="0 0 560 250" role="img" aria-label="Accuracy by budget. At 400 tokens: LoomCtx 81%, vector 75%, recency 50%. 800: 84, 77, 75. 1,600: 86, 79, 75. 3,200: 96, 87, 77."></svg>
+          <div class="chart-tip" id="chart-tip" hidden></div>
+        </div>
+        <details class="tbl">
+          <summary>Show as table</summary>
+          <table>
+            <thead><tr><th scope="col">Budget</th><th scope="col">LoomCtx</th><th scope="col">Vector</th><th scope="col">Recency</th></tr></thead>
+            <tbody>
+              <tr><td>400</td><td>81%</td><td>75%</td><td>50%</td></tr>
+              <tr><td>800</td><td>84%</td><td>77%</td><td>75%</td></tr>
+              <tr><td>1,600</td><td>86%</td><td>79%</td><td>75%</td></tr>
+              <tr><td>3,200</td><td>96%</td><td>87%</td><td>77%</td></tr>
+            </tbody>
+          </table>
+        </details>
+        <span class="src">docs/evaluation.md · 2026-09-24. Reruns on 2026-09-26 and 2026-09-27 reproduced it within variance.</span>
+      </div>
+
+      <div class="card">
+        <h3>Which models can drive it</h3>
+        <p class="sub">Four agent tasks over MCP, five runs each, on 35 models. Rule-scored, and a correct answer without a citation fails.</p>
+        <ul class="facts">
+          <li><span>Models with a perfect 20/20</span><b>15 of 35</b></li>
+          <li><span>Runs citing data the model never saw (scored as fails)</span><b>2 of 686</b></li>
+          <li><span>Cheapest clean pass per 4-task run</span><b>$0.01</b></li>
+          <li><span>Whole 35-model sweep, 5 runs each</span><b>≈ $46</b></li>
+          <li><span>Perfect on the 5 AD audits, 10,000-account forest</span><b>19 of 35</b></li>
+        </ul>
+        <span class="src">docs/models.md · 2026-09-28 · <a href="#models">every model, cost and task below ↓</a></span>
+      </div>
+    </div>
+
+    <div class="ev-row">
+      <div class="card">
+        <h3>On Kubernetes</h3>
+        <ul class="facts">
+          <li><span>Ingest through the gateway</span><b>237 /s</b></li>
+          <li><span>Asks, p50</span><b>83 ms</b></li>
+          <li><span>Ask throughput</span><b>186 /s</b></li>
+        </ul>
+        <span class="src">GKE, auth on, real corpus, 0 errors · 2026-09-27</span>
+      </div>
+      <div class="card">
+        <h3>When the primary dies</h3>
+        <ul class="facts">
+          <li><span>Postgres failover</span><b>15 s</b></li>
+          <li><span>Writes lost</span><b>0 of 233</b></li>
+          <li><span>Soak test</span><b>18 h</b></li>
+        </ul>
+        <span class="src">CloudNativePG, 3 instances, primary deleted under load</span>
+      </div>
+      <div class="card">
+        <h3>Identity at scale</h3>
+        <ul class="facts">
+          <li><span>Entra + Okta observations</span><b>1.59 M</b></li>
+          <li><span>Blind AD attack chains recalled</span><b>11 / 11</b></li>
+          <li><span>Decoy paths leaked</span><b>0</b></li>
+        </ul>
+        <span class="src">docs/ad-eval.md · deploy/README.md · 2026-09-27</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============ MODELS ============ -->
+<section class="band" id="models">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Model breakdown</span>
+      <h2>Which model should drive it, and what it costs.</h2>
+      <p class="lede">LoomCtx doesn't ship a model. Your agent brings its own, so we ran 36 of them through the same four tasks, five times each, against real data. Every number below is what the run measured and what OpenRouter billed.</p>
+    </div>
+
+    <div class="mb-meta" id="mb-meta" aria-label="Run summary"></div>
+
+    <div class="mb-tasks">
+      <div class="mb-task"><b>2-hop exposure</b><span>“Is web-01 exposed to anything CISA lists as exploited in the wild?” The agent finds the host, walks host → software → CVE, and must name at least 16 of the 32 KEV CVEs with the software each affects. Naming a non-KEV CVE as part of the exposure fails.</span></div>
+      <div class="mb-task"><b>Lease</b><span>“Which host held 10.0.4.7 on 2026-08-20?” A time-travel read. The answer must name laptop-17 and must not present web-01, the earlier holder, as the answer.</span></div>
+      <div class="mb-task"><b>Conflict</b><span>“What do sources disagree about for CVE-2026-0544's CVSS?” The agent must report both values, 9.8 from NIST and 5.5 from the CNA.</span></div>
+      <div class="mb-task"><b>OS</b><span>“What OS does web-01 run?” Two sources disagree. The agent must give both values, not pick one.</span></div>
+    </div>
+    <p class="mb-rule">Every task also has to be <b>faithful</b>: it must cite at least one observation the model was shown in that run, cite nothing it wasn't shown, and name no CVE that doesn't exist. A correct answer with no citation fails.</p>
+
+    <div class="mb-charts">
+      <div class="card">
+        <h3>Speed, cost and reliability</h3>
+        <p class="sub">Each dot is a model: how long one run took end to end, what it cost, and how often it was right. The best picks sit bottom left in solid blue; those are named. Both axes are log scale; hover any dot for its name and numbers. Switch to the Active Directory audits to see the same trade-off on a 10,000-account forest.</p>
+        <div class="mb-chart-head">
+          <div class="chart-legend" aria-hidden="true">
+            <span><i class="dot" style="background:var(--woad)"></i>passed every task</span>
+            <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--woad)"></i>passed 85% or more</span>
+            <span><i class="dot" style="background:var(--muted)"></i>passed less</span>
+          </div>
+          <div class="mb-chips" id="mb-speed-view" role="group" aria-label="Scorecard">
+            <button type="button" class="mb-chip" data-view="core" aria-pressed="true">4 core tasks</button>
+            <button type="button" class="mb-chip" data-view="ad" aria-pressed="false">5 AD audits</button>
+          </div>
+        </div>
+        <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-speed" role="img" aria-label="Scatter plot of cost per run against wall-clock time per run, one dot per model, shaded by how many tasks it passed. The full data is in the tables below."></svg></div><div class="chart-tip" id="mb-tip3" hidden></div></div>
+      </div>
+      <div class="card">
+        <h3>Reliability against cost</h3>
+        <p class="sub">One row per result, from all 20 tasks passed down. Each dot is a model, placed by what one four-task run cost. Further left is cheaper; hover a dot for its name. The count in brackets is how many models got that result. * Mistral Large was rate-limited, so only 15 of its 20 task-runs were scored.</p>
+        <div class="chart-legend" aria-hidden="true">
+          <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
+          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--woad)"></i>passed 17–19</span>
+          <span><i class="dot" style="background:var(--muted)"></i>passed 15 or fewer</span>
+        </div>
+        <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-scatter" role="img" aria-label="Scatter plot of tasks passed out of 20 against cost per four-task run, one dot per model. The full data is in the table below."></svg></div><div class="chart-tip" id="mb-tip" hidden></div></div>
+      </div>
+      <div class="card">
+        <h3>Cost per correct answer</h3>
+        <p class="sub">What a run cost, divided by the tasks it got right. This ranks price and reliability together. Log scale. * Mistral Large had only 5 scored task-runs.</p>
+        <div class="chart-legend" aria-hidden="true">
+          <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
+          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--woad)"></i>passed 17–19</span>
+          <span><i class="dot" style="background:var(--muted)"></i>passed 15 or fewer</span>
+        </div>
+        <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-value" role="img" aria-label="Models ranked by cost per correct answer, cheapest first. The full data is in the table below."></svg></div><div class="chart-tip" id="mb-tip2" hidden></div></div>
+      </div>
+    </div>
+
+    <div class="mb-controls">
+      <label class="mb-field" for="mb-search"><span>Find a model</span><input id="mb-search" type="search" placeholder="e.g. claude, gemini, deepseek" autocomplete="off"></label>
+      <label class="mb-field" for="mb-perday"><span>Agent questions per day</span><input id="mb-perday" type="number" min="1" step="100" value="1000" inputmode="numeric"></label>
+      <div class="mb-chips" role="group" aria-label="Filter">
+        <button type="button" class="mb-chip" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="mb-chip" data-filter="perfect" aria-pressed="false">20/20 only</button>
+        <button type="button" class="mb-chip" data-filter="cheap" aria-pressed="false">Under 5¢ a run</button>
+      </div>
+    </div>
+    <div class="table-wrap mb-table-wrap">
+      <table class="mb-table" id="mb-table">
+        <thead><tr>
+          <th scope="col" data-sort="name">Model</th>
+          <th scope="col" data-sort="passed" class="num">Passed</th>
+          <th scope="col" data-sort="exposure" class="num">2-hop</th>
+          <th scope="col" data-sort="lease" class="num">Lease</th>
+          <th scope="col" data-sort="conflict" class="num">Conflict</th>
+          <th scope="col" data-sort="os" class="num">OS</th>
+          <th scope="col" data-sort="cost" class="num">$ / run</th>
+          <th scope="col" data-sort="per_correct" class="num">$ / correct</th>
+          <th scope="col" data-sort="monthly" class="num">Est. / month</th>
+          <th scope="col" data-sort="secs" class="num">Time / run</th>
+          <th scope="col" data-sort="steps" class="num">Steps</th>
+          <th scope="col" data-sort="tok_in" class="num">Tokens read / run</th>
+          <th scope="col" data-sort="price_in" class="num">List $ / M in · out</th>
+          <th scope="col">Notes</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="mb-foot">
+      <p><b>Order.</b> Complete rows first, then pass rate, then cost as the table shows it, then speed. A cost gap too small to print doesn't outrank a model that answers several times faster. Click any column header to re-sort.</p>
+      <p><b>Reading the columns.</b> A run is all four tasks once, so <b>$ / run</b> and <b>Time / run</b> cover four questions. <b>$ / correct</b> is total cost divided by tasks passed. <b>Est. / month</b> is questions per day × 30 × the cost of one task (a run divided by four). Treat it as a rough guide: real questions vary, and what an agent pays is mostly what it reads (the tokens column), not what it writes.</p>
+      <p><b>Setup.</b> OpenRouter, 2026-09-28, temperature 0, up to 20 steps and 8,000 output tokens per turn. The corpus was 542,100 real observations (CISA KEV, NVD, EPSS and seed hosts), run as Kubernetes Jobs. List prices are OpenRouter's at the time of the run. <code>mistral-small-2603</code> isn't listed: it was rate-limited upstream, with 2 of 40 task-runs scored. Full method and the command to re-run it: <a href="https://github.com/seahop/loomctx/blob/main/docs/models.md">docs/models.md</a>.</p>
+    </div>
+
+    <div class="mb-ad" id="ad-audits">
+      <div class="sec-head">
+        <span class="eyebrow">Identity data</span>
+        <h3>Active Directory audits, on a 10,000-account forest.</h3>
+        <p class="lede">The same agents, pointed at a generated Active Directory export instead: 10,000 users, 1,500 groups and 2,000 computers across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Five standard reviews an identity team runs, five times each per model.</p>
+      </div>
+      <div class="mb-meta" id="ad-meta" aria-label="AD run summary"></div>
+      <div class="mb-tasks mb-tasks-5">
+        <div class="mb-task"><b>Cross-domain admins</b><span>“Which dev.local accounts are effective members of Domain Admins in corp.local, and is each enabled?” Five are, up to three groups deep; one is disabled and must be called out.</span></div>
+        <div class="mb-task"><b>Coverage</b><span>“Which groups is lab.local's labsvc-backup in?” That export never collected membership. The right answer says so; a confident “none” or a guessed group fails.</span></div>
+        <div class="mb-task"><b>Nested groups</b><span>A membership report for one account: five groups, the last four levels up. A group nested into one of its groups, and a sibling group, must not be listed.</span></div>
+        <div class="mb-task"><b>Delegation</b><span>“Which non-DC computers are trusted for unconstrained delegation?” Three servers among 2,000 computers; the domain controllers and a constrained-delegation server are distractors.</span></div>
+        <div class="mb-task"><b>Trusts</b><span>Every trust corp.local has, with its direction, whether it's transitive and whether SID filtering is on. One partner is non-transitive, one quarantined.</span></div>
+      </div>
+      <div class="table-wrap mb-table-wrap">
+        <table class="mb-table" id="ad-table">
+          <thead><tr>
+            <th scope="col" data-sort="name">Model</th>
+            <th scope="col" data-sort="passed" class="num">Passed</th>
+            <th scope="col" data-sort="xdomain" class="num">Admins</th>
+            <th scope="col" data-sort="coverage" class="num">Coverage</th>
+            <th scope="col" data-sort="groups" class="num">Groups</th>
+            <th scope="col" data-sort="delegation" class="num">Delegation</th>
+            <th scope="col" data-sort="trusts" class="num">Trusts</th>
+            <th scope="col" data-sort="cost" class="num">$ / 5 audits</th>
+            <th scope="col" data-sort="secs" class="num">Time / 5 audits</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="mb-foot">
+        <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. Every failing answer was read by hand before these numbers were published. Seven models' xdomain, groups and delegation runs are a re-run after an engine fix the first run surfaced (sideways walks through groups and OUs lost their chain, D-101). Rows marked * lost task-runs to upstream rate limits: most of Mistral Large's, two of Nemotron's.</p>
+        <p><b>GLM-5.3 Flash is slow.</b> It scored 25/25, but a five-audit run took it about fifteen minutes, and a single audit anywhere from half a minute to over twelve minutes (median two, against five seconds for Gemini 2.5 Flash). Read its timing as rough. Whatever it scores, it is a poor fit for an agent someone is waiting on. Marked † in the table. Nemotron 3 Super, Qwen 3.8 Max and DeepSeek Chat v3.1 are in the same slow tier.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CONNECTORS + SURFACES ============ -->
+<section class="band band-alt" id="connect">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Connectors</span>
+      <h2>Speaks the formats you already export.</h2>
+      <p class="lede">Connectors parse files you already have. They don't scan anything or call your cloud APIs. The one exception is the vulnerability connector, which pulls public feeds in one command with no API keys.</p>
+    </div>
+    <div class="connectors">
+      <div class="conn"><b>vulns <em class="p">vuln</em></b><span>CISA KEV, NVD, EPSS and CISA Vulnrichment, with cross-scorer CVSS conflicts kept.</span></div>
+      <div class="conn"><b>osv <em class="p">vuln</em></b><span>OSV, GHSA, PYSEC, Go and npm advisories, fused to CVEs by alias.</span></div>
+      <div class="conn"><b>nmap <em class="p">scan</em></b><span><code>nmap -oX</code> reports: hosts, ports, services, software, OS guesses.</span></div>
+      <div class="conn"><b>ldap <em class="p">identity</em></b><span>Raw LDAP / LDIF from Active Directory: membership → ACE → trust reachability.</span></div>
+      <div class="conn"><b>entra <em class="p">identity</em></b><span>Entra ID Graph export: users, groups, service principals, roles, OAuth consents.</span></div>
+      <div class="conn"><b>okta <em class="p">identity</em></b><span>Users, groups, apps, MFA and admin roles, in the same <code>iam</code> namespace as Entra.</span></div>
+      <div class="conn"><b>cloud <em class="p">inventory</em></b><span><code>terraform show -json</code>, tfstate, or an AWS Config snapshot.</span></div>
+      <div class="conn"><b>ocsf <em class="p">detections</em></b><span>OCSF vulnerability, detection, security and incident findings, both in and out.</span></div>
+      <div class="conn"><b>stix <em class="p">threat intel</em></b><span>STIX 2.1 import and export.</span></div>
+      <div class="conn"><b>attack <em class="p">taxonomy</em></b><span>The MITRE ATT&amp;CK bundle as a shared catalog of techniques.</span></div>
+    </div>
+
+    <div class="surfaces">
+      <div class="surface">
+        <h3>MCP, for agents</h3>
+        <p>Eleven tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
+        <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
+      </div>
+      <div class="surface">
+        <h3>HTTP, for everything</h3>
+        <p>FastAPI with an OpenAPI spec. Ingest single envelopes or up to 1,000 as a batch or NDJSON stream.</p>
+        <div class="chips"><span class="chip">/v1/ask</span><span class="chip">/v1/path</span><span class="chip">/v1/expand</span><span class="chip">/v1/ingest/batch</span></div>
+      </div>
+      <div class="surface">
+        <h3>SDKs</h3>
+        <p>Thin clients whose types are generated from, or validated against, the published contracts.</p>
+        <div class="chips"><span class="chip">Python</span><span class="chip">TypeScript</span><span class="chip">Go</span></div>
+      </div>
+      <div class="surface">
+        <h3>Pipelines</h3>
+        <p>Plug into the shippers you already run, or feed the Go gateway and NATS JetStream directly.</p>
+        <div class="chips"><span class="chip">Fluent Bit</span><span class="chip">Vector</span><span class="chip">Kafka / Redpanda</span><span class="chip">bulk NDJSON</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DEPLOY ============ -->
+<section class="band" id="deploy">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Deploy</span>
+      <h2>One container on a laptop. The same contract at cluster scale.</h2>
+    </div>
+    <div class="shapes">
+      <div class="shape">
+        <h3>The one-container shape</h3>
+        <div class="flow"><span class="node">agent</span><span class="arrow">→</span><span class="node">loomctx · SQLite</span></div>
+        <p>Run <code>docker compose up loomctx</code> to get one engine and one SQLite file with vector search. No queue, and the LLM is optional. This is enough for an engagement laptop or a demo.</p>
+      </div>
+      <div class="shape">
+        <h3>The scale shape</h3>
+        <div class="flow">
+          <span class="node">shippers</span><span class="arrow">→</span>
+          <span class="node">Go gateway ×2–10</span><span class="arrow">→</span>
+          <span class="node">NATS JetStream R=3</span><span class="arrow">→</span>
+          <span class="node">writers</span><span class="arrow">→</span>
+          <span class="node">Postgres + pgvector (HA)</span>
+        </div>
+        <p>Stateless engines autoscale from 2 to 8, with enrichment workers as a StatefulSet. Kubernetes manifests ship in four shapes: <code>default</code>, <code>scale</code>, <code>scale-pg</code> and <code>scale-pg-ha</code>. Validated on GKE.</p>
+      </div>
+    </div>
+    <ul class="posture">
+      <li><b>Scoped API keys:</b> stored hashed, hot-reloaded, and scoped by namespace, r/w, entity type, source and expiry</li>
+      <li><b>Signed handles:</b> HMAC-SHA256, so expansion handles can't be forged or altered</li>
+      <li><b>Rate limits per grant</b>, with a stricter bucket for LLM calls and <code>Retry-After</code></li>
+      <li><b>Default-deny NetworkPolicies</b>, PDBs, read-only root filesystem, non-root user</li>
+      <li><b>Supply chain:</b> digest-pinned images, SHA-pinned actions, Trivy gate, SBOM and provenance</li>
+      <li><b>Data lifecycle:</b> tombstone redaction, retention purge, JSONL export and migration</li>
+      <li><b>Bring any model:</b> OpenRouter, Anthropic, OpenAI, Groq, Venice, or self-hosted Ollama / vLLM</li>
+      <li><b>814 tests</b>, with 908 on the Postgres lane, plus a scale-shape smoke test in CI</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ RUN ============ -->
+<section class="band band-alt" id="run">
+  <div class="wrap qs-grid">
+    <div class="sec-head" style="margin-bottom:0">
+      <span class="eyebrow">Run it</span>
+      <h2>Five minutes, Docker only.</h2>
+      <p class="lede">Nothing installs on your host. The seed dataset includes the moments shown on this page: the reassigned IP lease, the OS conflict on web-01, and a disputed contract owner.</p>
+      <div class="docs-links">
+        <a href="https://github.com/seahop/loomctx/blob/main/docs/quickstart.md"><b>Quickstart</b><span>5 min</span></a>
+        <a href="https://github.com/seahop/loomctx/blob/main/docs/tutorial.md"><b>Build your own security domain</b><span>30 min</span></a>
+        <a href="https://github.com/seahop/loomctx/blob/main/docs/architecture.md"><b>Architecture</b><span>design doc</span></a>
+        <a href="https://github.com/seahop/loomctx/blob/main/docs/evaluation.md"><b>Evaluation method</b><span>scorecards</span></a>
+      </div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><span>bash</span><button class="copy" type="button" data-copy="qs-code">Copy</button></div>
+<pre id="qs-code"><span class="c"># start the engine and load the demo dataset</span>
+docker compose up -d --wait loomctx
+docker compose exec loomctx python -m loomctx.seed load
+
+<span class="c"># optional: real data next to it (CISA KEV + NVD + EPSS)</span>
+docker compose exec loomctx python -m loomctx.connectors.vulns load \
+  --db /data/loomctx.db --bridge-seed-hosts
+
+<span class="c"># ask a focused, budgeted question</span>
+curl -s -X POST localhost:8000/v1/ask \
+  -H 'content-type: application/json' -d '{
+  "namespace": "netsec",
+  "subject": {"type": "ip", "key": "10.0.4.7"},
+  "question": "which host was assigned this ip?",
+  "budget": 600
+}'</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ RELEASE ============ -->
+<section class="band" style="padding-top:0;border-top:0">
+  <div class="wrap">
+    <div class="talk">
+      <div>
+        <h2>Releasing late October 2026.</h2>
+        <p>The source opens under Apache-2.0 in late October. The first release ships with the demo dataset behind this page: a reassigned IP lease, a real CVSS disagreement between NIST and a CNA, and an agent over MCP that finds 30 KEV CVEs on one host with 40 citations, none of them invented.</p>
+      </div>
+      <a class="btn btn-primary" href="https://github.com/seahop/loomctx">Star on GitHub</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>LoomCtx · context engine for AI agents · Apache-2.0 · <span class="mono">loomctx.dev</span></span>
+    <span><a href="https://github.com/seahop/loomctx">github.com/seahop/loomctx</a> · <span class="mono">ghcr.io/seahop/loomctx</span></span>
+  </div>
+</footer>
+
+<script src="assets/site.js?v=13431abf3e"></script>
+<script src="assets/models-data.js?v=006d7d7d6e"></script>
+<script src="assets/models.js?v=3232bd6fd9"></script>
+</body>
+</html>
