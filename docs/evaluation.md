@@ -281,6 +281,14 @@ migrated to `loomctx.db` (schema v8), run as a Job — reproduced it again:
 abstention rows; `full` 98 % on the 47 questions it could send. About
 $1.20 of reader calls.
 
+The 2026-09-29 run on GKE — the current engine, after D-091…D-103 (named
+packs, sibling walks that keep their chain, core-first ranking, the walk
+memo) — reproduced it again: `loomctx` 80 / 85 / 86 / 97 %, `vector`
+75 / 77 / 78 / 86 %, `recency` 49 / 75 / 75 / 77 %, multi-hop 15/18 at
+3,200 (every other condition 0/18), no hallucination on the 24 abstention
+rows; `full` 96 % on the 47 questions it could send; the 3,200-token pack
+averaged 614 tokens. About $1.30 of reader calls.
+
 ## Caveats
 
 - **One corpus, or two.** The seed is small and synthetic; the vulns corpus

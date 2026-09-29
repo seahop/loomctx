@@ -1,4 +1,4 @@
-# Demo script (conference, mid-October 2026)
+# Demo script (conference, 2026-10-21)
 
 Three acts, about twelve minutes, one laptop, nothing on the host but
 Docker. Every number and question below has been run; the fallbacks are

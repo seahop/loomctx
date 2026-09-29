@@ -202,7 +202,7 @@ observations, two-hop scope over 1,077 entities in 0.5 s; on GKE with
 real nodes, auth on and real data, 435/s load, 178/s ingest, 201/s ask
 (D-063, `deploy/README.md`).
 Demo script: `docs/demo.md`. Milestones: `docs/roadmap.md` (conference:
-mid-October 2026).
+2026-10-21).
 
 Agents connect natively over MCP:
 

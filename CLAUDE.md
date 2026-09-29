@@ -8,7 +8,8 @@ agents token-budgeted, cited, question-scoped "context packs".
 1. `docs/roadmap.md` — what is done / stubbed / next (keep its status markers updated)
    and `docs/hardening.md` — the verified issue lists from the 2026-09-08 and 2026-09-23 reviews
    (flip its status markers as items land)
-2. `docs/decisions.md` — constraints and choices (append new decisions there)
+2. `docs/decisions.md` — constraints and choices (append new decisions there);
+   `docs/future-work.md` — the planned post-talk work, with designs
 3. `docs/architecture.md` — the design
 4. Code: `src/loomctx/contracts.py` → `src/loomctx/store/sqlite.py` → `src/loomctx/api/http.py`
 
@@ -53,7 +54,7 @@ docker compose exec loomctx python -m loomctx.seed load
 
 ## Deadline
 
-Conference demo + presentation mid-October 2026 (about 2026-10-13; moved up from "end of October" on 2026-09-23). Repo is meant to be public
+Conference demo + presentation on 2026-10-21 (confirmed 2026-09-29; the site and docs say "late October" for the release). Repo is meant to be public
 (github.com/seahop/loomctx; still private as of 2026-09-24 — flip repo AND GHCR
 package visibility before the talk) — keep `main` green and presentable. k8s manifests in
 `deploy/k8s`; CI publishes the image to ghcr.io/seahop/loomctx on main.
