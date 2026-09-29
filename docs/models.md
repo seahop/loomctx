@@ -246,8 +246,8 @@ changed read again.
 
 | Model | Passed | xdomain | coverage | groups | delegation | trusts | Time/run | Cost/run | Not run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `openai/gpt-6-luna` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 226 s | $0.01 | 0 |
 | `google/gemini-2.5-flash` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 42 s | $0.01 | 0 |
+| `openai/gpt-6-luna` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 226 s | $0.01 | 0 |
 | `minimax/minimax-m3` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 479 s | $0.05 | 0 |
 | `z-ai/glm-5.3-flash` ³ | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 894 s | $0.05 | 0 |
 | `deepseek/deepseek-v4.1-flash` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 254 s | $0.07 | 0 |
@@ -283,7 +283,9 @@ changed read again.
 | `nvidia/nemotron-3-super-120b-a12b` | 23/23 (incomplete) | 4/4 | 5/5 | 4/4 | 5/5 | 5/5 | 1284 s | $0.05 | 2 |
 
 Per-task cells are passes out of five; time and cost are per five-audit
-run. The runs are from 2026-09-28. Seven models' xdomain, groups and
+run. Sorted by pass rate, then cost to two significant figures, then time
+(a faster model outranks one a fraction of a cent cheaper); incomplete
+rows last. The runs are from 2026-09-28. Seven models' xdomain, groups and
 delegation rows are a re-run on the engine with D-101 (a sibling walk that
 kept its chain): those three tasks are the ones whose walks go sideways
 through groups and OUs, and the first run exposed the bug there (Haiku,
