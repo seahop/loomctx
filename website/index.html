@@ -423,11 +423,11 @@
       </div>
       <div class="card">
         <h3>Reliability against cost</h3>
-        <p class="sub">One row per result, from all 20 tasks passed down. Each dot is a model, placed by what one four-task run cost. Further left is cheaper; hover a dot for its name. The count in brackets is how many models got that result. * Mistral Large was rate-limited, so only 15 of its 20 task-runs were scored.</p>
+        <p class="sub">One row per result, from all 20 tasks passed down. Each dot is a model, placed by what one four-task run cost. Further left is cheaper; hover a dot for its name. The count in brackets is how many models got that result. * Mistral Large was rate-limited, so only 5 of its 20 task-runs were scored.</p>
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
           <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--woad)"></i>passed 17–19</span>
-          <span><i class="dot" style="background:var(--muted)"></i>passed 15 or fewer</span>
+          <span><i class="dot" style="background:var(--muted)"></i>passed 16 or fewer</span>
         </div>
         <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-scatter" role="img" aria-label="Scatter plot of tasks passed out of 20 against cost per four-task run, one dot per model. The full data is in the table below."></svg></div><div class="chart-tip" id="mb-tip" hidden></div></div>
       </div>
@@ -437,7 +437,7 @@
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
           <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--woad)"></i>passed 17–19</span>
-          <span><i class="dot" style="background:var(--muted)"></i>passed 15 or fewer</span>
+          <span><i class="dot" style="background:var(--muted)"></i>passed 16 or fewer</span>
         </div>
         <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-value" role="img" aria-label="Models ranked by cost per correct answer, cheapest first. The full data is in the table below."></svg></div><div class="chart-tip" id="mb-tip2" hidden></div></div>
       </div>
@@ -476,7 +476,7 @@
     <div class="mb-foot">
       <p><b>Order.</b> Complete rows first, then pass rate, then cost as the table shows it, then speed. A cost gap too small to print doesn't outrank a model that answers several times faster. Click any column header to re-sort.</p>
       <p><b>Reading the columns.</b> A run is all four tasks once, so <b>$ / run</b> and <b>Time / run</b> cover four questions. <b>$ / correct</b> is total cost divided by tasks passed. <b>Est. / month</b> is questions per day × 30 × the cost of one task (a run divided by four). Treat it as a rough guide: real questions vary, and what an agent pays is mostly what it reads (the tokens column), not what it writes.</p>
-      <p><b>Setup.</b> OpenRouter, 2026-09-28, temperature 0, up to 20 steps and 8,000 output tokens per turn. The corpus was 542,100 real observations (CISA KEV, NVD, EPSS and seed hosts), run as Kubernetes Jobs. List prices are OpenRouter's at the time of the run. <code>mistral-small-2603</code> isn't listed: it was rate-limited upstream, with 2 of 40 task-runs scored. Full method and the command to re-run it: <a href="https://github.com/seahop/loomctx/blob/main/docs/models.md">docs/models.md</a>.</p>
+      <p><b>Setup.</b> OpenRouter, 2026-09-28, temperature 0, up to 20 steps and 8,000 output tokens per turn. The corpus was 542,100 real observations (CISA KEV, NVD, EPSS and seed hosts), run as Kubernetes Jobs. List prices are OpenRouter's at the time of the run. <code>mistral-small-2603</code> isn't listed: it was rate-limited upstream, with 1 of 20 task-runs scored. Full method and the command to re-run it: <a href="https://github.com/seahop/loomctx/blob/main/docs/models.md">docs/models.md</a>.</p>
     </div>
 
     <div class="mb-ad" id="ad-audits">
@@ -511,7 +511,7 @@
       </div>
       <div class="mb-foot">
         <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. Every failing answer was read by hand before these numbers were published. Seven models' xdomain, groups and delegation runs are a re-run after an engine fix the first run surfaced (sideways walks through groups and OUs lost their chain, D-101). Rows marked * lost task-runs to upstream rate limits: most of Mistral Large's, two of Nemotron's.</p>
-        <p><b>GLM-5.3 Flash is slow.</b> It scored 25/25, but a five-audit run took it about fifteen minutes, and a single audit anywhere from half a minute to over twelve minutes (median two, against five seconds for Gemini 2.5 Flash). Read its timing as rough. Whatever it scores, it is a poor fit for an agent someone is waiting on. Marked † in the table. Nemotron 3 Super, Qwen 3.8 Max and DeepSeek Chat v3.1 are in the same slow tier.</p>
+        <p><b>GLM-5.3 Flash is slow.</b> It scored 25/25, but a five-audit run took it about fifteen minutes, and a single audit anywhere from half a minute to over twelve minutes (median two, against five seconds for Gemini 2.5 Flash). Read its timing as rough. Whatever it scores, it is a poor fit for an agent someone is waiting on. Marked † in the table. Nemotron 3 Super, Qwen 3.8 Max, Qwen 3.8 Flash and DeepSeek Chat v3.1 are in the same slow tier.</p>
       </div>
     </div>
   </div>
@@ -541,7 +541,7 @@
     <div class="surfaces">
       <div class="surface">
         <h3>MCP, for agents</h3>
-        <p>Eleven tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
+        <p>Twelve tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
         <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
       </div>
       <div class="surface">
@@ -596,7 +596,7 @@
       <li><b>Supply chain:</b> digest-pinned images, SHA-pinned actions, Trivy gate, SBOM and provenance</li>
       <li><b>Data lifecycle:</b> tombstone redaction, retention purge, JSONL export and migration</li>
       <li><b>Bring any model:</b> OpenRouter, Anthropic, OpenAI, Groq, Venice, or self-hosted Ollama / vLLM</li>
-      <li><b>814 tests</b>, with 908 on the Postgres lane, plus a scale-shape smoke test in CI</li>
+      <li><b>954 tests</b>: 841 run on SQLite and 936 on the Postgres lane, plus a scale-shape smoke test in CI</li>
     </ul>
   </div>
 </section>
@@ -643,7 +643,7 @@ curl -s -X POST localhost:8000/v1/ask \
     <div class="talk">
       <div>
         <h2>Releasing late October 2026.</h2>
-        <p>The source opens under Apache-2.0 in late October. The first release ships with the demo dataset behind this page: a reassigned IP lease, a real CVSS disagreement between NIST and a CNA, and an agent over MCP that finds 30 KEV CVEs on one host with 40 citations, none of them invented.</p>
+        <p>The source opens under Apache-2.0 in late October. The first release ships with the demo dataset behind this page: a reassigned IP lease, a real CVSS disagreement between NIST and a CNA, and an agent over MCP that walks one host to the KEV-listed CVEs its software carries, citing only what it was shown.</p>
       </div>
       <a class="btn btn-primary" href="https://github.com/seahop/loomctx">Star on GitHub</a>
     </div>
