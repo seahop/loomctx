@@ -1,6 +1,6 @@
-"""Extended agent-eval tasks — run on demand, NOT part of the published
-scorecard (`docs/models.md`) until their scoring has been read against real
-answers.
+"""Extended agent-eval tasks — five Active Directory audits, run on demand
+and published as their own scorecard in `docs/models.md` ("Active Directory
+audits"), separate from the four core tasks.
 
     python -m loomctx.agent_eval_ext prepare /data/ext         # write the two LDIF exports
     python -m loomctx.connectors.ldap import /data/ext/forest.ldif --db /data/loomctx.db

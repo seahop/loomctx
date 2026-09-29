@@ -8,6 +8,15 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Model scorecard 2026-09-28; Active Directory audits published
+
+- `docs/models.md` re-measured on the current engine: 35 models, five runs of
+  the four core tasks (686 scored task-runs); 15 models 20/20.
+- A second scorecard, five Active Directory audits (`agent_eval_ext`:
+  cross-domain admins, collection coverage, nested groups, unconstrained
+  delegation, trusts) on a 10,000-account forest, five runs each; 19 of 35
+  models 25/25. `glm-5.3-flash` is flagged as too slow for interactive use.
+
 ### Find entities by name; coverage gaps on entity asks (D-091, D-092)
 
 - A predicate the registry marks `label` names its subject; entity search
