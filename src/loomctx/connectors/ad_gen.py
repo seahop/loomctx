@@ -83,7 +83,15 @@ SCALES: dict[str, dict[str, int]] = {
     "small": {"users": 500, "groups": 100, "computers": 150, "nest": 3},
     "medium": {"users": 3000, "groups": 600, "computers": 800, "nest": 5},
     "large": {"users": 10000, "groups": 1500, "computers": 2000, "nest": 5},
+    # ~500,000 objects, same proportions as large: the scale measurement (docs/future-work.md item 0)
+    "xl": {"users": 370000, "groups": 55000, "computers": 75000, "nest": 5},
 }
+
+# RIDs agent_eval_ext plants its fixed objects at (95001-95204); the generator
+# hands out RIDs in sequence and skips this block, so a forest big enough to
+# reach it never collides with them. Smaller scales stop short of it, so their
+# output is unchanged.
+RESERVED_RIDS = range(95000, 96000)
 
 # how many chains to plant per hop bucket, and how many decoys of each kind
 PLANT = {2: 4, 3: 4, 4: 3}
@@ -219,6 +227,8 @@ class Generator:
 
     def _rid(self) -> int:
         self.next_rid += 1
+        if self.next_rid in RESERVED_RIDS:
+            self.next_rid = RESERVED_RIDS.stop
         return self.next_rid
 
     def _sid(self, rid: int | None = None) -> str:

@@ -24,6 +24,19 @@ def test_generator_is_deterministic():
     assert c_ldif != a_ldif
 
 
+def test_generator_skips_the_rids_the_ad_audits_plant():
+    # a forest big enough to reach 95000 must not reuse agent_eval_ext's fixed RIDs
+    gen = ad_gen.Generator(7, "tiny")
+    gen.next_rid = ad_gen.RESERVED_RIDS.start - 2
+    rids = [gen._rid() for _ in range(3)]
+    assert rids == [ad_gen.RESERVED_RIDS.start - 1, ad_gen.RESERVED_RIDS.stop, ad_gen.RESERVED_RIDS.stop + 1]
+    # the planted fixed objects sit inside the reserved block
+    from loomctx import agent_eval_ext as ext
+    planted = [rid for rid, *_ in {**ext.GROUP_CHAIN, **ext.GROUP_DISTRACTORS, **ext.DELEGATION_HOSTS}.values()]
+    assert all(rid in ad_gen.RESERVED_RIDS for rid in planted)
+    assert ad_gen.SCALES["xl"]["users"] > ad_gen.RESERVED_RIDS.stop
+
+
 def test_generator_emits_parseable_ldif_with_the_planted_shape():
     from loomctx.connectors import ldap
     ldif, truth = ad_gen.generate(7, "small")
