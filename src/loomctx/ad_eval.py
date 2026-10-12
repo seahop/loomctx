@@ -658,6 +658,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--generate", action="store_true",
                         help="generate + import into the store first (uses --scale / --seed)")
     parser.add_argument("--scale", default="medium")
+    parser.add_argument("--style", default="plain", help="ad_gen style: plain or realistic")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--budgets", default=",".join(str(b) for b in BUDGETS))
     parser.add_argument("--live", action="store_true", help="also run a cheap live-reader smoke")
@@ -677,7 +678,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.generate:
             from .connectors import ad_gen
-            ldif, truth = ad_gen.generate(args.seed, args.scale)
+            ldif, truth = ad_gen.generate(args.seed, args.scale, args.style)
             ingest = load_ldif(store, ldif, args.namespace)
         else:
             if not args.truth:
@@ -695,7 +696,8 @@ def main(argv: list[str] | None = None) -> None:
         meta = {"date": datetime.now(timezone.utc).date().isoformat(),
                 "store": redact_dsn(args.db or os.environ.get("LOOMCTX_DB", "loomctx.db")),
                 "namespace": args.namespace, "scale": truth.get("scale", args.scale),
-                "seed": truth.get("seed", args.seed), "counts": truth.get("counts", {}),
+                "seed": truth.get("seed", args.seed), "style": truth.get("style", "plain"),
+                "counts": truth.get("counts", {}),
                 "ingest": ingest}
         if args.live:
             meta["live"] = live_smoke(store, args.namespace, truth, index, args.model,

@@ -37,6 +37,32 @@ def test_generator_skips_the_rids_the_ad_audits_plant():
     assert ad_gen.SCALES["xl"]["users"] > ad_gen.RESERVED_RIDS.stop
 
 
+def test_realistic_style_keeps_the_planted_shape_in_a_real_looking_directory():
+    from loomctx.connectors import ldap
+    ldif, truth = ad_gen.generate(7, "small", "realistic")
+    assert (ldif, truth) == ad_gen.generate(7, "small", "realistic")       # deterministic
+    assert truth["style"] == "realistic"
+    entries, _ = ldap.parse_ldif(ldif)
+    assert len(entries) == truth["counts"]["objects"]
+    assert len(truth["chains"]) == 11 and len(truth["decoys"]) == 6
+    # real-looking names, OUs, machines and an all-employees hub
+    assert "sAMAccountName: " in ldif and "@corp.local" in ldif
+    assert ",OU=NYC,OU=Staff,DC=corp,DC=local" in ldif
+    assert "CN=DL-All-Employees,CN=Users," in ldif and "OU=SQL,OU=Servers," in ldif
+    assert "u00001" not in ldif and "grp00001" not in ldif
+    # planted chains never run through the company- or department-wide groups
+    hubs = {"DL-All-Employees"} | {f"SG-{d}-All" for d, *_ in ad_gen.DEPTS} | {f"SG-{s}-All" for s, *_ in ad_gen.SITES}
+    gen = ad_gen.RealisticGenerator(7, "small")
+    gen.build()
+    by_sid = {o.sid: dict(o.attrs).get("name") for o in gen.objects if o.sid}
+    for chain in truth["chains"]:
+        for e in chain["edges"]:
+            if e["predicate"] == "member_of":
+                assert by_sid.get(e["object"]["key"]) not in hubs
+    # the plain style is untouched by the realistic one
+    assert ad_gen.generate(7, "small")[0] == ad_gen.generate(7, "small", "plain")[0]
+
+
 def test_generator_emits_parseable_ldif_with_the_planted_shape():
     from loomctx.connectors import ldap
     ldif, truth = ad_gen.generate(7, "small")

@@ -107,11 +107,11 @@ def _user(dn: str, sid: str, sam: str, enabled: bool, **attrs) -> str:
                 userAccountControl=512 if enabled else 514, **attrs)
 
 
-def forest_ldif(seed: int = 7, scale: str = "large") -> str:
+def forest_ldif(seed: int = 7, scale: str = "large", style: str = "plain") -> str:
     """The generated corp.local directory plus a dev.local child domain and
     the parent groups that nest it, the groups task's account and groups and
     the delegation task's servers — one forest-wide export."""
-    base, _ = ad_gen.generate(seed, scale)
+    base, _ = ad_gen.generate(seed, scale, style)
     dev = lambda name: f"CN={name},CN=Users,{DEV}"   # noqa: E731
     corp = lambda name: f"CN={name},CN=Users,{CORP}"  # noqa: E731
     out = [_obj(DEV, ["domain", "domainDNS"], DEV_SID, "dev.local")]
@@ -601,10 +601,12 @@ def main(argv: list[str] | None = None) -> None:
     prep.add_argument("--seed", type=int, default=7)
     prep.add_argument("--scale", default="large", choices=sorted(ad_gen.SCALES),
                       help="ad_gen scale of corp.local (default large; small for tests)")
+    prep.add_argument("--style", default="plain", choices=ad_gen.STYLES,
+                      help="ad_gen style of corp.local: plain (the published runs) or realistic")
     args = parser.parse_args(argv)
     os.makedirs(args.dir, exist_ok=True)
     with open(os.path.join(args.dir, "forest.ldif"), "w", encoding="utf-8") as fh:
-        fh.write(forest_ldif(args.seed, args.scale))
+        fh.write(forest_ldif(args.seed, args.scale, args.style))
     with open(os.path.join(args.dir, "lab.ldif"), "w", encoding="utf-8") as fh:
         fh.write(lab_ldif())
     print(f"wrote {args.dir}/forest.ldif and {args.dir}/lab.ldif (namespace {NAMESPACE})")

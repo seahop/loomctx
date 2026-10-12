@@ -25,6 +25,34 @@ def store(tmp_path_factory):
     s.close()
 
 
+@pytest.fixture(scope="module")
+def realistic_store(tmp_path_factory):
+    d = tmp_path_factory.mktemp("ext-real")
+    ext.main(["prepare", str(d), "--scale", "small", "--style", "realistic"])
+    db = str(d / "ext.db")
+    ldap.main(["import", str(d / "forest.ldif"), "--db", db])
+    ldap.main(["import", str(d / "lab.ldif"), "--db", db, "--source", "lab-export"])
+    s = store_from_url(db, read_url=None)
+    yield s
+    s.close()
+
+
+def test_every_audit_truth_holds_on_a_realistic_forest(realistic_store):
+    # the realistic base adds hubs, admins and delegated rights; the planted answers must not move
+    s = realistic_store
+    t = ext._truth_xdomain(s)
+    assert t["members"] == {"dlee": True, "dkim": True, "dpatel": True, "dgarcia": True, "dnguyen": False}
+    assert ext._truth_coverage(s)["stored_memberships"] == []
+    g = ext._truth_groups(s)
+    assert g["groups"] == ["CORP-ERP-Access", "CORP-Finance-All", "CORP-Finance-Users", "CORP-Remote-Apps",
+                           "CORP-VPN-Users"]
+    d = ext._truth_delegation(s)
+    assert d["hosts"] == ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"] and d["decoys"] == ["WEB-KCD04"]
+    assert d["dcs"] and all("-DC" in n for n in d["dcs"])
+    t = ext._truth_trusts(s)["trusts"]
+    assert t["dev.local"] == {"direction": "bidirectional", "transitive": True, "sid_filtering": False}
+
+
 def test_the_cross_domain_truth_is_walked_in_the_store(store):
     t = ext._truth_xdomain(store)
     assert t["members"] == {"dlee": True, "dkim": True, "dpatel": True, "dgarcia": True, "dnguyen": False}
