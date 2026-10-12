@@ -1163,6 +1163,40 @@ def test_the_scope_walk_is_capped_and_says_so(tmp_path, monkeypatch):
     store.close()
 
 
+def test_a_selective_topic_admits_only_its_carriers_from_a_crowded_window(tmp_path, monkeypatch):
+    """At 500k objects an OU of 14,800 computers, three with unconstrained
+    delegation, filled the walk's cap with non-carriers: 20 s a hop, minutes
+    at depth 3. A crowded window whose topic singles out at most a fifth of
+    it now admits only the carriers, and the cut is reported (D-104); an
+    unselective topic still fills the cap as before."""
+    store = SqliteStore(tmp_path / "sel.db")
+    domain = EntityRef(type="domain", key="corp")
+    hosts = [EntityRef(type="host", key=f"h{i:02d}") for i in range(60)]
+    _claims(store, [dict(subject=h, predicate="member_of", object=domain, observed_at=_at(8, 1 + i % 25),
+                         source="ad") for i, h in enumerate(hosts)]
+            + [dict(subject=h, predicate="runs_os", object="linux", observed_at=_at(8, 1), source="cmdb")
+               for h in hosts]
+            + [dict(subject=hosts[i], predicate="unconstrained_delegation", object=True, observed_at=_at(8, 2),
+                    source="ad") for i in (5, 31, 47)])
+    # the topic vocabulary is the registry (domain knowledge is data), as a connector registers it
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[
+        PredicateDef(name="member_of"), PredicateDef(name="runs_os"),
+        PredicateDef(name="unconstrained_delegation", description="trusted for unconstrained Kerberos delegation")]))
+    monkeypatch.setenv("LOOMCTX_MAX_SCOPE_ENTITIES", "10")
+    scope = ScopeSpec(subjects=[domain], expand=["member_of", "unconstrained_delegation"], depth=1)
+    pack = build_pack(store, AskRequest(scope=scope, question="which hosts allow unconstrained delegation?",
+                                        budget=4000))
+    assert {s.key for s in pack.subjects} == {"corp", "h05", "h31", "h47"}
+    cut = [t for t in pack.truncated if t.reason == "scope_cap"]
+    assert cut and (cut[0].gathered, cut[0].total) == (4, 61)
+    # every host runs linux: not selective, so the window fills the cap as before
+    scope = ScopeSpec(subjects=[domain], expand=["member_of", "runs_os"], depth=1)
+    pack = build_pack(store, AskRequest(scope=scope, question="which os do the hosts run?", budget=4000))
+    assert len(pack.subjects) == 10
+    store.close()
+
+
 def test_a_thread_expansion_hands_back_a_conflict_that_does_not_fit(tmp_path):
     """A thread handle spends its budget on the thread and mints no
     handles — but a conflict too big for it was dropped without a trace."""

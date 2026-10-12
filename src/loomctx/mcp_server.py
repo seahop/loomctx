@@ -425,10 +425,12 @@ class AgentPathEdge(TypedDict):
 
 class AgentPath(TypedDict):
     """A path an agent reads: the traversal rendered `A -pred-> B -pred-> C`
-    and one compact citation per hop (D-067)."""
+    and one compact citation per hop (D-067); format='detailed' adds the full
+    PathEdge objects as `edges`."""
     text: str
     hops: int
     cites: list[str]
+    edges: NotRequired[list[dict[str, Any]]]
 
 
 # A PathPack as an agent reads it: connecting paths shortest-first, each an
@@ -950,7 +952,10 @@ def _path_view(pack, fmt: Format = "concise") -> PathView:
         raise ValueError(f"format must be 'concise' or 'detailed', got {fmt!r}")
     d = pack.model_dump(mode="json", by_alias=True, exclude_none=True)
     if fmt == "detailed":
-        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges), "edges": dp}
+        # cites too: the output schema requires them in either format, and a
+        # detailed path without them failed validation (the tool errored)
+        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges),
+                  "cites": [cite_text(e.cite) for e in edges], "edges": dp}
                  for edges, dp in zip(pack.paths, d.get("paths", []))]
     else:
         paths = [{"text": _path_arrow(pack, edges), "hops": len(edges),

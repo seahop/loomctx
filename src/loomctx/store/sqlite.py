@@ -422,9 +422,13 @@ class SqliteStore(GraphStore):
         self._vec = self._load_vec()
         # Referential integrity is per-connection in SQLite (H-B10). Old
         # files may hold dangling rows from before this was on; report,
-        # don't refuse to start.
+        # don't refuse to start. Checked when a migration ran, not on every
+        # open: the check walks every reference (23 s at 6.5M observations)
+        # and every MCP session opens the store anew; a file already at this
+        # version has had it, and enforced writes keep it clean (D-104).
         self._conn.execute("PRAGMA foreign_keys=ON")
-        dangling = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        dangling = (self._conn.execute("PRAGMA foreign_key_check").fetchall()
+                    if current < SCHEMA_VERSION else [])
         if dangling:
             logging.getLogger("loomctx.store").warning(
                 "sqlite: %d row(s) violate foreign keys (pre-existing data);"
@@ -818,7 +822,9 @@ class SqliteStore(GraphStore):
         lo, hi = common.prefix_bounds(prefix)
         with self._tx(read=True):
             rows = self._conn.execute(
-                _OBS_SELECT + " WHERE o.namespace = ? AND o.id >= ?"
+                # `+o.namespace`: keep the planner on the primary-key range;
+                # it once took the namespace index and scanned every row
+                _OBS_SELECT + " WHERE +o.namespace = ? AND o.id >= ?"
                 + (" AND o.id < ?" if hi is not None else "") + _NOT_TOMBSTONED
                 + " ORDER BY o.id LIMIT ?",
                 (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP)).fetchall()
@@ -1955,6 +1961,15 @@ class SqliteStore(GraphStore):
             yield common.row_to_observation(row)
 
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        key = common.SUMMARY_KEY.format(namespace=namespace)
+        with self._tx(read=True):
+            marker = "|".join(str(v) for v in self._conn.execute(
+                "SELECT (SELECT max(rowid) FROM observations), (SELECT count(*) FROM tombstones),"
+                " (SELECT count(*) FROM merge_log)").fetchone())
+            cached = self._conn.execute("SELECT value FROM loomctx_meta WHERE key = ?", (key,)).fetchone()
+        hit = common.cached_summary(cached["value"] if cached else None, marker)
+        if hit is not None:
+            return hit
         sql = ("SELECT s.type AS stype, o.predicate AS predicate, e.type AS otype, COUNT(*) AS n"
                " FROM observations o JOIN entities s ON s.id = o.subject_id"
                " LEFT JOIN entities e ON e.id = o.object_entity_id"
@@ -1963,8 +1978,16 @@ class SqliteStore(GraphStore):
                " GROUP BY s.type, o.predicate, e.type")
         with self._tx(read=True):
             rows = self._conn.execute(sql, (namespace,)).fetchall()
-        return sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
-                      key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        out = sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
+                     key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        try:
+            with self._tx():
+                self._conn.execute("INSERT INTO loomctx_meta (key, value) VALUES (?, ?)"
+                                   " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                   (key, common.summary_value(marker, out)))
+        except sqlite3.Error:   # a read-only store still answers; it just can't remember
+            pass
+        return out
 
     def namespace_summary(self) -> dict[str, dict[str, int]]:
         with self._tx(read=True):
@@ -2092,6 +2115,15 @@ class SqliteStore(GraphStore):
         with self._tx():
             self._put_tombstone(namespace, observation_id, reason, recorded_at)
             self._drop_briefs_citing(namespace, observation_id)
+
+    def refresh_statistics(self) -> None:
+        """ANALYZE after a bulk load (D-081, now for SQLite too): without
+        sqlite_stat1 the planner chooses indexes blind — at 6.5M observations
+        it served a 12-hex cite lookup from the namespace index, scanning every
+        row. analysis_limit samples each index, so this stays quick at size."""
+        with self._tx():
+            self._conn.execute("PRAGMA analysis_limit=1000")
+            self._conn.execute("ANALYZE")
 
     def wipe(self) -> None:
         with self._tx():

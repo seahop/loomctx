@@ -167,6 +167,31 @@ def parse(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
+# relation_summary is a GROUP BY over a namespace's observations (86 s at
+# 6.5M rows on SQLite), and every MCP session — a fresh process — asked for
+# it. Backends cache it in loomctx_meta under a marker of what changes it
+# (the newest observation, the tombstone and merge counts), so it is computed
+# once per change, not once per session.
+SUMMARY_KEY = "relsum:{namespace}"
+
+
+def summary_value(marker: str, rows: list) -> str:
+    return json.dumps({"marker": marker, "rows": rows})
+
+
+def cached_summary(raw: str | None, marker: str) -> list[tuple] | None:
+    """The cached rows when `raw` was written under `marker`, else None."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("marker") != marker:
+        return None
+    return [tuple(r) for r in data.get("rows", [])]
+
+
 def prefix_bounds(prefix: str) -> tuple[str, str | None]:
     """(lo, hi) such that `lo <= s < hi` holds exactly for the strings that
     start with `prefix`: hi is the prefix with its last code point

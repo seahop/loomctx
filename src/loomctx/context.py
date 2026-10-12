@@ -1346,6 +1346,7 @@ def _walk_scope(
     held = 0                                # rows gathered for the walk
     beyond: set[tuple[str, str]] = set()   # reached, but past the entity cap
     cut_at: EntityRef | None = None
+    filtered_at: EntityRef | None = None    # where a selective topic narrowed a crowded window
     topic: frozenset[str] | None = None     # computed once the first rows are in
 
     def walkable(obs: Observation, retired) -> bool:
@@ -1435,11 +1436,22 @@ def _walk_scope(
             # the ones that do (D-061). Past the window only carriers enter.
             for ref, end, obs in carriers.values():
                 admit(ref, end, obs, next_frontier)
-            for ref, end, obs in window.values():
-                admit(ref, end, obs, next_frontier)
+            # A crowded window whose topic singles out a few far ends admits
+            # only those (D-104): filling the cap with arbitrary non-carriers
+            # cost a pack 20 s per hop at 500k objects (an OU of 14,800
+            # computers, three of them with unconstrained delegation), and
+            # minutes at depth 3. The rest is a recorded cut, not a silent one.
+            if carriers and crowded and len(carriers) <= _SELECTIVE_SHARE * len(window):
+                beyond.update(k for k in window if k not in seen)
+                filtered_at = filtered_at or chunk[0]
+            else:
+                for ref, end, obs in window.values():
+                    admit(ref, end, obs, next_frontier)
         frontier = next_frontier
     if cut_at is not None:
         _record_scope_cap(truncated, cut_at, len(resolved), len(resolved) + len(beyond))
+    elif filtered_at is not None:
+        _record_scope_cap(truncated, filtered_at, len(resolved), len(resolved) + len(beyond))
     return resolved, paths
 
 

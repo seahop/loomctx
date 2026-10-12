@@ -1268,6 +1268,58 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
     assert len(store.subjects_citing("ns", [a.id], per_artifact=100)[a.id]) == 9
 
 
+def test_relation_summary_is_cached_until_the_data_changes(store):
+    """describe_namespace's map is a GROUP BY over every observation (86 s at
+    6.5M rows), and each MCP session is a fresh process: the store keeps it
+    until a write changes what it counts (D-104)."""
+    def logins() -> int:
+        return sum(r[3] for r in store.relation_summary("default") if r[1] == "logged_in_by")
+    obs = store.record_claim(login_claim())
+    first = store.relation_summary("default")
+    assert store.relation_summary("default") == first and logins() == 1
+    store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key="other")}))
+    assert logins() == 2                       # a new observation invalidates it
+    store.redact("default", obs.id, "x")
+    assert logins() == 1                       # so does a tombstone
+
+
+def test_sqlite_checks_references_on_migration_not_every_open(tmp_path, caplog):
+    """foreign_key_check walks every reference (23 s at 6.5M observations)
+    and every MCP session opened the store anew: it runs when a migration
+    does, which is when an old file's dangling rows can still be there."""
+    import logging
+    import sqlite3
+    from loomctx.store.sqlite import SCHEMA_VERSION, SqliteStore
+    path = str(tmp_path / "fk.db")
+    SqliteStore(path).close()
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("INSERT INTO aliases (namespace, alias, entity_id) VALUES ('default', 'dangling', 'nowhere')")
+    c.execute("UPDATE loomctx_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION - 1),))
+    c.commit()
+    c.close()
+    with caplog.at_level(logging.WARNING, logger="loomctx.store"):
+        SqliteStore(path).close()                     # migrates: checked, and reported
+    assert any("violate foreign keys" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="loomctx.store"):
+        SqliteStore(path).close()                     # already current: not walked again
+    assert not any("violate foreign keys" in r.message for r in caplog.records)
+
+
+def test_sqlite_refresh_statistics_analyzes(tmp_path):
+    """The SQLite planner chose indexes blind without sqlite_stat1 (a cite
+    lookup scanned 6.5M rows): a bulk load now ends with ANALYZE."""
+    import sqlite3
+    from loomctx.store.sqlite import SqliteStore
+    s = SqliteStore(str(tmp_path / "a.db"))
+    s.record_claim(login_claim())
+    s.refresh_statistics()
+    s.close()
+    c = sqlite3.connect(str(tmp_path / "a.db"))
+    assert c.execute("SELECT count(*) FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone()[0] == 1
+
+
 def test_observations_by_prefix_resolves_cite_tokens(store):
     """A 12-hex token from a pack finds its observation; tombstoned rows
     and other namespaces never surface; the read is capped."""

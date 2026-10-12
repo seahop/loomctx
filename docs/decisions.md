@@ -3317,6 +3317,45 @@ It is not patched yet.") is still a claim. Re-scored with the fix, four
 2026-09-28 runs flip to pass (three Opus 5.5, one Nemotron); none of the
 2026-09-27 run's answers change.
 
+## D-104 · What 500,000 directory objects exposed (2026-10-13)
+
+The first 500k-object run (a realistic AD forest, 6.5M observations, SQLite;
+`docs/future-work.md` item 0) kept answers right — 47 of the first 51 agent
+audits passed — but some calls took minutes. Profiled on the real store, five
+causes, each a fix that changes nothing at small scale:
+
+- **No planner statistics on SQLite.** `refresh_statistics()` was a no-op
+  there (D-081 analyzed Postgres only), so a 12-hex cite lookup used the
+  namespace index and scanned every row (25 s; 107 s under load). It now runs
+  `ANALYZE` with `analysis_limit` (47 s once, at the end of a bulk load), and
+  the prefix query keeps itself on the primary-key range (`+o.namespace`).
+- **A reference check on every open.** `PRAGMA foreign_key_check` walked every
+  foreign key (23 s) each time a store opened, and each MCP session is a new
+  process. It now runs when a migration does — when an old file's dangling
+  rows can exist; enforced writes keep a current file clean.
+- **The relation summary recomputed per session.** `describe_namespace`'s
+  GROUP BY took 86 s (46 s with statistics) and a session's warm-up of it
+  held the store while the agent's first call waited (`list_namespaces`, 9
+  minutes). Both backends now keep it in `loomctx_meta` under a marker of what
+  changes it (newest observation, tombstone and merge counts): computed once
+  per change, read in a millisecond after.
+- **Crowded walks filled the cap with non-carriers.** When a scope's frontier
+  exceeded the entity cap, the topic's carriers went in first (D-061) and
+  arbitrary others filled the remaining 2,000 slots; the pack then gathered
+  and ranked them all (20 s a hop, minutes at depth 3 — 53 minutes for one
+  delegation call). A window whose topic singles out at most a fifth of it
+  (`_SELECTIVE_SHARE`) now admits only the carriers, and records the rest as a
+  `scope_cap` cut. An unselective topic fills the cap as before; on the 10k
+  forest every delegation query's pack is unchanged, and `ad_eval` (plain,
+  large, blind) is 11/11 at every budget as before.
+- **`find_path` with `format="detailed"` failed validation**: its paths lacked
+  the `cites` the output schema requires. Detailed paths carry `cites` and the
+  full `edges`.
+
+Replayed against the 500k store with the fixes: the 53-minute delegation call
+24 s, a 16-minute domain-wide one 4.6 s, `describe_namespace` 0.4 s, a store
+open under a second. The scale numbers are in the scale report.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

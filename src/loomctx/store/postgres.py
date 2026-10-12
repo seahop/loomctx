@@ -1822,6 +1822,15 @@ class PostgresStore(GraphStore):
             yield common.row_to_observation(row)
 
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        key = common.SUMMARY_KEY.format(namespace=namespace)
+        with self._tx(read=True):
+            m = self._q("SELECT (SELECT max(recorded_at) FROM observations)::text AS a,"
+                        " (SELECT count(*) FROM tombstones) AS b, (SELECT count(*) FROM merge_log) AS c")[0]
+            marker = f"{m['a']}|{m['b']}|{m['c']}"
+            cached = self._q("SELECT value FROM loomctx_meta WHERE key = %s", (key,))
+        hit = common.cached_summary(cached[0]["value"] if cached else None, marker)
+        if hit is not None:
+            return hit
         sql = ("SELECT s.type AS stype, o.predicate AS predicate, e.type AS otype, COUNT(*) AS n"
                " FROM observations o JOIN entities s ON s.id = o.subject_id"
                " LEFT JOIN entities e ON e.id = o.object_entity_id"
@@ -1830,8 +1839,16 @@ class PostgresStore(GraphStore):
                " GROUP BY s.type, o.predicate, e.type")
         with self._tx(read=True):
             rows = self._q(sql, (namespace,))
-        return sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
-                      key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        out = sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
+                     key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        try:
+            with self._tx():
+                self._x("INSERT INTO loomctx_meta (key, value) VALUES (%s, %s)"
+                        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                        (key, common.summary_value(marker, out)))
+        except Exception:  # noqa: BLE001 — a read replica still answers; it just can't remember
+            pass
+        return out
 
     def namespace_summary(self) -> dict[str, dict[str, int]]:
         with self._tx(read=True):

@@ -75,6 +75,13 @@ def test_find_path_through_the_tool_manager(store):
     view = res.structured_content
     assert view["from"] == {"type": "user", "key": "jdoe"} and view["paths"]
     assert view["paths"][0]["text"].startswith("user:jdoe")
+    # format='detailed' must pass the output schema too (a detailed path once
+    # lacked `cites`, so every detailed call errored at validation)
+    res = asyncio.run(call({"from": "user:jdoe", "to": "domain:corp.local",
+                            "via": ["logged_in_by", "member_of"], "depth": 2, "format": "detailed"}))
+    assert not res.is_error, res.content
+    p = res.structured_content["paths"][0]
+    assert p["cites"] and p["edges"] and len(p["cites"]) == len(p["edges"]) == p["hops"]
 
 
 def test_find_entity_returns_handles(store):
