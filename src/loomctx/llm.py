@@ -153,8 +153,9 @@ def _post_json(url: str, body: dict, headers: dict, timeout: float = 120,
                 detail = ""
             # 402 (out of credit) says nothing about the request either —
             # not worth retrying, but never the model's answer in an eval;
-            # nor does a 403 for a spent key ("Key limit exceeded")
-            spent = exc.code == 402 or (exc.code == 403 and _SPENT.search(detail) is not None)
+            # nor does a 403 for a spent key ("Key limit exceeded"), nor a
+            # 401 for an expired or revoked key
+            spent = exc.code in (401, 402) or (exc.code == 403 and _SPENT.search(detail) is not None)
             last = LLMError(f"provider returned {exc.code}: {detail}",
                             public=f"LLM provider returned HTTP {exc.code}",
                             transient=exc.code in _RETRYABLE or spent)

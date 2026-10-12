@@ -433,6 +433,16 @@ def test_provider_outages_are_retried_then_not_scored(seeded_db):
             _llm._post_json("https://x/v1", {}, {})
         except LLMError as exc:
             assert exc.transient
+    # an expired or revoked key (OpenRouter: 401 "API key expired") is the account's problem too
+    expired = urllib.error.HTTPError("https://x/v1", 401, "Unauthorized", {},
+                                     io.BytesIO(b'{"error":{"message":"API key expired.","code":401}}'))
+    with mock.patch.object(_llm, "_urlopen", side_effect=expired) as call:
+        try:
+            _llm._post_json("https://x/v1", {}, {})
+        except LLMError as exc:
+            assert exc.transient and call.call_count == 1
+        else:
+            raise AssertionError("401 must raise")
     denied = urllib.error.HTTPError("https://x/v1", 403, "Forbidden", {}, io.BytesIO(b'{"error":"model not allowed"}'))
     with mock.patch.object(_llm, "_urlopen", side_effect=denied):
         try:
