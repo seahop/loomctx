@@ -2275,7 +2275,9 @@ def test_hub_completion_learns_the_attribute_from_the_registry(store, monkeypatc
 def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
     """With the entity cap binding, the walk cuts entities that do not
     carry the question's topic, not the ones that do (D-061); the cut is
-    still reported as scope_cap."""
+    still reported as scope_cap. A topic this selective (three carriers in
+    a crowded window) admits only its carriers rather than filling the cap
+    with the rest (D-104)."""
     from loomctx import context
     from loomctx.context import resolve_scope_paths
     from loomctx.contracts import ScopeSpec
@@ -2286,14 +2288,14 @@ def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
                                  truncated=truncated, question=_KEV_Q)
     keys = [r.key for r in got]
-    assert len(got) == 8 and set(keys[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
-    assert any(t.reason == "scope_cap" for t in truncated.values())
+    assert set(keys[2:]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"} and len(got) == 5
+    assert any(t.reason == "scope_cap" and t.total > t.gathered for t in truncated.values())
     # no hub at all, just a crowded frontier: the carriers are probed for
     monkeypatch.setattr(context, "_GATHER_LIMIT", 1000)
     truncated = {}
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
                                  truncated=truncated, question=_KEV_Q)
-    assert len(got) == 8 and set(r.key for r in got[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
+    assert set(r.key for r in got[2:]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"} and len(got) == 5
     assert not any(t.reason == "gather_limit" for t in truncated.values())
 
 
