@@ -3540,9 +3540,15 @@ The delegation ask on the 10k store: 2,000 subjects -> 38 (the 4 DCs and the
 seven with their flags. Small scopes and unselective topics walk as before:
 `ad_eval` (plain, large, blind) keeps the scope walk at 11/11 at every budget
 in three runs. find_path (untouched here) was 10, 9 and 9 of 11 at 1,500
-tokens across those runs, 11/11 at 3,000 and up: equal-length paths are
-ordered by observation id, random per ingest, so which 4-hop path fits a
-tight budget varies run to run.
+tokens across those runs, 11/11 at 3,000 and up: equal-length paths were
+ordered by observation id, random per ingest, so which 4-hop path fit a
+tight budget varied run to run (ordering by the edges' content instead was
+deterministic and worse, 8/11). find_path now orders equal-length paths by
+specificity — the fewest rows on record at their interior entities (largest,
+then total), from the counts the search already holds — then by content,
+ids last: 11/11 at every budget, the same in two runs, no decoy leaked. A
+coincidental route runs through a hub (Domain Users); an escalation through
+the named groups it abuses.
 
 ## D-017 · License: Apache-2.0 (2026-09-04)
 

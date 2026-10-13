@@ -14,6 +14,9 @@ tag is v0.1.0).
   the entity cap; rarity is judged on the namespace's counts; entities that
   lead deeper (nested OUs) are kept; edges into the cut leave the pack's
   pool. The AD delegation ask: 8.8 s -> 1.3 s on a 10k forest, same answer.
+- find_path orders equal-length paths by specificity (fewest rows at their
+  interior entities), not by random ids: the same data returns the same
+  paths, and the blind AD benchmark's find_path is 11/11 at every budget.
 
 ### List mode (D-107)
 

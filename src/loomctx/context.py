@@ -1494,6 +1494,12 @@ def _is_subject(obs: Observation, ref: EntityRef) -> bool:
     return obs.subject.type == ref.type and obs.subject.key == ref.key
 
 
+def _edge_sort_key(obs: Observation) -> tuple:
+    end = obs.object
+    far = (end.type, end.key) if isinstance(end, EntityRef) else ("", str(end))
+    return (obs.subject.type, obs.subject.key, obs.predicate, *far, obs.id)
+
+
 def _turns(before: Observation, after: Observation, pivot: EntityRef) -> bool:
     """Two consecutive edges at `pivot` on one predicate with `pivot` on the
     same side of both — user -member_of-> group <-member_of- other user: a
@@ -2314,6 +2320,7 @@ def find_paths(
     work = 0            # edge extensions examined: partials made + reach checks
     materialized = 0    # partial paths held for a next hop
     searched = bool(via_set) and endpoints_ok and src_key != dst_key
+    degree: dict[tuple[str, str], int] = {}   # rows on record per gathered entity (D-109)
 
     if searched:
         cap, row_cap = max_scope_entities(), max_scope_observations()
@@ -2510,8 +2517,22 @@ def find_paths(
         if retired:
             complete = [edges for edges in complete if not any(e.id in retired for e in edges)]
 
-    # shortest first, then a stable order by the edges' ids
-    complete.sort(key=lambda edges: (len(edges), tuple(e.id for e in edges)))
+    # Shortest first; among equal lengths the most specific — through the
+    # entities with the fewest rows on record (a planted escalation goes
+    # through a named group, a coincidental route through Domain Users) —
+    # then by what the edges say. Ids last: they are random per ingest, and
+    # ordering by them returned different paths for the same data (D-109).
+    if searched:
+        degree = {k: (t.total if (t := truncated.get(k)) is not None and t.reason == "gather_limit"
+                      else len(rows)) for k, rows in gathered.items()}
+
+    def specificity(edges: tuple[Observation, ...]) -> tuple[int, int]:
+        inner = {(r.type, r.key) for e in edges for r in (e.subject, e.object)
+                 if isinstance(r, EntityRef)} - {src_key, dst_key}
+        counts = [degree.get(k, 0) for k in inner]
+        return (max(counts, default=0), sum(counts))
+
+    complete.sort(key=lambda edges: (len(edges), specificity(edges), tuple(_edge_sort_key(e) for e in edges)))
     budget = min(req.budget, max_budget())
     returned: list[tuple[Observation, ...]] = []
     charged = 0
