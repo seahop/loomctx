@@ -204,8 +204,10 @@ _EXCLUDES = re.compile(r"\b(?:not|no|none|neither|nor|never|without|excluded?|is
 _DISABLED = re.compile(r"\bdisabled\b|\bnot enabled\b|\binactive\b|\baccountdisable\b", re.I)
 
 
-# a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no"
-_DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b|\benabled\W{0,6}(?:no|false)\b", re.I)
+# a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no",
+# "**Enabled Status:** No" (a label word between, as the realistic forest's answers write it)
+_DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b"
+                            r"|\benabled(?:\s+(?:status|state|flag))?\W{0,6}(?:no|false)\b", re.I)
 _BLOCK_LINE = re.compile(r"\s*(?:[-+|]|\*(?!\*)|\d+[.)])")     # "**Bold:**" is a lead-in, not a bullet
 _ADMIN = re.compile(r"domain admins|tier0|tier-0", re.I)
 # typographic apostrophes some models emit ("can’t", "isn’t")
@@ -381,11 +383,12 @@ def _score_groups(answer: str, truth: dict, seen: set[str], store) -> dict:
         if _EXCLUDES.search(line) or _EXCLUDES.search(lead):
             return False
         # "CORP-Finance-Interns (…) is a member of CORP-Finance-Users" states
-        # the directory's structure; it puts the distractor forward only
-        # where the line also says the account inherits it
+        # the directory's structure — as does "CORP-Finance-Interns →
+        # CORP-Finance-Users"; it puts the distractor forward only where the
+        # line also says the account inherits it
         plain = line.replace("*", "").replace("`", "")
-        child = re.search(re.escape(d) + r"\S*\s*(?:\([^)]*\)\s*)*(?:is|are)?\s*(?:a\s+)?(?:member|nested|contained)\w*\s+(?:of|in|into|inside)\b",
-                          plain, re.I)
+        child = re.search(re.escape(d) + r"\S*\s*(?:\([^)]*\)\s*)*(?:(?:is|are)?\s*(?:a\s+)?(?:member|nested|contained)\w*\s+"
+                          r"(?:of|in|into|inside)\b|(?:→|->|=>))", plain, re.I)
         return not (child and not re.search(r"inherit|\b" + re.escape(truth.get("account", GROUPS_ACCOUNT)), plain, re.I))
     false_groups = sorted(d for d in truth["distractors"] if any(
         claims(line, lead, d) for line, lead in _lines(answer, d, names)))

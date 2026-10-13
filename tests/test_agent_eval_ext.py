@@ -112,6 +112,11 @@ def test_xdomain_reads_table_rows_and_lead_ins():
                    "| no " + CITE + " |"):
         answer = rows + "| dnguyen | DEV-Ops. " + status
         assert ext._score_xdomain(answer, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"], status
+    # a labelled field under the member's item (Haiku on the realistic forest, 2026-10-13)
+    items = "".join(f"{i}. **{m}@dev.local** {CITE}\n   - **Group Added Through:** DEV-Ops@dev.local\n"
+                    f"   - **Enabled Status:** {'No' if m == 'dnguyen' else 'Yes'} {CITE}\n"
+                    for i, m in enumerate(["dlee", "dkim", "dnguyen", "dgarcia", "dpatel"], 1))
+    assert ext._score_xdomain(items, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"]
     excluded = (rows + "| dnguyen | DEV-Ops | disabled |\n\n"
                 "The remaining dev.local users are in groups that never chain into Domain Admins:\n"
                 "- **DEV-Engineering** members `dchen`, `dsmith`; the group is a member of CORP-App-Readers.")
@@ -181,6 +186,10 @@ def test_groups_scores_the_closure_and_the_distractors():
     assert ext._score_groups(padded, truth, SEEN, None)["false_groups"] == ["CORP-Finance-Managers"]
     by_sid = short + "- group:S-1-5-21-9-95007 (via CORP-ERP-Access)\n"
     assert ext._score_groups(by_sid, {**truth, "keys": {"CORP-Remote-Apps": "S-1-5-21-9-95007"}}, SEEN, None)["pass"]
+    # arrow notation states structure too (a realistic-forest answer's risk note, 2026-10-13)
+    arrows = (good + "\n- Worth noting (other principals): CORP-Finance-Interns → CORP-Finance-Users [abcdefab] and "
+              "CORP-Finance-Managers → CORP-Finance-All [abcdefab] feed the same chain.")
+    assert ext._score_groups(arrows, truth, SEEN, None)["pass"]
 
 
 def test_delegation_scores_the_servers_and_not_the_dcs():
