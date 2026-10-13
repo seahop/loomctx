@@ -67,6 +67,7 @@ from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, 
 from .gates import check_supersedes, scope_counts, scope_schema
 from .listing import list_entities as list_entities_impl
 from .llm import LLMError, embedder_from_env, llm_from_env
+from .queries import find_query
 from .queries import resolve as resolve_query
 from .queries import run_query as run_query_impl
 from .metrics import REJECTED
@@ -951,7 +952,7 @@ def _listed(value: list[str] | str | None) -> list[str]:
 
 def ask_scope(
     subjects: list[str] | str,
-    question: str,
+    question: str = "",
     expand_predicates: list[str] | str | None = None,
     depth: int = 1,
     budget: int = SCOPE_BUDGET_DEFAULT,
@@ -1266,7 +1267,7 @@ def list_entities(
 
 def run_query(
     name: str,
-    params: dict[str, Any] | str | None = None,
+    params: dict[str, Any] | list[Any] | str | None = None,
     limit: int = 50,
     offset: int = 0,
     budget: int = 2000,
@@ -1286,6 +1287,10 @@ def run_query(
     _known_namespace(namespace, grant)
     if isinstance(params, str):
         params = json.loads(params) if params.strip() else {}
+    if isinstance(params, list):
+        # positional, in the query's parameter order: ["group:…", "user"]
+        query = find_query(_get_store().get_schema(namespace), namespace, name)
+        params = {p.name: v for p, v in zip(query.params, params)}
     req = QueryRequest(namespace=namespace, name=name, params=params or {}, limit=limit, offset=offset,
                        budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at))
     _, listed = resolve_query(_get_store(), req, allowed_types=_allowed(grant))

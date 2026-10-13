@@ -243,3 +243,16 @@ def test_empty_searches_retry_what_agents_meant(store):
     assert search_by_name(store, NS, "nothing-like-this")[0] == []
     # a domain that holds no such entity: nothing, not another domain's
     assert search_by_name(store, NS, "lab.local\\Domain Admins")[0] == []
+
+
+def test_run_query_says_what_a_parameter_takes(store):
+    with pytest.raises(QueryError, match="this parameter takes a group; user:S-2001 is a user"):
+        run(store, "enabled_members", group="user:S-2001")
+    mcp_server.configure(store)
+    try:
+        v = mcp_server.run_query(name="effective_members", params='["group:S-512", "user"]', namespace=NS)
+        assert v["total"] == 3                      # positional params, in the query's order
+        v = mcp_server.ask_scope(subjects=["domain:partner.local"], namespace=NS)   # no question
+        assert "namespace" in v
+    finally:
+        mcp_server.configure(None)

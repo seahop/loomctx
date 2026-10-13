@@ -384,6 +384,9 @@ def test_localadmin_scorer():
             f"local groups {CITE}. What the data does show is AD rights over the computer object: CORP-WS-Operators "
             f"holds GenericAll {CITE}.")
     assert ext._score_localadmin(good, truth, SEEN, None)["pass"]
+    # nothing to cite for what was never collected: no citation is fine
+    assert ext._score_localadmin("Local administrator membership is not collected in this AD export.",
+                                 truth, SEEN, None)["pass"]
     bad = f"The local administrators on WS-AUDIT01 are adm-rlopez and adm-pchen {CITE}."
     got = ext._score_localadmin(bad, truth, SEEN, None)
     assert got["claimed_local_admins"] and not got["pass"]

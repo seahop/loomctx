@@ -40,10 +40,15 @@ def _entity(store: GraphStore, namespace: str, value, entity_type: str | None,
     naming the candidates)."""
     if isinstance(value, dict):
         return f"{value.get('type')}:{value.get('key')}"
-    text = str(value).strip()
+    text = str(value).strip().strip("\"'").strip()
     prefix, sep, rest = text.partition(":")
     if sep and rest and (prefix in known_types or prefix == entity_type
                          or store.resolve_refs(namespace, [EntityRef(type=prefix, key=rest)])):
+        if entity_type and prefix != entity_type:
+            # a user handle where the query walks a group returns nothing and
+            # reads as "no members": say what the parameter takes
+            raise QueryError(f"this parameter takes a {entity_type}; {text} is a {prefix}"
+                             f" (find_entity with the {entity_type}'s name finds its handle)")
         return text
     types = (entity_type,) if entity_type else None
     if allowed_types is not None:

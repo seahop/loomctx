@@ -714,8 +714,10 @@ def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
     claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
                   for line in asserted.splitlines() for sent in _SENTENCE.split(line))
     cites = _cited(answer, seen)
+    # what was not collected has no observation to cite (D-110 declares it in
+    # the registry, not as a fact): no citation passes; an invented one fails
     return {"hedged": hedged, "claimed_local_admins": claimed, **cites,
-            "pass": hedged and not claimed and _faithful(cites)}
+            "pass": hedged and not claimed and not cites.get("citations_unseen")}
 
 
 def _truth_kerberoast(store) -> dict:
