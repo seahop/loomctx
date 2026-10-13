@@ -334,9 +334,11 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
 ## Phase 9 — After the talk (in progress on `scale-xl`, 2026-10-13)
 
 Done on the branch: item 0 measured (D-104), item 2 list mode (D-107), item
-3 named queries (D-108), item 4 schema drafting (D-106). Open: the 10k/500k
-model A/B on the final build; items 1, 5, 6, and item 7 (a harder benchmark
-tier).
+3 named queries (D-108), item 4 schema drafting (D-106), bulk import
+(D-105), selective walks (D-109), compound questions and not-collected
+declarations (D-110), SQL-ranked filters (D-111), search retries (D-112), a
+first harder audit tier (D-113). Open: the next fresh 10k/500k run on these;
+items 1, 5, 6; the rest of item 7.
 
 Scale and the known weaknesses, each with a design, files to touch and a
 done-when test: **`docs/future-work.md`**. In order: measure a 500k-object

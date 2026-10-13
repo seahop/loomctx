@@ -244,6 +244,12 @@ is GraphRAG's home turf. LoomCtx answers about entities, not themes.
 
 ## 7. A harder benchmark tier (tougher questions)
 
+**Status (2026-10-13): first cut, D-113** — access (nested admins with rights
+over a workstation), localadmin (not collected), kerberoast (enabled nested
+admins with SPNs), with the engine features they need (D-110: `within`
+filters, routes, not-collected declarations). Cross-source and `as_of`
+questions remain.
+
 **Problem.** The AD audits ask one thing each: a group's members, the
 delegation hosts, the trusts. Nineteen models pass all five; the scorecard
 no longer separates the strong ones, and real audits combine conditions
