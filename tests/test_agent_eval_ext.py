@@ -317,3 +317,39 @@ def test_coverage_hedge_reads_not_collected_phrasings_from_list_notes():
                  "the data regarding its group memberships may be missing, not necessarily absent."):
         assert _NOT_COLLECTED.search(text), text
     assert not _NOT_COLLECTED.search("labsvc-backup is a member of LAB-Backup and LAB-Ops.")
+
+
+def test_coverage_fails_a_membership_the_data_does_not_record():
+    """Qwen3 Coder on the final A/B: "is a member of the following groups:
+    Domain Users, Backup Operators" (each cited to an unrelated fact) plus a
+    coverage note passed — only the lab's own groups counted as guesses.
+    With no membership on record, any unhedged membership claim fails."""
+    from loomctx.agent_eval_ext import _score_coverage
+    truth = {"account": "labsvc-backup", "stored_memberships": [], "groups": ["LAB-Admins", "LAB-Backup", "LAB-Users"]}
+    bad = ("The account `labsvc-backup` in the `lab.local` domain is a member of the following groups:\n\n"
+           "- Domain Users [e51e8b03f5d0]\n- Backup Operators [a1c09e453656]\n\nNote: The data indicates that the "
+           "`member_of` relationship was not collected by the `lab-export` [a3e306710498].")
+    assert _score_coverage(bad, truth, set(), None)["claimed_membership"] is True
+    good = [
+        "The `labsvc-backup` account in the `lab.local` domain was not observed as a member of any groups in the "
+        "data collected by `lab-export`. The collection did not gather `member_of` for lab.local, so this is a "
+        "coverage gap [a3e306710498].",
+        "The account labsvc-backup in the lab.local domain does not have its group memberships collected by the "
+        "lab-export. Therefore, the groups it is a member of may be missing data, not absent [775390e1b4b4].",
+        "No group memberships are recorded for labsvc-backup — a data-collection gap: lab-export did not collect "
+        "member_of [775390e1b4b4]. It may belong to groups that were never exported.",
+    ]
+    for text in good:
+        got = _score_coverage(text, truth, set(), None)
+        assert not got["claimed_membership"] and got["hedged"], text
+    # excerpts of real final-A/B answers the first version of this check failed wrongly
+    excerpts = [
+        "This cannot be answered from the data — group membership for lab.local was not collected [a3e306710498].\n"
+        "Any groups it belongs to in lab.local are simply missing from this dataset.",
+        "labsvc-backup has no group memberships recorded — a data-collection gap [a3e306710498].\n"
+        "- A direct listing of groups this user is a member of   returned 0 rows",
+        "The account `labsvc-backup@lab.local` is a member of the following groups:\n\n"
+        "- No group membership data was collected for this account in the `lab-export` records [a3e306710498].",
+    ]
+    for text in excerpts:
+        assert not _score_coverage(text, truth, set(), None)["claimed_membership"], text
