@@ -454,9 +454,12 @@ def merge_schema(existing: SchemaRegistration | None,
             "label": old.label or p.label,
             "display": old.display or p.display,
             "description": p.description or old.description})
+    queries = {q.name: q for q in existing.queries}
+    queries.update((q.name, q) for q in incoming.queries)   # a re-registered query replaces (D-108)
     return SchemaRegistration(
         namespace=incoming.namespace,
         entity_types=list(types.values()),
         predicates=list(preds.values()),
         strict=incoming.strict,
+        queries=list(queries.values()),
     )

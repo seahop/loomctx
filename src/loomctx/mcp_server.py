@@ -60,12 +60,15 @@ from .context import (build_pack, cite_text, decode_handle, expand_pack, find_pa
                      label_predicates, search_by_name, semantic_search)
 from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, EntityRef,
                         ExpansionHandle,
-                        ListFilter, ListRequest, Observation, PathRequest, PredicateDef, ScopeSpec,
+                        ListFilter, ListRequest, Observation, PathRequest, PredicateDef, QueryRequest,
+                        ScopeSpec,
                         ScopeTruncation,
                         SemanticSearchResponse)
 from .gates import check_supersedes, scope_counts, scope_schema
 from .listing import list_entities as list_entities_impl
 from .llm import LLMError, embedder_from_env, llm_from_env
+from .queries import resolve as resolve_query
+from .queries import run_query as run_query_impl
 from .metrics import REJECTED
 from .ratelimit import LimiterPool, RateLimitSettings
 from .registry import validate_claim
@@ -82,6 +85,10 @@ _transport = "stdio"
 # dropped the argument after two calls and spent twelve steps querying an
 # empty 'default'; a deployment that serves one team sets this once.
 _DEFAULT_NS = os.environ.get("LOOMCTX_MCP_NAMESPACE", "").strip() or "default"
+# Named queries on the MCP surface (D-108): on by default. LOOMCTX_MCP_QUERIES=0
+# hides run_query and the `queries` describe_namespace lists — how a run is
+# measured with and without them.
+_QUERIES_ON = os.environ.get("LOOMCTX_MCP_QUERIES", "1").strip().lower() not in ("0", "false", "no", "off")
 
 Format = Literal["concise", "detailed"]
 
@@ -271,6 +278,8 @@ INSTRUCTIONS = (
     "list_entities returns EVERY entity matching conditions with an exact "
     "count (a group's nested members that are enabled, computers with a "
     "flag set) — use it when the answer is a set, not a ranked pack. "
+    "describe_namespace lists a namespace's named `queries` (questions it "
+    "answers exactly); run one with run_query(name, params). "
     "purple_report sets a red-team operation's logged actions against the "
     "detections on the same hosts (detected / host_only / missed). Every "
     "pack tool takes format='concise' (default: "
@@ -531,12 +540,21 @@ class EntityTypeCount(TypedDict):
     attributes: NotRequired[list[str]]
 
 
+class AgentQuery(TypedDict):
+    """A named query the namespace answers exactly (D-108): run it with
+    run_query(name, params)."""
+    name: str
+    description: str
+    params: list[str]
+
+
 class NamespaceDescription(TypedDict):
     namespace: str
     entity_types: list[EntityTypeCount]
     predicates: list[PredicateDef]
     strict: bool
     hint: str
+    queries: NotRequired[list[AgentQuery]]
 
 
 class EntityMatch(TypedDict):
@@ -702,13 +720,24 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
         if attributes:
             entry["attributes"] = _capped(attributes, _ATTRIBUTES_SHOWN)
         types.append(entry)
-    return {
+    view: dict[str, Any] = {
         "namespace": namespace,
         "entity_types": types,
         "predicates": [p.model_dump(mode="json") for p in (schema.predicates if schema else [])],
         "strict": bool(schema and schema.strict),
         "hint": _path_hint(relations),
     }
+    if schema is not None and schema.queries and _QUERIES_ON:
+        view["queries"] = [{"name": q.name, "description": q.description,
+                            "params": [_param_text(p) for p in q.params]} for q in schema.queries]
+    return view  # type: ignore[return-value]
+
+
+def _param_text(p) -> str:
+    """A query parameter as one line: `group (entity: group) — the group`."""
+    kind = f"{p.kind}: {p.entity_type}" if p.entity_type else p.kind
+    text = f"{p.name} ({kind}{'' if p.default is None else f', default {p.default!r}'})"
+    return text + (f" — {p.description}" if p.description else "")
 
 
 # describe_namespace counts against the agent's context: a type's links and
@@ -1171,6 +1200,38 @@ def list_entities(
     return _list_view(list_entities_impl(_get_store(), req, allowed_types=_allowed(grant)))
 
 
+def run_query(
+    name: str,
+    params: dict[str, Any] | str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    budget: int = 2000,
+    namespace: str = _DEFAULT_NS,
+    as_of: str | None = None,
+    valid_at: str | None = None,
+    ctx: Context = None,
+) -> ListView:
+    """Run one of the namespace's NAMED QUERIES — questions it answers
+    exactly, listed under `queries` by describe_namespace (an AD namespace:
+    effective_members(group), account_groups(account),
+    unconstrained_delegation_hosts, domain_trusts, …). `params` maps each
+    parameter to its value; an entity parameter takes a 'type:key' handle or
+    a name. Returns every match with an exact `total`, cited, paged like
+    list_entities. Prefer it over composing the same walk by hand."""
+    grant = _grant(ctx, namespace, "r")
+    _known_namespace(namespace, grant)
+    if isinstance(params, str):
+        params = json.loads(params) if params.strip() else {}
+    req = QueryRequest(namespace=namespace, name=name, params=params or {}, limit=limit, offset=offset,
+                       budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at))
+    _, listed = resolve_query(_get_store(), req, allowed_types=_allowed(grant))
+    if listed.of is not None:
+        _gate_type(grant, listed.of.type)
+    if listed.type:
+        _gate_type(grant, listed.type)
+    return _list_view(run_query_impl(_get_store(), req, allowed_types=_allowed(grant)))
+
+
 class PurpleView(TypedDict):
     """Red actions of an operation against the detections around them (D-086)."""
     namespace: str
@@ -1427,6 +1488,7 @@ TOOL_META: dict[str, tuple[str, bool, bool]] = {
     "ask_scope": ("Ask about a scope", True, True),
     "find_path": ("Find paths between two entities", True, True),
     "list_entities": ("List every entity matching conditions", True, True),
+    "run_query": ("Run a named query", True, True),
     "expand": ("Expand a handle", True, True),
     "record_claim": ("Record a claim", False, True),
     "get_observations": ("Get raw observations", True, True),
@@ -1443,6 +1505,7 @@ TOOLS = (
     ask_scope,
     find_path,
     list_entities,
+    run_query,
     expand,
     record_claim,
     get_observations,
@@ -1522,9 +1585,11 @@ def _accept_aliases(fn):
     return wrapped
 
 
-_PACK_TOOLS = ("ask", "ask_scope", "find_path", "list_entities", "expand", "answer")
+_PACK_TOOLS = ("ask", "ask_scope", "find_path", "list_entities", "run_query", "expand", "answer")
 
 for _fn in TOOLS:
+    if _fn is run_query and not _QUERIES_ON:
+        continue
     _impl = _accept_aliases(_fn)
     _impl = _compact_text(_impl) if _fn.__name__ in _PACK_TOOLS else _impl
     mcp.tool(name=_fn.__name__, title=TOOL_META[_fn.__name__][0],

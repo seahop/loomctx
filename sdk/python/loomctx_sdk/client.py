@@ -196,6 +196,32 @@ class LoomCtx:
             },
         )
 
+    def run_query(
+        self,
+        name: str,
+        params: dict | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        budget: int = 1500,
+        as_of: str | None = None,
+        valid_at: str | None = None,
+    ) -> dict:
+        """Run one of the namespace's named queries (D-108) — listed by its
+        schema registration — with `params`; the answer is a list page."""
+        return self._post(
+            "/v1/query",
+            {
+                "namespace": self.namespace,
+                "name": name,
+                "params": params or {},
+                "limit": limit,
+                "offset": offset,
+                "budget": budget,
+                "as_of": as_of,
+                "valid_at": valid_at,
+            },
+        )
+
     def path(
         self,
         from_: EntityTuple,

@@ -708,6 +708,82 @@ class PredicateDef(BaseModel):
     )
 
 
+class QueryParam(BaseModel):
+    """One parameter of a named query (D-108). Without a default it is
+    required. An `entity` parameter takes a 'type:key' handle or a name the
+    namespace's label predicates know (resolved like find_entity, within
+    `entity_type` when set)."""
+
+    name: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str = ""
+    kind: Literal["string", "entity", "integer", "boolean"] = "string"
+    entity_type: str | None = None
+    default: Any = None
+
+
+class QueryDef(BaseModel):
+    """A named, parameterized question a namespace answers exactly (D-108):
+    a ListRequest template whose string values may be `{param}`
+    placeholders — "effective_members(group)", "unconstrained delegation
+    hosts that are not DCs". Data, not code: a connector registers the
+    questions its domain asks, and an agent runs one by name instead of
+    composing the walk and filters itself. `namespace`, paging and budget
+    come from the call, never the template."""
+
+    name: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str
+    params: list[QueryParam] = Field(default_factory=list)
+    request: dict[str, Any] = Field(
+        description="a ListRequest without namespace / limit / offset / "
+        "budget / as_of / valid_at; '{param}' strings are substituted",
+    )
+
+    @model_validator(mode="after")
+    def _template_is_a_list_request(self) -> "QueryDef":
+        reserved = {"namespace", "limit", "offset", "budget", "as_of", "valid_at"} & set(self.request)
+        if reserved:
+            raise ValueError(f"query '{self.name}': the call supplies {sorted(reserved)}, not the template")
+        sample = {p.name: {"string": "x", "entity": "t:x", "integer": 1, "boolean": True}[p.kind]
+                  for p in self.params}
+        ListRequest.model_validate(fill_template(self.request, sample))
+        return self
+
+
+def fill_template(value: Any, params: dict[str, Any]) -> Any:
+    """`value` with every '{name}' string replaced by params[name]: a whole
+    placeholder takes the value as typed (an entity handle 'type:key'
+    becomes a ref where an EntityRef is expected), one inside a longer
+    string is spelled in."""
+    if isinstance(value, dict):
+        filled = {k: fill_template(v, params) for k, v in value.items()}
+        if isinstance(filled.get("of"), str):
+            t, _, k = filled["of"].partition(":")
+            filled["of"] = {"type": t, "key": k}
+        return filled
+    if isinstance(value, list):
+        return [fill_template(v, params) for v in value]
+    if isinstance(value, str):
+        whole = value[1:-1] if value.startswith("{") and value.endswith("}") else None
+        if whole in params:
+            return params[whole]
+        for name, v in params.items():
+            value = value.replace("{" + name + "}", str(v))
+    return value
+
+
+class QueryRequest(BaseModel):
+    """Run a namespace's named query (D-108); the answer is a ListPage."""
+
+    namespace: str = DEFAULT_NAMESPACE
+    name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=50, gt=0, le=MAX_LIST_LIMIT)
+    offset: int = Field(default=0, ge=0)
+    budget: int = Field(default=1500, gt=0, le=1_000_000)
+    as_of: datetime | None = None
+    valid_at: datetime | None = None
+
+
 class SchemaRegistration(BaseModel):
     """Per-namespace registry (D-024). Registering is additive (a later POST
     merges by name). Validation on ingest: a registered predicate's
@@ -718,3 +794,8 @@ class SchemaRegistration(BaseModel):
     entity_types: list[EntityTypeDef] = Field(default_factory=list)
     predicates: list[PredicateDef] = Field(default_factory=list)
     strict: bool = False
+    queries: list[QueryDef] = Field(
+        default_factory=list,
+        description="named questions the namespace answers exactly (D-108); "
+        "a later registration replaces a query of the same name",
+    )

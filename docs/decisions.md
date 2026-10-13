@@ -3475,6 +3475,36 @@ are not DCs?" want every match and a count; agents answered them by paging
   `is_dc!=true`, `name~=svc`, `spn?`, `!mail`); a comma inside a value (an
   LDAP DN) does not split it.
 
+## D-108 · Named queries: the questions a namespace answers, by name (2026-10-13)
+
+The AD audits are the same few questions every time — a group's effective
+members, an account's groups, unconstrained delegation outside the DCs, the
+trusts — and models lose runs composing them (wrong direction, depth 1 for
+nested groups, forgetting the DC exclusion). A namespace's registration now
+carries `queries`: `QueryDef` (name, description, `QueryParam`s, and a
+ListRequest template whose `{param}` strings are substituted). MCP
+`run_query(name, params)` (14 tools), HTTP `POST /v1/query` (`QueryRequest`
+-> `ListPage`); `describe_namespace` lists each query with its parameters.
+
+- **Data, not code.** A template is validated as a ListRequest at
+  registration (sample values in every placeholder); the call, never the
+  template, supplies namespace, paging, budget and the time axes. Domain
+  questions stay in the registry (hard rule): the LDAP connector registers
+  effective_members, enabled_members, account_groups,
+  unconstrained_delegation_hosts, domain_trusts, kerberoastable_users,
+  asrep_roastable_users. Registration merges by name; a re-registered query
+  replaces the old.
+- **Entity parameters** take a 'type:key' handle or a name the label
+  predicates know (find_entity's resolution, within the parameter's
+  `entity_type`); a name matching several entities is refused with the
+  candidates, never guessed (two domains' "Domain Admins").
+- **Coverage-aware absence** (also list mode): an `ne` match with no value on
+  record is "not set" when coverage records the predicate as collected (LDAP
+  emits `is_dc` only when it holds), and "unknown" with the coverage record
+  to cite when collection was partial.
+- **Measured both ways.** `LOOMCTX_MCP_QUERIES=0` hides run_query and the
+  listed queries, so a run reports agent results with and without them.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

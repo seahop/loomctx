@@ -1996,6 +1996,76 @@
     "title": "ListPage",
     "type": "object"
   },
+  "QueryRequest": {
+    "description": "Run a namespace's named query (D-108); the answer is a ListPage.",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      },
+      "params": {
+        "additionalProperties": true,
+        "title": "Params",
+        "type": "object"
+      },
+      "limit": {
+        "default": 50,
+        "exclusiveMinimum": 0,
+        "maximum": 1000,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Offset",
+        "type": "integer"
+      },
+      "budget": {
+        "default": 1500,
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "As Of"
+      },
+      "valid_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Valid At"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "title": "QueryRequest",
+    "type": "object"
+  },
   "AnswerRequest": {
     "$defs": {
       "EntityRef": {
@@ -2758,6 +2828,87 @@
         ],
         "title": "PredicateDef",
         "type": "object"
+      },
+      "QueryDef": {
+        "description": "A named, parameterized question a namespace answers exactly (D-108):\na ListRequest template whose string values may be `{param}`\nplaceholders \u2014 \"effective_members(group)\", \"unconstrained delegation\nhosts that are not DCs\". Data, not code: a connector registers the\nquestions its domain asks, and an agent runs one by name instead of\ncomposing the walk and filters itself. `namespace`, paging and budget\ncome from the call, never the template.",
+        "properties": {
+          "name": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/$defs/QueryParam"
+            },
+            "title": "Params",
+            "type": "array"
+          },
+          "request": {
+            "additionalProperties": true,
+            "description": "a ListRequest without namespace / limit / offset / budget / as_of / valid_at; '{param}' strings are substituted",
+            "title": "Request",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "request"
+        ],
+        "title": "QueryDef",
+        "type": "object"
+      },
+      "QueryParam": {
+        "description": "One parameter of a named query (D-108). Without a default it is\nrequired. An `entity` parameter takes a 'type:key' handle or a name the\nnamespace's label predicates know (resolved like find_entity, within\n`entity_type` when set).",
+        "properties": {
+          "name": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "kind": {
+            "default": "string",
+            "enum": [
+              "string",
+              "entity",
+              "integer",
+              "boolean"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "entity_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entity Type"
+          },
+          "default": {
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "QueryParam",
+        "type": "object"
       }
     },
     "description": "Per-namespace registry (D-024). Registering is additive (a later POST\nmerges by name). Validation on ingest: a registered predicate's\nobject_types are always enforced; with `strict` the namespace also\nrejects unregistered predicates and entity types.",
@@ -2785,6 +2936,14 @@
         "default": false,
         "title": "Strict",
         "type": "boolean"
+      },
+      "queries": {
+        "description": "named questions the namespace answers exactly (D-108); a later registration replaces a query of the same name",
+        "items": {
+          "$ref": "#/$defs/QueryDef"
+        },
+        "title": "Queries",
+        "type": "array"
       }
     },
     "title": "SchemaRegistration",

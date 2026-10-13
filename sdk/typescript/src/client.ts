@@ -18,6 +18,7 @@ import type {
   ListRequest,
   PathPack,
   PathRequest,
+  QueryRequest,
   SchemaRegistration,
   SemanticSearchResponse,
 } from "./contracts.js";
@@ -254,6 +255,25 @@ export class LoomCtx {
       valid_at: opts.valid_at ?? null,
     };
     return this.post("/v1/list", body);
+  }
+
+  /** Run one of the namespace's named queries (D-108); the answer is a list page. */
+  query(
+    name: string,
+    params: Record<string, unknown> = {},
+    opts: { limit?: number; offset?: number; budget?: number; as_of?: string | null; valid_at?: string | null } = {},
+  ): Promise<ListPage> {
+    const body: QueryRequest = {
+      namespace: this.namespace,
+      name,
+      params,
+      limit: opts.limit ?? 50,
+      offset: opts.offset ?? 0,
+      budget: opts.budget ?? 1500,
+      as_of: opts.as_of ?? null,
+      valid_at: opts.valid_at ?? null,
+    };
+    return this.post("/v1/query", body);
   }
 
   answer(

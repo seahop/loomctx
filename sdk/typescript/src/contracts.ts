@@ -21,6 +21,7 @@ export interface LoomCtxContracts {
   PathPack?: PathPack;
   ListRequest?: ListRequest;
   ListPage?: ListPage;
+  QueryRequest?: QueryRequest;
   AnswerRequest?: AnswerRequest;
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
@@ -529,6 +530,21 @@ export interface ListRow {
   cites?: Citation[];
 }
 /**
+ * Run a namespace's named query (D-108); the answer is a ListPage.
+ */
+export interface QueryRequest {
+  namespace?: string;
+  name: string;
+  params?: {
+    [k: string]: unknown;
+  };
+  limit?: number;
+  offset?: number;
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+/**
  * Ask + synthesize: retrieve a context pack, then have the configured
  * LLM produce a cited answer/decision. With neither subject nor scope,
  * subjects are auto-resolved from entity names mentioned in the question.
@@ -576,6 +592,10 @@ export interface SchemaRegistration {
   entity_types?: EntityTypeDef[];
   predicates?: PredicateDef[];
   strict?: boolean;
+  /**
+   * named questions the namespace answers exactly (D-108); a later registration replaces a query of the same name
+   */
+  queries?: QueryDef[];
 }
 /**
  * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
@@ -613,6 +633,47 @@ export interface PredicateDef {
    * the label a pack shows beside its subject's opaque key, over the namespace's other labels: a name that says where the entity lives (`dlee@dev.local`, a UPN) rather than a bare login that reads the same in every domain (D-097)
    */
   display?: boolean;
+}
+/**
+ * A named, parameterized question a namespace answers exactly (D-108):
+ * a ListRequest template whose string values may be `{param}`
+ * placeholders — "effective_members(group)", "unconstrained delegation
+ * hosts that are not DCs". Data, not code: a connector registers the
+ * questions its domain asks, and an agent runs one by name instead of
+ * composing the walk and filters itself. `namespace`, paging and budget
+ * come from the call, never the template.
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "QueryDef".
+ */
+export interface QueryDef {
+  name: string;
+  description: string;
+  params?: QueryParam[];
+  /**
+   * a ListRequest without namespace / limit / offset / budget / as_of / valid_at; '{param}' strings are substituted
+   */
+  request: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * One parameter of a named query (D-108). Without a default it is
+ * required. An `entity` parameter takes a 'type:key' handle or a name the
+ * namespace's label predicates know (resolved like find_entity, within
+ * `entity_type` when set).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "QueryParam".
+ */
+export interface QueryParam {
+  name: string;
+  description?: string;
+  kind?: "string" | "entity" | "integer" | "boolean";
+  entity_type?: string | null;
+  default?: {
+    [k: string]: unknown;
+  };
 }
 export interface IngestBatchResponse {
   total: number;

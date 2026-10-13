@@ -410,9 +410,8 @@ def list_entities(store: GraphStore, req: ListRequest,
                 for k in chunk:
                     keep(k, f, rules.current(by.get(k, [])), survivors)
         alive = survivors
-    for pred, n in sorted(unrecorded.items()):
-        notes.append(f"{n} candidate entit{'y has' if n == 1 else 'ies have'} no {pred} value on record "
-                     f"(counted as not equal)")
+    if unrecorded:
+        notes.extend(_unrecorded_notes(store, ns, req.as_of, unrecorded))
     page.total = len(alive)
     page.exact = not cut
     if cut:
@@ -476,6 +475,30 @@ def list_entities(store: GraphStore, req: ListRequest,
         notes.append(f"{len(window) - len(page.rows)} row(s) of this page did not fit the token budget; "
                      f"continue from offset {end}")
     return done()
+
+
+def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list[str]:
+    """What an `ne` match with no value on record means, per predicate: a
+    collector that sets a flag only when it holds (LDAP's is_dc,
+    unconstrained_delegation) and records the predicate as fully collected
+    makes absence "not set"; a partial or absent collection makes it
+    unknown — said with the coverage record to cite (D-092, D-107)."""
+    from . import coverage
+    recs = coverage.records(store, ns, as_of)
+    out = []
+    for pred, n in sorted(unrecorded.items()):
+        lead = f"{n} candidate entit{'y has' if n == 1 else 'ies have'} no {pred} value on record"
+        mine = [r for r in recs if str(r.object) == pred]
+        gaps = [r for r in mine if r.attrs.get("state") in ("absent", "partial")]
+        if gaps:
+            out.append(f"{lead}: {pred} was not fully collected (coverage {gaps[0].id[:12]}), so for them "
+                       "it is unknown, not a different value")
+        elif mine:
+            out.append(f"{lead}; coverage {mine[0].id[:12]} records {pred} as collected, so it is not set "
+                       "on them")
+        else:
+            out.append(f"{lead} (counted as not equal)")
+    return out
 
 
 def _value(rows: list[LiteRow]):

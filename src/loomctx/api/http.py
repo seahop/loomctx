@@ -45,6 +45,7 @@ from ..contracts import (
     ListRequest,
     PathPack,
     PathRequest,
+    QueryRequest,
 )
 from ..contracts import (
     MAX_BATCH_ITEMS,
@@ -55,6 +56,8 @@ from ..contracts import (
 )
 from ..gates import check_citation, check_supersedes, scope_schema, stamp_uploader
 from ..listing import list_entities
+from ..queries import QueryError, run_query
+from ..queries import resolve as resolve_query
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
@@ -619,6 +622,26 @@ def list_route(req: ListRequest, request: Request) -> ListPage:
         _gate_entity_type(grant, req.type)
     with metrics.PACK_SECONDS.time():
         return list_entities(request.app.state.store, req, allowed_types=_allowed_types(grant))
+
+
+@app.post("/v1/query", response_model=ListPage)
+def query_route(req: QueryRequest, request: Request) -> ListPage:
+    """Run a namespace's named query (D-108): the ListRequest its template
+    spells, gated like /v1/list. An unknown query or a parameter it cannot
+    use is a 422 that says what the query takes."""
+    grant = _authorize(request, req.namespace, "r")
+    allowed = _allowed_types(grant)
+    store = request.app.state.store
+    try:
+        _, listed = resolve_query(store, req, allowed_types=allowed)
+    except QueryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if listed.of is not None:
+        _gate_entity_type(grant, listed.of.type)
+    if listed.type is not None:
+        _gate_entity_type(grant, listed.type)
+    with metrics.PACK_SECONDS.time():
+        return run_query(store, req, allowed_types=allowed)
 
 
 @app.post("/v1/expand", response_model=ContextPack)

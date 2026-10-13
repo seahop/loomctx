@@ -15,6 +15,15 @@ tag is v0.1.0).
   (`enabled=false`, `is_dc!=true`), paged and cited. Seeded from indexes and
   read set-wise, so it costs the same shape at 10k objects as at 500k.
 
+### Named queries (D-108)
+
+- A schema registration can carry `queries`: named, parameterized list
+  templates. `POST /v1/query`, MCP `run_query`; `describe_namespace` lists
+  them. The LDAP connector registers effective_members, enabled_members,
+  account_groups, unconstrained_delegation_hosts, domain_trusts,
+  kerberoastable_users and asrep_roastable_users.
+- `LOOMCTX_MCP_QUERIES=0` hides them on the MCP surface.
+
 ### Draft a schema registration from a sample (D-106)
 
 - `python -m loomctx.registry draft SAMPLE [--format envelopes|ndjson|json|ldif]

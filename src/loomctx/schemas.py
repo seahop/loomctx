@@ -32,6 +32,7 @@ from .contracts import (
     Observation,
     PathPack,
     PathRequest,
+    QueryRequest,
     SchemaRegistration,
     SemanticSearchResponse,
 )
@@ -48,6 +49,7 @@ ROOTS = {
     "PathPack": PathPack.model_json_schema,
     "ListRequest": ListRequest.model_json_schema,
     "ListPage": ListPage.model_json_schema,
+    "QueryRequest": QueryRequest.model_json_schema,
     "AnswerRequest": AnswerRequest.model_json_schema,
     "AnswerResponse": AnswerResponse.model_json_schema,
     "SemanticSearchResponse": SemanticSearchResponse.model_json_schema,
