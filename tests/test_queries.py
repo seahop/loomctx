@@ -212,12 +212,21 @@ def test_not_collected_is_declared_and_noted(store):
     pack = build_pack(store, AskRequest(namespace=NS, subject=EntityRef(type="computer", key="S-3002"),
                                         question="is it trusted for delegation?"))
     assert not any("not collected by this namespace" in n for n in pack.notes)
+    # an empty answer to an ordinary filter says nothing about local groups…
     page = list_entities(store, ListRequest(namespace=NS, type="user", where=[
         {"predicate": "sam", "op": "eq", "value": "nobody"}]))
-    assert page.total == 0 and any("logon sessions" in n for n in page.notes)
+    assert page.total == 0 and not any("not collected by this namespace" in n for n in page.notes)
+    # …an empty answer to a predicate the namespace lacks names the matching gap
+    page = list_entities(store, ListRequest(namespace=NS, of=EntityRef(type="computer", key="S-3002"),
+                                            via=["local_admin"], direction="in"))
+    assert any("local group membership" in n for n in page.notes)
+    assert not any("logon sessions" in n for n in page.notes)
     pp = find_paths(store, PathRequest(namespace=NS, **{"from": EntityRef(type="user", key="S-2001")},
                                        to=EntityRef(type="computer", key="S-3002"), via=["member_of"]))
-    assert not pp.paths and any("not collected by this namespace" in n for n in pp.notes)
+    assert not pp.paths and not any("not collected by this namespace" in n for n in pp.notes)
+    pp = find_paths(store, PathRequest(namespace=NS, **{"from": EntityRef(type="user", key="S-2001")},
+                                       to=EntityRef(type="computer", key="S-3002"), via=["has_session"]))
+    assert any("logon sessions" in n for n in pp.notes)
 
 
 def test_empty_searches_retry_what_agents_meant(store):

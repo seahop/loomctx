@@ -372,7 +372,10 @@ def list_entities(store: GraphStore, req: ListRequest,
     st = stats if stats is not None else {}
     st.update(start="", candidates=0, fetched=0, scanned=0)
 
+    asked_unknown: list[str] = []
+
     def unknown(name: str, what: str) -> None:
+        asked_unknown.append(name)
         close = _close_predicates(name, definitions, vocabulary)
         hint = f"; did you mean {', '.join(close)}?" if close else ""
         notes.append(f"{what} '{name}' is not a predicate in namespace '{ns}'{hint}")
@@ -620,8 +623,10 @@ def list_entities(store: GraphStore, req: ListRequest,
                      f"continue from offset {end}")
     elif page.next_offset is not None:
         notes.append(f"{len(alive) - end} more match(es) past this page: call again with offset={end}")
-    if not alive:
-        nc = not_collected_note(store, ns, None)
+    if not alive and asked_unknown:
+        # an empty answer to a predicate the namespace does not have — what
+        # its sources declare they do not carry may be what was asked (D-110)
+        nc = not_collected_note(store, ns, " ".join(asked_unknown).replace("_", " "), fallback_all=True)
         if nc:
             notes.append(nc)
     return done()

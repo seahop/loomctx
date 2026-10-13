@@ -2188,15 +2188,18 @@ def _close_predicates(name: str, definitions, vocabulary: set[str]) -> list[str]
     return out[:_MAX_SUGGESTIONS]
 
 
-def not_collected_note(store: GraphStore, namespace: str, question: str | None) -> str | None:
-    """The namespace's declared not-collected topics (D-110): all of them
-    (question None — an empty result), or those whose words the question
-    uses. A statement of what the data cannot carry, not advice."""
+def not_collected_note(store: GraphStore, namespace: str, question: str | None,
+                       fallback_all: bool = False) -> str | None:
+    """The namespace's declared not-collected topics (D-110) whose words the
+    question (or the unknown predicates a request named) uses; with
+    `fallback_all`, every topic when none matches by word. A statement of
+    what the data cannot carry, not advice."""
     schema = _schema(store, namespace)
     gaps = list(schema.not_collected) if schema is not None else []
     if question is not None:
         text = f" {question.lower()} "
-        gaps = [g for g in gaps if any(re.search(rf"\b{re.escape(w.lower())}\b", text) for w in g.words)]
+        matched = [g for g in gaps if any(re.search(rf"\b{re.escape(w.lower())}\b", text) for w in g.words)]
+        gaps = matched or (gaps if fallback_all else [])
     if not gaps:
         return None
     return ("not collected by this namespace's sources: " + "; ".join(g.description for g in gaps)
@@ -2718,7 +2721,9 @@ def find_paths(
     if not returned and searched:
         notes.append(f"no path found from {src.type}:{src.key} to {dst.type}:{dst.key} within "
                      f"depth {depth} along {', '.join(sorted(via_set))}")
-        nc_note = not_collected_note(store, ns, None)
+        unknown_via = sorted(via_set - _registry_predicates(store, ns) - seen_preds)
+        nc_note = (not_collected_note(store, ns, " ".join(unknown_via).replace("_", " "), fallback_all=True)
+                   if unknown_via else None)
         if nc_note:
             notes.append(nc_note)
     if searched:
