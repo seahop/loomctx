@@ -312,8 +312,8 @@ _NOT_COLLECTED = re.compile(
     r"|no (?:group[- ]?)?membership (?:data|information|attributes?|records?)"
     r"|(?:membership|group) (?:data|information|attributes?) (?:is |are |was |were )?(?:missing|absent|unavailable)"
     r"|(?:did(?:n't| not)|does(?:n't| not)|do(?:n't| not)) (?:collect|export|include|capture|record)"
-    r"|missing (?:data )?(?:rather than|not) (?:empty|absen\w*|none)"
-    r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any )?collected"
+    r"|missing(?: data)?,? (?:rather than|not) (?:necessarily )?(?:empty|absen\w*|none)"
+    r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any |its |their )?(?:group )?(?:memberships? )?collected"
     r"|coverage|(?:can(?:not|'t)|could(?:n't| not)|unable to) (?:be )?"
     r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list)\w*"
     r"|\bunknown\b|incomplete|partial (?:export|collection|data)",

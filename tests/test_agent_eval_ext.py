@@ -305,3 +305,15 @@ def test_scorers_read_the_five_run_answers():
     listed = ("The following computer accounts, other than domain controllers, are trusted for unconstrained delegation:\n"
               f"- APP-LEGACY01$ {CITE}\n- PRINT-HQ02$\n- SQL-OLD03$\n- WEB-KCD04$@corp.local [4a33ed837fb0]\n- SRV01989$")
     assert ext._score_delegation(listed, deleg, SEEN, None)["false_hosts"] == ["WEB-KCD04"]
+
+
+def test_coverage_hedge_reads_not_collected_phrasings_from_list_notes():
+    """GPT-4o on the final A/B: the right answer, scored unhedged — "does not
+    have its group memberships collected" and "may be missing data, not
+    absent" (the list note's own words, with a comma) were not read."""
+    from loomctx.agent_eval_ext import _NOT_COLLECTED
+    for text in ("The account labsvc-backup does not have its group memberships collected by the lab-export.",
+                 "Therefore, the groups it is a member of may be missing data, not absent [775390e1b4b4].",
+                 "the data regarding its group memberships may be missing, not necessarily absent."):
+        assert _NOT_COLLECTED.search(text), text
+    assert not _NOT_COLLECTED.search("labsvc-backup is a member of LAB-Backup and LAB-Ops.")
