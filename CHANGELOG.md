@@ -44,6 +44,17 @@ tag is v0.1.0).
   anything. On the shipped connectors' envelopes it reproduces 86–92 % of the
   hand-written predicates.
 
+### Bulk import about 3x faster (D-105)
+
+- SQLite records a batch of claims set at a time (one lookup per batch for
+  replays, entities and aliases; `executemany` for the rows), and the direct
+  loader (`loomctx.ingest`, every connector's `import --db`) runs in a new
+  store bulk mode: commits every 5 s, a larger page cache and checkpoint
+  interval, and into an empty store the query indexes built once at the end.
+  The 175k-observation realistic forest imports in 16 s instead of 49 s
+  (a tenth of the disk writes), the 6.5M-observation one in 15 minutes
+  instead of 42 (a fifth of the writes); what is stored is unchanged.
+
 ### Model scorecard 2026-09-28; Active Directory audits published
 
 - `docs/models.md` re-measured on the current engine: 35 models, five runs of

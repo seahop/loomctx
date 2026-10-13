@@ -3356,6 +3356,62 @@ Replayed against the 500k store with the fixes: the 53-minute delegation call
 24 s, a 16-minute domain-wide one 4.6 s, `describe_namespace` 0.4 s, a store
 open under a second. The scale numbers are in the scale report.
 
+## D-105 · Bulk import, set at a time (2026-10-13)
+
+The realistic 500,000-object forest (6.5M observations) took 2.3 hours to
+import into SQLite through the LDAP connector: 780 observations/s, using a
+third of a CPU. Profiled (cProfile, the 175k-observation realistic large
+forest, fresh store, 52.7 s): 29% in 706 commits, 23% in 878,000
+`execute` calls (five statements per claim: the replay pre-check, the exact
+entity, the alias, the create-and-reread, the insert), the rest Python
+around them. Importing the same 175k into a 6.5M-row store showed what grows:
+commits were 31 s, and the load wrote 9.8 GiB (56 KB per observation) —
+every 500-line batch dirtied a few thousand random index pages, wrote them
+to the WAL, and the 1,000-page autocheckpoint wrote them again.
+
+- **`record_claims` is set at a time on SQLite.** One query per batch finds
+  the replayed event ids (and their tombstones), one the exact entities, one
+  the aliases; new entities go in through one `executemany`, the rows
+  through another. What lands is what the claim-at-a-time loop stored:
+  replays answer with the stored row (a redacted one as its stand-in), a
+  repeat within the batch with the first's row and no entities of its own,
+  a merged-away ref lands on its canonical, a row that loses the insert race
+  (H-B2) answers with the winner. Nothing in a batch changes what a ref
+  resolves to, which is what makes resolving them up front exact.
+- **A bulk mode on the store** (`GraphStore.bulk_load()`, a no-op by
+  default; SQLite and the sharding wrapper implement it). The direct loader
+  (`loomctx.ingest`, and every connector's `import --db`) runs a file in it.
+  Inside, SQLite holds the writer, makes each write call a savepoint in a
+  transaction committed every 5 s (a call keeps its own all-or-nothing; the
+  calls before an error stay stored, as when each committed alone; reads on
+  the loading thread see its writes, so a claim still cites a document from
+  an earlier batch), and raises the page cache to 256 MiB and the
+  checkpoint interval to 20,000 pages, restored on the way out. Into a store
+  with no observations it also drops the eight query-only observation
+  indexes and builds them once at the end by sort (the dedupe index and the
+  entity indexes stay); a load that dies midway leaves them to the next
+  open, which creates any missing index. Another writer waits up to ~5 s,
+  inside its 15 s busy timeout. A loader whose input reads this same store
+  through another connection passes `bulk=False` (the KEV load, S-29).
+- One registry cache per load (a schema read per batch before), and the
+  registry's predicate index is kept per schema instead of rebuilt per claim.
+
+Measured on one host, the same realistic forests, old (main) vs new, wall
+time of `python -m loomctx.connectors.ldap import --db` into a fresh store:
+medium (56k observations) 11.3–13.4 s → 5.1–5.2 s; large (175k) 49.1–49.4 s
+→ 15.8–17.5 s (3,570 → 10,000–11,100 observations/s), writing 5.5 GiB →
+0.5 GiB; xl (6.5M) 2,516 s → 877.5 s (2,584 → 7,410/s), writing 384 GiB →
+74 GiB. This host has a local NVMe disk; where writes are the bottleneck (the
+2.3-hour run's network disk) the fifth of the bytes should count for more.
+175k more into the 6.5M-row store (no index deferral there): load 72.7–76.0
+s → 31.1 s. The stored
+observations, entities and aliases are identical (a hash over every
+observation's content, ids aside — they are uuid4 either way). Tried and
+dropped: reading the input ahead on a thread (SQLite releases the GIL per
+row, and the two threads convoyed on it: no gain), `model_construct` for the
+Observation (slower than validating), foreign keys off (no change), a 1 GiB
+cache and `mmap_size` (no change beyond 256 MiB). Postgres is unchanged.
+
 ## D-106 · A schema registration drafted from a sample, for review (2026-10-13)
 
 Future-work item 4. Every new source needs a `SchemaRegistration` (entity

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import abc
 import inspect
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from typing import Iterator
 
@@ -235,6 +236,13 @@ class ShardedStore(GraphStore):
     def refresh_statistics(self) -> None:
         for s in self._all:
             s.refresh_statistics()
+
+    @contextmanager
+    def bulk_load(self) -> Iterator[None]:
+        with ExitStack() as stack:
+            for s in self._all:
+                stack.enter_context(s.bulk_load())
+            yield
 
     def close(self) -> None:
         for s in self._all:

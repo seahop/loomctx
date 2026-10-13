@@ -43,14 +43,31 @@ class RegistryCache:
         self._cache.pop(namespace, None)
 
 
+_LAST_INDEX: tuple = (None, {}, set())
+
+
+def _index(schema: SchemaRegistration) -> tuple[dict, set[str]]:
+    """The registry's predicates by name and its entity type names, kept for
+    the last schema seen: a batch validates every claim against the same
+    cached registration (D-105), and rebuilding both per claim was most of
+    the cost of validating it."""
+    global _LAST_INDEX
+    last = _LAST_INDEX
+    if last[0] is schema:
+        return last[1], last[2]
+    predicates = {p.name: p for p in schema.predicates}
+    types = {t.name for t in schema.entity_types}
+    _LAST_INDEX = (schema, predicates, types)
+    return predicates, types
+
+
 def validate_claim(schema: SchemaRegistration | None, claim: ClaimIn) -> str | None:
     """Why this claim violates the namespace's registry, or None if it is
     acceptable. Registered predicates always enforce their object_types;
     `strict` additionally rejects anything unregistered."""
     if schema is None:
         return None
-    predicates = {p.name: p for p in schema.predicates}
-    types = {t.name for t in schema.entity_types}
+    predicates, types = _index(schema)
     pred = predicates.get(claim.predicate)
     if pred is None:
         if schema.strict:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator
 
@@ -721,6 +722,17 @@ class GraphStore(ABC):
     def refresh_statistics(self) -> None:
         """Bring the query planner's statistics up to date after a bulk load
         (D-081). A no-op where the backend needs none."""
+
+    @contextmanager
+    def bulk_load(self) -> Iterator[None]:
+        """Scope a long run of batched writes from this thread (D-105): the
+        bulk loader wraps a whole file in it. A backend may tune itself for
+        the run inside (a bigger page cache, fewer commits) and restores its
+        normal settings on the way out. What lands is unchanged: each write
+        call keeps its own all-or-nothing, the calls that succeeded before
+        an error stay stored, and reads on this thread see every write made
+        inside. A no-op where the backend needs none."""
+        yield
 
     @abstractmethod
     def close(self) -> None:

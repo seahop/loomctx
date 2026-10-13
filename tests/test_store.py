@@ -327,6 +327,10 @@ def test_dedupe_survives_losing_the_insert_race(store, monkeypatch):
         calls["n"] += 1
         return None if calls["n"] == 1 else real(namespace, event_id)
 
+    if hasattr(store, "_existing_by_events"):
+        # SQLite pre-checks a whole batch at once (D-105): hide it there
+        monkeypatch.setattr(store, "_existing_by_events", lambda marks: {})
+        calls["n"] = 1
     monkeypatch.setattr(store, "_existing_by_event", flaky)
     replay = store.record_claim(_claim(event_id="race-1"))
     assert replay.id == first.id and calls["n"] == 2
