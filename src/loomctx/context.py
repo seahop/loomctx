@@ -1973,6 +1973,12 @@ def _build_pack(
             "a fact about this entity that those records would carry may be missing data, not absent")
         if gap_note:
             notes.append(gap_note)
+    # what the namespace's sources declare they do not carry, when the
+    # question asks about it (D-110): "local admins of WS-1" over an LDAP
+    # export that has no local groups is unanswerable, not "none"
+    nc_note = not_collected_note(store, req.namespace, req.question)
+    if nc_note:
+        notes.append(nc_note)
     # A subject question's named attribute ("what is the has_severity of
     # CVE-X", "the largest invoiced_amount ever recorded") orders its
     # conflicts and ships before the orientation layers, exempt from the
@@ -2115,6 +2121,21 @@ def _close_predicates(name: str, definitions, vocabulary: set[str]) -> list[str]
     if best:
         out += [n for n in names if shared[n] == best and n not in out]
     return out[:_MAX_SUGGESTIONS]
+
+
+def not_collected_note(store: GraphStore, namespace: str, question: str | None) -> str | None:
+    """The namespace's declared not-collected topics (D-110): all of them
+    (question None — an empty result), or those whose words the question
+    uses. A statement of what the data cannot carry, not advice."""
+    schema = _schema(store, namespace)
+    gaps = list(schema.not_collected) if schema is not None else []
+    if question is not None:
+        text = f" {question.lower()} "
+        gaps = [g for g in gaps if any(re.search(rf"\b{re.escape(w.lower())}\b", text) for w in g.words)]
+    if not gaps:
+        return None
+    return ("not collected by this namespace's sources: " + "; ".join(g.description for g in gaps)
+            + " — a question about these cannot be answered from here")
 
 
 def request_notes(store: GraphStore, namespace: str, scope: ScopeSpec | None, asked: list[EntityRef],
@@ -2632,6 +2653,9 @@ def find_paths(
     if not returned and searched:
         notes.append(f"no path found from {src.type}:{src.key} to {dst.type}:{dst.key} within "
                      f"depth {depth} along {', '.join(sorted(via_set))}")
+        nc_note = not_collected_note(store, ns, None)
+        if nc_note:
+            notes.append(nc_note)
     if searched:
         gap_note = coverage.note(
             coverage.gaps(store, ns, via_set | status_preds, req.as_of),

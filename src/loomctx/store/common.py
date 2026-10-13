@@ -456,10 +456,13 @@ def merge_schema(existing: SchemaRegistration | None,
             "description": p.description or old.description})
     queries = {q.name: q for q in existing.queries}
     queries.update((q.name, q) for q in incoming.queries)   # a re-registered query replaces (D-108)
+    gaps = {g.topic: g for g in existing.not_collected}
+    gaps.update((g.topic, g) for g in incoming.not_collected)   # by topic (D-110)
     return SchemaRegistration(
         namespace=incoming.namespace,
         entity_types=list(types.values()),
         predicates=list(preds.values()),
         strict=incoming.strict,
         queries=list(queries.values()),
+        not_collected=list(gaps.values()),
     )

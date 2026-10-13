@@ -8,6 +8,15 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Compound questions; what is not collected (D-110)
+
+- List mode: `within` / `not_within` filters (nested membership), routes on
+  rows (`paths`), and a paging note. "Which Domain Admins have rights over
+  WS-1" is one call.
+- Connectors declare what they do not collect (`not_collected`); the LDAP
+  connector declares local groups, sessions and GPO user rights, and empty
+  results and matching questions say so.
+
 ### Faster selective scope walks (D-109)
 
 - A walk window of 500+ entities is narrowed by a selective topic even under

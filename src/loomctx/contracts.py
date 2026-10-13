@@ -572,11 +572,18 @@ class ListFilter(BaseModel):
     ones whose status was never collected — the page says how many)."""
 
     predicate: str
-    op: Literal["eq", "ne", "in", "contains", "exists", "absent"] = "eq"
+    op: Literal["eq", "ne", "in", "contains", "exists", "absent", "within", "not_within"] = "eq"
     value: Any = Field(
         default=None,
         description="the compared value: a scalar for eq / ne / contains, a "
-        "list for in; ignored by exists / absent",
+        "list for in; an entity ('type:key') for within / not_within; ignored "
+        "by exists / absent",
+    )
+    depth: int = Field(
+        default=6, ge=1, le=32,
+        description="within / not_within: the most `predicate` edges from the "
+        "entity to `value` (nested membership: user -member_of-> group "
+        "-member_of-> … -> value); clamped to the list depth cap",
     )
 
 
@@ -616,6 +623,12 @@ class ListRequest(BaseModel):
         f"(nested membership); clamped to {MAX_LIST_DEPTH} and noted",
     )
     where: list[ListFilter] = Field(default_factory=list)
+    paths: bool = Field(
+        default=False,
+        description="an `of` listing: give each row its route to `of`, every "
+        "edge cited (how an account reaches a machine through groups and ACL "
+        "grants); costs budget",
+    )
     fields: list[str] = Field(
         default_factory=list,
         description="predicates whose current value each row should show, "
@@ -644,6 +657,10 @@ class ListRow(BaseModel):
     hops: int | None = Field(
         default=None,
         description="an `of` listing: edges between this entity and `of` (1 = direct)",
+    )
+    path: list[PathEdge] = Field(
+        default_factory=list,
+        description="with `paths`: the edges from this entity to `of`, as stored, each cited",
     )
     through: EntityRef | None = Field(
         default=None,
@@ -792,6 +809,19 @@ class QueryRequest(BaseModel):
     valid_at: datetime | None = None
 
 
+class NotCollectedDef(BaseModel):
+    """Something a namespace's sources do not carry, declared by the
+    connector (D-110): an LDAP export has no local group membership, so
+    "local admins of WS-1" cannot be answered from it — and an empty result
+    must not read as "none". `words` are the plain terms a question uses for
+    it; the engine notes the declaration when a question names them."""
+
+    topic: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str
+    words: list[str] = Field(default_factory=list)
+    source: str = ""
+
+
 class SchemaRegistration(BaseModel):
     """Per-namespace registry (D-024). Registering is additive (a later POST
     merges by name). Validation on ingest: a registered predicate's
@@ -806,4 +836,8 @@ class SchemaRegistration(BaseModel):
         default_factory=list,
         description="named questions the namespace answers exactly (D-108); "
         "a later registration replaces a query of the same name",
+    )
+    not_collected: list[NotCollectedDef] = Field(
+        default_factory=list,
+        description="what the namespace's sources do not carry (D-110); merged by topic",
     )

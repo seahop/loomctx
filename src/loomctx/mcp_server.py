@@ -476,6 +476,11 @@ PathView = TypedDict("PathView", {
 })
 
 
+class AgentRoute(TypedDict):
+    text: str
+    cites: list[str]
+
+
 class AgentListRow(TypedDict):
     """One listed entity: its handle, display name, the current values the
     listing filtered on or was asked for, how far it is from `of` (`hops`,
@@ -486,6 +491,7 @@ class AgentListRow(TypedDict):
     values: NotRequired[dict[str, Any]]
     hops: NotRequired[int]
     through: NotRequired[str]
+    path: NotRequired[AgentRoute]
     cites: list[str]
 
 
@@ -559,6 +565,7 @@ class NamespaceDescription(TypedDict):
     strict: bool
     hint: str
     queries: NotRequired[list[AgentQuery]]
+    not_collected: NotRequired[list[dict[str, str]]]
 
 
 class EntityMatch(TypedDict):
@@ -744,6 +751,8 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
         "strict": bool(schema and schema.strict),
         "hint": _path_hint(relations),
     }
+    if schema is not None and schema.not_collected:
+        view["not_collected"] = [{"topic": g.topic, "description": g.description} for g in schema.not_collected]
     if schema is not None and schema.queries and _QUERIES_ON:
         view["queries"] = [{"name": q.name, "description": q.description,
                             "params": [_param_text(p) for p in q.params]} for q in schema.queries]
@@ -1109,6 +1118,10 @@ def find_path(
 _FILTER_TEXT = re.compile(r"^\s*(!)?\s*([A-Za-z_][\w.-]*)\s*(?:(!=|~=|=)\s*(.*?)|(\?))?\s*$")
 
 
+_WITHIN_TEXT = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s+(not\s+within|within)\s+(\S+?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
+                          re.I)
+
+
 def _filters(where) -> list[ListFilter]:
     """list_entities' `where`: objects {predicate, op, value}, or text an
     agent writes naturally — `enabled=false`, `is_dc!=true`, `name~=svc`
@@ -1135,10 +1148,16 @@ def _filters(where) -> list[ListFilter]:
         if isinstance(item, dict):
             out.append(ListFilter.model_validate(item))
             continue
+        w = _WITHIN_TEXT.match(str(item))
+        if w is not None:
+            pred, op, value, depth = w.groups()
+            out.append(ListFilter(predicate=pred, op="not_within" if op.lower().startswith("not") else "within",
+                                  value=value.strip().strip("'\""), depth=int(depth) if depth else 6))
+            continue
         m = _FILTER_TEXT.match(str(item))
         if m is None:
             raise ValueError(f"cannot read filter {item!r}: write predicate=value, predicate!=value, "
-                             "predicate~=text, predicate? or !predicate")
+                             "predicate~=text, predicate?, !predicate or predicate within type:key")
         neg, pred, op, value, has = m.groups()
         if neg:
             out.append(ListFilter(predicate=pred, op="absent"))
@@ -1148,6 +1167,21 @@ def _filters(where) -> list[ListFilter]:
             value = value.strip().strip("'\"")
             out.append(ListFilter(predicate=pred, op={"=": "eq", "!=": "ne", "~=": "contains"}[op], value=value))
     return out
+
+
+def _row_route(r) -> str:
+    """A row's route as arrows from the entity, each edge as stored:
+    `user:a -member_of-> group:g -has_ace-> computer:w`."""
+    cur, parts = r.entity, [f"{r.entity.type}:{r.entity.key}"]
+    for e in r.path:
+        if (e.subject.type, e.subject.key) == (cur.type, cur.key):
+            nxt, arrow = e.object, f"-{e.predicate}->"
+        else:
+            nxt, arrow = e.subject, f"<-{e.predicate}-"
+        label = f"{nxt.type}:{nxt.key}" if isinstance(nxt, EntityRef) else str(nxt)
+        parts.append(f"{arrow} {label}")
+        cur = nxt if isinstance(nxt, EntityRef) else cur
+    return " ".join(parts)
 
 
 def _list_view(page) -> ListView:
@@ -1169,6 +1203,8 @@ def _list_view(page) -> ListView:
             row["hops"] = r.hops
         if r.through is not None:
             row["through"] = f"{r.through.type}:{r.through.key}"
+        if r.path:
+            row["path"] = {"text": _row_route(r), "cites": [cite_text(e.cite) for e in r.path]}
         row["cites"] = [cite_text(c) for c in r.cites]
         rows.append(row)
     view["rows"] = rows
@@ -1182,6 +1218,7 @@ def list_entities(
     direction: Literal["in", "out", "any"] = "in",
     depth: int = 1,
     where: list[dict[str, Any] | str] | str | None = None,
+    paths: bool = False,
     fields: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -1201,11 +1238,16 @@ def list_entities(
     edge points at it — a group's members; 'out': what it points at), up to
     `depth` hops (nested groups: depth 3-6). `where` filters on CURRENT
     values, all must hold: objects {predicate, op, value} with op eq / ne /
-    in / contains / exists / absent, or text like "enabled=false",
-    "is_dc!=true", "spn?". `ne` includes entities with no value recorded
-    (a note counts them). `fields` adds predicates to show per row. Every
-    row is cited; `total` counts all matches — page with `offset` /
-    `next_offset`. Name filters by the predicates describe_namespace lists."""
+    in / contains / exists / absent / within / not_within, or text like
+    "enabled=false", "is_dc!=true", "spn?", "member_of within group:<key>"
+    (nested membership in that group, up to depth 6). `ne` includes
+    entities with no value recorded (a note counts them). `paths=true`
+    gives each row of an `of` listing its cited route to `of` (an account
+    reaching a machine through groups and ACL grants: via=["has_ace",
+    "member_of"], direction="in"). `fields` adds predicates to show per
+    row. Every row is cited; `total` counts all matches — page with
+    `offset` / `next_offset`. Name filters by the predicates
+    describe_namespace lists."""
     grant = _grant(ctx, namespace, "r")
     root = _parse_ref(of) if of else None
     if root is not None:
@@ -1216,7 +1258,7 @@ def list_entities(
     type = type.strip().strip("\"'").strip() if type else type
     req = ListRequest(
         namespace=namespace, type=type or None, of=root, via=_listed(via), direction=direction,
-        depth=depth, where=_filters(where), fields=_listed(fields), limit=limit, offset=offset,
+        depth=depth, where=_filters(where), paths=paths, fields=_listed(fields), limit=limit, offset=offset,
         budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
     )
     return _list_view(list_entities_impl(_get_store(), req, allowed_types=_allowed(grant)))

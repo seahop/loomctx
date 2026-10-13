@@ -3636,6 +3636,38 @@ ids last: 11/11 at every budget, the same in two runs, no decoy leaked. A
 coincidental route runs through a hub (Domain Users); an escalation through
 the named groups it abuses.
 
+## D-110 · Compound questions in one call; what the data cannot answer (2026-10-13)
+
+"Which Domain Admins have access to WS-123?" is the question people ask, and
+it took two listings and a hand intersection; worse, "access" often means
+local admin or sessions, which an LDAP export does not carry, and nothing
+stopped an empty answer reading as "nobody".
+
+- **Closure filters.** `ListFilter` ops `within` / `not_within` with `depth`
+  (default 6): the entity reaches `value` along `predicate` — `member_of
+  within group:Domain Admins` is nested membership. A filter is evaluated up
+  from a few candidates or down from the entity, as `of` listings are; alone
+  it is the start set ("users in Domain Admins"); beside an `of` it seeds the
+  walk, so the admins walk up to the machine rather than the machine's
+  trustees (Domain Users, at 500k) walking down. Text form: `member_of within
+  group:<key> [depth N]`.
+- **Routes.** `ListRequest.paths` gives each row of an `of` listing its
+  route to `of` as `PathEdge`s, each cited — `user:a -member_of-> group:g
+  -has_ace-> computer:w` — charged against the budget.
+- **Not-collected declarations.** `SchemaRegistration.not_collected`
+  (`NotCollectedDef`: topic, description, words; merged by topic). The LDAP
+  connector declares machines' local groups (local admin / RDP), logon
+  sessions and GPO user rights. `describe_namespace` lists them; a pack
+  whose question uses their words, an empty listing and a path search that
+  found nothing say what is not collected — facts, not advice.
+- **Paging.** A page the limit ended says how many matches remain and the
+  offset to continue from.
+
+On the 10k forest the access listing answers in 0.2 s (329 principals hold
+rights over the busiest DC through groups; none is a Domain Admin — an
+exact, cited "none" over what is collected, with local admin noted as not
+collected); "enabled Domain Admins" from the closure, 0.8 s.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

@@ -190,3 +190,31 @@ def test_http_query_route(tmp_path, monkeypatch):
         assert [row["entity"]["key"] for row in r.json()["rows"]] == ["S-3002"]
         r = client.post("/v1/query", json={"namespace": NS, "name": "nope"})
         assert r.status_code == 422 and "has no query 'nope'" in r.text
+
+
+def test_not_collected_is_declared_and_noted(store):
+    """The LDAP export carries no local groups or sessions (D-110): the
+    namespace says so in describe_namespace, in a pack whose question asks
+    about them, and in an empty listing or path search."""
+    from loomctx.context import build_pack
+    from loomctx.contracts import AskRequest, ListRequest, PathRequest
+    from loomctx.context import find_paths
+    from loomctx.listing import list_entities
+    mcp_server.configure(store)
+    try:
+        view = mcp_server.describe_namespace(namespace=NS)
+        assert {g["topic"] for g in view["not_collected"]} == {"local_groups", "sessions", "user_rights"}
+    finally:
+        mcp_server.configure(None)
+    pack = build_pack(store, AskRequest(namespace=NS, subject=EntityRef(type="computer", key="S-3002"),
+                                        question="who are the local admins on this computer?"))
+    assert any("local group membership" in n for n in pack.notes)
+    pack = build_pack(store, AskRequest(namespace=NS, subject=EntityRef(type="computer", key="S-3002"),
+                                        question="is it trusted for delegation?"))
+    assert not any("not collected by this namespace" in n for n in pack.notes)
+    page = list_entities(store, ListRequest(namespace=NS, type="user", where=[
+        {"predicate": "sam", "op": "eq", "value": "nobody"}]))
+    assert page.total == 0 and any("logon sessions" in n for n in page.notes)
+    pp = find_paths(store, PathRequest(namespace=NS, **{"from": EntityRef(type="user", key="S-2001")},
+                                       to=EntityRef(type="computer", key="S-3002"), via=["member_of"]))
+    assert not pp.paths and any("not collected by this namespace" in n for n in pp.notes)

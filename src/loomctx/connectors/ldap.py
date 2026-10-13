@@ -94,8 +94,8 @@ from typing import Iterable, Iterator
 
 from .. import coverage
 from .. import identity as ident
-from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef, QueryDef, QueryParam,
-                         SchemaRegistration)
+from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, NotCollectedDef, PredicateDef, QueryDef,
+                         QueryParam, SchemaRegistration)
 
 SOURCE_DEFAULT = "ad-export"
 NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
@@ -839,7 +839,26 @@ def schema(namespace: str) -> SchemaRegistration:
             PredicateDef(name="os", description="operatingSystem"),
         ],
         queries=QUERIES,
+        not_collected=NOT_COLLECTED,
     )
+
+
+# What a directory export does not carry (D-110): these live on the machines
+# or in logs, not in AD — "who is local admin on WS-1" cannot be answered
+# from an LDAP dump, and an empty result must not read as "nobody".
+NOT_COLLECTED = [
+    NotCollectedDef(topic="local_groups", source="ldap",
+                    description="machines' local group membership (local Administrators, Remote Desktop Users) "
+                                "and so local admin / RDP rights on a computer",
+                    words=["local admin", "local admins", "local administrator", "local administrators",
+                           "admin rights on", "administrator on", "remote desktop", "rdp", "local group"]),
+    NotCollectedDef(topic="sessions", source="ldap",
+                    description="logon sessions — who is or was logged on to a computer",
+                    words=["session", "sessions", "logged on", "logged in", "logon", "logons", "signed in"]),
+    NotCollectedDef(topic="user_rights", source="ldap",
+                    description="user rights assignments applied by GPO (SeDebugPrivilege, log on locally, …)",
+                    words=["user rights", "privilege", "sedebug", "log on locally", "gpo rights"]),
+]
 
 
 # The directory questions an audit asks, answered exactly by list mode

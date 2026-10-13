@@ -835,6 +835,14 @@
       "ListFilter": {
         "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
         "properties": {
+          "depth": {
+            "default": 6,
+            "description": "within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> \u2026 -> value); clamped to the list depth cap",
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "title": "Depth",
+            "type": "integer"
+          },
           "op": {
             "default": "eq",
             "enum": [
@@ -843,7 +851,9 @@
               "in",
               "contains",
               "exists",
-              "absent"
+              "absent",
+              "within",
+              "not_within"
             ],
             "title": "Op",
             "type": "string"
@@ -853,7 +863,7 @@
             "type": "string"
           },
           "value": {
-            "description": "the compared value: a scalar for eq / ne / contains, a list for in; ignored by exists / absent",
+            "description": "the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent",
             "title": "Value"
           }
         },
@@ -1005,6 +1015,12 @@
             "title": "Offset",
             "type": "integer"
           },
+          "paths": {
+            "default": false,
+            "description": "an `of` listing: give each row its route to `of`, every edge cited (how an account reaches a machine through groups and ACL grants); costs budget",
+            "title": "Paths",
+            "type": "boolean"
+          },
           "type": {
             "anyOf": [
               {
@@ -1083,6 +1099,14 @@
               }
             ],
             "title": "Name"
+          },
+          "path": {
+            "description": "with `paths`: the edges from this entity to `of`, as stored, each cited",
+            "items": {
+              "$ref": "#/components/schemas/PathEdge"
+            },
+            "title": "Path",
+            "type": "array"
           },
           "through": {
             "anyOf": [
@@ -1166,6 +1190,38 @@
           "cite"
         ],
         "title": "NodeStatus",
+        "type": "object"
+      },
+      "NotCollectedDef": {
+        "description": "Something a namespace's sources do not carry, declared by the\nconnector (D-110): an LDAP export has no local group membership, so\n\"local admins of WS-1\" cannot be answered from it \u2014 and an empty result\nmust not read as \"none\". `words` are the plain terms a question uses for\nit; the engine notes the declaration when a question names them.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "topic": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Topic",
+            "type": "string"
+          },
+          "words": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Words",
+            "type": "array"
+          }
+        },
+        "required": [
+          "topic",
+          "description"
+        ],
+        "title": "NotCollectedDef",
         "type": "object"
       },
       "PathEdge": {
@@ -1651,6 +1707,14 @@
             "default": "default",
             "title": "Namespace",
             "type": "string"
+          },
+          "not_collected": {
+            "description": "what the namespace's sources do not carry (D-110); merged by topic",
+            "items": {
+              "$ref": "#/components/schemas/NotCollectedDef"
+            },
+            "title": "Not Collected",
+            "type": "array"
           },
           "predicates": {
             "items": {

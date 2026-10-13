@@ -261,3 +261,55 @@ def test_mcp_tolerates_quoted_handles(tmp_path):
     finally:
         mcp_server.configure(None)
         s.close()
+
+
+def test_within_filters_nested_membership_and_seeds_the_listing(store):
+    """`member_of within group:X` (D-110): in X directly or through nested
+    groups — the closure, as a filter and, alone, as the start set."""
+    page, st = run(store, type="user", where=[ListFilter(predicate="member_of", op="within",
+                                                         value="group:domain-admins")])
+    assert st["start"] == "closure" and keys(page) == ["alice", "bob", "carol", "dave"]
+    page, _ = run(store, type="user", where=[ListFilter(predicate="member_of", op="within",
+                                                        value="group:domain-admins", depth=1)])
+    assert keys(page) == ["alice"]
+    page, _ = run(store, type="user", where=[ListFilter(predicate="enabled", op="exists"),
+                                             ListFilter(predicate="member_of", op="not_within",
+                                                        value="group:domain-admins")])
+    assert keys(page) == ["erin"]
+    page, _ = run(store, type="user", where=[ListFilter(predicate="enabled", op="eq", value=True),
+                                             ListFilter(predicate="member_of", op="within",
+                                                        value="group:it-admins")])
+    assert keys(page) == []                 # bob (disabled) and carol (disabled at T2), dave has no status
+    page, _ = run(store, type="user", where=[ListFilter(predicate="member_of", op="within", value="group:nope")])
+    assert page.total == 0 and any("not on record" in n for n in page.notes)
+
+
+def test_access_style_listing_with_routes(store):
+    """"Which Domain Admins have rights over this workstation?" in one call:
+    walk in from the machine over ACL grants and membership, keep the
+    admins (nested), and give each row its cited route."""
+    store.record_claim(ClaimIn(subject=ref("group:it-admins"), predicate="has_ace", object=ref("computer:ws01"),
+                               observed_at=T1, source="ldap", attrs={"right": "GenericAll"}))
+    page, _ = run(store, of=ref("computer:ws01"), via=["has_ace", "member_of"], direction="in", depth=4,
+                  type="user", paths=True,
+                  where=[ListFilter(predicate="member_of", op="within", value="group:domain-admins")])
+    assert keys(page) == ["bob", "carol", "dave"]          # alice is in domain-admins but not under it-admins
+    st = {}
+    listing.list_entities(store, ListRequest(of=ref("computer:ws01"), via=["has_ace", "member_of"], direction="in",
+                                             depth=4, where=[ListFilter(predicate="member_of", op="within",
+                                                                        value="group:domain-admins")]), stats=st)
+    assert st["start"] == "upward" and st["seeded_by_closure"]   # the admins walk up, not the machine down
+    carol = next(r for r in page.rows if r.entity.key == "carol")
+    assert [e.predicate for e in carol.path] == ["member_of", "member_of", "has_ace"]
+    assert carol.path[-1].object == ref("computer:ws01") and all(e.cite.observation_id for e in carol.path)
+    view = mcp_server._list_view(page)
+    assert view["rows"][1]["path"]["text"] == ("user:carol -member_of-> group:helpdesk -member_of-> "
+                                               "group:it-admins -has_ace-> computer:ws01")
+
+
+def test_within_text_filter():
+    f = mcp_server._filters("member_of within group:domain-admins, enabled=true")
+    assert [(x.predicate, x.op, x.value) for x in f] == [("member_of", "within", "group:domain-admins"),
+                                                         ("enabled", "eq", "true")]
+    f = mcp_server._filters("member_of not within group:protected-users depth 3")
+    assert (f[0].op, f[0].value, f[0].depth) == ("not_within", "group:protected-users", 3)

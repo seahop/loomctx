@@ -1645,15 +1645,25 @@
               "in",
               "contains",
               "exists",
-              "absent"
+              "absent",
+              "within",
+              "not_within"
             ],
             "title": "Op",
             "type": "string"
           },
           "value": {
             "default": null,
-            "description": "the compared value: a scalar for eq / ne / contains, a list for in; ignored by exists / absent",
+            "description": "the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent",
             "title": "Value"
+          },
+          "depth": {
+            "default": 6,
+            "description": "within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> \u2026 -> value); clamped to the list depth cap",
+            "maximum": 32,
+            "minimum": 1,
+            "title": "Depth",
+            "type": "integer"
           }
         },
         "required": [
@@ -1728,6 +1738,12 @@
         },
         "title": "Where",
         "type": "array"
+      },
+      "paths": {
+        "default": false,
+        "description": "an `of` listing: give each row its route to `of`, every edge cited (how an account reaches a machine through groups and ACL grants); costs budget",
+        "title": "Paths",
+        "type": "boolean"
       },
       "fields": {
         "description": "predicates whose current value each row should show, cited (beyond the ones `where` already names)",
@@ -1938,6 +1954,14 @@
             "description": "an `of` listing: edges between this entity and `of` (1 = direct)",
             "title": "Hops"
           },
+          "path": {
+            "description": "with `paths`: the edges from this entity to `of`, as stored, each cited",
+            "items": {
+              "$ref": "#/$defs/PathEdge"
+            },
+            "title": "Path",
+            "type": "array"
+          },
           "through": {
             "anyOf": [
               {
@@ -1955,6 +1979,80 @@
           "entity"
         ],
         "title": "ListRow",
+        "type": "object"
+      },
+      "PathEdge": {
+        "description": "One edge of a path, exactly as it is stored (never re-oriented): the\nobservation's `subject` `predicate` `object`, cited and time-scoped. The\ntraversal direction is implied by the edge's place in the sequence \u2014 an\n`affects` edge (cve -> product) walked product -> cve still renders\ncve affects product, so the reader sees the fact as recorded (D-067).",
+        "properties": {
+          "subject": {
+            "$ref": "#/$defs/EntityRef"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "object": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntityRef"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Object"
+          },
+          "cite": {
+            "$ref": "#/$defs/Citation"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid To"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "predicate",
+          "object",
+          "cite",
+          "source"
+        ],
+        "title": "PathEdge",
         "type": "object"
       }
     },
@@ -2804,6 +2902,38 @@
         "title": "EntityTypeDef",
         "type": "object"
       },
+      "NotCollectedDef": {
+        "description": "Something a namespace's sources do not carry, declared by the\nconnector (D-110): an LDAP export has no local group membership, so\n\"local admins of WS-1\" cannot be answered from it \u2014 and an empty result\nmust not read as \"none\". `words` are the plain terms a question uses for\nit; the engine notes the declaration when a question names them.",
+        "properties": {
+          "topic": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Topic",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "words": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Words",
+            "type": "array"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "description"
+        ],
+        "title": "NotCollectedDef",
+        "type": "object"
+      },
       "PredicateDef": {
         "properties": {
           "name": {
@@ -2968,6 +3098,14 @@
           "$ref": "#/$defs/QueryDef"
         },
         "title": "Queries",
+        "type": "array"
+      },
+      "not_collected": {
+        "description": "what the namespace's sources do not carry (D-110); merged by topic",
+        "items": {
+          "$ref": "#/$defs/NotCollectedDef"
+        },
+        "title": "Not Collected",
         "type": "array"
       }
     },

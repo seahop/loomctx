@@ -461,6 +461,10 @@ export interface ListRequest {
   depth?: number;
   where?: ListFilter[];
   /**
+   * an `of` listing: give each row its route to `of`, every edge cited (how an account reaches a machine through groups and ACL grants); costs budget
+   */
+  paths?: boolean;
+  /**
    * predicates whose current value each row should show, cited (beyond the ones `where` already names)
    */
   fields?: string[];
@@ -485,13 +489,17 @@ export interface ListRequest {
  */
 export interface ListFilter {
   predicate: string;
-  op?: "eq" | "ne" | "in" | "contains" | "exists" | "absent";
+  op?: "eq" | "ne" | "in" | "contains" | "exists" | "absent" | "within" | "not_within";
   /**
-   * the compared value: a scalar for eq / ne / contains, a list for in; ignored by exists / absent
+   * the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent
    */
   value?: {
     [k: string]: unknown;
   };
+  /**
+   * within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> … -> value); clamped to the list depth cap
+   */
+  depth?: number;
 }
 /**
  * One page of a ListRequest, sorted by entity key so paging is stable.
@@ -532,6 +540,10 @@ export interface ListRow {
    * an `of` listing: edges between this entity and `of` (1 = direct)
    */
   hops?: number | null;
+  /**
+   * with `paths`: the edges from this entity to `of`, as stored, each cited
+   */
+  path?: PathEdge[];
   /**
    * an `of` listing past one hop: the entity one step closer to `of` on its route
    */
@@ -604,6 +616,10 @@ export interface SchemaRegistration {
    * named questions the namespace answers exactly (D-108); a later registration replaces a query of the same name
    */
   queries?: QueryDef[];
+  /**
+   * what the namespace's sources do not carry (D-110); merged by topic
+   */
+  not_collected?: NotCollectedDef[];
 }
 /**
  * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
@@ -682,6 +698,22 @@ export interface QueryParam {
   default?: {
     [k: string]: unknown;
   };
+}
+/**
+ * Something a namespace's sources do not carry, declared by the
+ * connector (D-110): an LDAP export has no local group membership, so
+ * "local admins of WS-1" cannot be answered from it — and an empty result
+ * must not read as "none". `words` are the plain terms a question uses for
+ * it; the engine notes the declaration when a question names them.
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "NotCollectedDef".
+ */
+export interface NotCollectedDef {
+  topic: string;
+  description: string;
+  words?: string[];
+  source?: string;
 }
 export interface IngestBatchResponse {
   total: number;

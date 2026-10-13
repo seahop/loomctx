@@ -31,8 +31,8 @@ import json
 from collections import defaultdict
 from datetime import datetime
 
-from .context import _citation, _close_predicates, _schema, cite_tokens, est_tokens
-from .contracts import MAX_LIST_DEPTH, EntityRef, ListFilter, ListPage, ListRequest, ListRow
+from .context import _citation, _close_predicates, _schema, cite_tokens, est_tokens, not_collected_note
+from .contracts import MAX_LIST_DEPTH, EntityRef, ListFilter, ListPage, ListRequest, ListRow, PathEdge
 from .store import common
 from .store.base import GraphStore
 from .store.common import LiteRow
@@ -42,7 +42,8 @@ _UPWARD_MAX = 5_000      # a positive seed this small checks membership upward
 _SCAN_RATIO = 20         # scan a predicate when it holds < this many rows per candidate
 _ROW_FRAME = 6           # tokens a row's framing costs beyond its text and cites
 _POSITIVE = ("eq", "in", "exists")
-_SELECTIVITY = {"eq": 0, "in": 1, "contains": 2, "exists": 3, "absent": 4, "ne": 5}
+_SELECTIVITY = {"eq": 0, "in": 1, "within": 2, "contains": 3, "exists": 4, "absent": 5, "not_within": 6, "ne": 7}
+_CLOSURE = ("within", "not_within")
 
 Key = tuple[str, str]
 
@@ -218,6 +219,7 @@ def _walk_down(store, req, root: Key, via, depth, cap, rules, route: dict) -> tu
                     seen.add(far)
                     members[far] = r
                     route[far] = (level + 1, node)
+                    route.setdefault("chains", {})[far] = [r] + route.get("chains", {}).get(node, [])
                     nxt.append(far)
                     if len(members) >= cap:
                         return members, True
@@ -238,6 +240,7 @@ def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules,
     rev = _REVERSE[req.direction]
     reached: dict[Key, set[Key]] = defaultdict(set)
     first: dict[Key, list[tuple[LiteRow, Key]]] = defaultdict(list)
+    ups: dict[Key, list[tuple[LiteRow, Key]]] = defaultdict(list)   # node -> its edges toward root
     children: dict[Key, set[Key]] = defaultdict(set)
     cur: dict[Key, set[Key]] = {k: {k} for k in seed}
     for level in range(depth):
@@ -252,6 +255,7 @@ def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules,
                 for r, far in adj.get(k, ()):
                     if level == 0:
                         first[k].append((r, far))
+                    ups[k].append((r, far))
                     children[far].add(k)
                     new = cur[k] - reached[far]
                     if new:
@@ -263,21 +267,63 @@ def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules,
         cur = nxt
     if cur and any(k != root for k in cur):
         route["open"] = sum(1 for k in cur if k != root)
-    # the nodes that lead to root, so each member cites an edge on its route
-    leads = {root}
-    stack = [root]
-    while stack:
-        for child in children.get(stack.pop(), ()):
-            if child not in leads:
-                leads.add(child)
-                stack.append(child)
+    # the nodes that lead to root (and how far), so each member cites an edge
+    # on its route and, asked, the whole route
+    dist = {root: 0}
+    queue = [root]
+    for node in queue:
+        for child in children.get(node, ()):
+            if child not in dist:
+                dist[child] = dist[node] + 1
+                queue.append(child)
+    leads = set(dist)
     out = {}
     for k in reached.get(root, ()):
-        hop = next(((r, far) for r, far in first.get(k, ()) if far in leads), None)
+        hop = next(((r, far) for r, far in sorted(first.get(k, ()), key=lambda x: dist.get(x[1], 99))
+                    if far in leads), None)
         out[k] = hop[0] if hop else None
         if k in route and hop is not None and hop[1] != root:
             route[k] = (route[k][0], hop[1])
+        chain, cur = [], k     # the shortest route, edge by edge
+        while cur != root and len(chain) <= depth:
+            step = next(((r, far) for r, far in ups.get(cur, ()) if dist.get(far, 99) == dist.get(cur, 99) - 1),
+                        None)
+            if step is None:
+                break
+            chain.append(step[0])
+            cur = step[1]
+        if cur == root:
+            route.setdefault("chains", {})[k] = chain
     return out
+
+
+def _target(store, ns: str, value) -> Key | None:
+    """A within filter's entity ('type:key' or {type, key}), canonical."""
+    if isinstance(value, dict):
+        ref = EntityRef(type=value.get("type", ""), key=value.get("key", ""))
+    elif isinstance(value, str) and ":" in value:
+        t, _, k = value.strip().strip("\"'").partition(":")
+        ref = EntityRef(type=t, key=k)
+    else:
+        return None
+    got = store.resolve_refs(ns, [ref]).get(_key(ref))
+    return _key(got) if got is not None else None
+
+
+def _closure(store, req, f: ListFilter, among: list[Key] | None, cap, rules) -> tuple[set[Key], bool]:
+    """The entities (of `among`, or all) that reach the filter's entity along
+    its predicate within its depth: up from a few candidates, or down from
+    the entity — the walk list mode's `of` uses, one index side at a time."""
+    target = _target(store, req.namespace, f.value)
+    if target is None:
+        return set(), False
+    sub = req.model_copy(update={"direction": "in"})
+    depth = min(f.depth, MAX_LIST_DEPTH)
+    if among is not None and len(among) <= _UPWARD_MAX:
+        return set(_walk_up(store, sub, target, among, [f.predicate], depth, cap, rules, {})), False
+    down, cut = _walk_down(store, sub, target, [f.predicate], depth, cap, rules, {})
+    got = set(down)
+    return (got & set(among) if among is not None else got), cut
 
 
 def _seed(store, req, cap) -> tuple[list[Key] | None, bool]:
@@ -364,9 +410,21 @@ def list_entities(store: GraphStore, req: ListRequest,
             if p not in vocabulary:
                 unknown(p, "via")
         root = _key(root_ref)
+        closure_seed = None
+        if seed is None and any(f.op == "within" for f in req.where):
+            # "admins with rights over WS-1": the admins (a group's closure,
+            # usually a handful) walk up to the machine — never the machine's
+            # trustees down, which at 500k objects can be Domain Users
+            f0 = next(f for f in req.where if f.op == "within")
+            if _target(store, ns, f0.value) is not None:
+                got, closure_cut = _closure(store, req, f0, None, cap, rules)
+                if len(got) <= _UPWARD_MAX and not closure_cut:
+                    seed = [k for k in got if req.type is None or k[0] == req.type]
+                    closure_seed = f0
         if seed is not None and len(seed) <= _UPWARD_MAX and not cut:
             admitted = _walk_up(store, req, root, seed, via, depth, cap, rules, route)
             st["start"] = "upward"
+            st["seeded_by_closure"] = closure_seed is not None
         else:
             down, walk_cut = _walk_down(store, req, root, via, depth, cap, rules, route)
             cut = cut or walk_cut
@@ -377,6 +435,14 @@ def list_entities(store: GraphStore, req: ListRequest,
     elif seed is not None:
         candidates = seed
         st["start"] = "index"
+    elif any(f.op == "within" for f in req.where):
+        # "users in Domain Admins, nested": the group's closure is the start set
+        f0 = next(f for f in req.where if f.op == "within")
+        if _target(store, ns, f0.value) is None:
+            return done(f"within {f0.predicate}: entity {f0.value!r} is not on record")
+        got, cut = _closure(store, req, f0, None, cap, rules)
+        candidates = [k for k in got if req.type is None or k[0] == req.type]
+        st["start"] = "closure"
     elif req.type is not None:
         candidates = [_key(r) for r in store.entity_refs_of_type(ns, req.type, cap + 1)]
         cut = len(candidates) > cap
@@ -405,6 +471,18 @@ def list_entities(store: GraphStore, req: ListRequest,
 
     for f in sorted(req.where, key=lambda f: _SELECTIVITY[f.op]):
         survivors: list[Key] = []
+        if f.op in _CLOSURE:
+            if (st.get("start") == "closure" or st.get("seeded_by_closure")) and \
+                    f is next(x for x in req.where if x.op == "within"):
+                continue   # the start set is this closure already
+            if _target(store, ns, f.value) is None:
+                notes.append(f"{f.op} {f.predicate}: entity {f.value!r} is not on record")
+                alive = alive if f.op == "not_within" else []
+                continue
+            inside, closure_cut = _closure(store, req, f, alive, cap, rules)
+            cut = cut or closure_cut
+            alive = [k for k in alive if (k in inside) == (f.op == "within")]
+            continue
         if len(alive) > _FETCH_CHUNK and _scalar_rows(summary, f.predicate) < _SCAN_RATIO * len(alive):
             # one index range beats a lookup per candidate
             wanted = set(alive)
@@ -452,7 +530,7 @@ def list_entities(store: GraphStore, req: ListRequest,
         for k in window:
             for pred, got in rules.current(by.get(k, [])).items():
                 current[k].setdefault(pred, got)
-    shown = list(dict.fromkeys([f.predicate for f in req.where] + list(req.fields)))
+    shown = list(dict.fromkeys([f.predicate for f in req.where if f.op not in _CLOSURE] + list(req.fields)))
     plan: dict[Key, tuple[str | None, list[str], list[str]]] = {}   # name, value preds, cited ids
     for k in window:
         mine = current.get(k, {})
@@ -472,19 +550,26 @@ def list_entities(store: GraphStore, req: ListRequest,
         for k in bare:
             plan[k][2].extend(o.id for o in newest.get(k, []) if rules.allowed is None
                               or o.subject.type in rules.allowed)
-    full = {o.id: o for o in store.observations_by_ids(ns, [i for k in window for i in plan[k][2]])}
+    chains = route.get("chains", {}) if (req.paths and req.of is not None) else {}
+    chain_ids = [r.id for k in window for r in chains.get(k, [])]
+    full = {o.id: o for o in store.observations_by_ids(ns, list(dict.fromkeys(
+        [i for k in window for i in plan[k][2]] + chain_ids)))}
     charged = 0
     for k in window:
         name, preds, ids = plan[k]
         mine = current.get(k, {})
         values = {p: _value(mine[p]) for p in preds}
         hops, closer = route.get(k, (None, None))
+        path = [_path_edge(full[r.id]) for r in chains.get(k, []) if r.id in full]
         row = ListRow(entity=_ref(k), name=name, values=values,
                       cites=[_citation(full[i]) for i in ids if i in full],
-                      hops=hops, through=_ref(closer) if closer is not None and hops and hops > 1 else None)
+                      hops=hops, through=_ref(closer) if closer is not None and hops and hops > 1 else None,
+                      path=path)
         text = " ".join([f"{k[0]}:{k[1]}"] + ([name] if name else [])
-                        + [f"{p}={json.dumps(v, default=str)}" for p, v in values.items()])
-        cost = est_tokens(text) + _ROW_FRAME + sum(cite_tokens(c) for c in row.cites)
+                        + [f"{p}={json.dumps(v, default=str)}" for p, v in values.items()]
+                        + [f"{e.subject.key} {e.predicate} {_end_text(e.object)}" for e in path])
+        cost = (est_tokens(text) + _ROW_FRAME + sum(cite_tokens(c) for c in row.cites)
+                + sum(cite_tokens(e.cite) for e in path))
         if charged + cost > req.budget:
             if not page.rows:
                 notes.append(f"the budget ({req.budget}) does not fit one row; raise budget")
@@ -511,6 +596,12 @@ def list_entities(store: GraphStore, req: ListRequest,
     if page.rows and len(page.rows) < len(window):
         notes.append(f"{len(window) - len(page.rows)} row(s) of this page did not fit the token budget; "
                      f"continue from offset {end}")
+    elif page.next_offset is not None:
+        notes.append(f"{len(alive) - end} more match(es) past this page: call again with offset={end}")
+    if not alive:
+        nc = not_collected_note(store, ns, None)
+        if nc:
+            notes.append(nc)
     return done()
 
 
@@ -572,6 +663,15 @@ def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list
         else:
             out.append(f"{lead} (counted as not equal)")
     return out
+
+
+def _end_text(end) -> str:
+    return f"{end.type}:{end.key}" if isinstance(end, EntityRef) else str(end)
+
+
+def _path_edge(o) -> PathEdge:
+    return PathEdge(subject=o.subject, predicate=o.predicate, object=o.object, cite=_citation(o),
+                    valid_from=o.valid_from, valid_to=o.valid_to, source=o.source)
 
 
 def _value(rows: list[LiteRow]):
