@@ -313,3 +313,21 @@ def test_within_text_filter():
                                                          ("enabled", "eq", "true")]
     f = mcp_server._filters("member_of not within group:protected-users depth 3")
     assert (f[0].op, f[0].value, f[0].depth) == ("not_within", "group:protected-users", 3)
+
+
+def test_ranked_filters_match_the_python_path(store, monkeypatch):
+    """The SQL-ranked current values (D-111) give the same pages as the
+    per-candidate path: forced on a tiny store by lowering the threshold."""
+    cases = [dict(type="user", where=[ListFilter(predicate="enabled", op="eq", value=True)]),
+             dict(type="user", where=[ListFilter(predicate="enabled", op="ne", value=True)]),
+             dict(type="user", where=[ListFilter(predicate="enabled", op="absent")]),
+             dict(type="user", where=[ListFilter(predicate="enabled", op="eq", value="false")], as_of=MID),
+             dict(type="computer", where=[ListFilter(predicate="is_dc", op="ne", value=True)])]
+    slow = [run(store, **c)[0] for c in cases]
+    monkeypatch.setattr(listing, "_FETCH_CHUNK", 0)
+    for c, old in zip(cases, slow):
+        new, st = run(store, **c)
+        assert st.get("ranked"), c
+        assert keys(new) == keys(old) and new.total == old.total, c
+        assert [r.values for r in new.rows] == [r.values for r in old.rows], c
+        assert [n for n in new.notes if "value on record" in n] == [n for n in old.notes if "value on record" in n]

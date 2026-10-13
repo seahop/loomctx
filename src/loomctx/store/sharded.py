@@ -149,6 +149,11 @@ class ShardedStore(GraphStore):
     def lite_scalars(self, namespace: str, predicate: str, observed_before=None) -> Iterator:
         return self.shard_for(namespace).lite_scalars(namespace, predicate, observed_before)
 
+    def current_scalar_subjects(self, namespace: str, predicate: str, value_jsons: list[str] | None = None,
+                                observed_before=None, valid_at=None):
+        return self.shard_for(namespace).current_scalar_subjects(namespace, predicate, value_jsons,
+                                                                 observed_before, valid_at)
+
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
         return self.shard_for(namespace).relation_summary(namespace)
 

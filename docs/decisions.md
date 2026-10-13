@@ -3668,6 +3668,22 @@ rights over the busiest DC through groups; none is a Domain Admin — an
 exact, cited "none" over what is collected, with local admin noted as not
 collected); "enabled Domain Admins" from the closure, 0.8 s.
 
+## D-111 · Current values ranked in SQL for large filters (2026-10-13)
+
+At 500k objects a listing filtering 110,000 accounts on `enabled` took 26 s:
+every row of the predicate came back as a LiteRow and the newest snapshot
+per subject was found in Python. `GraphStore.current_scalar_subjects`
+ranks it in SQL (`RANK() OVER (PARTITION BY subject ORDER BY observed_at
+DESC)` over idx_obs_label's range, visible, sender-asserted, valid at
+`valid_at`, by `as_of`) and returns only (type, key, matched) per subject.
+List mode uses it for `eq` / `in` / `exists` / `absent` / `ne` on large
+candidate sets when the caller is unscoped; `contains` and type-scoped
+callers keep the per-row path. Supersession is by recency here (a
+correction is the newer row); a correction in the same snapshot as what it
+corrects would differ — the per-row path remains the reference, and a test
+forces both paths over the same requests. 10k: unchanged totals, 0.42 ->
+0.38 s and 0.22 -> 0.17 s; the 500k measurement rides the next GKE probe.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

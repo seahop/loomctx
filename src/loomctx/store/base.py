@@ -318,6 +318,31 @@ class GraphStore(ABC):
                           iso(o.valid_from), iso(o.valid_to), o.supersedes, o.source,
                           bool(o.attrs.get("extracted")) or o.source.startswith("doc:"))
 
+    def current_scalar_subjects(
+        self, namespace: str, predicate: str, value_jsons: list[str] | None = None,
+        observed_before: datetime | None = None, valid_at: datetime | None = None,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """(subjects with a current value of `predicate`, those whose current
+        value's lower-cased JSON is one of `value_jsons`): current = the rows
+        at the newest instant any visible, sender-asserted row valid at
+        `valid_at` was observed (D-111). Backends rank in SQL; a listing
+        filtering 110,000 accounts on `enabled` read every row in Python."""
+        from .common import iso
+        va = iso(valid_at)
+        newest: dict[tuple[str, str], tuple[str, set[str]]] = {}
+        for r in self.lite_scalars(namespace, predicate, observed_before):
+            if r.extracted or (va is not None and ((r.valid_from is not None and r.valid_from > va)
+                                                   or (r.valid_to is not None and r.valid_to <= va))):
+                continue
+            v = json.dumps(r.object).lower()[:200]
+            got = newest.get(r.subject)
+            if got is None or r.observed_at > got[0]:
+                newest[r.subject] = (r.observed_at, {v})
+            elif r.observed_at == got[0]:
+                got[1].add(v)
+        wanted = {v.lower()[:200] for v in value_jsons} if value_jsons else set()
+        return set(newest), {k for k, (_, vs) in newest.items() if vs & wanted}
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

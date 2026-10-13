@@ -1622,6 +1622,35 @@ class SqliteStore(GraphStore):
                 for r in rows:
                     yield common.lite_row(r)
 
+    def current_scalar_subjects(
+        self, namespace: str, predicate: str, value_jsons: list[str] | None = None,
+        observed_before: datetime | None = None, valid_at: datetime | None = None,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """The newest snapshot per subject ranked in SQL over idx_obs_label's
+        range (D-111): only (type, key, matched) per subject comes back."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        valid_sql, valid_args = "", ()
+        if valid_at is not None:
+            v = common.iso(valid_at)
+            valid_sql = (" AND (o.valid_from IS NULL OR o.valid_from <= ?)"
+                         " AND (o.valid_to IS NULL OR o.valid_to > ?)")
+            valid_args = (v, v)
+        wanted = sorted({w.lower()[:200] for w in (value_jsons or [])})
+        hit = (f"MAX(CASE WHEN cur.v IN ({','.join(['?'] * len(wanted))}) THEN 1 ELSE 0 END)"
+               if wanted else "0")
+        sql = ("WITH cur AS (SELECT o.subject_id, lower(substr(o.object_json, 1, 200)) AS v,"
+               " RANK() OVER (PARTITION BY o.subject_id ORDER BY o.observed_at DESC) AS rk"
+               " FROM observations o WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               + before_sql + valid_sql
+               + " AND o.source NOT LIKE 'doc:%%' AND coalesce(json_extract(o.attrs_json, '$.extracted'), 0) IN (0, 'false')" + _NOT_TOMBSTONED + ")"
+               " SELECT e.type AS type, e.key AS key, " + hit + " AS hit"
+               " FROM cur JOIN entities e ON e.id = cur.subject_id WHERE cur.rk = 1 GROUP BY e.type, e.key")
+        params = (namespace, predicate, *before_args, *valid_args, *wanted)
+        with self._tx(read=True):
+            rows = self._conn.execute(sql, params).fetchall()
+        any_ = {(r["type"], r["key"]) for r in rows}
+        return any_, {(r["type"], r["key"]) for r in rows if r["hit"]}
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

@@ -44,6 +44,7 @@ _ROW_FRAME = 6           # tokens a row's framing costs beyond its text and cite
 _POSITIVE = ("eq", "in", "exists")
 _SELECTIVITY = {"eq": 0, "in": 1, "within": 2, "contains": 3, "exists": 4, "absent": 5, "not_within": 6, "ne": 7}
 _CLOSURE = ("within", "not_within")
+_RANKED = ("eq", "in", "exists", "absent", "ne")   # ops the store's SQL ranking answers (D-111)
 
 Key = tuple[str, str]
 
@@ -483,7 +484,27 @@ def list_entities(store: GraphStore, req: ListRequest,
             cut = cut or closure_cut
             alive = [k for k in alive if (k in inside) == (f.op == "within")]
             continue
-        if len(alive) > _FETCH_CHUNK and _scalar_rows(summary, f.predicate) < _SCAN_RATIO * len(alive):
+        if (len(alive) > _FETCH_CHUNK and f.op in _RANKED and allowed_types is None
+                and _scalar_rows(summary, f.predicate) < _SCAN_RATIO * len(alive)):
+            # the newest value per subject ranked in SQL, only keys back (D-111)
+            vjs = None if f.op in ("exists", "absent") else [
+                vj for w in (f.value if isinstance(f.value, list) else [f.value]) for vj in _value_jsons(w)]
+            have, match = store.current_scalar_subjects(ns, f.predicate, vjs, req.as_of, req.valid_at)
+            st["ranked"] = st.get("ranked", 0) + len(alive)
+            for k in alive:
+                if f.op in ("eq", "in"):
+                    ok = k in match
+                elif f.op == "exists":
+                    ok = k in have
+                elif f.op == "absent":
+                    ok = k not in have
+                else:   # ne
+                    ok = k not in match
+                    if ok and k not in have:
+                        unrecorded[f.predicate] += 1
+                if ok:
+                    survivors.append(k)
+        elif len(alive) > _FETCH_CHUNK and _scalar_rows(summary, f.predicate) < _SCAN_RATIO * len(alive):
             # one index range beats a lookup per candidate
             wanted = set(alive)
             seen: set[Key] = set()
@@ -521,8 +542,9 @@ def list_entities(store: GraphStore, req: ListRequest,
     window = alive[req.offset:req.offset + req.limit]
     labels = ([d.name for d in definitions if d.display]
               + [d.name for d in definitions if d.label and not d.display])
-    filtered = {f.predicate for f in req.where}
-    extra = list(dict.fromkeys([p for p in req.fields if p not in filtered] + labels))
+    filtered = {f.predicate for f in req.where if f.op not in _CLOSURE}
+    missing = [p for p in filtered if any(p not in current.get(k, {}) for k in window)]
+    extra = list(dict.fromkeys([p for p in req.fields if p not in filtered] + labels + missing))
     if window and extra:
         by = defaultdict(list)
         for r in store.lite_rows(ns, [_ref(k) for k in window], extra, side="subject", observed_before=req.as_of):
