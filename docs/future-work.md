@@ -104,6 +104,12 @@ closures with a visited set.
 
 ## 2. List mode for large answer sets
 
+**Status (2026-10-13): built, D-107** (`POST /v1/list`, MCP `list_entities`).
+It is a separate read, not a pack item; paging is by offset over a key-sorted
+set rather than a signed handle, and filters read current values set-wise
+(index seeds, one-side edge reads, predicate range scans). The "done when"
+measurement rides the next 10k/500k run.
+
 **Problem.** Packs render facts as sentences, which is costly for "list all
 X". In the AD audits most delegation failures were the 20-step cap: models
 walking OUs one call at a time. With 200 correct answers, prose packs cannot
@@ -133,6 +139,11 @@ the 20-step cap, and the default-size AD audits don't regress.
 ---
 
 ## 3. Named queries in the schema registry (weaker models ask poorly)
+
+**Status (2026-10-13): built, D-108** (`run_query`, `POST /v1/query`; the
+LDAP connector registers seven). Queries compile to list mode only, so far.
+The "done when" measurement rides the next run, reported with and without
+them (`LOOMCTX_MCP_QUERIES=0`).
 
 **Problem.** Scorecard spread is partly phrasing: D-064's phrasing fix took
 the exposure task from 9 to 30 passes across the eighteen models tested.
@@ -228,6 +239,33 @@ is GraphRAG's home turf. LoomCtx answers about entities, not themes.
 - LLM cost is paid at enrichment, never at read time.
 
 **Only if users ask.** It is useful, but it isn't what LoomCtx is for.
+
+---
+
+## 7. A harder benchmark tier (tougher questions)
+
+**Problem.** The AD audits ask one thing each: a group's members, the
+delegation hosts, the trusts. Nineteen models pass all five; the scorecard
+no longer separates the strong ones, and real audits combine conditions
+across sources.
+
+**Design.** A second tier in `agent_eval_ext`, same forests and scorers'
+style (truth from the generator, hand-read failures before publishing):
+- **Multi-condition sets**: enabled members of a privileged group (nested)
+  that are also Kerberoastable; delegation hosts whose owner group has a
+  disabled-account member.
+- **Cross-source joins**: an identity's AD groups against its Entra/Okta
+  roles (D-099 resolution), or a vulnerable host (OSV/nmap) reachable by an
+  account with an ACE path to it.
+- **Time**: who was a Domain Admin on a past date (`as_of`), and who was
+  removed since.
+- **Negatives and coverage**: a question whose honest answer is "not
+  collected" for one domain and a list for another.
+Each task reports pass, steps, tokens and time, and runs with and without
+named queries.
+
+**Done when.** The tier separates the current 25/25 models, and the plain
+tier's results are unchanged.
 
 ---
 

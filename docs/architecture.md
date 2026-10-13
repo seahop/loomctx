@@ -155,8 +155,8 @@ grounding prompt. The pack rides along in the response for audit (D-012).
 
 1. **MCP server** (primary, for agents): `list_namespaces`,
    `describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
-   `find_path`, `expand`, `record_claim`, `get_observations`, `answer`,
-   `purple_report`. Agents also *write back* what they learn.
+   `find_path`, `list_entities`, `run_query`, `expand`, `record_claim`,
+   `get_observations`, `answer`, `purple_report`. Agents also *write back* what they learn.
 2. **HTTP API + thin SDKs** (Python, TypeScript, Go; OpenAPI for the rest) for
    apps and custom pipeline code. `POST /v1/ingest/batch` takes a JSON array or
    NDJSON, which is what log shippers' HTTP outputs produce.

@@ -183,7 +183,8 @@ Neither framing is baked into LoomCtx; both are just questions over the graph.
 Point any MCP-capable agent at LoomCtx and it gets `list_namespaces`,
 `describe_namespace`, `find_entity`, `find_related`, `ask`, `ask_scope`,
 `find_path` (the connecting edge sequence(s) between two entities, D-067),
-`expand`, `record_claim`, `get_observations`, `answer`, `purple_report` (a
+`list_entities` (every entity matching conditions, with an exact count, D-107),
+`run_query` (a namespace's named questions, D-108), `expand`, `record_claim`, `get_observations`, `answer`, `purple_report` (a
 red-team operation against the detections, D-086) — scoped to whatever
 the agent's API key allows:
 

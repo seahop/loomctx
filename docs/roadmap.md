@@ -32,6 +32,7 @@ presentable.
 | 2026-09-26 | Identity connectors checked at scale (D-077…D-079): Entra/Okta generator + harness, four connector defects fixed (S-52…S-55), blind AD re-measurement (S-51), lazy-greedy pack selection; validated on GKE through the gateway path to 1.38M observations; open: identity-hub walk cost (S-57), find_path depth/status (S-58); 738 tests pass |
 | 2026-09-26 | Identity/IAM connectors (D-074…D-076): LDAP deep fix (S-50), Entra ID (Azure AD) connector, Okta connector; both IdPs in the shared `iam` namespace with overlapping predicates for cross-provider walks; 732 tests pass |
 | 2026-09-29 | Identity at scale on the agent side (D-091…D-103): name search and named packs, sibling walks that keep their chain, one walk per pack and rare-carrier counting (delegation packs 12 s → 4.4 s); model scorecard re-run (35 models × 5, 15 at 20/20) and five Active Directory audits on a 10,000-account forest published (19 of 35 at 25/25); retrieval scorecard re-run on the current engine (80 / 85 / 86 / 97 %, within variance); site source committed; post-talk plan in `docs/future-work.md`; 841 tests pass (936 on the Postgres lane) |
+| 2026-10-13 | Scale work on branch `scale-xl` (not yet on `main`): 500k-object realistic AD forest built and measured (D-104 fixes: SQLite statistics, cached relation summary, selective crowded walks); list mode (D-107), named queries (D-108), schema-drafting helper (D-106); full 10k/500k model A/B re-run pending on the final build |
 | early Oct | Freeze features; night-before load + alias pass on the frozen volume, dated re-runs of every rehearsal line (`docs/demo.md` checklist); presentation materials |
 | 2026-10-21 | **Conference** |
 
@@ -330,7 +331,12 @@ ingestion, tenant isolation of capacity. Contract unchanged throughout.
   (`PathRequest`/`PathPack`); a bounded shortest-first BFS reusing the scope
   walk, honest about hub limits via `truncated`.
 
-## Phase 9 — After the talk (planned, not started)
+## Phase 9 — After the talk (in progress on `scale-xl`, 2026-10-13)
+
+Done on the branch: item 0 measured (D-104), item 2 list mode (D-107), item
+3 named queries (D-108), item 4 schema drafting (D-106). Open: the 10k/500k
+model A/B on the final build; items 1, 5, 6, and item 7 (a harder benchmark
+tier).
 
 Scale and the known weaknesses, each with a design, files to touch and a
 done-when test: **`docs/future-work.md`**. In order: measure a 500k-object

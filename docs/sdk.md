@@ -19,6 +19,8 @@ core functions the HTTP API uses (no drift possible). Entity handles are
 | `ask(subject, question, budget, as_of?, valid_at?, format?)` | Budgeted, cited context on **one** entity (`as_of` = known at T, `valid_at` = true at T) |
 | `ask_scope(subjects, question, expand_predicates?, depth?, budget?, format?, siblings?)` | **Several** entities and/or relation hops: an anchor + contents ("domain:corp.local" over `member_of`), or host → product ← cve; an attribute in `expand_predicates` is the question's topic; default budget 3000; a walk does not turn back to co-members unless `siblings` (D-080) |
 | `find_path(from, to, via?, depth?, max_paths?, budget?, as_of?, valid_at?, format?, siblings?)` | The connecting **edge sequence(s)** between two entities along `via`, shortest first (default depth 4, at most 6), each hop cited (host→product→cve, user→group→domain); `node_status` flags a disabled account on a path; reports paths that EXIST, does not rank or score them (D-067, D-080) |
+| `list_entities(type?, of?, via?, direction?, depth?, where?, fields?, limit?, offset?, budget?, as_of?, valid_at?)` | **Every** entity matching conditions, with an exact `total`: entities of `type`, or connected to `of` along `via` within `depth` edges (nested group members: direction `in`, depth 3–6), filtered on current values (`where`: `{predicate, op, value}` with eq / ne / in / contains / exists / absent, or text like `enabled=false`, `is_dc!=true`); rows cited, paged by `offset` / `next_offset`. Use it when the answer is a set (D-107) |
+| `run_query(name, params?, limit?, offset?, budget?)` | Run one of the namespace's **named queries** — `describe_namespace` lists them (LDAP: `effective_members(group)`, `account_groups(account)`, `unconstrained_delegation_hosts`, `domain_trusts`, …); entity parameters take a handle or a name; returns a list page (D-108). `LOOMCTX_MCP_QUERIES=0` hides it |
 | `expand(handle, budget, format?)` | Progressive disclosure — pull one thread deeper; a `cite` token returns that one observation |
 | `record_claim(subject, predicate, ..., object_ref \| object_value, supersedes?, event_id?)` | Agents write back facts they learn; `supersedes` records a correction of an earlier observation |
 | `get_observations(subject)` | Raw audit view (an entity, or a `cite` token / observation id) |
@@ -122,6 +124,8 @@ GET  /v1/entities/semantic?q=                    # entities by MEANING, each wit
 GET  /v1/artifacts/{id}                          # stored document, verbatim
 POST /v1/ask                                     # AskRequest (subject | scope) -> ContextPack
 POST /v1/path                                    # PathRequest (from, to, via) -> PathPack: connecting edge sequences, cited (D-067)
+POST /v1/list                                    # ListRequest (type | of+via, where) -> ListPage: every match, exact total, cited (D-107)
+POST /v1/query                                   # QueryRequest (name, params) -> ListPage: a registered named query (D-108)
 POST /v1/expand                                  # ExpandRequest -> ContextPack
 POST /v1/answer                                  # retrieval-grounded LLM answer (503 until an LLM is configured, D-012)
 POST /v1/schemas, GET /v1/schemas                # per-namespace registry: entity types, predicates, strictness (D-024)
