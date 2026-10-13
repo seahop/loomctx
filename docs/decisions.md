@@ -3684,6 +3684,18 @@ corrects would differ — the per-row path remains the reference, and a test
 forces both paths over the same requests. 10k: unchanged totals, 0.42 ->
 0.38 s and 0.22 -> 0.17 s; the 500k measurement rides the next GKE probe.
 
+**Addendum: the predicate scans are pinned to idx_obs_label.** The final A/B's
+500k transcripts held list calls of 1-2 hours — every one a `contains`
+filter over a whole type (`principal~=lab.local` over 200k users). The scan
+behind it asked for a predicate's rows ordered by subject, and SQLite met
+the ORDER BY by walking the namespace's subject index — all 6.5M rows,
+checking each one's predicate — rather than reading the predicate's ~450k
+rows from idx_obs_label and sorting them. `lite_scalars` and
+`current_scalar_subjects` now say `INDEXED BY idx_obs_label` (when it
+exists: a bulk load defers it into an empty store, D-105). 10k: the
+`contains` scan 1.16 s -> 0.21 s; the plan no longer touches the rest of
+the namespace, which is what grew to hours.
+
 ## D-112 · An empty entity search retries what the agent meant (2026-10-13)
 
 137 of 2,480 `find_entity` calls in the final A/B's 10k half found nothing,

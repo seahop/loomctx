@@ -1578,6 +1578,19 @@ class SqliteStore(GraphStore):
     _LITE_FROM = (" FROM observations o JOIN entities s ON s.id = o.subject_id"
                   " LEFT JOIN entities oe ON oe.id = o.object_entity_id")
 
+    def _label_index(self) -> str:
+        """' INDEXED BY idx_obs_label' when the index exists. A predicate's
+        rows ordered or partitioned by subject made the planner walk the
+        namespace's whole subject index (6.5M rows at 500k, every row's
+        predicate checked) to skip one sort: list mode's `contains` scans
+        took 1-2 hours on the final A/B's 500k forest. The label range plus
+        a sort of that predicate's rows is what is wanted. Absent (a bulk
+        load deferring it into an empty store, D-105), no hint."""
+        with self._tx(read=True):
+            found = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_obs_label'").fetchone()
+        return " INDEXED BY idx_obs_label" if found else ""
+
     def lite_rows(
         self, namespace: str, refs: list[EntityRef], predicates: list[str], side: str = "subject",
         limit: int = 1_000_000, observed_before: datetime | None = None,
@@ -1609,7 +1622,8 @@ class SqliteStore(GraphStore):
     ) -> Iterator[common.LiteRow]:
         """One idx_obs_label range, ordered by subject, streamed (D-107)."""
         before_sql, before_args = _observed_before("?", observed_before)
-        sql = ("SELECT " + common.LITE_COLS + self._LITE_FROM
+        from_ = self._LITE_FROM.replace(" o JOIN", f" o{self._label_index()} JOIN", 1)
+        sql = ("SELECT " + common.LITE_COLS + from_
                + " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
                + before_sql + _NOT_TOMBSTONED + " ORDER BY o.subject_id")
         params = (namespace, predicate, *before_args)
@@ -1640,7 +1654,8 @@ class SqliteStore(GraphStore):
                if wanted else "0")
         sql = ("WITH cur AS (SELECT o.subject_id, lower(substr(o.object_json, 1, 200)) AS v,"
                " RANK() OVER (PARTITION BY o.subject_id ORDER BY o.observed_at DESC) AS rk"
-               " FROM observations o WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               " FROM observations o" + self._label_index()
+               + " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
                + before_sql + valid_sql
                + " AND o.source NOT LIKE 'doc:%%' AND coalesce(json_extract(o.attrs_json, '$.extracted'), 0) IN (0, 'false')" + _NOT_TOMBSTONED + ")"
                " SELECT e.type AS type, e.key AS key, " + hit + " AS hit"
