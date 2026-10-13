@@ -1924,6 +1924,31 @@
             },
             "title": "Cites",
             "type": "array"
+          },
+          "hops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "an `of` listing: edges between this entity and `of` (1 = direct)",
+            "title": "Hops"
+          },
+          "through": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "an `of` listing past one hop: the entity one step closer to `of` on its route"
           }
         },
         "required": [

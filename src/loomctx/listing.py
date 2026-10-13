@@ -195,14 +195,16 @@ def _edges(store: GraphStore, req: ListRequest, nodes: list[Key], via: list[str]
     return out
 
 
-def _walk_down(store, req, root: Key, via, depth, cap, rules) -> tuple[dict[Key, LiteRow], bool]:
+def _walk_down(store, req, root: Key, via, depth, cap, rules, route: dict) -> tuple[dict[Key, LiteRow], bool]:
     """Every entity within `depth` edges of `root` along `via` in the
     request's direction -> the edge that admitted it; True when the
-    candidate cap cut the walk."""
+    candidate cap cut the walk. `route` receives entity -> (hops, the entity
+    one step closer to root), and "open" -> how many entities at the last
+    depth link onward to entities not listed."""
     members: dict[Key, LiteRow] = {}
     seen = {root}
     frontier = [root]
-    for _ in range(depth):
+    for level in range(depth):
         if not frontier:
             break
         nxt: list[Key] = []
@@ -215,14 +217,20 @@ def _walk_down(store, req, root: Key, via, depth, cap, rules) -> tuple[dict[Key,
                         continue
                     seen.add(far)
                     members[far] = r
+                    route[far] = (level + 1, node)
                     nxt.append(far)
                     if len(members) >= cap:
                         return members, True
         frontier = nxt
+    if frontier:   # the depth ran out: do the last entities link on?
+        probe = frontier[:_FETCH_CHUNK]
+        adj = _edges(store, req, probe, via, req.direction, 50 * len(probe), rules)
+        route["open"] = sum(1 for node in probe if any(far not in seen for _, far in adj.get(node, ())))
     return members, False
 
 
-def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules) -> dict[Key, LiteRow | None]:
+def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules,
+             route: dict) -> dict[Key, LiteRow | None]:
     """Which of `seed` reach `root` within `depth` edges — walked up from
     them (the reverse direction), so a group holding every account is never
     enumerated: the seed's few memberships are read level by level, with
@@ -249,7 +257,12 @@ def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules) -> 
                     if new:
                         reached[far] |= new
                         nxt[far] |= new
+                        if far == root:
+                            for origin in new:
+                                route.setdefault(origin, (level + 1, None))
         cur = nxt
+    if cur and any(k != root for k in cur):
+        route["open"] = sum(1 for k in cur if k != root)
     # the nodes that lead to root, so each member cites an edge on its route
     leads = {root}
     stack = [root]
@@ -258,8 +271,13 @@ def _walk_up(store, req, root: Key, seed: list[Key], via, depth, cap, rules) -> 
             if child not in leads:
                 leads.add(child)
                 stack.append(child)
-    return {k: next((r for r, far in first.get(k, ()) if far in leads), None)
-            for k in reached.get(root, ())}
+    out = {}
+    for k in reached.get(root, ()):
+        hop = next(((r, far) for r, far in first.get(k, ()) if far in leads), None)
+        out[k] = hop[0] if hop else None
+        if k in route and hop is not None and hop[1] != root:
+            route[k] = (route[k][0], hop[1])
+    return out
 
 
 def _seed(store, req, cap) -> tuple[list[Key] | None, bool]:
@@ -333,6 +351,7 @@ def list_entities(store: GraphStore, req: ListRequest,
     admitted: dict[Key, LiteRow | None] = {}
     root_ref: EntityRef | None = None
     via: list[str] = []
+    route: dict = {}   # entity -> (hops, the entity one step closer to `of`); "open" -> onward links
     if req.of is not None:
         root_ref = store.resolve_refs(ns, [req.of]).get(_key(req.of))
         if root_ref is None or (allowed_types is not None and root_ref.type not in allowed_types):
@@ -346,10 +365,10 @@ def list_entities(store: GraphStore, req: ListRequest,
                 unknown(p, "via")
         root = _key(root_ref)
         if seed is not None and len(seed) <= _UPWARD_MAX and not cut:
-            admitted = _walk_up(store, req, root, seed, via, depth, cap, rules)
+            admitted = _walk_up(store, req, root, seed, via, depth, cap, rules, route)
             st["start"] = "upward"
         else:
-            down, walk_cut = _walk_down(store, req, root, via, depth, cap, rules)
+            down, walk_cut = _walk_down(store, req, root, via, depth, cap, rules, route)
             cut = cut or walk_cut
             keep_only = set(seed) if seed is not None else None
             admitted = {k: r for k, r in down.items() if keep_only is None or k in keep_only}
@@ -459,8 +478,10 @@ def list_entities(store: GraphStore, req: ListRequest,
         name, preds, ids = plan[k]
         mine = current.get(k, {})
         values = {p: _value(mine[p]) for p in preds}
+        hops, closer = route.get(k, (None, None))
         row = ListRow(entity=_ref(k), name=name, values=values,
-                      cites=[_citation(full[i]) for i in ids if i in full])
+                      cites=[_citation(full[i]) for i in ids if i in full],
+                      hops=hops, through=_ref(closer) if closer is not None and hops and hops > 1 else None)
         text = " ".join([f"{k[0]}:{k[1]}"] + ([name] if name else [])
                         + [f"{p}={json.dumps(v, default=str)}" for p, v in values.items()])
         cost = est_tokens(text) + _ROW_FRAME + sum(cite_tokens(c) for c in row.cites)
@@ -473,6 +494,17 @@ def list_entities(store: GraphStore, req: ListRequest,
     gap = _gap_note(store, ns, req, root_ref if req.of is not None else None, via if req.of is not None else [])
     if gap:
         notes.insert(0, gap)
+    if req.of is not None and route.get("open"):
+        notes.append(f"the walk stopped at depth {depth}: {route['open']} entit"
+                     f"{'y' if route['open'] == 1 else 'ies'} at that depth link onward along "
+                     f"{', '.join(via)} to entities not listed (depth may be up to {MAX_LIST_DEPTH})")
+    if req.of is not None and not admitted and req.direction in _SIDE:
+        other = "out" if req.direction == "in" else "in"
+        if store.lite_rows(ns, [root_ref], via, side=_SIDE[other], limit=1, observed_before=req.as_of):
+            notes.append(f"direction={req.direction!r} lists entities whose {', '.join(via)} edge "
+                         + ("points at " if req.direction == "in" else "starts from ")
+                         + f"{req.of.type}:{req.of.key}; there are none. It has {', '.join(via)} edges "
+                         f"the other way (direction={other!r})")
     page.charged_tokens = charged
     end = req.offset + len(page.rows)
     page.next_offset = end if end < len(alive) else None
@@ -503,8 +535,7 @@ def _gap_note(store, ns: str, req: ListRequest, root: EntityRef | None, via: lis
     kinds = {root.type} if root is not None else ({req.type} if req.type else set())
     found = [g for g in coverage.gaps(store, ns, preds, req.as_of)
              if (not sources or g.source in sources) and (not g.types or not kinds or kinds & set(g.types))]
-    return coverage.note(found, "an entity this listing does not include may be missing data, not absent; "
-                                "cite the coverage record and say it was not collected, not that there are none")
+    return coverage.note(found, "an entity this listing does not include may be missing data, not absent")
 
 
 def _filter_entities(store, ns: str, req: ListRequest) -> list[EntityRef]:

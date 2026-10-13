@@ -478,10 +478,14 @@ PathView = TypedDict("PathView", {
 
 class AgentListRow(TypedDict):
     """One listed entity: its handle, display name, the current values the
-    listing filtered on or was asked for, and the cite tokens backing them."""
+    listing filtered on or was asked for, how far it is from `of` (`hops`,
+    and `through` the entity one step closer), and the cite tokens backing
+    them."""
     entity: str
     name: NotRequired[str]
     values: NotRequired[dict[str, Any]]
+    hops: NotRequired[int]
+    through: NotRequired[str]
     cites: list[str]
 
 
@@ -645,6 +649,9 @@ def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
 
 
 def _parse_ref(handle: str) -> EntityRef:
+    # a handle sent JSON-quoted ('"user:S-1-…"') is the same handle: a model
+    # looped to the step cap on "entity not on record" for one (final A/B)
+    handle = handle.strip().strip("\"'").strip()
     etype, sep, key = handle.partition(":")
     if not sep or not etype or not key:
         raise ValueError(
@@ -1158,6 +1165,10 @@ def _list_view(page) -> ListView:
         if r.values:
             row["values"] = {k: (f"{v.type}:{v.key}" if isinstance(v, EntityRef) else v)
                              for k, v in r.values.items()}
+        if r.hops is not None:
+            row["hops"] = r.hops
+        if r.through is not None:
+            row["through"] = f"{r.through.type}:{r.through.key}"
         row["cites"] = [cite_text(c) for c in r.cites]
         rows.append(row)
     view["rows"] = rows
@@ -1202,6 +1213,7 @@ def list_entities(
     if type:
         _gate_type(grant, type)
     _known_namespace(namespace, grant)
+    type = type.strip().strip("\"'").strip() if type else type
     req = ListRequest(
         namespace=namespace, type=type or None, of=root, via=_listed(via), direction=direction,
         depth=depth, where=_filters(where), fields=_listed(fields), limit=limit, offset=offset,

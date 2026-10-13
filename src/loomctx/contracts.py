@@ -641,6 +641,14 @@ class ListRow(BaseModel):
     name: str | None = None
     values: dict[str, ObjectValue] = Field(default_factory=dict)
     cites: list[Citation] = Field(default_factory=list)
+    hops: int | None = Field(
+        default=None,
+        description="an `of` listing: edges between this entity and `of` (1 = direct)",
+    )
+    through: EntityRef | None = Field(
+        default=None,
+        description="an `of` listing past one hop: the entity one step closer to `of` on its route",
+    )
 
 
 class ListPage(BaseModel):

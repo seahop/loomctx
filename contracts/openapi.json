@@ -1061,6 +1061,18 @@
           "entity": {
             "$ref": "#/components/schemas/EntityRef"
           },
+          "hops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "an `of` listing: edges between this entity and `of` (1 = direct)",
+            "title": "Hops"
+          },
           "name": {
             "anyOf": [
               {
@@ -1071,6 +1083,17 @@
               }
             ],
             "title": "Name"
+          },
+          "through": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "an `of` listing past one hop: the entity one step closer to `of` on its route"
           },
           "values": {
             "additionalProperties": {

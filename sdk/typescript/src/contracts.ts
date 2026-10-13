@@ -528,6 +528,14 @@ export interface ListRow {
     [k: string]: EntityRef | string | number | boolean;
   };
   cites?: Citation[];
+  /**
+   * an `of` listing: edges between this entity and `of` (1 = direct)
+   */
+  hops?: number | null;
+  /**
+   * an `of` listing past one hop: the entity one step closer to `of` on its route
+   */
+  through?: EntityRef | null;
 }
 /**
  * Run a namespace's named query (D-108); the answer is a ListPage.

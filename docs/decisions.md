@@ -3539,6 +3539,18 @@ are not DCs?" want every match and a count; agents answered them by paging
   `of` listing for the predicates it walked, from the sources that supplied
   `of`; a type or filter listing for the predicates its filters name, for
   the types a gap applies to; each citing its coverage record in brackets.
+- **Addendum (2026-10-13): facts, not coaching.** The gap note's closing
+  imperative ("cite the coverage record and say it was not collected") is
+  removed: notes state what the call did and found, never how to answer.
+  Reading why nested groups fell to 86% with named queries off (91% on the
+  published engine, identical ask_scope packs on both builds) showed list
+  mode's own gaps: a model re-walked hop by hop because rows did not say
+  direct from nested; another looped on a JSON-quoted handle. Rows of an
+  `of` listing now carry `hops` (1 = direct) and `through` (the entity one
+  step closer to `of`); a walk its depth cut says how many entities at that
+  depth link onward; an empty listing says when the other direction has
+  edges; handles and types arrive unquoted. Measured on held-out data (a
+  forest of another seed) before any number is cited.
 
 ## D-108 · Named queries: the questions a namespace answers, by name (2026-10-13)
 

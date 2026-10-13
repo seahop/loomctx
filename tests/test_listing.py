@@ -228,3 +228,36 @@ def test_http_list_route(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["total"] == 3 and [row["entity"]["key"] for row in body["rows"]] == ["app01", "dc01", "old01"]
+
+
+def test_rows_say_how_far_and_the_walk_says_where_it_stopped(store):
+    """Facts about the listing itself (D-107): each row's distance from `of`
+    and the entity one step closer; a walk cut by its depth says entities at
+    that depth link on; an empty listing in one direction says the other has
+    edges. No advice about any question — what the call did."""
+    page, _ = run(store, of=ref("group:domain-admins"), via=["member_of"], type="user", depth=3)
+    by = {r.entity.key: r for r in page.rows}
+    assert by["alice"].hops == 1 and by["alice"].through is None
+    assert by["carol"].hops == 3 and by["carol"].through == ref("group:helpdesk")
+    page, _ = run(store, of=ref("group:domain-admins"), via=["member_of"], type="user", depth=1)
+    assert any("stopped at depth 1" in n and "link onward along member_of" in n for n in page.notes)
+    full, _ = run(store, of=ref("group:domain-admins"), via=["member_of"], depth=3)
+    assert not any("stopped at depth" in n for n in full.notes)
+    page, _ = run(store, of=ref("user:carol"), via=["member_of"], direction="in")
+    assert page.total == 0 and any("direction='in'" in n and "direction='out'" in n for n in page.notes)
+    up, _ = run(store, of=ref("group:domain-admins"), via=["member_of"], depth=3,
+                where=[ListFilter(predicate="enabled", op="exists")])
+    assert {r.entity.key: r.hops for r in up.rows} == {"alice": 1, "bob": 2, "carol": 3}
+    assert next(r for r in up.rows if r.entity.key == "carol").through == ref("group:helpdesk")
+
+
+def test_mcp_tolerates_quoted_handles(tmp_path):
+    s = SqliteStore(tmp_path / "q.db")
+    _forest(s)
+    mcp_server.configure(s)
+    try:
+        view = mcp_server.list_entities(of='"group:domain-admins"', via="member_of", type='"user"', depth=3)
+        assert view["total"] == 4 and view["rows"][2]["hops"] == 3 and view["rows"][2]["through"] == "group:helpdesk"
+    finally:
+        mcp_server.configure(None)
+        s.close()
