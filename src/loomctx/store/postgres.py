@@ -1282,7 +1282,8 @@ class PostgresStore(GraphStore):
 
     def _many_query(self, namespace: str, ids: list[str], limit: int,
                     observed_before: datetime | None,
-                    predicates: list[str] | None = None) -> tuple[str, tuple]:
+                    predicates: list[str] | None = None,
+                    side: str | None = None) -> tuple[str, tuple]:
         """The `hits` body of the batched gather and its parameters: a
         LATERAL per side, so every entity contributes its newest `limit`
         rows of each side from its own index range instead of every edge
@@ -1292,25 +1293,27 @@ class PostgresStore(GraphStore):
         pred_sql, pred_args = "", ()
         if predicates is not None:
             pred_sql, pred_args = " AND o.predicate = ANY(%s)", (list(predicates),)
-        sql = (
-            "SELECT s.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
-            + _OBS_SELECT_ENT.format(ent="o.subject_id")
-            + " WHERE o.namespace = %s AND o.subject_id = ids.eid" + _NOT_TOMBSTONED + before_sql
-            + pred_sql + " ORDER BY o.observed_at DESC LIMIT %s) s"
-            " UNION ALL "
-            "SELECT t.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
-            + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
-            + " WHERE o.namespace = %s AND o.object_entity_id = ids.eid AND o.subject_id <> ids.eid"
-            + _NOT_TOMBSTONED + before_sql + pred_sql
-            + " ORDER BY o.observed_at DESC LIMIT %s) t"
-        )
-        return sql, (list(ids), namespace, *before_args, *pred_args, limit,
-                     list(ids), namespace, *before_args, *pred_args, limit)
+        subj = ("SELECT s.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+                + _OBS_SELECT_ENT.format(ent="o.subject_id")
+                + " WHERE o.namespace = %s AND o.subject_id = ids.eid" + _NOT_TOMBSTONED + before_sql
+                + pred_sql + " ORDER BY o.observed_at DESC LIMIT %s) s")
+        obj = ("SELECT t.* FROM unnest(%s::text[]) AS ids(eid) CROSS JOIN LATERAL ("
+               + _OBS_SELECT_ENT.format(ent="o.object_entity_id")
+               + " WHERE o.namespace = %s AND o.object_entity_id = ids.eid AND o.subject_id <> ids.eid"
+               + _NOT_TOMBSTONED + before_sql + pred_sql
+               + " ORDER BY o.observed_at DESC LIMIT %s) t")
+        one = (list(ids), namespace, *before_args, *pred_args, limit)
+        if side == "subject":
+            return subj, one
+        if side == "object":
+            return obj, one
+        return subj + " UNION ALL " + obj, one + one
 
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
         predicates: list[str] | None = None,
+        side: str | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs or (predicates is not None and not predicates):
@@ -1320,7 +1323,7 @@ class PostgresStore(GraphStore):
             ids = list(owners)
             for start in range(0, len(ids), self._MANY_CHUNK):
                 chunk = ids[start:start + self._MANY_CHUNK]
-                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates)
+                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates, side)
                 rows = self._q(
                     "WITH hits AS (" + hits + "),"
                     " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
@@ -1332,6 +1335,75 @@ class PostgresStore(GraphStore):
                     for ref in owners[row["ent"]]:
                         result.setdefault((ref.type, ref.key), []).append(obs)
         return result
+
+    def subjects_with_value(
+        self, namespace: str, predicate: str, value_json: str | None = None,
+        limit: int = 100_000, observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """idx_obs_label serves it: (namespace, predicate, the value's
+        lower-cased JSON text) — the expression written verbatim (D-107)."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        value_sql, value_args = "", ()
+        if value_json is not None:
+            value_sql, value_args = " AND lower(left(o.object_json, 200)) = %s", (value_json.lower()[:200],)
+        sql = ("SELECT DISTINCT e.type, e.key FROM observations o JOIN entities e ON e.id = o.subject_id"
+               " WHERE o.namespace = %s AND o.predicate = %s AND o.object_entity_id IS NULL"
+               + value_sql + before_sql + _NOT_TOMBSTONED + " LIMIT %s")
+        with self._tx(read=True):
+            rows = self._q(sql, (namespace, predicate, *value_args, *before_args, limit))
+        return [EntityRef(type=r["type"], key=r["key"]) for r in rows]
+
+    def entity_refs_of_type(self, namespace: str, type: str, limit: int = 100_000) -> list[EntityRef]:
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT key FROM entities WHERE namespace = %s AND type = %s ORDER BY key LIMIT %s",
+                (namespace, type, limit))
+        return [EntityRef(type=type, key=r["key"]) for r in rows]
+
+    _LITE_FROM = (" FROM observations o JOIN entities s ON s.id = o.subject_id"
+                  " LEFT JOIN entities oe ON oe.id = o.object_entity_id")
+
+    def lite_rows(
+        self, namespace: str, refs: list[EntityRef], predicates: list[str], side: str = "subject",
+        limit: int = 1_000_000, observed_before: datetime | None = None,
+    ) -> list[common.LiteRow]:
+        """One indexed IN-list read per chunk on the side's index
+        (idx_obs_subject / idx_obs_object), every row, no window (D-107)."""
+        if not refs or not predicates:
+            return []
+        col = "o.subject_id" if side == "subject" else "o.object_entity_id"
+        before_sql, before_args = _observed_before("%s", observed_before)
+        out: list[common.LiteRow] = []
+        with self._tx(read=True):
+            ids = list(self._resolve_many(namespace, refs))
+            for start in range(0, len(ids), self._MANY_CHUNK):
+                chunk = ids[start:start + self._MANY_CHUNK]
+                sql = ("SELECT " + common.LITE_COLS + self._LITE_FROM
+                       + f" WHERE o.namespace = %s AND {col} IN ({','.join(['%s'] * len(chunk))})"
+                       + f" AND o.predicate IN ({','.join(['%s'] * len(predicates))})"
+                       + before_sql + _NOT_TOMBSTONED + " LIMIT %s")
+                rows = self._q(
+                    sql, (namespace, *chunk, *predicates, *before_args, limit - len(out)))
+                out.extend(common.lite_row(r) for r in rows)
+                if len(out) >= limit:
+                    break
+        return out
+
+    def lite_scalars(
+        self, namespace: str, predicate: str, observed_before: datetime | None = None,
+    ) -> Iterator[common.LiteRow]:
+        """One idx_obs_label range, ordered by subject, streamed (D-107)."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        sql = ("SELECT " + common.LITE_COLS + self._LITE_FROM
+               + " WHERE o.namespace = %s AND o.predicate = %s AND o.object_entity_id IS NULL"
+               + before_sql + _NOT_TOMBSTONED + " ORDER BY o.subject_id")
+        params = (namespace, predicate, *before_args)
+        with self._tx(read=True):
+            with self._conn.cursor(name="loomctx_lite_scan") as cur:
+                cur.itersize = 5000
+                cur.execute(sql, params)
+                for r in cur:
+                    yield common.lite_row(r)
 
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],

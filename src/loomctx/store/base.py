@@ -6,6 +6,7 @@ No code outside src/loomctx/store/ may touch a database directly. New backends
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Iterator
@@ -205,6 +206,7 @@ class GraphStore(ABC):
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
         predicates: list[str] | None = None,
+        side: str | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         """observations_for for many refs at once: (type, key) -> its newest
         `limit` observations. Backends override with one round trip per
@@ -214,7 +216,19 @@ class GraphStore(ABC):
         on those predicates — the newest `limit` of *them* per entity, the
         filter applied in the query (D-061: a scope walk fetches a hub's
         edges past its gather window, and the attributes a question names
-        on the entities at their far end)."""
+        on the entities at their far end). `side` keeps only the rows where
+        the ref is the "subject" or the "object" — one index range, so a
+        walk up from a member never reads the hub's every inbound edge
+        (D-107)."""
+        if side is not None:
+            out: dict[tuple[str, str], list[Observation]] = {}
+            for r in refs:
+                rows = [o for o in self.observations_for(namespace, r, 2 ** 31 - 1, observed_before=observed_before)
+                        if (predicates is None or o.predicate in predicates)
+                        and ((o.subject.type, o.subject.key) == (r.type, r.key)) == (side == "subject")][:limit]
+                if rows:
+                    out[(r.type, r.key)] = rows
+            return out
         if predicates is None:
             return {(r.type, r.key): self.observations_for(namespace, r, limit, observed_before=observed_before)
                     for r in refs}
@@ -226,6 +240,82 @@ class GraphStore(ABC):
             if rows:
                 out[(r.type, r.key)] = rows
         return out
+
+    def subjects_with_value(
+        self, namespace: str, predicate: str, value_json: str | None = None,
+        limit: int = 100_000, observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """Distinct subjects with a visible scalar row on `predicate` — one
+        whose JSON text equals `value_json` when given (compared as the label
+        index compares: lower-cased, first 200 characters), any value
+        otherwise — observed at or before `observed_before`, at most `limit`
+        (D-107: a list's start set, "every computer trusted for unconstrained
+        delegation"). The row need not be the subject's newest: callers read
+        current values themselves. Backends answer it from idx_obs_label; this
+        default scans."""
+        from . import common
+        want = value_json.lower()[:200] if value_json is not None else None
+        out: dict[tuple[str, str], EntityRef] = {}
+        before = common.iso(observed_before)
+        dead = {t["observation_id"] for t in self.iter_tombstones(namespace)}
+        for o in self.iter_observations(namespace):
+            if (o.id in dead or o.predicate != predicate or isinstance(o.object, EntityRef)
+                    or (before is not None and common.iso(o.observed_at) > before)):
+                continue
+            if want is not None and json.dumps(o.object).lower()[:200] != want:
+                continue
+            out.setdefault((o.subject.type, o.subject.key), o.subject)
+            if len(out) >= limit:
+                break
+        return list(out.values())
+
+    def entity_refs_of_type(self, namespace: str, type: str, limit: int = 100_000) -> list[EntityRef]:
+        """The namespace's entities of one type, by key — a listing's start
+        set when no filter can seed it (D-107). Backends read the
+        (namespace, type, key) unique index; this default scans."""
+        refs = sorted((e.key for e in self.iter_entities(namespace) if e.type == type))[:limit]
+        return [EntityRef(type=type, key=k) for k in refs]
+
+    def lite_rows(
+        self, namespace: str, refs: list[EntityRef], predicates: list[str], side: str = "subject",
+        limit: int = 1_000_000, observed_before: datetime | None = None,
+    ) -> list:
+        """The visible rows on `predicates` where each ref is the `side`
+        ("subject" or "object"), as common.LiteRow — every one, up to
+        `limit` in all, no per-entity window (D-107). What a listing walks
+        and filters with: a group's every member, without building an
+        Observation per membership. This default reads through
+        observations_for_many."""
+        from .common import LiteRow, iso
+        rows = self.observations_for_many(namespace, refs, limit=2 ** 31 - 1, observed_before=observed_before,
+                                          predicates=list(predicates), side=side)
+        out = []
+        for got in rows.values():
+            for o in got:
+                obj = (o.object.type, o.object.key) if isinstance(o.object, EntityRef) else o.object
+                out.append(LiteRow(o.id, (o.subject.type, o.subject.key), o.predicate, obj, iso(o.observed_at),
+                                   iso(o.valid_from), iso(o.valid_to), o.supersedes, o.source,
+                                   bool(o.attrs.get("extracted")) or o.source.startswith("doc:")))
+        return out[:limit]
+
+    def lite_scalars(
+        self, namespace: str, predicate: str, observed_before: datetime | None = None,
+    ) -> Iterator:
+        """Every visible scalar row on `predicate`, as common.LiteRow,
+        grouped by subject (a subject's rows are adjacent) — streamed, so a
+        listing filtering 370,000 accounts on `enabled` reads one index
+        range instead of 370,000 lookups (D-107). This default scans."""
+        from .common import LiteRow, iso
+        dead = {t["observation_id"] for t in self.iter_tombstones(namespace)}
+        before = iso(observed_before)
+        rows = sorted((o for o in self.iter_observations(namespace)
+                       if o.predicate == predicate and not isinstance(o.object, EntityRef) and o.id not in dead
+                       and (before is None or iso(o.observed_at) <= before)),
+                      key=lambda o: (o.subject.type, o.subject.key))
+        for o in rows:
+            yield LiteRow(o.id, (o.subject.type, o.subject.key), o.predicate, o.object, iso(o.observed_at),
+                          iso(o.valid_from), iso(o.valid_to), o.supersedes, o.source,
+                          bool(o.attrs.get("extracted")) or o.source.startswith("doc:"))
 
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],

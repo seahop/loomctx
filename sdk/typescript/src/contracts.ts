@@ -19,6 +19,8 @@ export interface LoomCtxContracts {
   ContextPack?: ContextPack;
   PathRequest?: PathRequest;
   PathPack?: PathPack;
+  ListRequest?: ListRequest;
+  ListPage?: ListPage;
   AnswerRequest?: AnswerRequest;
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
@@ -425,6 +427,106 @@ export interface NodeStatus {
   predicate: string;
   value: EntityRef | string | number | boolean;
   cite: Citation;
+}
+/**
+ * "Which entities ...?" — an exact, paged set of entities instead of a
+ * ranked pack (D-107). The candidates are the entities that reach `of`
+ * along `via` within `depth` edges (group membership, nested), or, without
+ * `of`, every entity of `type`; `where` filters them, all conditions
+ * holding. Every row is cited by the rows that admitted it; the total is
+ * exact unless a cap is noted.
+ */
+export interface ListRequest {
+  namespace?: string;
+  /**
+   * keep only entities of this type (user, computer, host…)
+   */
+  type?: string | null;
+  /**
+   * list entities connected to this one (a group's members, a host's software) instead of a whole type
+   */
+  of?: EntityRef | null;
+  /**
+   * the edge predicates walked from `of`; empty = the namespace's registered containment predicates
+   */
+  via?: string[];
+  /**
+   * in: entities whose edge points AT `of` (members of a group: user member_of group); out: what `of` points at; any: both
+   */
+  direction?: "in" | "out" | "any";
+  /**
+   * the most edges between a listed entity and `of` (nested membership); clamped to 6 and noted
+   */
+  depth?: number;
+  where?: ListFilter[];
+  /**
+   * predicates whose current value each row should show, cited (beyond the ones `where` already names)
+   */
+  fields?: string[];
+  limit?: number;
+  offset?: number;
+  /**
+   * token budget, charged on each row's rendered text plus its citations; rows past it are left for the next page
+   */
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+/**
+ * One condition on an entity's CURRENT value of a predicate: the newest
+ * visible, unsuperseded, in-scope row (valid at `valid_at` when one is
+ * asked), compared case-insensitively on scalars. `ne` holds for an entity
+ * with no value on record (D-107: "accounts not disabled" includes the
+ * ones whose status was never collected — the page says how many).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "ListFilter".
+ */
+export interface ListFilter {
+  predicate: string;
+  op?: "eq" | "ne" | "in" | "contains" | "exists" | "absent";
+  /**
+   * the compared value: a scalar for eq / ne / contains, a list for in; ignored by exists / absent
+   */
+  value?: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * One page of a ListRequest, sorted by entity key so paging is stable.
+ * `total` counts every match, not just this page; `next_offset` is set
+ * while more remain. `notes` say what the listing could not do exactly —
+ * a candidate cap, entities with no value on record for a filter, an
+ * unknown predicate — advice, not evidence (D-064).
+ */
+export interface ListPage {
+  namespace: string;
+  rows?: ListRow[];
+  total?: number;
+  /**
+   * false when a cap stopped the candidate walk, so `total` is a lower bound (the note names the cap)
+   */
+  exact?: boolean;
+  offset?: number;
+  next_offset?: number | null;
+  charged_tokens?: number;
+  notes?: string[];
+}
+/**
+ * One listed entity, its display name when one is registered, the
+ * current values the request filtered on or asked for, and the rows
+ * that back them (an `of` listing also cites the edge that admitted it).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "ListRow".
+ */
+export interface ListRow {
+  entity: EntityRef;
+  name?: string | null;
+  values?: {
+    [k: string]: EntityRef | string | number | boolean;
+  };
+  cites?: Citation[];
 }
 /**
  * Ask + synthesize: retrieve a context pack, then have the configured

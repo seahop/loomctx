@@ -8,6 +8,13 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### List mode (D-107)
+
+- `POST /v1/list` and MCP `list_entities`: every entity matching conditions,
+  with an exact count — a group's nested members, filtered on current values
+  (`enabled=false`, `is_dc!=true`), paged and cited. Seeded from indexes and
+  read set-wise, so it costs the same shape at 10k objects as at 500k.
+
 ### Model scorecard 2026-09-28; Active Directory audits published
 
 - `docs/models.md` re-measured on the current engine: 35 models, five runs of

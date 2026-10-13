@@ -43,6 +43,17 @@ def max_scope_entities() -> int:
     return _positive_int("LOOMCTX_MAX_SCOPE_ENTITIES", _DEFAULT_MAX_SCOPE_ENTITIES)
 
 
+_DEFAULT_MAX_LIST_CANDIDATES = 200_000
+
+
+def max_list_candidates() -> int:
+    """Ceiling on the entities one listing examines (D-107): the members of a
+    group holding every account, at 500,000 objects, are 370,000 of them. A
+    cut makes the page's total a lower bound and says so (`exact` false),
+    never silent. LOOMCTX_MAX_LIST_CANDIDATES."""
+    return _positive_int("LOOMCTX_MAX_LIST_CANDIDATES", _DEFAULT_MAX_LIST_CANDIDATES)
+
+
 def max_scope_observations() -> int:
     """Ceiling on the observations one ask gathers across all its subjects
     (D-058): the memory bound the entity cap alone does not give, since

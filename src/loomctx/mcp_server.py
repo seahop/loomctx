@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import threading
@@ -59,9 +60,11 @@ from .context import (build_pack, cite_text, decode_handle, expand_pack, find_pa
                      label_predicates, search_by_name, semantic_search)
 from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, EntityRef,
                         ExpansionHandle,
-                        Observation, PathRequest, PredicateDef, ScopeSpec, ScopeTruncation,
+                        ListFilter, ListRequest, Observation, PathRequest, PredicateDef, ScopeSpec,
+                        ScopeTruncation,
                         SemanticSearchResponse)
 from .gates import check_supersedes, scope_counts, scope_schema
+from .listing import list_entities as list_entities_impl
 from .llm import LLMError, embedder_from_env, llm_from_env
 from .metrics import REJECTED
 from .ratelimit import LimiterPool, RateLimitSettings
@@ -265,6 +268,9 @@ INSTRUCTIONS = (
     "sequence(s) that connect two entities along named predicates "
     "(reachability: host->product->cve, user->group->domain), each hop "
     "cited — it reports the paths that exist, it does not rank them. "
+    "list_entities returns EVERY entity matching conditions with an exact "
+    "count (a group's nested members that are enabled, computers with a "
+    "flag set) — use it when the answer is a set, not a ranked pack. "
     "purple_report sets a red-team operation's logged actions against the "
     "detections on the same hosts (detected / host_only / missed). Every "
     "pack tool takes format='concise' (default: "
@@ -459,6 +465,28 @@ PathView = TypedDict("PathView", {
     "truncated": NotRequired[list[ScopeTruncation]],
     "coverage_warning": NotRequired[str],
 })
+
+
+class AgentListRow(TypedDict):
+    """One listed entity: its handle, display name, the current values the
+    listing filtered on or was asked for, and the cite tokens backing them."""
+    entity: str
+    name: NotRequired[str]
+    values: NotRequired[dict[str, Any]]
+    cites: list[str]
+
+
+class ListView(TypedDict):
+    """A page of list_entities (D-107): `total` is every match, exact unless
+    `exact` is false; continue with `next_offset`."""
+    namespace: str
+    total: int
+    exact: bool
+    offset: int
+    next_offset: NotRequired[int]
+    charged_tokens: int
+    rows: list[AgentListRow]
+    notes: NotRequired[list[str]]
 
 
 class ObservationList(TypedDict):
@@ -1032,6 +1060,117 @@ def find_path(
     return _path_view(find_paths(_get_store(), req, allowed_types=_allowed(grant)), format)
 
 
+_FILTER_TEXT = re.compile(r"^\s*(!)?\s*([A-Za-z_][\w.-]*)\s*(?:(!=|~=|=)\s*(.*?)|(\?))?\s*$")
+
+
+def _filters(where) -> list[ListFilter]:
+    """list_entities' `where`: objects {predicate, op, value}, or text an
+    agent writes naturally — `enabled=false`, `is_dc!=true`, `name~=svc`
+    (contains), `spn?` (has a value), `!spn` (has none); a JSON string of
+    either is accepted too."""
+    if where is None:
+        return []
+    if isinstance(where, str):
+        text = where.strip()
+        if text.startswith(("[", "{")):
+            where = json.loads(text)
+        else:
+            where = []
+            for piece in re.split(r"\s*(?:;|\band\b)\s*", text):
+                parts = [p for p in re.split(r"\s*,\s*", piece) if p]
+                # a comma inside a value (an LDAP DN: CN=Bob,OU=Staff) is
+                # not a separator: split only when no part holds a second '='
+                where += parts if len(parts) > 1 and all(p.count("=") <= 1 for p in parts) else [piece]
+            where = [w for w in where if w]
+    if isinstance(where, dict):
+        where = [where]
+    out: list[ListFilter] = []
+    for item in where:
+        if isinstance(item, dict):
+            out.append(ListFilter.model_validate(item))
+            continue
+        m = _FILTER_TEXT.match(str(item))
+        if m is None:
+            raise ValueError(f"cannot read filter {item!r}: write predicate=value, predicate!=value, "
+                             "predicate~=text, predicate? or !predicate")
+        neg, pred, op, value, has = m.groups()
+        if neg:
+            out.append(ListFilter(predicate=pred, op="absent"))
+        elif has or op is None:
+            out.append(ListFilter(predicate=pred, op="exists"))
+        else:
+            value = value.strip().strip("'\"")
+            out.append(ListFilter(predicate=pred, op={"=": "eq", "!=": "ne", "~=": "contains"}[op], value=value))
+    return out
+
+
+def _list_view(page) -> ListView:
+    view: dict[str, Any] = {"namespace": page.namespace}
+    if page.notes:
+        view["notes"] = page.notes
+    view.update(total=page.total, exact=page.exact, offset=page.offset, charged_tokens=page.charged_tokens)
+    if page.next_offset is not None:
+        view["next_offset"] = page.next_offset
+    rows = []
+    for r in page.rows:
+        row: dict[str, Any] = {"entity": f"{r.entity.type}:{r.entity.key}"}
+        if r.name:
+            row["name"] = r.name
+        if r.values:
+            row["values"] = {k: (f"{v.type}:{v.key}" if isinstance(v, EntityRef) else v)
+                             for k, v in r.values.items()}
+        row["cites"] = [cite_text(c) for c in r.cites]
+        rows.append(row)
+    view["rows"] = rows
+    return view  # type: ignore[return-value]
+
+
+def list_entities(
+    type: str | None = None,
+    of: str | None = None,
+    via: list[str] | str | None = None,
+    direction: Literal["in", "out", "any"] = "in",
+    depth: int = 1,
+    where: list[dict[str, Any] | str] | str | None = None,
+    fields: list[str] | str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    budget: int = 2000,
+    namespace: str = _DEFAULT_NS,
+    as_of: str | None = None,
+    valid_at: str | None = None,
+    ctx: Context = None,
+) -> ListView:
+    """List EVERY entity matching conditions, with an exact count — "which
+    accounts are disabled?", "which members of Domain Admins (nested) are
+    enabled?", "which computers allow unconstrained delegation and are not
+    domain controllers?". Use it instead of ask/ask_scope when the answer is
+    a set: a pack ranks what fits its budget, a listing returns all matches,
+    paged. `type` keeps one entity type; `of` ('type:key') lists what is
+    connected to that entity along `via` (direction 'in': entities whose
+    edge points at it — a group's members; 'out': what it points at), up to
+    `depth` hops (nested groups: depth 3-6). `where` filters on CURRENT
+    values, all must hold: objects {predicate, op, value} with op eq / ne /
+    in / contains / exists / absent, or text like "enabled=false",
+    "is_dc!=true", "spn?". `ne` includes entities with no value recorded
+    (a note counts them). `fields` adds predicates to show per row. Every
+    row is cited; `total` counts all matches — page with `offset` /
+    `next_offset`. Name filters by the predicates describe_namespace lists."""
+    grant = _grant(ctx, namespace, "r")
+    root = _parse_ref(of) if of else None
+    if root is not None:
+        _gate_type(grant, root.type)
+    if type:
+        _gate_type(grant, type)
+    _known_namespace(namespace, grant)
+    req = ListRequest(
+        namespace=namespace, type=type or None, of=root, via=_listed(via), direction=direction,
+        depth=depth, where=_filters(where), fields=_listed(fields), limit=limit, offset=offset,
+        budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
+    )
+    return _list_view(list_entities_impl(_get_store(), req, allowed_types=_allowed(grant)))
+
+
 class PurpleView(TypedDict):
     """Red actions of an operation against the detections around them (D-086)."""
     namespace: str
@@ -1287,6 +1426,7 @@ TOOL_META: dict[str, tuple[str, bool, bool]] = {
     "ask": ("Ask about one entity", True, True),
     "ask_scope": ("Ask about a scope", True, True),
     "find_path": ("Find paths between two entities", True, True),
+    "list_entities": ("List every entity matching conditions", True, True),
     "expand": ("Expand a handle", True, True),
     "record_claim": ("Record a claim", False, True),
     "get_observations": ("Get raw observations", True, True),
@@ -1302,6 +1442,7 @@ TOOLS = (
     ask,
     ask_scope,
     find_path,
+    list_entities,
     expand,
     record_claim,
     get_observations,
@@ -1381,7 +1522,7 @@ def _accept_aliases(fn):
     return wrapped
 
 
-_PACK_TOOLS = ("ask", "ask_scope", "find_path", "expand", "answer")
+_PACK_TOOLS = ("ask", "ask_scope", "find_path", "list_entities", "expand", "answer")
 
 for _fn in TOOLS:
     _impl = _accept_aliases(_fn)

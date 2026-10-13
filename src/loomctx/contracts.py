@@ -560,6 +560,110 @@ class PathPack(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+MAX_LIST_DEPTH = 6
+MAX_LIST_LIMIT = 1000
+
+
+class ListFilter(BaseModel):
+    """One condition on an entity's CURRENT value of a predicate: the newest
+    visible, unsuperseded, in-scope row (valid at `valid_at` when one is
+    asked), compared case-insensitively on scalars. `ne` holds for an entity
+    with no value on record (D-107: "accounts not disabled" includes the
+    ones whose status was never collected — the page says how many)."""
+
+    predicate: str
+    op: Literal["eq", "ne", "in", "contains", "exists", "absent"] = "eq"
+    value: Any = Field(
+        default=None,
+        description="the compared value: a scalar for eq / ne / contains, a "
+        "list for in; ignored by exists / absent",
+    )
+
+
+class ListRequest(BaseModel):
+    """"Which entities ...?" — an exact, paged set of entities instead of a
+    ranked pack (D-107). The candidates are the entities that reach `of`
+    along `via` within `depth` edges (group membership, nested), or, without
+    `of`, every entity of `type`; `where` filters them, all conditions
+    holding. Every row is cited by the rows that admitted it; the total is
+    exact unless a cap is noted."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    namespace: str = DEFAULT_NAMESPACE
+    type: str | None = Field(
+        default=None,
+        description="keep only entities of this type (user, computer, host…)",
+    )
+    of: EntityRef | None = Field(
+        default=None,
+        description="list entities connected to this one (a group's members, "
+        "a host's software) instead of a whole type",
+    )
+    via: list[str] = Field(
+        default_factory=list,
+        description="the edge predicates walked from `of`; empty = the "
+        "namespace's registered containment predicates",
+    )
+    direction: Literal["in", "out", "any"] = Field(
+        default="in",
+        description="in: entities whose edge points AT `of` (members of a "
+        "group: user member_of group); out: what `of` points at; any: both",
+    )
+    depth: int = Field(
+        default=1, ge=1, le=32,
+        description="the most edges between a listed entity and `of` "
+        f"(nested membership); clamped to {MAX_LIST_DEPTH} and noted",
+    )
+    where: list[ListFilter] = Field(default_factory=list)
+    fields: list[str] = Field(
+        default_factory=list,
+        description="predicates whose current value each row should show, "
+        "cited (beyond the ones `where` already names)",
+    )
+    limit: int = Field(default=50, gt=0, le=MAX_LIST_LIMIT)
+    offset: int = Field(default=0, ge=0)
+    budget: int = Field(
+        default=1500, gt=0, le=1_000_000,
+        description="token budget, charged on each row's rendered text plus "
+        "its citations; rows past it are left for the next page",
+    )
+    as_of: datetime | None = None
+    valid_at: datetime | None = None
+
+
+class ListRow(BaseModel):
+    """One listed entity, its display name when one is registered, the
+    current values the request filtered on or asked for, and the rows
+    that back them (an `of` listing also cites the edge that admitted it)."""
+
+    entity: EntityRef
+    name: str | None = None
+    values: dict[str, ObjectValue] = Field(default_factory=dict)
+    cites: list[Citation] = Field(default_factory=list)
+
+
+class ListPage(BaseModel):
+    """One page of a ListRequest, sorted by entity key so paging is stable.
+    `total` counts every match, not just this page; `next_offset` is set
+    while more remain. `notes` say what the listing could not do exactly —
+    a candidate cap, entities with no value on record for a filter, an
+    unknown predicate — advice, not evidence (D-064)."""
+
+    namespace: str
+    rows: list[ListRow] = Field(default_factory=list)
+    total: int = Field(default=0, ge=0)
+    exact: bool = Field(
+        default=True,
+        description="false when a cap stopped the candidate walk, so `total` "
+        "is a lower bound (the note names the cap)",
+    )
+    offset: int = Field(default=0, ge=0)
+    next_offset: int | None = None
+    charged_tokens: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Schema registry — what makes the core domain-agnostic                       #
 # --------------------------------------------------------------------------- #

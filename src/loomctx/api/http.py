@@ -41,6 +41,8 @@ from ..contracts import (
     EntityRef,
     ExpandRequest,
     IngestEnvelope,
+    ListPage,
+    ListRequest,
     PathPack,
     PathRequest,
 )
@@ -52,6 +54,7 @@ from ..contracts import (
     SemanticSearchResponse,
 )
 from ..gates import check_citation, check_supersedes, scope_schema, stamp_uploader
+from ..listing import list_entities
 from ..llm import LLMError, embedder_from_env, llm_from_env
 from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
@@ -602,6 +605,20 @@ def path(req: PathRequest, request: Request) -> PathPack:
     _gate_entity_type(grant, req.to.type)
     with metrics.PACK_SECONDS.time():
         return find_paths(request.app.state.store, req, allowed_types=_allowed_types(grant))
+
+
+@app.post("/v1/list", response_model=ListPage)
+def list_route(req: ListRequest, request: Request) -> ListPage:
+    """Every entity matching a ListRequest, exact and paged (D-107). Gated
+    like /v1/path: the namespace grant, then `of`'s and `type`'s entity
+    types; rows outside the caller's types never appear."""
+    grant = _authorize(request, req.namespace, "r")
+    if req.of is not None:
+        _gate_entity_type(grant, req.of.type)
+    if req.type is not None:
+        _gate_entity_type(grant, req.type)
+    with metrics.PACK_SECONDS.time():
+        return list_entities(request.app.state.store, req, allowed_types=_allowed_types(grant))
 
 
 @app.post("/v1/expand", response_model=ContextPack)

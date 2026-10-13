@@ -13,6 +13,9 @@ import type {
   EntityRef,
   IngestBatchResponse,
   Observation,
+  ListFilter,
+  ListPage,
+  ListRequest,
   PathPack,
   PathRequest,
   SchemaRegistration,
@@ -78,6 +81,25 @@ export interface PathOptions {
   via?: string[];
   depth?: number;
   max_paths?: number;
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+
+export interface ListOptions {
+  /** keep only entities of this type */
+  type?: string | null;
+  /** list what is connected to this entity along `via` */
+  of?: EntityTuple | null;
+  via?: string[];
+  /** in: edges pointing at `of` (a group's members); out; any */
+  direction?: "in" | "out" | "any";
+  depth?: number;
+  /** conditions on current values, all must hold */
+  where?: ListFilter[];
+  fields?: string[];
+  limit?: number;
+  offset?: number;
   budget?: number;
   as_of?: string | null;
   valid_at?: string | null;
@@ -208,6 +230,30 @@ export class LoomCtx {
       valid_at: opts.valid_at ?? null,
     };
     return this.post("/v1/path", body);
+  }
+
+  /**
+   * Every entity matching conditions, with an exact count (D-107): entities
+   * of `opts.type`, or connected to `opts.of` along `opts.via`, filtered on
+   * current values. Rows are cited; page with `offset` / `next_offset`.
+   */
+  list(opts: ListOptions = {}): Promise<ListPage> {
+    const body: ListRequest = {
+      namespace: this.namespace,
+      type: opts.type ?? null,
+      of: opts.of ? ref(opts.of) : null,
+      via: opts.via ?? [],
+      direction: opts.direction ?? "in",
+      depth: opts.depth ?? 1,
+      where: opts.where ?? [],
+      fields: opts.fields ?? [],
+      limit: opts.limit ?? 50,
+      offset: opts.offset ?? 0,
+      budget: opts.budget ?? 1500,
+      as_of: opts.as_of ?? null,
+      valid_at: opts.valid_at ?? null,
+    };
+    return this.post("/v1/list", body);
   }
 
   answer(

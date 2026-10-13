@@ -157,6 +157,45 @@ class LoomCtx:
     def expand(self, handle_id: str, budget: int = 800) -> dict:
         return self._post("/v1/expand", {"handle": handle_id, "budget": budget})
 
+    def list_entities(
+        self,
+        type: str | None = None,
+        of: EntityTuple | None = None,
+        via: list[str] | None = None,
+        direction: str = "in",
+        depth: int = 1,
+        where: list[dict] | None = None,
+        fields: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        budget: int = 1500,
+        as_of: str | None = None,
+        valid_at: str | None = None,
+    ) -> dict:
+        """Every entity matching conditions, with an exact count (D-107):
+        entities of `type`, or connected to `of` along `via` within `depth`
+        edges, filtered on current values — `where` items are
+        {"predicate", "op" (eq|ne|in|contains|exists|absent), "value"}.
+        Rows are cited; page with `offset` / the response's `next_offset`."""
+        return self._post(
+            "/v1/list",
+            {
+                "namespace": self.namespace,
+                "type": type,
+                "of": {"type": of[0], "key": of[1]} if of else None,
+                "via": via or [],
+                "direction": direction,
+                "depth": depth,
+                "where": where or [],
+                "fields": fields or [],
+                "limit": limit,
+                "offset": offset,
+                "budget": budget,
+                "as_of": as_of,
+                "valid_at": valid_at,
+            },
+        )
+
     def path(
         self,
         from_: EntityTuple,

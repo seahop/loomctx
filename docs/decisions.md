@@ -3356,6 +3356,50 @@ Replayed against the 500k store with the fixes: the 53-minute delegation call
 24 s, a 16-minute domain-wide one 4.6 s, `describe_namespace` 0.4 s, a store
 open under a second. The scale numbers are in the scale report.
 
+## D-107 · List mode: exact, paged entity sets (2026-10-13)
+
+A pack ranks what fits a budget. "Which members of Domain Admins, nested,
+are still enabled?" and "which computers allow unconstrained delegation and
+are not DCs?" want every match and a count; agents answered them by paging
+`ask_scope` and counting by hand, which is where the AD audits lost runs
+(step caps, partial lists). New contracts `ListFilter`, `ListRequest`,
+`ListRow`, `ListPage`; HTTP `POST /v1/list`; MCP `list_entities` (13 tools).
+
+- **Semantics.** Candidates are the entities that reach `of` along `via`
+  within `depth` edges (direction `in`: edges pointing at `of` — a group's
+  members; `out`; `any`), or every entity of `type`, or the subjects an
+  indexed positive filter names. `where` filters on CURRENT values: the
+  visible, unsuperseded, sender-asserted rows (valid at `valid_at`, observed
+  by `as_of`) at the newest instant any such row of the predicate was — one
+  snapshot, so a multi-valued attribute keeps every value it last had.
+  Comparison is case-folded with booleans and numbers matched by spelling
+  (`"false"` finds `false`). `ne` holds where no value is recorded, and a
+  note counts those entities (an uncollected status is not "enabled").
+  Rows sort by key; `total` is every match; `offset`/`next_offset` page;
+  the token budget charges each row's shown text plus its citations.
+- **Citations.** Every row cites the rows that admitted it: the edge into
+  the walk (an `of` listing), each filtered or requested value, the name; a
+  row listed by type alone cites its newest row.
+- **Scale.** The work tracks the answer, not the namespace. A positive filter
+  seeds from idx_obs_label (`subjects_with_value`). Walks read one index
+  side (`observations_for_many(side=)`, `lite_rows`), so a walk up from a
+  member never reads a hub group's every inbound edge; a positive seed of at
+  most 5,000 checks membership upward instead of enumerating the group.
+  Each filter reads either per candidate (an IN-list per 2,000) or one scan
+  of the predicate's index range (`lite_scalars`), whichever touches fewer
+  rows by the cached relation summary; most selective first. Walks and
+  filters use `LiteRow` (no Observation construction); only the cited rows
+  of the returned page are read in full. On the 10k forest: the 8,788
+  members of the largest group 0.15 s, a type-wide `ne` filter 0.24 s,
+  seeded filters under 0.1 s. A cap (`LOOMCTX_MAX_LIST_CANDIDATES`, default
+  200,000) makes `total` a lower bound with `exact` false and a note.
+- **Store interface** (no schema change): `subjects_with_value`,
+  `entity_refs_of_type` (the entities' (namespace, type, key) unique index),
+  `lite_rows`, `lite_scalars`, and `side` on `observations_for_many`.
+- The MCP tool also reads filters written as text (`enabled=false`,
+  `is_dc!=true`, `name~=svc`, `spn?`, `!mail`); a comma inside a value (an
+  LDAP DN) does not split it.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
