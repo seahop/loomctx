@@ -85,6 +85,22 @@ GROUP_DISTRACTORS = {"CORP-Finance-Interns": (95009, "CORP-Finance-Users"),     
 DELEGATION_HOSTS = {"APP-LEGACY01": (95201, True, None), "PRINT-HQ02": (95202, True, None),
                     "SQL-OLD03": (95203, True, None), "WEB-KCD04": (95204, False, "HTTP/intranet.corp.local")}
 UAC_WORKSTATION, UAC_UNCONSTRAINED = 0x1000, 0x80000
+# the harder tier (D-113): access to one workstation, its local admins (not
+# collected), and Kerberoastable admins — a few planted accounts in the forest
+ACCESS_HOST = "WS-AUDIT01"
+ACCESS_HOST_RID = 95300
+ACCESS_GROUP = ("CORP-WS-Operators", 95301)            # GenericAll on the workstation
+ACCESS_ACCOUNTS = {                                    # sam: (rid, enabled, memberOf names, direct right)
+    "adm-rlopez": (95310, True, ["CORP-Tier0-Admins", "CORP-WS-Operators"], None),   # admin, via the group
+    "adm-pchen": (95311, True, ["Domain Admins"], "WriteDacl"),                      # admin, direct grant
+    "jdoe-ops": (95312, True, ["CORP-WS-Operators"], None),                           # access, not an admin
+    "adm-kwu": (95313, True, ["Domain Admins"], None),                                # admin, no access
+}
+KERBEROAST_ACCOUNTS = {                                # sam: (rid, enabled, memberOf names)
+    "svc-sqladm": (95320, True, ["CORP-Tier0-Admins"]),        # nested admin, Kerberoastable
+    "svc-backupadm": (95321, False, ["Domain Admins"]),        # admin, disabled
+    "svc-web": (95322, True, ["CORP-App-Readers"]),            # Kerberoastable, not an admin
+}
 EXPORT_AT = "2026-09-20T09:00:00Z"
 
 
@@ -93,9 +109,9 @@ def _sd() -> str:
     return ad_gen.b64(ad_gen.build_sd([]))
 
 
-def _obj(dn: str, classes: list[str], sid: str, name: str, **attrs) -> str:
+def _obj(dn: str, classes: list[str], sid: str, name: str, sd: str | None = None, **attrs) -> str:
     lines = [f"dn: {dn}", *[f"objectClass: {c}" for c in ["top", *classes]], f"objectSid: {sid}",
-             f"name: {name}", f"nTSecurityDescriptor:: {_sd()}"]
+             f"name: {name}", f"nTSecurityDescriptor:: {sd or _sd()}"]
     for k, v in attrs.items():
         for item in (v if isinstance(v, list) else [v]):
             lines.append(f"{k}: {item}")
@@ -147,6 +163,24 @@ def forest_ldif(seed: int = 7, scale: str = "large", style: str = "plain") -> st
                         sAMAccountName=f"{name}$", operatingSystem="Windows Server 2016 Standard",
                         userAccountControl=UAC_WORKSTATION | (UAC_UNCONSTRAINED if unconstrained else 0),
                         **extra))
+    # the harder tier (D-113): one workstation, the group holding GenericAll
+    # on it, an admin with a direct WriteDacl grant, decoys either way, and
+    # three service accounts with SPNs around Domain Admins
+    names = {"Domain Admins": DA_DN, "CORP-Tier0-Admins": corp("CORP-Tier0-Admins"),
+             "CORP-WS-Operators": corp(ACCESS_GROUP[0]), "CORP-App-Readers": corp("CORP-App-Readers")}
+    out.append(_obj(corp(ACCESS_GROUP[0]), ["group"], f"{CORP_SID}-{ACCESS_GROUP[1]}", ACCESS_GROUP[0],
+                    sAMAccountName=ACCESS_GROUP[0]))
+    aces = [ad_gen.ace_for_right(f"{CORP_SID}-{ACCESS_GROUP[1]}", "GenericAll")]
+    for sam, (rid, enabled, groups, right) in ACCESS_ACCOUNTS.items():
+        out.append(_user(corp(sam), f"{CORP_SID}-{rid}", sam, enabled, memberOf=[names[g] for g in groups]))
+        if right:
+            aces.append(ad_gen.ace_for_right(f"{CORP_SID}-{rid}", right))
+    out.append(_obj(f"CN={ACCESS_HOST},OU=Workstations,{CORP}", ["computer"], f"{CORP_SID}-{ACCESS_HOST_RID}",
+                    ACCESS_HOST, sd=ad_gen.b64(ad_gen.build_sd(aces)), sAMAccountName=f"{ACCESS_HOST}$",
+                    operatingSystem="Windows 11 Enterprise", userAccountControl=UAC_WORKSTATION))
+    for sam, (rid, enabled, groups) in KERBEROAST_ACCOUNTS.items():
+        out.append(_user(corp(sam), f"{CORP_SID}-{rid}", sam, enabled, memberOf=[names[g] for g in groups],
+                         servicePrincipalName=f"MSSQLSvc/{sam}.corp.local:1433"))
     return base.rstrip("\n") + "\n\n" + "\n\n".join(out) + "\n"
 
 
@@ -597,6 +631,131 @@ def _score_trusts(answer: str, truth: dict, seen: set[str], store) -> dict:
             **cites, "pass": ok and _faithful(cites)}
 
 
+# ------------------------------------------------------- harder tier (D-113) #
+
+def _members_closure(store, group: EntityRef) -> set[str]:
+    """Keys of every principal whose member_of chain reaches `group`."""
+    seen, todo = set(), deque([group])
+    while todo:
+        g = todo.popleft()
+        for o in _obs(store, g, limit=100_000):
+            if (o.predicate == "member_of" and isinstance(o.object, EntityRef) and o.object.key == g.key
+                    and o.subject.key not in seen):
+                seen.add(o.subject.key)
+                todo.append(o.subject)
+    return seen
+
+
+def _sam(store, key: str) -> str:
+    facts = {o.predicate: o.object for o in _obs(store, EntityRef(type="user", key=key), limit=50)}
+    return str(facts.get("sam", key))
+
+
+def _truth_access(store) -> dict:
+    """The Domain Admins (nested) whose own grant, or a group's they reach,
+    is an ACL right over the workstation — walked in the store."""
+    host = EntityRef(type="computer", key=f"{CORP_SID}-{ACCESS_HOST_RID}")
+    trustees = {o.subject.key for o in _obs(store, host, limit=5000)
+                if o.predicate == "has_ace" and isinstance(o.object, EntityRef) and o.object.key == host.key}
+    admins = _members_closure(store, DOMAIN_ADMINS)
+    holders = set(trustees)
+    for t in trustees:
+        holders |= _members_closure(store, EntityRef(type="group", key=t))
+    users = {k for k in admins if k.startswith(CORP_SID)}
+    with_access = sorted(_sam(store, k) for k in users & holders
+                         if any(o.predicate == "sam" for o in _obs(store, EntityRef(type="user", key=k), limit=20)))
+    decoys = sorted(s for s in ACCESS_ACCOUNTS if s not in with_access)
+    return {"admins": with_access, "decoys": decoys, "host": ACCESS_HOST}
+
+
+_ACCESS_WORDS = re.compile(r"\b(?:rights?|access|genericall|generic all|writedacl|write dacl|grant\w*|control|ace|"
+                           r"permission\w*|full control)\b", re.I)
+
+
+def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """Every admin with rights named; a decoy (an operator who is no admin,
+    an admin with no grant) counts against the answer where a line puts it
+    forward with rights and neither the line nor its lead-in rules it out."""
+    answer = answer.translate(_QUOTES)
+    names = (*truth["admins"], *truth["decoys"])
+    named = sorted(a for a in truth["admins"] if _mentions(answer, a))
+    false = sorted(d for d in truth["decoys"] if any(
+        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead)
+        and (_ACCESS_WORDS.search(line) or _ACCESS_WORDS.search(lead) or line.lstrip().startswith("|"))
+        and not re.search(r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I)
+        for line, lead in _lines(answer, d, names)))
+    cites = _cited(answer, seen)
+    ok = bool(truth["admins"]) and named == truth["admins"] and not false
+    return {"admins_expected": truth["admins"], "admins_named": named, "false_accounts": false,
+            **cites, "pass": ok and _faithful(cites)}
+
+
+def _truth_localadmin(store) -> dict:
+    return {"host": ACCESS_HOST, "collected": False}
+
+
+# "X is a local admin", "the local administrators are …", "local admins: X, Y"
+_LOCAL_ADMIN_CLAIM = re.compile(r"\b(?:is|are|has|have)\s+(?:a\s+)?local admin\w*"
+                                r"|\blocal admin\w*\s+(?:on [\w.-]+\s+)?(?:are|is|include\w*)\b(?!\s+not)"
+                                r"|\blocal admin\w*\s*:\s*\S", re.I)
+
+
+def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """The honest "not collected": local group membership is not in an AD
+    export. Saying so passes; presenting accounts as the machine's local
+    administrators fails — AD rights over the computer object may be
+    mentioned, as what the data does carry."""
+    answer = re.sub(r"\*{1,3}|(?<!\w)_{1,3}|_{1,3}(?!\w)", "", answer.translate(_QUOTES))
+    asserted = _asserted(answer)
+    hedged = bool(_NOT_COLLECTED.search(answer)
+                  or re.search(r"\b(?:not|isn't|aren't|wasn't|weren't)\b[^.]{0,60}\b(?:in|part of|"
+                               r"captured by|available in|present in)\b[^.]{0,30}\b(?:the )?(?:data|export|"
+                               r"dataset|directory|namespace|ad)\b", answer, re.I))
+    claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
+                  for line in asserted.splitlines() for sent in _SENTENCE.split(line))
+    cites = _cited(answer, seen)
+    return {"hedged": hedged, "claimed_local_admins": claimed, **cites,
+            "pass": hedged and not claimed and _faithful(cites)}
+
+
+def _truth_kerberoast(store) -> dict:
+    """Enabled, Kerberoastable accounts in Domain Admins' closure."""
+    admins = _members_closure(store, DOMAIN_ADMINS)
+    hits, disabled = [], []
+    for k in admins:
+        facts = {o.predicate: o.object for o in _obs(store, EntityRef(type="user", key=k), limit=50)}
+        if facts.get("kerberoastable") is True:
+            (hits if facts.get("enabled") is True else disabled).append(str(facts.get("sam", k)))
+    others = sorted(s for s in KERBEROAST_ACCOUNTS if s not in hits and s not in disabled)
+    return {"accounts": sorted(hits), "disabled": sorted(disabled), "others": others}
+
+
+_KERBEROAST_WORDS = re.compile(r"kerberoast\w*|\bspns?\b|serviceprincipalname|service principal", re.I)
+
+
+def _score_kerberoast(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """Every enabled Kerberoastable admin named; a disabled one counts
+    against the answer only when put forward without being called disabled
+    or excluded; a Kerberoastable non-admin when put forward as an admin."""
+    answer = answer.translate(_QUOTES)
+    names = (*truth["accounts"], *truth["disabled"], *truth["others"])
+    named = sorted(a for a in truth["accounts"] if _mentions(answer, a))
+    false = sorted(d for d in truth["disabled"] if any(
+        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead) and not _DISABLED.search(line)
+        and not _DISABLED_CELL.search(line) and not _DISABLED.search(lead)
+        and (_KERBEROAST_WORDS.search(line) or _KERBEROAST_WORDS.search(lead) or line.lstrip().startswith("|"))
+        for line, lead in _lines(answer, d, names)))
+    false += sorted(o for o in truth["others"] if any(
+        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead)
+        and (_ADMIN.search(line) or _ADMIN.search(lead) or line.lstrip().startswith("|"))
+        and not re.search(r"non[- ]?admin|not (?:a |an )?(?:member of )?(?:the )?domain admins", line, re.I)
+        for line, lead in _lines(answer, o, names)))
+    cites = _cited(answer, seen)
+    ok = bool(truth["accounts"]) and named == truth["accounts"] and not false
+    return {"accounts_expected": truth["accounts"], "accounts_named": named, "false_accounts": sorted(false),
+            **cites, "pass": ok and _faithful(cites)}
+
+
 EXTENDED_TASKS = [
     Task("xdomain",
          "Access review for the forest trust between corp.local and its child domain dev.local: which "
@@ -621,6 +780,19 @@ EXTENDED_TASKS = [
          "direction, whether the trust is transitive, and whether SID filtering (quarantine) is "
          "enabled. Cite observation ids.",
          _truth_trusts, _score_trusts),
+    # the harder tier (D-113): compound questions and what an AD export cannot say
+    Task("access",
+         f"Access review for the corp.local workstation {ACCESS_HOST}: which members of the Domain Admins "
+         "group, directly or through nested groups, hold rights over that computer, and through which group "
+         "or grant? Cite observation ids.",
+         _truth_access, _score_access),
+    Task("localadmin",
+         f"Who has local administrator rights on the corp.local workstation {ACCESS_HOST}? Cite observation ids.",
+         _truth_localadmin, _score_localadmin),
+    Task("kerberoast",
+         "Which enabled accounts that are members of corp.local's Domain Admins, directly or through nested "
+         "groups, are Kerberoastable (have a servicePrincipalName)? Cite observation ids.",
+         _truth_kerberoast, _score_kerberoast),
 ]
 
 

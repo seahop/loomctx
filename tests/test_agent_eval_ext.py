@@ -353,3 +353,71 @@ def test_coverage_fails_a_membership_the_data_does_not_record():
     ]
     for text in excerpts:
         assert not _score_coverage(text, truth, set(), None)["claimed_membership"], text
+
+
+# ------------------------------------------------------- harder tier (D-113) #
+
+def test_harder_tier_truth_on_both_forests(store, realistic_store):
+    for s in (store, realistic_store):
+        a = ext._truth_access(s)
+        assert a["admins"] == ["adm-pchen", "adm-rlopez"] and set(a["decoys"]) == {"jdoe-ops", "adm-kwu"}
+        k = ext._truth_kerberoast(s)
+        assert "svc-sqladm" in k["accounts"] and "svc-backupadm" in k["disabled"] and k["others"] == ["svc-web"]
+
+
+def test_access_scorer():
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "host": "WS-AUDIT01"}
+    good = (f"Two Domain Admins hold rights over WS-AUDIT01:\n- adm-rlopez — GenericAll through CORP-WS-Operators {CITE}\n"
+            f"- adm-pchen — a direct WriteDacl grant {CITE}\n\n"
+            f"jdoe-ops is in CORP-WS-Operators but is not a Domain Admin; adm-kwu has no rights over it {CITE}.")
+    assert ext._score_access(good, truth, SEEN, None)["pass"]
+    bad = good.replace("jdoe-ops is in CORP-WS-Operators but is not a Domain Admin; adm-kwu has no rights over it",
+                       "- jdoe-ops — GenericAll through CORP-WS-Operators")
+    got = ext._score_access(bad, truth, SEEN, None)
+    assert not got["pass"] and got["false_accounts"] == ["jdoe-ops"]
+    assert not ext._score_access(f"adm-rlopez has GenericAll via CORP-WS-Operators {CITE}", truth, SEEN, None)["pass"]
+
+
+def test_localadmin_scorer():
+    truth = {"host": "WS-AUDIT01", "collected": False}
+    good = (f"Local administrator membership on WS-AUDIT01 is not collected: an AD export does not carry machines' "
+            f"local groups {CITE}. What the data does show is AD rights over the computer object: CORP-WS-Operators "
+            f"holds GenericAll {CITE}.")
+    assert ext._score_localadmin(good, truth, SEEN, None)["pass"]
+    bad = f"The local administrators on WS-AUDIT01 are adm-rlopez and adm-pchen {CITE}."
+    got = ext._score_localadmin(bad, truth, SEEN, None)
+    assert got["claimed_local_admins"] and not got["pass"]
+    hedged_claim = (f"adm-rlopez is a local admin on WS-AUDIT01 {CITE}. Note: local group membership was not "
+                    f"collected {CITE}.")
+    assert not ext._score_localadmin(hedged_claim, truth, SEEN, None)["pass"]
+
+
+def test_kerberoast_scorer():
+    truth = {"accounts": ["svc-sqladm"], "disabled": ["svc-backupadm"], "others": ["svc-web"]}
+    good = (f"One enabled Kerberoastable Domain Admin: svc-sqladm (SPN MSSQLSvc/…, via CORP-Tier0-Admins) {CITE}. "
+            f"svc-backupadm also has an SPN but is disabled {CITE}.")
+    assert ext._score_kerberoast(good, truth, SEEN, None)["pass"]
+    bad = f"Kerberoastable Domain Admins:\n- svc-sqladm {CITE}\n- svc-backupadm {CITE}\n- svc-web {CITE}"
+    got = ext._score_kerberoast(bad, truth, SEEN, None)
+    assert not got["pass"] and got["false_accounts"] == ["svc-backupadm", "svc-web"]
+
+
+def test_the_engine_answers_the_harder_tier_exactly(store):
+    """What the new list mode gives an agent for each (D-110): one call each."""
+    import loomctx.mcp_server as mcp
+    from loomctx.connectors import ldap as conn
+    store.put_schema(conn.schema("netsec"))
+    mcp.configure(store)
+    try:
+        host = f"computer:{ext.CORP_SID}-{ext.ACCESS_HOST_RID}"
+        v = mcp.list_entities(namespace="netsec", of=host, via=["has_ace", "member_of"], direction="in", depth=4,
+                              type="user", paths=True, where=f"member_of within group:{ext.DOMAIN_ADMINS.key}")
+        assert sorted(r["name"].split("@")[0] for r in v["rows"]) == ["adm-pchen", "adm-rlopez"]
+        assert all(r["path"]["text"].endswith(host) for r in v["rows"])
+        p = mcp.ask(namespace="netsec", subject=host, question=f"Who has local administrator rights on {ext.ACCESS_HOST}?")
+        assert any("local group membership" in n for n in p.get("notes", []))
+        v = mcp.list_entities(namespace="netsec", type="user",
+                              where=f"kerberoastable=true, enabled=true, member_of within group:{ext.DOMAIN_ADMINS.key}")
+        assert sorted(r["name"].split("@")[0] for r in v["rows"]) == ext._truth_kerberoast(store)["accounts"]
+    finally:
+        mcp.configure(None)

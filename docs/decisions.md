@@ -3700,6 +3700,29 @@ cite token (the entities its observation is about); an entity type
 entity meant; the rest name no entity (a source label, a domain that is not
 there) and still return nothing.
 
+## D-113 · A harder audit tier: access, local admins, Kerberoastable admins (2026-10-13)
+
+The five AD audits ask one thing each, and 19 models pass all five. The
+questions people will ask combine conditions and touch what an AD export
+cannot say. Three audits join `agent_eval_ext` (future-work item 7, first
+cut), planted in the same forest with truth walked in the store:
+
+- **access** — which Domain Admins (nested) hold rights over workstation
+  WS-AUDIT01, and through what: one admin through a group holding
+  GenericAll, one through a direct WriteDacl grant; an operator who is no
+  admin and an admin with no grant are decoys.
+- **localadmin** — who is local administrator on WS-AUDIT01: local group
+  membership is not in an AD export (declared, D-110); saying so passes,
+  presenting accounts as its local admins fails (AD rights over the
+  computer object may be mentioned as what the data carries).
+- **kerberoast** — which enabled, nested Domain Admins are Kerberoastable: a
+  nested admin with an SPN; a disabled admin with one, and a non-admin
+  service account with one, are decoys.
+
+Each is one list-mode call on the engine (`of` + `via` + `within` + `paths`;
+`within` + value filters; the declared gap) — tested end to end on the
+small forest. The planted accounts change no earlier audit's truth.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and
