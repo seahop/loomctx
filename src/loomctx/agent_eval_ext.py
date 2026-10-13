@@ -349,9 +349,12 @@ _NOT_COLLECTED = re.compile(
     r"|missing(?: data)?,? (?:rather than|not) (?:necessarily )?(?:empty|absen\w*|none)"
     r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any |its |their )?(?:group )?(?:memberships? )?collected"
     r"|coverage|(?:can(?:not|'t)|could(?:n't| not)|unable to) (?:be )?"
-    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list)\w*"
+    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list|answer)\w*"
     r"|\bunknown\b|incomplete|partial (?:export|collection|data)"
-    r"|impossible to (?:determine|tell|say|know|answer)",
+    r"|impossible to (?:determine|tell|say|know|answer)"
+    r"|not possible to (?:determine|tell|say|know|answer|confirm|establish)"
+    r"|(?:does|do)(?:n't| not) (?:contain|include|hold|carry) (?:any )?(?:data|information|records?)"
+    r"|no (?:data|information|records?) (?:on|about|for) (?:local|group)",
     re.I)
 # a flat "it is in no group" with no hedge
 _DEFINITIVE_NONE = re.compile(r"not a member of any|\bis (?:not|no) member|\bno group memberships?\b|"
@@ -666,7 +669,11 @@ def _truth_access(store) -> dict:
     with_access = sorted(_sam(store, k) for k in users & holders
                          if any(o.predicate == "sam" for o in _obs(store, EntityRef(type="user", key=k), limit=20)))
     decoys = sorted(s for s in ACCESS_ACCOUNTS if s not in with_access)
-    return {"admins": with_access, "decoys": decoys, "host": ACCESS_HOST}
+    planted = {s: f"{CORP_SID}-{rid}" for s, (rid, *_rest) in ACCESS_ACCOUNTS.items()}
+    operators = sorted(s for s in decoys if planted[s] in holders)       # rights, no admin
+    idle = sorted(s for s in decoys if planted[s] in admins)             # admin, no rights
+    return {"admins": with_access, "decoys": decoys, "operators": operators, "idle_admins": idle,
+            "host": ACCESS_HOST}
 
 
 _ACCESS_WORDS = re.compile(r"\b(?:rights?|access|genericall|generic all|writedacl|write dacl|grant\w*|control|ace|"
@@ -680,15 +687,50 @@ def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
     answer = answer.translate(_QUOTES)
     names = (*truth["admins"], *truth["decoys"])
     named = sorted(a for a in truth["admins"] if _mentions(answer, a))
+    if "operators" in truth:
+        operators = set(truth["operators"])
+    else:   # transcripts scored before the field: the planted design says which decoy is which
+        operators = {d for d in truth["decoys"]
+                     if d in ACCESS_ACCOUNTS and not {"Domain Admins", "CORP-Tier0-Admins"} & set(ACCESS_ACCOUNTS[d][2])}
+    admin_words = re.compile(r"domain admins?|\bDA\b|tier0|tier-0|\badmins?\b", re.I)
+    # the answer's opening, up to its first heading or list: "here are the
+    # members of the Domain Admins group who hold rights over …"
+    opening = []
+    for ln in answer.splitlines():
+        if ln.lstrip().startswith("#") or _BLOCK_LINE.match(ln):
+            break
+        opening.append(ln)
+    opening = " ".join(opening)
+
+    def others_singled(text: str, name: str) -> bool:
+        """"… — only adm-rlopez is a Domain Admin": the claim is someone else's."""
+        return bool(re.search(r"\bonly\b", text, re.I)
+                    and not re.search(rf"\bonly\W+(?:\w+\W+)?{re.escape(name)}", text, re.I))
+
     def put_forward(line: str, lead: str, name: str) -> bool:
+        """An operator (rights, no admin) counts where it is put forward as an
+        admin — "adm-rlopez, adm-pchen and jdoe-ops hold rights" is true and
+        no finding; an idle admin (admin, no rights) where it is given rights."""
         if _EXCLUDES.search(line) or _EXCLUDES.search(lead) or re.search(
                 r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I):
             return False
+        words = admin_words if name in operators else _ACCESS_WORDS
         if _BLOCK_LINE.match(line):     # a list item or table row: its lead-in or heading frames it
-            return bool(_ACCESS_WORDS.search(line) or _ACCESS_WORDS.search(lead) or line.lstrip().startswith("|"))
-        # prose: the sentence naming the account must give it rights — a title
-        # ("## Access review …") or an inventory of members is not a finding
-        return any(_ACCESS_WORDS.search(x) for x in re.split(r"(?<=[.;!?])\s+", line) if _mentions(x, name))
+            if name in operators:
+                # an item that IS the operator, in a list framed (by its lead-in,
+                # heading, or the answer's opening) as admins with rights — GLM's
+                # "here are the members of Domain Admins who hold rights … ## Indirect
+                # Access - jdoe-ops"; a row naming it among a group's members is not
+                own = re.match(rf"\s*(?:[-*+•|]|\d+[.)])?\s*\**\s*`?{re.escape(name)}", line, re.I)
+                frame = f"{lead} {opening}"
+                return bool(admin_words.search(line) and not others_singled(line, name)) or bool(
+                    own and admin_words.search(frame) and _ACCESS_WORDS.search(frame))
+            return bool(words.search(line) or words.search(lead) or line.lstrip().startswith("|"))
+        # prose: the sentence naming the account must say it — a title ("##
+        # Access review …") or an inventory of members is not a finding, nor a
+        # sentence that singles out someone else ("only adm-rlopez is a Domain Admin")
+        return any(words.search(x) and not others_singled(x, name)
+                   for x in re.split(r"(?<=[.;!?])\s+", line) if _mentions(x, name))
     false = sorted(d for d in truth["decoys"] if any(put_forward(line, lead, d)
                                                      for line, lead in _lines(answer, d, names)))
     cites = _cited(answer, seen)
@@ -719,7 +761,8 @@ def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
                                r"captured by|available in|present in)\b[^.]{0,30}\b(?:the )?(?:data|export|"
                                r"dataset|directory|namespace|ad)\b", answer, re.I))
     claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
-                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b", sent, re.I)
+                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b|\bby default\b",
+                                    sent, re.I)
                   for line in asserted.splitlines() for sent in _SENTENCE.split(line))
     cites = _cited(answer, seen)
     # what was not collected has no observation to cite (D-110 declares it in

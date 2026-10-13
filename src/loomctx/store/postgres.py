@@ -1434,6 +1434,12 @@ class PostgresStore(GraphStore):
         any_ = {(r["type"], r["key"]) for r in rows}
         return any_, {(r["type"], r["key"]) for r in rows if r["hit"]}
 
+    def first_observed(self, namespace: str) -> datetime | None:
+        with self._tx(read=True):
+            rows = self._q("SELECT min(observed_at) AS m FROM observations WHERE namespace = %s", (namespace,))
+        row = rows[0] if rows else None
+        return common.parse(row["m"]) if row and row["m"] else None
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

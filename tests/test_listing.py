@@ -331,3 +331,17 @@ def test_ranked_filters_match_the_python_path(store, monkeypatch):
         assert keys(new) == keys(old) and new.total == old.total, c
         assert [r.values for r in new.rows] == [r.values for r in old.rows], c
         assert [n for n in new.notes if "value on record" in n] == [n for n in old.notes if "value on record" in n]
+
+
+def test_within_takes_a_name_and_an_early_as_of_is_explained(store):
+    """`member_of within group:Domain Admins` with the group's name, not its
+    key, resolves through the label predicates (GPT-4o wrote it so, got "not
+    on record", and answered "none"); an empty listing as_of a time before
+    anything was observed says so (a model set as_of two months early)."""
+    _claim(store, "group:domain-admins", "displayName", "Domain Admins")
+    page, _ = run(store, type="user", where=[ListFilter(predicate="member_of", op="within", value="group:Domain Admins")])
+    assert keys(page) == ["alice", "bob", "carol", "dave"]
+    from datetime import datetime, timezone
+    page, _ = run(store, type="user", where=[ListFilter(predicate="enabled", op="eq", value=True)],
+                  as_of=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    assert page.total == 0 and any("before anything in namespace" in n for n in page.notes)

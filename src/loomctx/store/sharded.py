@@ -154,6 +154,9 @@ class ShardedStore(GraphStore):
         return self.shard_for(namespace).current_scalar_subjects(namespace, predicate, value_jsons,
                                                                  observed_before, valid_at)
 
+    def first_observed(self, namespace: str):
+        return self.shard_for(namespace).first_observed(namespace)
+
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
         return self.shard_for(namespace).relation_summary(namespace)
 

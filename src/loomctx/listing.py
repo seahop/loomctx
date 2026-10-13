@@ -308,6 +308,15 @@ def _target(store, ns: str, value) -> Key | None:
     else:
         return None
     got = store.resolve_refs(ns, [ref]).get(_key(ref))
+    if got is None and ref.key:
+        # a name where a handle goes ("group:Domain Admins"): the one entity of
+        # that type the label predicates name, as run_query resolves (D-108)
+        from .context import search_by_name
+        found, _ = search_by_name(store, ns, ref.key, limit=2, types=(ref.type,))
+        exact = [e for e in found if e.key.lower() == ref.key.lower()]
+        found = exact or found
+        if len(found) == 1:
+            return (found[0].type, found[0].key)
     return _key(got) if got is not None else None
 
 
@@ -604,6 +613,11 @@ def list_entities(store: GraphStore, req: ListRequest,
     gap = _gap_note(store, ns, req, root_ref if req.of is not None else None, via if req.of is not None else [])
     if gap:
         notes.insert(0, gap)
+    if not alive and req.as_of is not None:
+        first = store.first_observed(ns)
+        if first is not None and common.iso(req.as_of) < common.iso(first):
+            notes.append(f"as_of {common.iso(req.as_of)} is before anything in namespace {ns!r} was observed "
+                         f"(the earliest observation is {common.iso(first)}): nothing was known then")
     if req.of is not None and route.get("open"):
         notes.append(f"the walk stopped at depth {depth}: {route['open']} entit"
                      f"{'y' if route['open'] == 1 else 'ies'} at that depth link onward along "

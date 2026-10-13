@@ -343,6 +343,13 @@ class GraphStore(ABC):
         wanted = {v.lower()[:200] for v in value_jsons} if value_jsons else set()
         return set(newest), {k for k, (_, vs) in newest.items() if vs & wanted}
 
+    def first_observed(self, namespace: str) -> datetime | None:
+        """The earliest observed_at in the namespace — what an empty listing
+        `as_of` an earlier instant is told (D-110: a model set as_of two
+        months before the export and spent its steps learning why)."""
+        times = [o.observed_at for o in self.iter_observations(namespace)]
+        return min(times) if times else None
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

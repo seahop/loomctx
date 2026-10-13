@@ -444,3 +444,37 @@ def test_harder_tier_scorers_on_real_smoke_answers():
     mistral = (f"Local admin / RDP rights on a computer are not collected by its sources {CITE}. Therefore, it is "
                f"impossible to determine from this data who has local administrator rights on WS-AUDIT01.")
     assert ext._score_localadmin(mistral, lt, SEEN, None)["pass"]
+
+
+def test_held_out_scorer_corrections():
+    """Read by hand on the held-out run: Fable named exactly the two admins
+    and said, truly, that jdoe-ops holds rights through the group — not a
+    finding; Nemotron's "does not contain data on local group membership, so
+    it is not possible to confirm" hedges; Opus's "Domain Admins are local
+    administrators by default" is a stated default, not a claim from data."""
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "operators": ["jdoe-ops"],
+             "idle_admins": ["adm-kwu"], "host": "WS-AUDIT01"}
+    fable = (f"Resolving the group grant through membership yields 4 principals: the group itself, adm-rlopez, "
+             f"adm-pchen, and jdoe-ops {CITE}.\n\nDomain Admins with rights over WS-AUDIT01:\n"
+             f"1. adm-pchen — WriteDacl {CITE}\n2. adm-rlopez — GenericAll via CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(fable, truth, SEEN, None)["pass"]
+    glm = fable + (f"\nCORP-WS-Operators has exactly two members: adm-rlopez {CITE} and jdoe-ops {CITE} — only "
+                   f"adm-rlopez is a Domain Admin.")
+    assert ext._score_access(glm, truth, SEEN, None)["pass"]
+    assert ext._score_access(fable + "\n- " + glm.split("\n")[-1], truth, SEEN, None)["pass"]   # as a bullet
+    glm46 = (f"Here are the members of the Domain Admins group who hold rights over this workstation:\n\n"
+             f"## Direct Domain Admin Access\n- adm-pchen — direct rights via has_ace {CITE}\n\n"
+             f"## Indirect Access Through Nested Groups\n- jdoe-ops@corp.local\n  - Member of CORP-WS-Operators {CITE}\n"
+             f"- adm-rlopez@corp.local\n  - Member of CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(glm46, truth, SEEN, None)["false_accounts"] == ["jdoe-ops"]
+    table = fable + f"\n| CORP-WS-Operators (group) | GenericAll | members: adm-rlopez, jdoe-ops {CITE} |\n"
+    assert ext._score_access(table, truth, SEEN, None)["pass"]
+    listed = fable + f"3. jdoe-ops — GenericAll via CORP-WS-Operators {CITE}\n"
+    assert ext._score_access(listed, truth, SEEN, None)["false_accounts"] == ["jdoe-ops"]
+    lt = {"host": "WS-AUDIT01", "collected": False}
+    nemo = (f"adm-pchen has an ACE on WS-AUDIT01 {CITE}. The namespace does not contain data on local group "
+            f"membership, so it is not possible to confirm whether these ACEs confer local administrator rights.")
+    assert ext._score_localadmin(nemo, lt, SEEN, None)["pass"]
+    opus = (f"True local administrator rights cannot be answered from this data {CITE}. adm-pchen is a member of "
+            f"Domain Admins — Domain Admins are local administrators on domain-joined machines by default {CITE}.")
+    assert ext._score_localadmin(opus, lt, SEEN, None)["pass"]

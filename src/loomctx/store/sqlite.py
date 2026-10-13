@@ -1666,6 +1666,12 @@ class SqliteStore(GraphStore):
         any_ = {(r["type"], r["key"]) for r in rows}
         return any_, {(r["type"], r["key"]) for r in rows if r["hit"]}
 
+    def first_observed(self, namespace: str) -> datetime | None:
+        with self._tx(read=True):
+            row = self._conn.execute("SELECT min(observed_at) FROM observations WHERE namespace = ?",
+                                     (namespace,)).fetchone()
+        return common.parse(row[0]) if row and row[0] else None
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,
