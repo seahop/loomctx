@@ -88,6 +88,25 @@ def test_coverage_turns_a_missing_flag_into_not_set(store):
     assert keys(page) == ["S-2002", "S-2003"]
 
 
+def test_an_empty_listing_says_what_was_not_collected(store):
+    """The final A/B's coverage audit: account_groups for a lab account came
+    back empty, and agents answered "no groups" — the lab export never
+    carried membership. The listing now notes the gap of the sources that
+    supplied the account, citing the coverage record (D-092, D-107)."""
+    import re
+    from loomctx import coverage
+    store.record_claim(ClaimIn(namespace=NS, subject=EntityRef(type="user", key="S-7-1102"), predicate="sam",
+                               object="labsvc-backup", observed_at=T, source="lab-export"))
+    store.record_claim(coverage.claim(NS, "lab-export", "domain:lab.local", "member_of", 0, 40, T))
+    page = run(store, "account_groups", account="labsvc-backup")
+    assert page.total == 0
+    gap = next(n for n in page.notes if n.startswith("coverage:"))
+    assert "member_of" in gap and "not collected" in gap and re.search(r"\[[0-9a-f]{12}\]", gap)
+    # a corp account, supplied by the corp export, is not told about the lab's gap
+    page = run(store, "account_groups", account="bob")
+    assert not any(n.startswith("coverage:") for n in page.notes)
+
+
 def test_parameter_errors_say_what_the_query_takes(store):
     with pytest.raises(QueryError, match="registered: account_groups"):
         run(store, "nope")

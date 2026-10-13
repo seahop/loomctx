@@ -3530,6 +3530,15 @@ are not DCs?" want every match and a count; agents answered them by paging
 - The MCP tool also reads filters written as text (`enabled=false`,
   `is_dc!=true`, `name~=svc`, `spn?`, `!mail`); a comma inside a value (an
   LDAP DN) does not split it.
+- **Addendum (2026-10-13): a listing notes collection gaps, as packs do.**
+  In the final A/B's 10k run the coverage audit fell from 160/174 to
+  150/170; most of the drop was one model (qwen3-coder, 1 failure -> 5)
+  answering "no groups" from an empty `account_groups` for an account whose
+  domain's membership was never exported — the list said nothing, where an
+  ask notes the gap (D-092). A listing now notes coverage gaps first: an
+  `of` listing for the predicates it walked, from the sources that supplied
+  `of`; a type or filter listing for the predicates its filters name, for
+  the types a gap applies to; each citing its coverage record in brackets.
 
 ## D-108 · Named queries: the questions a namespace answers, by name (2026-10-13)
 

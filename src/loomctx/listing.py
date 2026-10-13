@@ -331,6 +331,8 @@ def list_entities(store: GraphStore, req: ListRequest,
     # ---------------------------------------------------------- candidates
     seed, cut = _seed(store, req, cap)
     admitted: dict[Key, LiteRow | None] = {}
+    root_ref: EntityRef | None = None
+    via: list[str] = []
     if req.of is not None:
         root_ref = store.resolve_refs(ns, [req.of]).get(_key(req.of))
         if root_ref is None or (allowed_types is not None and root_ref.type not in allowed_types):
@@ -468,6 +470,9 @@ def list_entities(store: GraphStore, req: ListRequest,
             break
         page.rows.append(row)
         charged += cost
+    gap = _gap_note(store, ns, req, root_ref if req.of is not None else None, via if req.of is not None else [])
+    if gap:
+        notes.insert(0, gap)
     page.charged_tokens = charged
     end = req.offset + len(page.rows)
     page.next_offset = end if end < len(alive) else None
@@ -475,6 +480,28 @@ def list_entities(store: GraphStore, req: ListRequest,
         notes.append(f"{len(window) - len(page.rows)} row(s) of this page did not fit the token budget; "
                      f"continue from offset {end}")
     return done()
+
+
+def _gap_note(store, ns: str, req: ListRequest, root: EntityRef | None, via: list[str]) -> str | None:
+    """The collection gaps behind what a listing could not include, as packs
+    note them (D-082, D-092): an empty `account_groups` for an account whose
+    domain's membership was never exported read as "no groups" to the
+    agents (the final A/B's coverage audit). An `of` listing notes gaps on
+    the predicates it walked from the sources that supplied `of`; a type or
+    filter listing, gaps on the predicates its filters name, for the types
+    the gap applies to. A `ne` filter's absences are said by
+    `_unrecorded_notes`."""
+    from . import coverage
+    preds = set(via) | {f.predicate for f in req.where if f.op != "ne"}
+    if not preds:
+        return None
+    sources = ({o.source for o in store.observations_for(ns, root, 200, observed_before=req.as_of)}
+               if root is not None else set())
+    kinds = {root.type} if root is not None else ({req.type} if req.type else set())
+    found = [g for g in coverage.gaps(store, ns, preds, req.as_of)
+             if (not sources or g.source in sources) and (not g.types or not kinds or kinds & set(g.types))]
+    return coverage.note(found, "an entity this listing does not include may be missing data, not absent; "
+                                "cite the coverage record and say it was not collected, not that there are none")
 
 
 def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list[str]:
