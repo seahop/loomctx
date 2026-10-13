@@ -350,7 +350,8 @@ _NOT_COLLECTED = re.compile(
     r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any |its |their )?(?:group )?(?:memberships? )?collected"
     r"|coverage|(?:can(?:not|'t)|could(?:n't| not)|unable to) (?:be )?"
     r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list)\w*"
-    r"|\bunknown\b|incomplete|partial (?:export|collection|data)",
+    r"|\bunknown\b|incomplete|partial (?:export|collection|data)"
+    r"|impossible to (?:determine|tell|say|know|answer)",
     re.I)
 # a flat "it is in no group" with no hedge
 _DEFINITIVE_NONE = re.compile(r"not a member of any|\bis (?:not|no) member|\bno group memberships?\b|"
@@ -679,11 +680,17 @@ def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
     answer = answer.translate(_QUOTES)
     names = (*truth["admins"], *truth["decoys"])
     named = sorted(a for a in truth["admins"] if _mentions(answer, a))
-    false = sorted(d for d in truth["decoys"] if any(
-        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead)
-        and (_ACCESS_WORDS.search(line) or _ACCESS_WORDS.search(lead) or line.lstrip().startswith("|"))
-        and not re.search(r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I)
-        for line, lead in _lines(answer, d, names)))
+    def put_forward(line: str, lead: str, name: str) -> bool:
+        if _EXCLUDES.search(line) or _EXCLUDES.search(lead) or re.search(
+                r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I):
+            return False
+        if _BLOCK_LINE.match(line):     # a list item or table row: its lead-in or heading frames it
+            return bool(_ACCESS_WORDS.search(line) or _ACCESS_WORDS.search(lead) or line.lstrip().startswith("|"))
+        # prose: the sentence naming the account must give it rights — a title
+        # ("## Access review …") or an inventory of members is not a finding
+        return any(_ACCESS_WORDS.search(x) for x in re.split(r"(?<=[.;!?])\s+", line) if _mentions(x, name))
+    false = sorted(d for d in truth["decoys"] if any(put_forward(line, lead, d)
+                                                     for line, lead in _lines(answer, d, names)))
     cites = _cited(answer, seen)
     ok = bool(truth["admins"]) and named == truth["admins"] and not false
     return {"admins_expected": truth["admins"], "admins_named": named, "false_accounts": false,
@@ -712,6 +719,7 @@ def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
                                r"captured by|available in|present in)\b[^.]{0,30}\b(?:the )?(?:data|export|"
                                r"dataset|directory|namespace|ad)\b", answer, re.I))
     claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
+                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b", sent, re.I)
                   for line in asserted.splitlines() for sent in _SENTENCE.split(line))
     cites = _cited(answer, seen)
     # what was not collected has no observation to cite (D-110 declares it in

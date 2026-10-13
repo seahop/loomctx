@@ -424,3 +424,23 @@ def test_the_engine_answers_the_harder_tier_exactly(store):
         assert sorted(r["name"].split("@")[0] for r in v["rows"]) == ext._truth_kerberoast(store)["accounts"]
     finally:
         mcp.configure(None)
+
+
+def test_harder_tier_scorers_on_real_smoke_answers():
+    """Two correct answers the first scorers failed (small-forest smoke run):
+    DeepSeek named exactly the two admins under a "## Access review" title
+    and listed adm-kwu only in an inventory of members; Mistral said local
+    admin "is impossible to determine … who has local administrator rights"."""
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "host": "WS-AUDIT01"}
+    ds = (f"## Access review — WS-AUDIT01 (corp.local) vs. Domain Admins\n\n"
+          f"Domain Admins has 15 effective members: users adm-rlopez, adm-pchen, adm-kwu, svc-sqladm {CITE}.\n\n"
+          f"Of those, exactly two hold rights over WS-AUDIT01:\n\n"
+          f"1. adm-pchen — a direct WriteDacl grant {CITE}\n2. adm-rlopez — GenericAll via CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(ds, truth, SEEN, None)["pass"]
+    nova = (f"#### Nested Rights Holders (via Domain Admins)\n\n1. adm-pchen {CITE}\n2. adm-rlopez {CITE}\n"
+            f"3. adm-kwu — member of Domain Admins {CITE}\n")
+    assert ext._score_access(nova, truth, SEEN, None)["false_accounts"] == ["adm-kwu"]
+    lt = {"host": "WS-AUDIT01", "collected": False}
+    mistral = (f"Local admin / RDP rights on a computer are not collected by its sources {CITE}. Therefore, it is "
+               f"impossible to determine from this data who has local administrator rights on WS-AUDIT01.")
+    assert ext._score_localadmin(mistral, lt, SEEN, None)["pass"]
