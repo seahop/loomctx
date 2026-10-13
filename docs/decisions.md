@@ -3505,6 +3505,45 @@ ListRequest template whose `{param}` strings are substituted). MCP
 - **Measured both ways.** `LOOMCTX_MCP_QUERIES=0` hides run_query and the
   listed queries, so a run reports agent results with and without them.
 
+## D-109 · A selective topic narrows large walk windows too (2026-10-13)
+
+On the realistic 10k forest, every slow `ask_scope` of the D-104 build was the
+delegation audit's walk (domain -contains-> OUs -> computers, topic
+`unconstrained_delegation`): 49 calls of 16–20 s, a third of all tool time.
+Three gaps, each found by tracing the walk:
+
+- **Under the cap is not small.** The second hop's window held ~1,990
+  accounts — under the 2,000-entity cap, so not "crowded", so D-104's
+  selective filter never ran; every account was admitted, gathered (40,637
+  rows) and ranked around seven carriers. A window of at least
+  `_LARGE_WINDOW` (500) entities is now narrowed like a crowded one.
+- **Rarity judged in pieces.** With several topic predicates (agents add
+  `enabled`, `is_dc`), the hub carriers and the rest of a window were each
+  judged rare-or-not on their own; in the rest everyone carries `enabled`, so
+  every account was a carrier. The walk now filters on the topic's rare
+  predicates by the namespace's own counts (the cached relation summary;
+  `_rare_topic`); the pack still shows the common ones as display fields
+  (D-100).
+- **Carriers a hop deeper.** A narrowed window keeps, besides its carriers,
+  the entities that lead on — that occur in a link role other than the one
+  they were reached in (an OU inside an OU; never a user reached by
+  `contains`). Once the walk has found carriers, a later large window with
+  neither is cut instead of refilling the cap. With no carriers and nothing
+  leading on anywhere yet, a window is admitted as before (a topic nothing
+  carries still gets a pack).
+- **The cut is not evidence.** Edges from the scope into entities the topic
+  filter cut (an OU's `contains` of a thousand non-carriers) leave the pack's
+  candidate pool: 9,832 rows to 183. A plain entity-cap cut keeps them.
+
+The delegation ask on the 10k store: 2,000 subjects -> 38 (the 4 DCs and the
+3 planted hosts, their OUs), 8.8 s -> 1.3 s in-process; the pack names all
+seven with their flags. Small scopes and unselective topics walk as before:
+`ad_eval` (plain, large, blind) keeps the scope walk at 11/11 at every budget
+in three runs. find_path (untouched here) was 10, 9 and 9 of 11 at 1,500
+tokens across those runs, 11/11 at 3,000 and up: equal-length paths are
+ordered by observation id, random per ingest, so which 4-hop path fits a
+tight budget varies run to run.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

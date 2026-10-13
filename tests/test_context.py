@@ -1197,6 +1197,49 @@ def test_a_selective_topic_admits_only_its_carriers_from_a_crowded_window(tmp_pa
     store.close()
 
 
+def test_a_large_window_is_narrowed_and_the_walk_reaches_carriers_a_hop_deeper(tmp_path):
+    """A 10k forest's delegation ask took 16-20 s: the domain's OUs held
+    ~2,000 accounts — under the cap, so not "crowded" — and every one was
+    admitted, gathered and ranked around seven carriers; `enabled` in the
+    topic (on every account) also made each account a carrier. A large
+    window is now narrowed by the topic's rare predicates, keeping what
+    leads on (an OU inside an OU) so carriers a hop deeper are still
+    reached; leaves past the carriers are a recorded cut (D-109)."""
+    store = SqliteStore(tmp_path / "large.db")
+    domain = EntityRef(type="domain", key="corp")
+    staff, servers, legacy = (EntityRef(type="ou", key=k) for k in ("staff", "servers", "legacy"))
+    users = [EntityRef(type="user", key=f"u{i:03d}") for i in range(600)]
+    hosts = [EntityRef(type="computer", key=k) for k in ("app01", "sql01", "old01", "web01")]
+    rows = [dict(subject=domain, predicate="contains", object=o, observed_at=_at(8, 1), source="ad")
+            for o in (staff, servers)]
+    rows.append(dict(subject=servers, predicate="contains", object=legacy, observed_at=_at(8, 1), source="ad"))
+    rows += [dict(subject=staff, predicate="contains", object=u, observed_at=_at(8, 1), source="ad") for u in users]
+    rows += [dict(subject=servers, predicate="contains", object=h, observed_at=_at(8, 1), source="ad")
+             for h in (hosts[0], hosts[1], hosts[3])]
+    rows.append(dict(subject=legacy, predicate="contains", object=hosts[2], observed_at=_at(8, 1), source="ad"))
+    rows += [dict(subject=e, predicate="enabled", object=True, observed_at=_at(8, 1), source="ad")
+             for e in users + hosts]
+    rows += [dict(subject=h, predicate="unconstrained_delegation", object=True, observed_at=_at(8, 2), source="ad")
+             for h in hosts[:3]]
+    _claims(store, rows)
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[
+        PredicateDef(name="contains", containment=True), PredicateDef(name="enabled", node_status=True),
+        PredicateDef(name="unconstrained_delegation", description="trusted for unconstrained Kerberos delegation")]))
+    scope = ScopeSpec(subjects=[domain], expand=["contains", "unconstrained_delegation", "enabled"], depth=3)
+    pack = build_pack(store, AskRequest(scope=scope, question="which computers allow unconstrained delegation?",
+                                        budget=4000))
+    got = {s.key for s in pack.subjects}
+    assert {"app01", "sql01", "old01"} <= got                 # old01 sits one OU deeper
+    assert not any(k.startswith("u") for k in got) and "web01" not in got
+    assert any(t.reason == "scope_cap" for t in pack.truncated)
+    # no topic: the window is walked as before
+    pack = build_pack(store, AskRequest(scope=ScopeSpec(subjects=[domain], expand=["contains"], depth=2),
+                                        question="what is in the domain?", budget=4000))
+    assert sum(1 for s in pack.subjects if s.type == "user") == 600
+    store.close()
+
+
 def test_a_thread_expansion_hands_back_a_conflict_that_does_not_fit(tmp_path):
     """A thread handle spends its budget on the thread and mints no
     handles — but a conflict too big for it was dropped without a trace."""

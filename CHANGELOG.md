@@ -8,6 +8,13 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Faster selective scope walks (D-109)
+
+- A walk window of 500+ entities is narrowed by a selective topic even under
+  the entity cap; rarity is judged on the namespace's counts; entities that
+  lead deeper (nested OUs) are kept; edges into the cut leave the pack's
+  pool. The AD delegation ask: 8.8 s -> 1.3 s on a 10k forest, same answer.
+
 ### List mode (D-107)
 
 - `POST /v1/list` and MCP `list_entities`: every entity matching conditions,
