@@ -482,7 +482,8 @@ def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list
     collector that sets a flag only when it holds (LDAP's is_dc,
     unconstrained_delegation) and records the predicate as fully collected
     makes absence "not set"; a partial or absent collection makes it
-    unknown — said with the coverage record to cite (D-092, D-107)."""
+    unknown — said with the coverage record to cite, bracketed as every
+    coverage note writes it (D-092, D-107)."""
     from . import coverage
     recs = coverage.records(store, ns, as_of)
     out = []
@@ -491,10 +492,10 @@ def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list
         mine = [r for r in recs if str(r.object) == pred]
         gaps = [r for r in mine if r.attrs.get("state") in ("absent", "partial")]
         if gaps:
-            out.append(f"{lead}: {pred} was not fully collected (coverage {gaps[0].id[:12]}), so for them "
+            out.append(f"{lead}: {pred} was not fully collected (coverage [{gaps[0].id[:12]}]), so for them "
                        "it is unknown, not a different value")
         elif mine:
-            out.append(f"{lead}; coverage {mine[0].id[:12]} records {pred} as collected, so it is not set "
+            out.append(f"{lead}; coverage [{mine[0].id[:12]}] records {pred} as collected, so it is not set "
                        "on them")
         else:
             out.append(f"{lead} (counted as not equal)")

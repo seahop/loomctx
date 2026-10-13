@@ -79,7 +79,11 @@ def test_coverage_turns_a_missing_flag_into_not_set(store):
     for pred, seen in (("is_dc", 2), ("enabled", 1)):
         store.record_claim(coverage.claim(NS, "ad-export", "domain:corp.local", pred, seen, 2, T))
     page = run(store, "unconstrained_delegation_hosts")
-    assert any("records is_dc as collected, so it is not set on them" in n for n in page.notes)
+    note = next(n for n in page.notes if "records is_dc as collected, so it is not set on them" in n)
+    # the record's cite token in brackets, as every coverage note writes it (an
+    # agent's harness and reader both look for `[<12 hex>]`)
+    import re
+    assert re.search(r"coverage \[[0-9a-f]{12}\] records", note)
     page = run_query(store, QueryRequest(namespace=NS, name="effective_members", params={"group": "IT-Admins"}))
     assert keys(page) == ["S-2002", "S-2003"]
 

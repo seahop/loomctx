@@ -3560,6 +3560,15 @@ ListRequest template whose `{param}` strings are substituted). MCP
   to cite when collection was partial.
 - **Measured both ways.** `LOOMCTX_MCP_QUERIES=0` hides run_query and the
   listed queries, so a run reports agent results with and without them.
+- **Addendum (2026-10-13): the note's cite token is bracketed.** The first
+  10k run of the final A/B showed delegation at 107/174 where 59 of the 67
+  failures named exactly the right hosts and lost only on one "unseen"
+  citation: the coverage record the `ne` note offered, printed as
+  `coverage badea704e74a` instead of `[badea704e74a]`, the form every
+  coverage note uses (D-092) and the agent harness reads as shown. The note
+  now brackets it. That run is re-scored counting a store's coverage-record
+  tokens as seen in runs that called list_entities or run_query (the only
+  tools that printed them); the report gives both counts.
 
 ## D-109 · A selective topic narrows large walk windows too (2026-10-13)
 
