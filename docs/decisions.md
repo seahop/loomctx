@@ -3684,6 +3684,22 @@ corrects would differ — the per-row path remains the reference, and a test
 forces both paths over the same requests. 10k: unchanged totals, 0.42 ->
 0.38 s and 0.22 -> 0.17 s; the 500k measurement rides the next GKE probe.
 
+## D-112 · An empty entity search retries what the agent meant (2026-10-13)
+
+137 of 2,480 `find_entity` calls in the final A/B's 10k half found nothing,
+and an empty search is where an agent either guesses or spends steps. Read
+by hand, they were a few shapes, now retried when the plain search (and the
+D-095 realm retry) finds nothing: a name with its domain as words ("Domain
+Admins corp.local", "corp.local Domain Admins", "LAB\\Domain Admins") — the
+name, keeping only entities whose label values carry that domain (another
+domain's entity of the same name is a different entity: nothing rather than
+it); a domain with a generic word ("corp.local domain"); a 12- or 32-hex
+cite token (the entities its observation is about); an entity type
+("coverage": entities of that type). Generic words inside a name stay
+("Domain Admins"). Replayed on the 10k store: 96 of the 137 now return the
+entity meant; the rest name no entity (a source label, a domain that is not
+there) and still return nothing.
+
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

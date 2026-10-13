@@ -1066,7 +1066,72 @@ def search_by_name(store: GraphStore, namespace: str, query: str, limit: int = 1
         found = store.search_entities(namespace, m.group(1), limit=limit, types=types, labels=labels)
         if found:
             return found, m.group(1)
+    if not found:
+        return _search_retries(store, namespace, query.strip(), limit, types, labels)
     return found, query
+
+
+_REALM = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+_GENERIC_WORDS = {"domain", "group", "groups", "user", "users", "account", "accounts", "computer", "host", "the"}
+_CITE_TOKEN = re.compile(r"[0-9a-f]{12}|[0-9a-f]{32}")
+
+
+def _search_retries(store: GraphStore, namespace: str, query: str, limit: int,
+                    types: tuple[str, ...] | None, labels: tuple[str, ...]) -> tuple[list, str]:
+    """What an empty search was likely asking for (D-112), from what the
+    final A/B's agents typed — 137 of 2,480 searches found nothing: a name
+    and its domain as words ("Domain Admins corp.local", "corp.local\\Domain
+    Admins": the name, preferring entities whose labels carry that domain),
+    a domain with a generic word ("corp.local domain"), a cite token (the
+    entity its observation is about), an entity type ("coverage": entities
+    of that type). Real matches, or none — never a guess."""
+    # a cite token: the entities its observation is about
+    if _CITE_TOKEN.fullmatch(query):
+        out = []
+        for o in store.observations_by_prefix(namespace, query)[:limit]:
+            for ref in (o.subject, o.object):
+                if isinstance(ref, EntityRef) and (types is None or ref.type in types):
+                    ent = store.get_entity(namespace, ref)
+                    if ent is not None and all((e.type, e.key) != (ent.type, ent.key) for e in out):
+                        out.append(ent)
+        return out, f"cite {query}"
+    # an entity type: entities of that type
+    schema = _schema(store, namespace)
+    known = {t.name for t in schema.entity_types} if schema is not None else set()
+    if query.lower() in known and (types is None or query.lower() in types):
+        refs = store.entity_refs_of_type(namespace, query.lower(), limit)
+        return [e for e in (store.get_entity(namespace, r) for r in refs) if e is not None], f"type {query.lower()}"
+    # a name with its domain as separate words, or REALM\name with spaces
+    realm, name = None, query
+    if "\\" in query:
+        realm, _, name = query.partition("\\")
+    else:
+        words = query.replace(",", " ").split()
+        realms = [w for w in words if _REALM.match(w)]
+        rest = [w for w in words if w not in realms]
+        content = [w for w in rest if w.lower() not in _GENERIC_WORDS]
+        if realms and content:      # "Domain Admins corp.local": generic words inside a name stay
+            realm, name = realms[0], " ".join(rest)
+        elif realms:                # "corp.local domain": the domain itself
+            name = realms[0]
+        elif content and len(content) < len(words):
+            name = " ".join(content)
+    name = name.strip()
+    if not name or name == query:
+        return [], query
+    found = store.search_entities(namespace, name, limit=max(limit, 20), types=types, labels=labels)
+    if realm and found:
+        rows = store.observations_for_many(namespace, [EntityRef(type=e.type, key=e.key) for e in found],
+                                           limit=20, predicates=list(labels)) if labels else {}
+        mark = realm.lower()
+        dn = ",".join(f"dc={p}" for p in mark.split("."))
+        local = [e for e in found
+                 if any(isinstance(o.object, str) and (o.object.lower().endswith("@" + mark) or dn in o.object.lower())
+                        for o in rows.get((e.type, e.key), []))]
+        # a named domain is a constraint: another domain's entity of that
+        # name is a different entity, not a near match
+        found = local
+    return found[:limit], name if not realm else f"{name} ({realm})"
 
 
 def display_predicates(store: GraphStore, namespace: str) -> frozenset[str]:

@@ -218,3 +218,28 @@ def test_not_collected_is_declared_and_noted(store):
     pp = find_paths(store, PathRequest(namespace=NS, **{"from": EntityRef(type="user", key="S-2001")},
                                        to=EntityRef(type="computer", key="S-3002"), via=["member_of"]))
     assert not pp.paths and any("not collected by this namespace" in n for n in pp.notes)
+
+
+def test_empty_searches_retry_what_agents_meant(store):
+    """The final A/B's empty searches (D-112): a name with its domain as
+    words, a domain with a generic word, a cite token, an entity type."""
+    from loomctx.context import search_by_name
+    _c(store, "group:S-512", "principal", "Domain Admins@corp.local")
+    _c(store, "group:S-9512", "name", "Domain Admins")
+    _c(store, "group:S-9512", "principal", "Domain Admins@dev.local")
+    _c(store, "domain:corp.local", "name", "corp.local")
+    got, matched = search_by_name(store, NS, "Domain Admins corp.local")
+    assert [e.key for e in got] == ["S-512"] and matched == "Domain Admins (corp.local)"
+    got, _ = search_by_name(store, NS, "dev.local\\Domain Admins")
+    assert [e.key for e in got] == ["S-9512"]
+    got, _ = search_by_name(store, NS, "corp.local domain")
+    assert [(e.type, e.key) for e in got] == [("domain", "corp.local")]
+    oid = store.observations_for(NS, EntityRef(type="user", key="S-2002"), 5)[0].id
+    got, matched = search_by_name(store, NS, oid[:12])
+    assert ("user", "S-2002") in {(e.type, e.key) for e in got} and matched.startswith("cite ")
+    _c(store, "gpo:{31B2F340}", "name", "Default Domain Policy")
+    got, matched = search_by_name(store, NS, "gpo")
+    assert matched == "type gpo" and [e.key for e in got] == ["{31B2F340}"]
+    assert search_by_name(store, NS, "nothing-like-this")[0] == []
+    # a domain that holds no such entity: nothing, not another domain's
+    assert search_by_name(store, NS, "lab.local\\Domain Admins")[0] == []
