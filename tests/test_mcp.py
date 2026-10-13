@@ -703,3 +703,14 @@ def test_start_up_warms_what_describe_namespace_reads(store, monkeypatch):
     assert calls == [mcp_server._DEFAULT_NS]
     mcp_server.describe_namespace(mcp_server._DEFAULT_NS)
     assert calls == [mcp_server._DEFAULT_NS]          # served from the warm cache
+
+
+def test_an_entity_name_passed_as_namespace_says_where_it_lives(store):
+    """Gemini 2.5 Flash passed namespace="corp.local" (a domain), read the
+    generic error as "no data" and gave up; the error now names the entity
+    and the namespace to call with."""
+    with pytest.raises(ValueError, match=r"'corp.local' is not a namespace: it is domain:corp.local in namespace "
+                                         r"'default' — call again with namespace='default'"):
+        mcp_server.find_entity(query="web-01", namespace="corp.local")
+    with pytest.raises(ValueError, match="holds no data"):
+        mcp_server.find_entity(query="web-01", namespace="nowhere")

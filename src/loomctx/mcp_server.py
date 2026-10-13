@@ -669,7 +669,17 @@ def _known_namespace(namespace: str, grant: Grant | None = None) -> None:
     (among the namespaces this caller may read)."""
     summary = _summary()
     if namespace not in summary and _get_store().get_schema(namespace) is None:
-        known = ", ".join(_visible(grant, summary)) or "none yet"
+        visible = _visible(grant, summary)
+        known = ", ".join(visible) or "none yet"
+        # an entity's name passed as the namespace (namespace="corp.local"): say
+        # where it lives — Gemini 2.5 Flash read the generic error as "the data
+        # is not here" and gave up on five runs out of five (final A/B, 10k)
+        for ns in visible:
+            hit = next((e for e in _get_store().search_entities(ns, namespace, limit=3)
+                        if e.key.lower() == namespace.lower()), None)
+            if hit is not None and (grant is None or grant.entity_types is None or hit.type in grant.entity_types):
+                raise ValueError(f"{namespace!r} is not a namespace: it is {hit.type}:{hit.key} in namespace "
+                                 f"{ns!r} — call again with namespace={ns!r}")
         raise ValueError(f"namespace {namespace!r} holds no data; namespaces with data: {known}"
                          " — pass namespace=... on every call")
 
