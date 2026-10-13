@@ -162,6 +162,11 @@ is wanted, but it isn't needed.
 
 ## 4. Schema-drafting helper (a new source needs connector work)
 
+**Status (2026-10-13): done, D-106.** `python -m loomctx.registry draft`
+(`loomctx/schema_draft.py`) drafts from envelope NDJSON, JSON records or
+LDIF. It has no LLM step. The overlap with the hand-written registrations
+is measured in D-106.
+
 **Problem.** Each new domain needs registered entity types and predicates.
 That is what makes packs precise, but it costs a day of connector work.
 

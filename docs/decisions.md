@@ -3356,6 +3356,81 @@ Replayed against the 500k store with the fixes: the 53-minute delegation call
 24 s, a 16-minute domain-wide one 4.6 s, `describe_namespace` 0.4 s, a store
 open under a second. The scale numbers are in the scale report.
 
+## D-106 · A schema registration drafted from a sample, for review (2026-10-13)
+
+Future-work item 4. Every new source needs a `SchemaRegistration` (entity
+types, predicates, their flags), and writing one by hand was a day of
+connector work. `python -m loomctx.registry draft SAMPLE` now reads a sample
+and prints a draft: valid `SchemaRegistration` JSON (non-strict). It goes
+to stdout or `--out`, and its review notes go to stderr and `--notes`.
+
+- **Where it lives.** `registry.py` already held the registry's meaning
+  (validation, containment) but had no CLI, so it gains a `main()` with one
+  subcommand, `draft`. The heuristics are in a new module,
+  `loomctx/schema_draft.py`, which is pure: it reads files, opens no store,
+  calls no engine, and **never registers anything**. A person reviews the
+  draft and registers it with `POST /v1/schemas`, or pastes it into a
+  connector's `schema()`. No LLM is involved. The design allows one to help
+  with names later, and its output would still be a draft for review.
+- **Inputs, best first.** First, the envelope NDJSON that every
+  connector's `emit` writes. Because it works for any connector, the types
+  and predicates come straight off the claims and only the flags are
+  inferred. Then JSON records: an array, an object of named arrays,
+  OData `value`, or NDJSON records. Then LDIF.
+- **Rules.** All of them key on field names and value shapes. Nothing
+  branches on a source. Entity types come from claim types, the array a
+  record came from, or a kind field (`objectClass`, its most specific
+  class; `@odata.type`; `kind`; `type`). `object_types` come from values
+  that resolve to another record's key: `id`, `dn`, `objectSid`, or a
+  unique `*Id` that names no other record. They can also come from
+  `{"id": ...}` objects and URLs ending in an id. A predicate that reaches
+  four or more types, or most of them, is left open. A list of references
+  named for a role (`members`, `owners`) is drafted from the member's side
+  (`member_of`, `owner_of`), the way the connectors write it. A row with
+  two references and no name of its own becomes one predicate between
+  them. Flags are set from names and shapes:
+  - `containment` for membership or parentage names and for DN parentage;
+  - `node_status` for status names (`enabled`, `status`, `state`, ... but
+    not `security_enabled`);
+  - `label` for name-like fields and DN-shaped values;
+  - `display` for the one label with `x@where` values, ranked
+    UPN/principal/login before mail.
+
+  A short house-style table maps common names to the ones the connectors
+  use (`displayName` → `name`, `userPrincipalName` → `upn`,
+  `accountEnabled` → `enabled`). `--keep-names` turns it off.
+- **Uncertainty goes in the notes, never in the JSON.** The notes list every
+  flag set from a name, edges left open, references mixed with scalars, ids
+  that matched no record, integer bit fields to decode, binary attributes
+  skipped, empty fields, and assignment rows turned into predicates. The
+  JSON always validates; nothing is half-filled.
+
+**Measured** against the hand-written registrations (`iam_gen --scale
+small`, `agent_eval_ext prepare --scale small`):
+
+| Sample | Entity types | Predicates | Flags agree (of matched) | Hand-set flags reproduced |
+|---|---|---|---|---|
+| Entra envelopes vs `entra.schema()` | 89% (8/9) | 86% (24/28) | 88% (21/24) | 79% (11/14) |
+| Okta envelopes vs `okta.schema()` | 86% (6/7) | 92% (22/24) | 91% (20/22) | 75% (9/12) |
+| LDAP envelopes vs `ldap.schema()` | 82% (9/11) | 88% (22/25) | 100% (22/22) | 92% (12/13) |
+| Entra + Okta envelopes vs `iam_schema.SHARED_PREDICATES` | — | 86% (6/7) | 83% (5/6) | 67% (4/6) |
+| Entra raw JSON | 56% (5/9) | 43% (12/28) | 92% (11/12) | 50% (7/14) |
+| Okta raw JSON | 43% (3/7) | 46% (11/24) | 91% (10/11) | 50% (6/12) |
+| LDAP raw LDIF | 45% (5/11) | 32% (8/25) | 100% (8/8) | 46% (6/13) |
+
+Every envelope miss is a predicate the sample never carries (`has_ip`,
+`auth_method`, `rbcd_from`) or an `object_types` list the hand-written
+registration widened so two connectors can share it (`member_of` →
+`group`, `directory_role`). On the predicates it matched, containment,
+node_status, label and display agree 100% for every sample. Raw exports
+score lower because some claims exist only after a connector decodes the
+source: `enabled` from `userAccountControl`, `has_ace` from a security
+descriptor, `principal` built from `sam@domain`. The drafter can't produce
+those. It flags the bit field and the binary attribute instead. Leaving
+out the framework items no raw export contains (coverage, identifier,
+`has_ip`) gives raw entity-type overlap of 83% for Entra, 75% for Okta and
+62% for LDAP.
+
 ## D-107 · List mode: exact, paged entity sets (2026-10-13)
 
 A pack ranks what fits a budget. "Which members of Domain Admins, nested,

@@ -15,6 +15,16 @@ tag is v0.1.0).
   (`enabled=false`, `is_dc!=true`), paged and cited. Seeded from indexes and
   read set-wise, so it costs the same shape at 10k objects as at 500k.
 
+### Draft a schema registration from a sample (D-106)
+
+- `python -m loomctx.registry draft SAMPLE [--format envelopes|ndjson|json|ldif]
+  [--namespace NS] [--out FILE] [--notes FILE]` reads a connector's emitted
+  envelope NDJSON, JSON records or LDIF and prints a draft `SchemaRegistration`.
+  It infers entity types, predicates, `object_types`, containment, node_status,
+  label and display. Review notes say what it guessed. It never registers
+  anything. On the shipped connectors' envelopes it reproduces 86–92 % of the
+  hand-written predicates.
+
 ### Model scorecard 2026-09-28; Active Directory audits published
 
 - `docs/models.md` re-measured on the current engine: 35 models, five runs of
