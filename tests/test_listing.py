@@ -345,3 +345,22 @@ def test_within_takes_a_name_and_an_early_as_of_is_explained(store):
     page, _ = run(store, type="user", where=[ListFilter(predicate="enabled", op="eq", value=True)],
                   as_of=datetime(2026, 7, 1, tzinfo=timezone.utc))
     assert page.total == 0 and any("before anything in namespace" in n for n in page.notes)
+
+
+def test_a_seed_that_hit_its_limit_is_never_a_start_set(store, monkeypatch):
+    """At 500k, `enabled=true` filled the index lookup's limit before the
+    type filter; the remainder looked complete and the Domain Admins were not
+    in it — 0, marked exact. A lookup at its limit is not a seed (D-110)."""
+    monkeypatch.setenv("LOOMCTX_MAX_LIST_CANDIDATES", "2")        # 3 subjects with enabled=true > 2
+    page, st = run(store, type="user", where=[ListFilter(predicate="member_of", op="within",
+                                                         value="group:domain-admins", depth=1),
+                                              ListFilter(predicate="enabled", op="eq", value=True)])
+    assert st["start"] != "index" and keys(page) == ["alice"]
+
+
+def test_a_small_closure_beats_a_large_seed(store, monkeypatch):
+    monkeypatch.setattr(listing, "_UPWARD_MAX", 1)
+    page, st = run(store, type="user", where=[ListFilter(predicate="enabled", op="exists"),
+                                              ListFilter(predicate="member_of", op="within",
+                                                         value="group:domain-admins", depth=1)])
+    assert st["start"] == "closure" and keys(page) == ["alice"]

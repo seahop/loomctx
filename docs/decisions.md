@@ -3663,6 +3663,20 @@ stopped an empty answer reading as "nobody".
 - **Paging.** A page the limit ended says how many matches remain and the
   offset to continue from.
 
+**Addendum (held-out 10k + 500k probe): a seed at its limit is not a seed.** An
+indexed positive filter seeds the candidates; its lookup is capped at the
+candidate cap + 1 rows, applied before the type filter. At 500k objects
+`enabled=true` filled that limit with users and computers alike, the type
+filter left 129,098 users — under the cap, so nothing said "cut" — and the
+listing was an arbitrary subset marked exact: "enabled Domain Admins" 0,
+`enabled_members` of a 325k group exactly 129,098. A lookup that reaches its
+limit is now never a start set (the listing starts from another filter, the
+closure, or the type, whose caps are reported), and a `within` closure is
+preferred over a larger index seed. One agent run of the final A/B's 500k
+half touched the path. Also from the held-out run: `within` takes a group's
+name where its handle goes, and an empty listing `as_of` a time before
+anything was observed says so (`GraphStore.first_observed`).
+
 On the 10k forest the access listing answers in 0.2 s (329 principals hold
 rights over the busiest DC through groups; none is a Domain Admin — an
 exact, cited "none" over what is collected, with local admin noted as not

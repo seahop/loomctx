@@ -337,25 +337,43 @@ def _closure(store, req, f: ListFilter, among: list[Key] | None, cap, rules) -> 
 
 
 def _seed(store, req, cap) -> tuple[list[Key] | None, bool]:
-    """The smallest candidate set an indexed positive filter gives, or None
-    when no filter can seed the listing; True when that set hit the cap."""
+    """The smallest COMPLETE candidate set an indexed positive filter gives,
+    or None when none can seed the listing. A lookup that reached its limit
+    is incomplete and never a start set (D-110): `enabled=true` at 500k
+    objects hit the 200,001-row limit before the type filter, left 129,098
+    users — under the cap, so nothing said "cut" — and the Domain Admins it
+    should have found were not among them: an exact-looking 0."""
     best: list[Key] | None = None
     for f in sorted(req.where, key=lambda f: _SELECTIVITY[f.op]):
         if f.op not in _POSITIVE or (f.op == "exists" and best is not None):
             continue
         got: dict[Key, None] = {}
+        complete = True
         lookups = [None] if f.op == "exists" else [
             vj for w in (f.value if f.op == "in" and isinstance(f.value, list) else [f.value])
             for vj in _value_jsons(w)]
         for vj in lookups:
-            for r in store.subjects_with_value(req.namespace, f.predicate, vj, cap + 1, req.as_of):
+            rows = store.subjects_with_value(req.namespace, f.predicate, vj, cap + 1, req.as_of)
+            complete = complete and len(rows) <= cap
+            for r in rows:
                 if req.type is None or r.type == req.type:
                     got.setdefault(_key(r))
-        if best is None or len(got) < len(best):
+        if complete and (best is None or len(got) < len(best)):
             best = list(got)
-    if best is None:
-        return None, False
-    return best[:cap], len(best) > cap
+    return best, False
+
+
+def _closure_smaller(store, req, seed: list[Key], cap, rules, st: dict) -> bool:
+    """Whether the first within filter's closure is the smaller start set than
+    a large index seed ("enabled users in Domain Admins": a handful, not the
+    enabled accounts); the closure is walked to at most the seed's size."""
+    f0 = next(f for f in req.where if f.op == "within")
+    if _target(store, req.namespace, f0.value) is None:
+        return False
+    got, cut = _closure(store, req, f0, None, min(cap, len(seed)), rules)
+    smaller = not cut and len(got) < len(seed)
+    st["closure_probe"] = len(got)
+    return smaller
 
 
 def _scalar_rows(summary, predicate: str) -> int:
@@ -445,7 +463,8 @@ def list_entities(store: GraphStore, req: ListRequest,
             admitted = {k: r for k, r in down.items() if keep_only is None or k in keep_only}
             st["start"] = "downward"
         candidates = list(admitted)
-    elif seed is not None:
+    elif seed is not None and not (len(seed) > _UPWARD_MAX and any(f.op == "within" for f in req.where)
+                                   and _closure_smaller(store, req, seed, cap, rules, st)):
         candidates = seed
         st["start"] = "index"
     elif any(f.op == "within" for f in req.where):
