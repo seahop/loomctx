@@ -495,13 +495,27 @@ def _gap_note(store, ns: str, req: ListRequest, root: EntityRef | None, via: lis
     preds = set(via) | {f.predicate for f in req.where if f.op != "ne"}
     if not preds:
         return None
-    sources = ({o.source for o in store.observations_for(ns, root, 200, observed_before=req.as_of)}
-               if root is not None else set())
+    # the entities the listing is about — `of`, or an entity a filter names
+    # (member_of=user:X) — scope the gaps to the sources that supplied them
+    about = [root] if root is not None else _filter_entities(store, ns, req)
+    sources = {o.source for ref in about
+               for o in store.observations_for(ns, ref, 200, observed_before=req.as_of)}
     kinds = {root.type} if root is not None else ({req.type} if req.type else set())
     found = [g for g in coverage.gaps(store, ns, preds, req.as_of)
              if (not sources or g.source in sources) and (not g.types or not kinds or kinds & set(g.types))]
     return coverage.note(found, "an entity this listing does not include may be missing data, not absent; "
                                 "cite the coverage record and say it was not collected, not that there are none")
+
+
+def _filter_entities(store, ns: str, req: ListRequest) -> list[EntityRef]:
+    """The entities `where` values name as 'type:key' handles, resolved."""
+    wanted = []
+    for f in req.where:
+        for v in (f.value if isinstance(f.value, list) else [f.value]):
+            if isinstance(v, str) and ":" in v:
+                t, _, k = v.partition(":")
+                wanted.append(EntityRef(type=t, key=k))
+    return list(store.resolve_refs(ns, wanted).values()) if wanted else []
 
 
 def _unrecorded_notes(store, ns: str, as_of, unrecorded: dict[str, int]) -> list[str]:

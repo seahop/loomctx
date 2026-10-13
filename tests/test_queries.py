@@ -105,6 +105,12 @@ def test_an_empty_listing_says_what_was_not_collected(store):
     # a corp account, supplied by the corp export, is not told about the lab's gap
     page = run(store, "account_groups", account="bob")
     assert not any(n.startswith("coverage:") for n in page.notes)
+    # nor is a filter naming a corp account ("groups where member_of = it")
+    from loomctx.contracts import ListFilter, ListRequest
+    from loomctx.listing import list_entities
+    page = list_entities(store, ListRequest(namespace=NS, type="group", where=[
+        ListFilter(predicate="member_of", op="eq", value="user:S-2002")]))
+    assert not any(n.startswith("coverage:") for n in page.notes)
 
 
 def test_parameter_errors_say_what_the_query_takes(store):
