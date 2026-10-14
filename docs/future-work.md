@@ -192,7 +192,8 @@ cheap to run and found real bugs, but they are one-off scripts in
   contention doesn't pollute the numbers.
 
 **Done when.** A build that slows any replayed call past 10 s at 500k, or
-changes an answer, is flagged before a model run is spent on it.
+changes an answer, is flagged before a model run is spent on it. Its table goes in `docs/performance.md`, the speed history every run
+adds to.
 
 ---
 

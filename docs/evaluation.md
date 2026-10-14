@@ -160,7 +160,8 @@ The first table is one row per condition:
   len/3 accounting, D-051), and the model's own prompt token count when it
   reports usage. Compare conditions on *both*: the point of the `full` row
   is its token column.
-- **Build p50 / p95 ms** — pack (or baseline context) build latency.
+- **Build p50 / p95 ms** — pack (or baseline context) build latency. Each
+  run's figures are kept in `docs/performance.md`.
 - **Truth in context** — the ground-truth observation ids were among the
   context's citations: was the evidence there at all. A `loomctx@B` row's
   value is retrieval recall under that budget.
