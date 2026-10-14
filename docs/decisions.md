@@ -3412,6 +3412,23 @@ row, and the two threads convoyed on it: no gain), `model_construct` for the
 Observation (slower than validating), foreign keys off (no change), a 1 GiB
 cache and `mmap_size` (no change beyond 256 MiB). Postgres is unchanged.
 
+
+**Addendum (2026-10-14): Postgres writes set at a time too.** D-105 batched
+SQLite's `record_claims`; Postgres kept a loop of one-claim writes, four to
+six statements each (the event-id check, an exact and an alias lookup and
+an insert per entity end, the row). Loading the 500k forest into a
+Postgres on its own node of a GKE cluster ran at ~283 facts/s with both
+machines near idle: the loader waited on round trips, ~0.5 ms each. Postgres
+now batches the same way, with the same semantics (replays answered,
+repeats within a batch answered with the first, merged-away refs resolved
+to their canonical entity, races with another writer settled by the row
+that exists): one `event_id = ANY(...)` lookup and one tombstone check per
+batch, entities matched through `unnest` arrays and inserted in one
+statement that returns what landed, and observations in multi-row INSERTs
+of 500 with `ON CONFLICT … DO NOTHING RETURNING id`. Tests compare a batch
+with the one-at-a-time path row for row on Postgres. Same host (no network
+in the way): the 10k forest 109 s → 65 s, identical contents; the
+across-the-network measurement follows the 2026-10-14 Postgres run.
 ## D-106 · A schema registration drafted from a sample, for review (2026-10-13)
 
 Future-work item 4. Every new source needs a `SchemaRegistration` (entity

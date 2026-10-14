@@ -89,6 +89,85 @@ def test_a_batch_bigger_than_a_lookup_chunk(tmp_path):
     assert sum(1 for _ in s.iter_entities("default")) == 700 + 1500
 
 
+def _pg():
+    import os
+    url = os.environ.get("LOOMCTX_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("LOOMCTX_TEST_POSTGRES_URL not set")
+    from loomctx.store.postgres import PostgresStore
+    s = PostgresStore(url)
+    s.wipe()
+    return s
+
+
+def _prepare(s):
+    """_prepared's history, into a given store."""
+    s.record_claim(_c("pre-1"))
+    gone = s.record_claim(_c("red-1", obj="secret"))
+    s.redact("default", gone.id, "spill")
+    s.record_claim(_c(subject=("ip_address", "10.0.4.7"), obj="x"))
+    s.record_claim(_c(subject=("ip", "10.0.4.7"), obj=("host", "web-01")))
+    assert s.merge_entities("default", EntityRef(type="ip_address", key="10.0.4.7"),
+                            EntityRef(type="ip", key="10.0.4.7"))
+
+
+def _pg_content(s):
+    with s._tx(read=True):
+        rows = s._q(
+            "SELECT o.event_id, e.type, e.key, o.predicate, o.object_json, o.source, o.observed_at,"
+            " o.attrs_json, o.provenance_json FROM observations o JOIN entities e ON e.id = o.subject_id")
+        ents = s._q("SELECT type, key FROM entities")
+        aliases = s._q("SELECT alias FROM aliases")
+
+    def row(r):
+        prov = r["provenance_json"]
+        prov = json.loads(prov) if isinstance(prov, str) else prov
+        if prov:
+            prov.pop("artifact_id", None)   # minted per store; the cited event id is compared
+        attrs = r["attrs_json"]
+        attrs = json.loads(attrs) if isinstance(attrs, str) else attrs
+        return (r["event_id"], r["type"], r["key"], r["predicate"], r["object_json"], r["source"],
+                str(r["observed_at"]), json.dumps(attrs, sort_keys=True), json.dumps(prov, sort_keys=True))
+    return (sorted(map(row, rows), key=repr), sorted((r["type"], r["key"]) for r in ents),
+            sorted(r["alias"] for r in aliases))
+
+
+def test_a_postgres_batch_stores_what_one_claim_at_a_time_stores():
+    """The Postgres write path is set at a time too: one claim at a time it
+    made four to six round trips per claim (~280 facts/s across a network)."""
+    s = _pg()
+    try:
+        _prepare(s)
+        singles = [s.record_claims([c])[0] for c in BATCH]
+        one = _pg_content(s)
+        s.wipe()
+        _prepare(s)
+        batch = s.record_claims(BATCH)
+        assert [_shape(o) for o in batch] == [_shape(o) for o in singles]
+        assert _pg_content(s) == one
+        assert batch[3].id == batch[1].id and batch[4].id != batch[5].id
+        assert batch[6].object == "[redacted]" and batch[2].subject == EntityRef(type="ip", key="10.0.4.7")
+        assert s.get_entity("default", EntityRef(type="host", key="never")) is None
+        assert s.get_entity("default", EntityRef(type="ip_address", key="10.0.4.7")).type == "ip"
+        for o in batch[1:6]:
+            assert s.observations_by_ids("default", [o.id])[0] == o
+    finally:
+        s.close()
+
+
+def test_a_postgres_batch_bigger_than_an_insert_chunk():
+    s = _pg()
+    try:
+        claims = [_c(f"b-{i}", subject=("host", f"h{i % 700}"), obj=("user", f"u{i}")) for i in range(1500)]
+        assert len({o.id for o in s.record_claims(claims)}) == 1500
+        again = s.record_claims(claims)                     # every one a replay
+        assert s.count_observations("default", EntityRef(type="host", key="h0")) == 3
+        assert len({o.id for o in again}) == 1500
+        assert sum(1 for _ in s.iter_entities("default")) == 700 + 1500
+    finally:
+        s.close()
+
+
 def test_bulk_load_reads_its_own_writes_and_restores_the_store(tmp_path):
     s = SqliteStore(tmp_path / "s.db")
     before = [s._writer.execute(f"PRAGMA {p}").fetchone()[0] for p in ("cache_size", "wal_autocheckpoint")]
