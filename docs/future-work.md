@@ -1,11 +1,12 @@
-# Future work: scale and the known weaknesses
+# Future work: efficiency after the scale run
 
-Written 2026-09-29, after the AD audit scorecard (`docs/models.md`) and a
-discussion of how LoomCtx compares with other graph-based retrieval. These
-are **post-talk** items (the talk is 2026-10-21; keep `main` stable until
-then). Each item states the problem, the evidence, a design that fits the
-architecture, the files to touch, and how to know it worked. Take them in
-order: item 0 decides whether items 1 and 2 are urgent.
+Rewritten 2026-10-14, after the full 10k/500k AD scorecard (`docs/models.md`).
+The first version of this file (2026-09-29) asked whether LoomCtx holds up at
+half a million objects. It does, and the answer reshapes what comes next.
+These are **post-talk** items (the talk is 2026-10-21; until then the only
+work is merging `scale-xl` once the GKE test lanes and the retrieval
+scorecard pass). Each item gives the problem, the evidence, a design that
+fits the architecture, and how to know it worked.
 
 House rules still apply to all of it (`CLAUDE.md`):
 - Docker only; run test suites on GKE (`secrets/gke/run-tests.sh TAG`, local
@@ -17,270 +18,347 @@ House rules still apply to all of it (`CLAUDE.md`):
   drift-checks them. Regenerate the TS SDK types too.
 - Every derived fact carries citations. Domain specifics go in the schema
   registry, never in core code.
-- `ad_eval` must stay 11/11. Re-run the AD audits
-  (`agent_eval_ext`, 5 tasks) and the retrieval scorecard
-  (`retrieval_eval`) after any read-path change, and read every changed
-  verdict by hand.
+- `ad_eval` must stay 11/11. After any read-path or tool-surface change,
+  re-run the AD audits (`agent_eval_ext`: the five standard audits are the
+  headline, the three harder ones are reported separately, both with and
+  without named queries) and the retrieval scorecard (`retrieval_eval`), and
+  read every changed verdict by hand. No change is accepted on cost or speed
+  alone if the standard audits' pass rate drops.
 
 ---
 
-## 0. Measure first: a 500k-object directory
+## Where we stand
 
-**Why.** Nothing above ~13.5k directory objects has been measured for query
-latency. Two measured points (`docs/ad-eval.md`, 31k → 98k observations)
-show scope-walk p50 growing ~2.2× for 3.1× the data, while find_path barely
-moves and the entities a walk gathers stay flat (~920 → ~979). Extrapolating
-37× gives scope walks of roughly 10–20 s p50 and 30–60 s p95. That is an
-estimate, not a measurement.
+**Done since 2026-09-29** (designs and measurements in `docs/decisions.md`):
+
+| Was | Status |
+| --- | --- |
+| 0. Measure a 500k-object directory | Done. 370,000 users, 55,000 groups, 75,000 computers, 6.5M facts (D-104). |
+| 2. List mode for large answer sets | Done, D-107 (`list_entities`, `POST /v1/list`); `within` filters, routes and paging, D-110. |
+| 3. Named queries in the registry | Done, D-108 (`run_query`, `POST /v1/query`; LDAP registers seven). |
+| 4. Schema-drafting helper | Done, D-106 (`python -m loomctx.registry draft`). |
+| 7. Harder benchmark tier | First cut, D-113 (access, local admin, Kerberoastable admins). |
+| Faster bulk import | Done, D-105: 10k 173 s → 39 s, 500k 2 h 18 m → 49 min. |
+| 500k latency tails | Fixed, D-111 and its addenda: SQL-ranked filters, the label-index pin, `contains` seeded from the index. |
+
+**What the 2026-10-14 run measured** (35 models × 5, one build, named queries
+on unless noted):
+
+| | 10,000 accounts | 500,000 objects |
+| --- | --- | --- |
+| Standard audits passed | 93% | 92% |
+| Standard, named queries off | 90% | 90% |
+| Harder audits passed | 81% | 81% |
+| Median time per standard audit | 21 s | 23 s |
+| Agent steps per standard audit | 5.7 | 5.7 |
+| Input tokens per standard audit | 58.5k | 58.9k |
+
+Accuracy, steps and tokens are flat across 37× the data, so read-path scale
+is no longer the bottleneck. What remains is:
+
+- what an agent pays per question (input tokens);
+- a few slow listings over very large groups;
+- the scale shape that has never been measured (Postgres);
+- the size of the store.
+
+The items below are ordered by how much each buys.
+
+---
+
+## 1. Cut what an agent reads on every turn (biggest cost lever)
+
+**Evidence.** Agents pay mostly for input, and at 500k a standard audit
+reads ~59k input tokens. In the 500k transcripts (named queries on, 1,371
+runs, 7.7 tool calls a run), the tool results add up to only ~20k characters
+a run (median), about 5k tokens. The rest is resent on every turn:
+
+- the tool definitions: 14 tools, 18,263 characters of names, descriptions
+  and input schemas, about 4.6k tokens;
+- the server instructions: 2,590 characters;
+- the growing history.
+
+Over ~6 turns that fixed prefix alone is roughly half of an audit's input.
+
+Largest definitions:
+
+| Tool | Characters |
+| --- | --- |
+| `list_entities` | 2,877 |
+| `ask_scope` | 2,354 |
+| `find_path` | 2,276 |
+| `record_claim` | 2,123 |
+| `purple_report` | 1,341 |
+
+`record_claim`, `purple_report` and `answer` together are 23% of the
+definitions and are almost never called in read-only audits (`answer` 0.01
+calls a run, the other two never).
+
+**Design.**
+- **Tool profiles.** `LOOMCTX_MCP_TOOLS=read` (the default for a read-only
+  key) exposes the eleven read tools; `full` adds `record_claim`, `answer`
+  and `purple_report`. A read-only key already cannot write; this makes the
+  advertised surface follow it, so a read-only agent never pays for the
+  write tools' schemas.
+- **Shorter descriptions, same meaning.** Move worked examples and edge
+  cases out of tool descriptions into the server instructions, said once.
+  Collapse repeated parameter docs (`namespace`, `budget`, `as_of`,
+  `valid_at` appear in most tools) into one shared sentence. Target: ≤10k
+  characters for the read profile.
+- **Careful: wording moves accuracy.** D-064's phrasing change took one task
+  from 9 to 30 passes across 18 models. So every cut is A/B-tested on the
+  five standard audits at 10k, 35 models × 3, before it ships, and reverted
+  if the pass rate drops by more than run-to-run noise (~1 point).
+
+**Done when.** Input tokens per standard audit drop by ≥25% (59k → ≤44k)
+with the standard pass rate unchanged.
+
+---
+
+## 2. A tiered `describe_namespace`
+
+**Evidence.** `describe_namespace` is **39% of everything agents read from
+tools** at 500k: 9.8k characters a call, called in 89% of runs, usually
+first or second. It lists every type, every predicate with counts and
+object types, every named query and every not-collected topic, and most of
+that is irrelevant to the question being asked.
+
+**Design.**
+- The default response becomes a summary:
+  - entity types with counts;
+  - the ten most-used predicates per type;
+  - named queries by name and one line each;
+  - not-collected topics by name;
+  - a total for what was left out.
+  Target: under 2.5k characters.
+- `describe_namespace(namespace, type="user")` or `predicate="member_of"`
+  returns the full detail for just that slice, in the format it has today.
+- Contract: the response keeps its shape, and the summary sets a
+  `truncated`-style field saying what to ask for next. This needs a
+  decisions entry.
+
+**Done when.** `describe_namespace` drops below 10% of tool output with no
+loss on the standard audits (the agents that need a predicate should ask for
+its slice).
+
+---
+
+## 3. Measure Postgres at 500k (the scale shape nobody has run)
+
+**Evidence.** Every 500k measurement so far ran on SQLite, one file per
+engine. The shape we tell people to deploy at scale is Postgres with
+pgvector on CloudNativePG (`deploy/k8s`, `scale-pg-ha`), validated only on
+the 542k-observation vulnerability corpus (83 ms p50 asks, 186 asks/s,
+2026-09-27). The SQLite-specific fixes (statistics, the `INDEXED BY` pin,
+D-104 and D-111) have Postgres counterparts that have only been run by
+unit tests.
 
 **Do.**
-- Add an `xl` preset to `SCALES` in `src/loomctx/connectors/ad_gen.py`, e.g.
-  370k users, 55k groups, 75k computers (≈500k objects, ≈5M observations).
-  Keep the planted objects' RIDs clear of the generated range (they sit at
-  95000+ today; move them above the new range).
-- Also generate **realistic answer sizes**. A second preset should plant
-  ~200 effective Domain Admins and ~100 unconstrained-delegation hosts, so
-  the list-sized-answer problem (item 2) shows up.
-- Run `ad_eval` (blind, with latency p50/p95) and the five AD audits with one
-  or two fast models (`gemini-2.5-flash`, `gpt-6-luna`) as GKE Jobs. Load
-  directly into the store, not through HTTP: 1.59M identity observations
-  took ~4,900 s through the gateway.
-- Record the results in `docs/ad-eval.md` next to the medium and large rows.
+- Load `xl2` into CNPG through the bulk path (D-105) and record the import
+  time. Postgres should use `COPY`; if it doesn't yet, that is part of item
+  6.
+- Replay the 500k tool calls from the full run against it (item 4's
+  harness) and run the model-free probe (`secrets/gke/final_probe.py`).
+- Run one slice of the scorecard (8 models × 3, standard audits) to confirm
+  accuracy is the same as on SQLite.
 
-**Decides.** If walk p95 is above ~10 s, do item 1. If the audits fail on
-the step cap or on truncated sets, do item 2.
+**Done when.** p95 per tool at 500k on Postgres is within 2× of SQLite on
+one node, with the same probe answers. Any plan regressions get the
+Postgres counterpart of the SQLite fix.
 
 ---
 
-## 1. Precompute transitive membership (walk cost at scale)
+## 4. A replay benchmark as a standing check (no LLM spend)
 
-**Problem.** "Effective members of Domain Admins" is answered by walking
-`member_of` at read time (`resolve_scope_paths` → `_walk_scope` in
-`src/loomctx/context.py`). Cost grows with the neighbourhood, and hubs (a
-Domain Users with hundreds of thousands of members) are skipped by design
-(`_hub_carriers`, `_HUB_EDGE_LIMIT`), so an answer that runs through one
-comes back partial.
+**Evidence.** The full run's worst calls (minutes to an hour) were I/O
+contention on shared nodes plus one slow path. Replaying the 60 slowest
+distinct calls on one machine took ≤8.8 s each after the fix; the model-free
+probe found four inexact answers at the old 200,000 candidate cap. Both were
+cheap to run and found real bugs, but they are one-off scripts in
+`secrets/gke/stores/`.
 
 **Design.**
-- Registry: add `transitive: bool` to `PredicateDef` (`contracts.py`, next to
-  `containment` / `label` / `display`). LDAP, Entra and Okta mark
-  `member_of`. This is a contract change, so it needs a decisions entry. Keep
-  it domain-agnostic: the engine closes any predicate marked transitive.
-- Storage: a derived table, **not** observations (observations are
-  source-attested and append-only; a closure is computed). Model it on
-  dossiers (`put_dossier`, `get_dossier` and `dossier_candidates` in
-  `store/base.py`, `refresh_dossiers` in `enrich.py`). Each row holds
-  namespace, subject, predicate, the reached object, hop count, the
-  observation ids along the chain (its citations), and the chain's validity
-  window (the intersection of the edges' `valid_from` / `valid_to`). This
-  needs a schema version bump (currently 9, in both `sqlite.py` and
-  `postgres.py`) and an index on (namespace, predicate, object) for
-  "who reaches X".
-- Maintenance: a new enrichment job in `tick()` (`enrich.py`, selected via
-  `parse_jobs`). It recomputes closures for subjects whose transitive edges
-  changed since a watermark (`recorded_at`), the same way dossiers find
-  their candidates. Supersession and redaction of an edge must invalidate
-  every closure row that cites it.
-- Read path: when a scope asks for a transitive predicate and the request
-  is *current* (`valid_at` and `as_of` unset), answer from the closure table
-  with one indexed lookup, citing the chain's observations. Time-travel
-  requests fall back to the walk. That keeps v1 correct without making the
-  closure fully bitemporal.
-- MCP and HTTP need no new tool: `ask_scope` and `find_path` use it
-  transparently. The pack's items should still show the path
-  ("dkim → CORP-Tier0-Admins → Domain Admins"), cited.
+- `python -m loomctx.replay TRANSCRIPTS STORE` replays recorded MCP calls
+  in process and reports p50/p95/max per tool, and any call whose answer
+  changed since the last baseline (by row keys and totals, not text).
+- Keep a pinned corpus: the full run's distinct calls at 10k and 500k, plus
+  the probe cases.
+- Run it as a GKE Job on each candidate build, one store per node, so
+  contention doesn't pollute the numbers.
 
-**Done when.** At the `xl` preset, "effective members of group X" is under
-1 s at p95. `ad_eval` stays 11/11, the AD audits hold, and a membership
-removal (superseding observation) drops the derived row on the next tick.
-Add tests in `tests/test_store.py` (both lanes) and `tests/test_scope.py`.
-
-**Risks.** Closure size (users × groups reached) can be large. Cap it per
-subject and record the cap in the pack's `truncated`, the same way
-`_record_scope_cap` does. Cycles in nesting are legal in AD, so compute
-closures with a visited set.
+**Done when.** A build that slows any replayed call past 10 s at 500k, or
+changes an answer, is flagged before a model run is spent on it.
 
 ---
 
-## 2. List mode for large answer sets
+## 5. The remaining slow listings: precomputed membership
 
-**Status (2026-10-13): built, D-107** (`POST /v1/list`, MCP `list_entities`).
-It is a separate read, not a pack item; paging is by offset over a key-sorted
-set rather than a signed handle, and filters read current values set-wise
-(index seeds, one-side edge reads, predicate range scans). The "done when"
-measurement rides the next 10k/500k run.
+**Evidence.** From the model-free probe at 500k on today's build (one node):
 
-**Problem.** Packs render facts as sentences, which is costly for "list all
-X". In the AD audits most delegation failures were the 20-step cap: models
-walking OUs one call at a time. With 200 correct answers, prose packs cannot
-carry the set inside a budget.
+| Listing | Time | Result |
+| --- | --- | --- |
+| Members of the largest group, nested | 7.3 s | 324,958 rows, exact |
+| Enabled members of the largest group | 11.5 s | exact |
+| Enabled Domain Admins (`within`) | 3.5 s | 16 |
+| `kerberoastable_users` | 4.5 s | 14,036 |
+| `asrep_roastable_users` | 3.9 s | **0** |
+
+Agents mostly ask the small questions (the audits' median call is
+sub-second), but the big ones are realistic, and returning zero rows in
+3.9 s says that query scans when it should short-circuit. Look at that
+first; it is probably a missing seed path, not a design problem.
+
+**Design** (the 2026-09-29 item 1, still the right shape):
+- Registry: `transitive: bool` on `PredicateDef`; LDAP, Entra and Okta mark
+  `member_of`. It is a contract change, needs a decisions entry, and stays
+  domain-agnostic: the engine closes any predicate marked transitive.
+- Storage: a derived table, **not** observations (a closure is computed, not
+  attested). Model it on dossiers (`put_dossier`, `dossier_candidates`,
+  `refresh_dossiers`). Each row holds:
+  - subject, predicate, the reached object and the hop count;
+  - the observation ids along the chain (its citations);
+  - the chain's validity window.
+  Index it on (namespace, predicate, object) for "who reaches X". This is a
+  schema version bump on both backends.
+- Maintenance: an enrichment job in `tick()` recomputes closures for
+  subjects whose transitive edges changed since a watermark. Supersession
+  or redaction of an edge invalidates every row that cites it. Cycles are
+  legal in AD, so use a visited set. Cap rows per subject and report the
+  cap like `_record_scope_cap`.
+- Read path: list mode's `within` filters and `of` walks over a transitive
+  predicate read the closure when the request is current (`valid_at` and
+  `as_of` unset). Time-travel requests keep the walk. `ask_scope` and
+  `find_path` can use it the same way. Routes on rows still show the chain,
+  cited.
+
+**Done when.** "Enabled Domain Admins" and "enabled members of X" are under
+1 s at p95 at 500k, `ad_eval` stays 11/11, and a membership removal drops
+the derived rows on the next tick.
+
+---
+
+## 6. A smaller store and a faster import
+
+**Evidence.** The 500k SQLite store is 7.5 GB for 6.5M facts, about
+1.15 KB a fact. The `observations` table is 3.2 GB; indexes are the rest:
+
+| Index | Size | Note |
+| --- | --- | --- |
+| `idx_obs_event` | 0.85 GB | the idempotency key; the event id averages 88 bytes |
+| `idx_obs_subject` | 0.48 GB | |
+| `idx_obs_subject_recorded` | 0.48 GB | likely covers `idx_obs_subject`'s queries |
+| `idx_obs_object` | 0.40 GB | |
+| `idx_obs_recorded` | 0.27 GB | |
+
+Ids are 32-character text in every row and every index (`id`,
+`subject_id`, `object_entity_id`), and timestamps are ISO strings. The
+import runs at ~2,200 facts/s (49 min at 500k), 2.8× faster than before
+D-105 but still the one cost that grows with the data.
 
 **Design.**
-- A compact paged listing. Either a new pack item kind (`ContextItem.kind`
-  is a `Literal` in `contracts.py`) or, cleaner, a new read: MCP tool
-  `list_members` / HTTP `POST /v1/list`. Given a scope (subjects plus a
-  predicate, or a registered attribute filter such as
-  `unconstrained_delegation = true`), it returns:
-  `{total, rows: [{ref, name, citation}], next: handle}`.
-  - Each row costs a few tokens: the display name (`display_predicates`)
-    plus one citation id.
-  - The budget still applies, and `total` is always exact, so the agent
-    knows how much it has not seen.
-  - Pages continue through a signed handle (`encode_handle`), like `expand`.
-- Carriers of a rare attribute are already counted before they are loaded
-  (`_rare_carriers`, `edges_to_carriers`), so the count is cheap.
-- Contract change: decisions entry, regenerated contracts, a `TOOL_META`
-  entry in `mcp_server.py` (read-only, idempotent), and a line in the MCP
-  instructions telling agents to list, not walk, when they need a set.
+- Store a 16-byte digest of `event_id` for idempotency; keep the original
+  only where provenance needs it.
+- Check every query plan that uses `idx_obs_subject`; drop it if
+  `idx_obs_subject_recorded` serves them.
+- Next, the larger change (schema v10, with a migration): integer surrogate
+  keys for observations and entities, with the text ids kept as unique
+  external handles; integer epoch timestamps.
+- Import: parse and build claims in parallel workers feeding one writer;
+  `COPY` on Postgres; indexes built after a bulk load at any size (today
+  only into an empty store).
 
-**Done when.** The `xl` many-admins audit passes with a fast model inside
-the 20-step cap, and the default-size AD audits don't regress.
+**Done when.**
+- The 500k store is under 4 GB.
+- The 500k import is under 15 minutes.
+- Read latency is unchanged in the replay benchmark (item 4).
 
 ---
 
-## 3. Named queries in the schema registry (weaker models ask poorly)
+## 7. Concurrency at 500k
 
-**Status (2026-10-13): built, D-108** (`run_query`, `POST /v1/query`; the
-LDAP connector registers seven). Queries compile to list mode only, so far.
-The "done when" measurement rides the next run, reported with and without
-them (`LOOMCTX_MCP_QUERIES=0`).
+**Evidence.** Every 500k measurement ran one agent per store at a time. The
+Kubernetes numbers (186 asks/s) are from the 542k-observation vuln corpus
+with short asks. A shared deployment serves many agents at once.
 
-**Problem.** Scorecard spread is partly phrasing: D-064's phrasing fix took
-the exposure task from 9 to 30 passes across the eighteen models tested.
-Models that hit the step cap mostly didn't know which one call answers the
-question.
+**Do.** Replay the 500k calls (item 4) at concurrency 8, 32 and 128 against:
+- one engine on SQLite;
+- the autoscaled engines on Postgres (item 3).
 
-**Design.**
-- Let a `SchemaRegistration` declare named queries. For example,
-  `effective_members(group)` = scope over `member_of`, transitive, reverse;
-  `hosts_with(attribute, value)` = list mode over carriers.
-  - This is configuration, not core code, so it obeys "domain specifics go
-    in the registry".
-  - `describe_namespace` lists them, with a one-line description each.
-- The MCP server exposes one generic tool, `run_query(name, args)`, rather
-  than a tool per query. That keeps the tool list stable across namespaces.
-- Queries compile to the existing requests (`ask_scope`, find_path, list
-  mode). No new retrieval logic.
+Record p95 per tool and throughput, and watch for lock contention on SQLite
+writes during reads (enrichment running).
 
-**Done when.** A model that currently fails an AD audit on the step cap
-(`gemini-3.5-flash`, `gemini-3.8-flash` on delegation) passes it with the
-named query available.
-
-This is the lightest item. It could land before the talk if a demo moment
-is wanted, but it isn't needed.
+**Done when.** The numbers are in `deploy/README.md` with a sizing note
+(agents per engine at 500k).
 
 ---
 
-## 4. Schema-drafting helper (a new source needs connector work)
+## 8. Where named queries cost points
 
-**Status (2026-10-13): done, D-106.** `python -m loomctx.registry draft`
-(`loomctx/schema_draft.py`) drafts from envelope NDJSON, JSON records or
-LDIF. It has no LLM step. The overlap with the hand-written registrations
-is measured in D-106.
+**Evidence.** Named queries add 2 points on the standard audits at 500k (92%
+vs 90%), but not everywhere:
 
-**Problem.** Each new domain needs registered entity types and predicates.
-That is what makes packs precise, but it costs a day of connector work.
+| Audit | Named queries on vs off |
+| --- | --- |
+| Delegation | +12 points |
+| Cross-domain admins | +8 |
+| Kerberoastable admins | +6 |
+| Coverage | −6 |
+| Nested groups | −3 |
 
-**Design.**
-- A CLI, `python -m loomctx.registry draft SAMPLE`, that reads a sample
-  export (JSON, NDJSON or LDIF) and proposes a `SchemaRegistration`:
-  - entity types from record kinds;
-  - predicates from fields;
-  - `object_types` where a field references another record;
-  - `label` / `display` candidates from name-like fields.
-- An LLM may help name things, but its output is a **draft file for human
-  review**, never auto-registered.
-- Point people at OCSF and STIX first: anything that already emits those
-  loads through `connectors/ocsf.py` and `connectors/stix.py` without new
-  work.
+One cause is already fixed: four Gemini 2.5 Flash groups failures were a
+guessed handle that `of` didn't resolve (now it does, D-111 addendum).
 
-**Done when.** Drafting against the Entra and Okta generator output
-(`connectors/iam_gen.py`) reproduces most of the hand-written registration
-in `connectors/iam_schema.py`.
+**Do.**
+- Read the coverage and groups failures that pass with queries off and fail
+  with them on.
+- Check that `run_query` results carry the same notes a `list_entities`
+  call does:
+  - the coverage-gap note for an entity from an export that never collected
+    membership;
+  - the direction note;
+  - the "matched by name" note.
+- Fix the engine or the query's description, never the scorer.
 
----
-
-## 5. Entity resolution review queue (managed, never solved)
-
-**Problem.** Deciding that `web-01`, `WEB-01.corp.local` and an IP are one
-host is the stage where graph systems quietly fail. LoomCtx resolves by
-natural key → alias → embedding → LLM adjudication (`resolve_entities`,
-`resolve_identities`, `adjudicate_entities` and `adjudicate_aliases` in
-`enrich.py`). Merges are recorded and reversible (`merge_entities` /
-`unmerge` / `mark_distinct` in `store/base.py`).
-
-**Improve.**
-- Prefer hard identifiers first, everywhere: SIDs, objectGUIDs, cloud
-  resource ids. `identity.py` does this for identities; extend the pattern
-  to hosts (MAC, cloud instance id, cert fingerprint).
-- A review queue: adjudications below a confidence threshold are held as
-  *proposed* merges instead of applied, surfaced through an admin endpoint
-  (`docs/administration.md`), and approved or declined by a person.
-  Declines already exist (`_decline` / `remember_decline`).
-
-**Done when.** A seeded set of near-duplicate hosts produces proposals, not
-silent merges, below the threshold. Existing merge metrics
-(`docs/evaluation.md`, alias merges) don't regress.
+**Done when.** With named queries on, no audit scores below its queries-off
+result by more than noise.
 
 ---
 
-## 6. Theme summaries over documents (optional; off the core job)
+## 9. Benchmarks that hold us honest
 
-**Problem.** "What are the recurring themes across our incident reports?"
-is GraphRAG's home turf. LoomCtx answers about entities, not themes.
-
-**Design.**
-- An optional enrichment job clusters the document chunks LoomCtx already
-  embeds (`nearest_chunks`, `doc_chunks_for_artifacts`).
-- An LLM writes a short summary per cluster.
-- Each summary is stored as a derived, cited artifact whose citations are
-  the chunks.
-- Serve it through `find_related` or a scope over a `theme` entity type.
-- LLM cost is paid at enrichment, never at read time.
-
-**Only if users ask.** It is useful, but it isn't what LoomCtx is for.
+- **The rest of the harder tier** (from the old item 7): cross-source joins
+  (an identity's AD groups against its Entra/Okta roles; a vulnerable host
+  reachable by an account with an ACE path) and time (who was a Domain Admin
+  on a past date, `as_of`). Keep them reported apart from the standard five.
+- **Non-synthetic directory data.** Everything at 500k is generated. Export
+  a public lab (for example GOAD, Game of Active Directory) through the LDAP
+  connector and run the standard audits' question types against it with
+  hand-written truth. It is small, but it is real AD with real quirks.
+- **A cost column per model at 500k on the site**, from the same runs.
 
 ---
 
-## 7. A harder benchmark tier (tougher questions)
+## 10. Carried over, unchanged
 
-**Status (2026-10-13): first cut, D-113** — access (nested admins with rights
-over a workstation), localadmin (not collected), kerberoast (enabled nested
-admins with SPNs), with the engine features they need (D-110: `within`
-filters, routes, not-collected declarations). Cross-source and `as_of`
-questions remain.
-
-**Problem.** The AD audits ask one thing each: a group's members, the
-delegation hosts, the trusts. Nineteen models pass all five; the scorecard
-no longer separates the strong ones, and real audits combine conditions
-across sources.
-
-**Design.** A second tier in `agent_eval_ext`, same forests and scorers'
-style (truth from the generator, hand-read failures before publishing):
-- **Multi-condition sets**: enabled members of a privileged group (nested)
-  that are also Kerberoastable; delegation hosts whose owner group has a
-  disabled-account member.
-- **Cross-source joins**: an identity's AD groups against its Entra/Okta
-  roles (D-099 resolution), or a vulnerable host (OSV/nmap) reachable by an
-  account with an ACE path to it.
-- **Time**: who was a Domain Admin on a past date (`as_of`), and who was
-  removed since.
-- **Negatives and coverage**: a question whose honest answer is "not
-  collected" for one domain and a list for another.
-Each task reports pass, steps, tokens and time, and runs with and without
-named queries.
-
-**Done when.** The tier separates the current 25/25 models, and the plain
-tier's results are unchanged.
+- **Entity resolution review queue** (was item 5): hold low-confidence
+  adjudications as proposed merges for a person to approve; extend hard
+  identifiers (MAC, cloud instance id, certificate fingerprint) to hosts.
+- **Theme summaries over documents** (was item 6): optional, LLM at
+  enrichment only, and only if users ask.
 
 ---
 
 ## Suggested order
 
-1. Item 0 (measure).
-2. Then items 1 and 2 if the numbers call for them; together they address
-   everything the 500k-object discussion raised.
-3. Item 3 whenever a model-facing improvement is wanted.
-4. Items 4 and 5 when a new data source or a merge problem makes them
-   concrete.
-5. Item 6 only on demand.
+1. **Before the talk:** merge `scale-xl` after the GKE test lanes and the
+   retrieval scorecard pass. Nothing else.
+2. **Items 1 and 2** first. They are cheap, they cut what every agent pays
+   on every question, and they are measured on the standard audits.
+3. **Item 4**, so every later change is checked for speed and answers
+   without spending on models.
+4. **Item 3** (Postgres at 500k), then **item 7** (concurrency) on top of
+   it. Together they turn "it scales" into a sizing guide.
+5. **Item 6** (store size and import), then **item 5** (precomputed
+   membership) if the replay benchmark still shows the large listings above
+   target.
+6. **Item 8** alongside, since it is reading transcripts more than writing
+   code. Then **item 9**. Item 10 only on demand.
