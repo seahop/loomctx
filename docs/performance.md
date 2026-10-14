@@ -71,6 +71,44 @@ the 500k store, one machine, cold:
 Before the fix, on the shared GKE node, the two largest listings stopped at
 the 200,000-candidate cap (inexact) after 56 s and 29 s.
 
+## Postgres vs SQLite at 500k (2026-10-14, model-free, database idle)
+
+Same build (ca15cbb), same forest, before any agent ran. Postgres 17 +
+pgvector on its own n2-highmem-8 (64 GB, pd-ssd), reached over the cluster
+network. SQLite a local file on an n2-highmem-8 (store in page cache). Each
+backend probed by one job with 1 vCPU.
+
+Replay of 643 recorded agent calls (the 500k run's 60 slowest plus up to 70
+per tool), ms:
+
+| Tool | SQLite p50 / p95 / max | Postgres p50 / p95 / max |
+| --- | --- | --- |
+| `list_entities` | 20 / 4,259 / 5,317 | 411 / 6,652 / 8,593 |
+| `run_query` | 4 / 5,039 / 5,326 | 42 / 8,667 / 8,926 |
+| `ask_scope` | 484 / 5,713 / 6,674 | 546 / 3,002 / 3,876 |
+| `ask` | 434 / 717 / 1,385 | 445 / 847 / 1,406 |
+| `find_path` | 5 / 149 / 775 | 33 / 185 / 2,514 |
+| `find_entity` | 1 / 2 / 4 | 33 / 64 / 410 |
+| `find_related` | 329 / 1,119 / 1,190 | 343 / 1,375 / 2,349 |
+| all calls | 4 / 1,385 / 6,674 | 38 / 3,367 / 8,926 |
+
+Probe, cold (s): members of the 325k group 30.8 vs 26.5; enabled members
+of it 14.6 vs 36.9; enabled members of the 110k group 8.3 vs 22.0; enabled
+Domain Admins 4.0 vs 6.5; Kerberoastable users 4.9 vs 8.1; type listing of
+75,005 computers 0.26 vs 0.42; the small named queries 0.01 vs 0.03–0.05.
+
+Answers: every probe total and every exact listing (`list_entities`,
+`run_query`, `find_path`) agreed. Of 643 replayed calls, 81 differ only
+because they cite SQLite's observation ids or signed handles, which do not
+exist in the Postgres store (ids are minted at load), and 28 budgeted packs
+chose a different subset of equal-scoring facts (tie-breaks use those ids).
+None disagreed on a total.
+
+Reading: point lookups pay a network round trip on Postgres (1 → 33 ms);
+scans and closures over hundreds of thousands of rows are 1.5–2.5× slower
+there; scoped packs are as fast or faster. Precomputed membership
+(future-work item 5) and set-based reads are where Postgres gains most.
+
 ## Imports
 
 Through the LDAP connector, as a user loads data:
@@ -106,10 +144,8 @@ Reducing this is future-work item 6.
 
 ## Pending
 
-- Postgres at 500k: the replay sample (643 recorded calls) and the probe,
-  on Postgres and SQLite on the same build and hardware, with the database
-  idle, then the model sweep's tool latencies with 16 agents sharing one
-  database (the 2026-10-14 run).
+- The 2026-10-14 model sweep's tool latencies with 16 agents sharing one
+  Postgres database, against SQLite's private copies.
 - The batched Postgres writer's 500k import, same machine.
 - A standing replay benchmark on each candidate build (future-work item 4).
   When it exists, it writes its table here.
