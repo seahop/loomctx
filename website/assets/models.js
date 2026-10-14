@@ -89,18 +89,26 @@
       out.push('<line style="stroke:var(--line);stroke-width:1" x1="' + L + '" x2="' + (W - R) + '" y1="' + (T + (i + 1) * ROW) + '" y2="' + (T + (i + 1) * ROW) + '"/>');
       out.push('<text style="fill:var(--ink-2);font:500 10.5px var(--f-mono)" x="' + (L - 12) + '" y="' + (cy + 4) + '" text-anchor="end">' + key + (ms[0].incomplete ? "*" : "") +
                '  <tspan style="fill:var(--muted);font:500 10.5px var(--f-mono)">(' + ms.length + ")</tspan></text>");
-      var placed = [];
-      ms.forEach(function (m) {
-        var px = x(m.cost), dy = 0;
-        [0, -9, 9, -18, 18].some(function (o) {
-          if (!placed.some(function (p) { return p[1] === o && Math.abs(p[0] - px) < 10; })) { dy = o; return true; }
-          return false;
-        });
-        placed.push([px, dy]);
-        var t = tier(m);
-        out.push('<circle cx="' + px + '" cy="' + (cy + dy) + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
-        hits.push('<circle style="fill:transparent" cx="' + px + '" cy="' + (cy + dy) + '" r="8" data-tip="' + esc(m.id + " · " + m.passes + "/" + m.scored + " · " + money(m.cost) + " a run") + '"/>');
-      });
+      // dots that would touch spread sideways along the row, centred on
+      // their costs, so every dot of a row stays on its line
+      var GAP = 10, runs = [];
+      ms.forEach(function (m) { runs.push({ ms: [m], at: x(m.cost), sum: x(m.cost) }); });
+      for (var merged = true; merged;) {
+        merged = false;
+        for (var k = 0; k + 1 < runs.length; k++) {
+          var a = runs[k], b = runs[k + 1];
+          if (a.at + (a.ms.length - 1) * GAP + GAP > b.at) {
+            var ms2 = a.ms.concat(b.ms), sum = a.sum + b.sum;
+            runs.splice(k, 2, { ms: ms2, sum: sum, at: sum / ms2.length - (ms2.length - 1) * GAP / 2 });
+            merged = true; break;
+          }
+        }
+      }
+      runs.forEach(function (r) { r.ms.forEach(function (m, j) {
+        var px = r.at + j * GAP, t = tier(m);
+        out.push('<circle cx="' + px + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
+        hits.push('<circle style="fill:transparent" cx="' + px + '" cy="' + cy + '" r="8" data-tip="' + esc(m.id + " · " + m.passes + "/" + m.scored + " · " + money(m.cost) + " a run") + '"/>');
+      }); });
     });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     svg.innerHTML = out.join("") + hits.join("");
