@@ -24,6 +24,12 @@ House rules still apply to all of it (`CLAUDE.md`):
   without named queries) and the retrieval scorecard (`retrieval_eval`), and
   read every changed verdict by hand. No change is accepted on cost or speed
   alone if the standard audits' pass rate drops.
+- **Named queries are a shortcut, never a requirement.** A person must be
+  able to ask about any data with the general tools (`ask`, `ask_scope`,
+  `find_path`, `list_entities`) and get something useful and true back. So
+  the **queries-off** result is the floor: every change must hold or raise
+  it, and an improvement that only shows up with named queries on doesn't
+  count as a fix for general questions.
 
 ---
 
@@ -291,35 +297,41 @@ writes during reads (enrichment running).
 
 ---
 
-## 8. Where named queries cost points
+## 8. General questions first: the coverage and nested-groups gap
 
-**Evidence.** Named queries add 2 points on the standard audits at 500k (92%
-vs 90%), but not everywhere:
+**Evidence.** At 500k, coverage fails 22 times with named queries on and 12
+with them off, and nested groups 14 against 9. Reading those runs, **most of
+the gap is not `run_query`**: the extra failures mostly never called it.
 
-| Audit | Named queries on vs off |
-| --- | --- |
-| Delegation | +12 points |
-| Cross-domain admins | +8 |
-| Kerberoastable admins | +6 |
-| Coverage | −6 |
-| Nested groups | −3 |
+| Cause | Runs | What happened |
+| --- | --- | --- |
+| Llama 4 Maverick | +5 coverage, +4 groups | Writes tool calls as plain text on OpenRouter's route, so it fails either way and the arms differ by chance |
+| Gemini 2.5 Flash | +4 groups | Guessed `user:mreyes@corp.local`; `list_entities` said "not on record" and it stopped. Fixed after the run: `of` resolves names (D-111 addendum) |
+| Qwen3-Coder | +3 coverage | Used `ask`, invented "Domain Users" and "Backup Operators" from the account's name, and cited the account's real `enabled` and `sam` facts as support. The data has no membership for it; the scorer was right |
+| GLM-4.6V | +4 groups | `ask_scope` over `member_of` at the default depth reached 3 of 5 groups. The pack said "the walk stopped at depth 1 … depth=2 walks one hop further"; the model ignored it |
 
-One cause is already fixed: four Gemini 2.5 Flash groups failures were a
-guessed handle that `of` didn't resolve (now it does, D-111 addendum).
+Two models went the other way (GLM-5.3 Flash −5 and Command A+ −3 on
+groups with queries on), which is why the net gap is smaller than the sum.
 
 **Do.**
-- Read the coverage and groups failures that pass with queries off and fail
-  with them on.
-- Check that `run_query` results carry the same notes a `list_entities`
-  call does:
-  - the coverage-gap note for an entity from an export that never collected
-    membership;
-  - the direction note;
-  - the "matched by name" note.
-- Fix the engine or the query's description, never the scorer.
+- **Containment walks follow the chain.** For a predicate registered as
+  containment (`member_of`, `contains`), `ask_scope` should walk to the end
+  of the chain by default, within the existing caps, instead of one hop.
+  Where a cap or an explicit depth stops it, the note should say how much
+  is left ("member_of continues 3 more levels, 3 more groups"), not just
+  that it continues. A count is harder to ignore than a hint.
+- **Citations must support the claim.** Qwen3-Coder's answer cited real
+  observations that say nothing about membership. The faithfulness check
+  (seen, not invented) cannot catch that. Add a scorer check that each
+  claimed membership's citation is a `member_of` row, and report it. It is
+  a failure of the model, not the engine, but it belongs in the published
+  numbers.
+- Re-run coverage and groups on the fixed build, queries off first (the
+  floor), then on.
 
-**Done when.** With named queries on, no audit scores below its queries-off
-result by more than noise.
+**Done when.** Queries-off coverage and groups are at or above their
+queries-on results, and the GLM-4.6V-style partial walk can't happen on a
+default `ask_scope`.
 
 ---
 
@@ -356,9 +368,13 @@ result by more than noise.
 3. **Item 4**, so every later change is checked for speed and answers
    without spending on models.
 4. **Item 3** (Postgres at 500k), then **item 7** (concurrency) on top of
-   it. Together they turn "it scales" into a sizing guide.
+   it. Together they turn "it scales" into a sizing guide. Postgres is what
+   a scale deployment runs, so its numbers are the ones to publish; if time
+   allows, its model-free half (load, replay, probe) can run before the
+   talk.
 5. **Item 6** (store size and import), then **item 5** (precomputed
    membership) if the replay benchmark still shows the large listings above
    target.
-6. **Item 8** alongside, since it is reading transcripts more than writing
-   code. Then **item 9**. Item 10 only on demand.
+6. **Item 8** right after items 1 and 2: the containment-walk fix is
+   small and serves every general question. Then **item 9**. Item 10 only
+   on demand.
