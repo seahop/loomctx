@@ -144,7 +144,7 @@
       core: { rows: models, what: "four-task run" },
       ad: { rows: (D.ad ? D.ad.models : []).filter(function (m) { return m.secs != null; }).map(function (m) {
         return Object.assign({}, m, { passes: m.passed[0], scored: m.passed[1], rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0 });
-      }), what: "five-audit run" }
+      }), what: "eight-audit run" }
     };
     var TIME_TICKS = [[15, "15 s"], [30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1200, "20 min"]];
     function draw(view) {
@@ -293,20 +293,25 @@
            ((a.secs == null ? Infinity : a.secs) - (b.secs == null ? Infinity : b.secs));
   }
   var perfect = rows.filter(function (m) { return m.rate === 1 && !m.incomplete; }).length;
+  function share(t) { return t && t[1] ? Math.round(100 * t[0] / t[1]) + "%" : "—"; }
+  var T = A.totals || {};
   document.getElementById("ad-meta").innerHTML = [
     ["models", rows.length], ["perfect", perfect + " at " + (TASKS.length * A.runs) + "/" + (TASKS.length * A.runs)],
     ["runs per model", A.runs + " × " + TASKS.length + " audits"], ["accounts", A.forest.users.toLocaleString("en-US")],
-    ["facts loaded", A.forest.observations.toLocaleString("en-US")], ["whole sweep", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
+    ["facts loaded", A.forest.observations.toLocaleString("en-US")],
+    ["passed at 500k", share(T.xl_on)], ["at 10k", share(T.large_on)], ["500k, no named queries", share(T.xl_off)],
+    ["whole sweep, all four", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
   ].map(function (c) { return "<span><b>" + esc(c[1]) + "</b> " + esc(c[0]) + "</span>"; }).join("");
   var tbody = document.querySelector("#ad-table tbody");
   var state = { key: "passed", dir: -1 };
   function val(m, key) {
     if (key === "name") return m.id;
     if (key === "passed") return (m.incomplete ? -1e6 : 0) + m.rate * 1000 - m.cost / 100;   // partial runs rank last
+    if (key === "passed_10k" || key === "passed_off") { var p = m[key]; return p && p[1] ? p[0] / p[1] : -1; }
     if (TASKS.indexOf(key) >= 0) { var t = m.tasks[key]; return t ? t[0] / t[1] : -1; }
     return m[key] == null ? Infinity : m[key];
   }
-  function cell(t) { return t ? t[0] + "/" + t[1] : "—"; }
+  function cell(t) { return t && t[1] ? t[0] + "/" + t[1] : "—"; }
   function render() {
     var sorted = rows.slice().sort(function (a, b) {
       if (state.key === "passed") return rank(a, b) * -state.dir;
@@ -317,6 +322,7 @@
       return "<tr><td>" + esc(m.name) + (m.note ? ' <span title="' + esc(m.note) + '">†</span>' : "") + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
         m.passed[0] + "/" + m.passed[1] + (m.incomplete ? "*" : "") + "</span></td>" +
+        '<td class="num">' + cell(m.passed_10k) + "</td>" + '<td class="num">' + cell(m.passed_off) + "</td>" +
         TASKS.map(function (t) { return '<td class="num">' + cell(m.tasks[t]) + "</td>"; }).join("") +
         '<td class="num">' + money(m.cost) + "</td>" +
         '<td class="num">' + (m.secs == null ? "—" : Math.round(m.secs) + " s") + "</td></tr>";
@@ -330,7 +336,7 @@
     function go() {
       var key = th.dataset.sort;
       if (state.key === key) state.dir = -state.dir;
-      else { state.key = key; state.dir = (key === "passed" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
+      else { state.key = key; state.dir = (key === "passed" || key === "passed_10k" || key === "passed_off" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
       render();
     }
     th.addEventListener("click", go);

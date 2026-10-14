@@ -404,4 +404,4 @@ footer a { color: var(--ink-2); }
 /* a card's single implicit column must be allowed to shrink, or a scrolling chart inside widens the page */
 .card { grid-template-columns: minmax(0, 1fr); }
 .mb-chart-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; justify-content: space-between; }
-#ad-table { min-width: 900px; }
+#ad-table { min-width: 1240px; }

@@ -13,8 +13,8 @@ Measured 2026-09-28 on OpenRouter: 36 models attempted, 35 scored, five
 full runs each of four tasks (686 scored task-runs, $46), run as GKE Jobs
 against the real corpus — seed hosts plus CISA KEV, NVD and EPSS, 542,100
 observations, embedded — with no hints beyond the MCP server's own
-instructions. A second scorecard, five Active Directory audits on a
-10,000-account forest, is below ([Active Directory audits](#active-directory-audits)).
+instructions. A second scorecard, eight Active Directory audits on 10,000- and
+500,000-object forests (2026-10-14), is below ([Active Directory audits](#active-directory-audits)).
 
 - **Fifteen models pass every task every time.** From a cent per
   four-task run (`google/gemini-2.5-flash`, `openai/gpt-6-luna`) through
@@ -44,10 +44,10 @@ instructions. A second scorecard, five Active Directory audits on a
 
 | If you want… | Use | Why |
 | --- | --- | --- |
-| one model to start with | **`google/gemini-2.5-flash`** | 20/20 here and 25/25 on the AD audits, a cent and 21 s per four-task run, the fastest clean pass |
-| the cheapest current-generation pass | **`openai/gpt-6-luna`** | 20/20 and 25/25 at a cent; `gemini-3.5-flash-lite`, `minimax-m3`, `qwen3.8-flash` and `deepseek-v4.1-flash` are 20/20 at two to four cents |
-| the model for when answers matter or it is on stage | **`anthropic/claude-sonnet-4.5`** | 20/20 and 25/25, 34 cents in 13 steps; `claude-sonnet-5`, `claude-opus-5.5` and `claude-fable-5.1` are also perfect on both, at 47 cents to $2.36, with no gain on these tasks |
-| self-hosted weights | **`deepseek/deepseek-v4.1-flash`** | open weights, 20/20 and 25/25 at four cents on OpenRouter |
+| one model to start with | **`openai/gpt-6-luna`** | 20/20 here and 40/40 on the eight AD audits at both sizes, about a cent a run |
+| the fastest cheap pass | **`google/gemini-2.5-flash`** on simple lookups | 20/20 here at a cent and 21 s, but 19/40 on the AD audits: not for set-valued or combined questions |
+| the model for when answers matter or it is on stage | **`anthropic/claude-sonnet-4.5`** | 20/20 and 40/40 at both AD sizes; `claude-sonnet-5`, `claude-opus-4.8` and `claude-haiku-4.5` are 40/40 at 500k too |
+| self-hosted weights | **`deepseek/deepseek-v4.1-flash`** | open weights, 20/20 and 40/40 on the AD audits at 500k, a few cents on OpenRouter |
 | to avoid | `meta-llama/llama-4-maverick` via OpenRouter (0/20, tool-call format); `gpt-4o`, `qwen3-coder`, `nova-2-lite` (0/5 on the two-hop task) | see the notes under the table |
 
 Model ids age fast. The evidence and the command to re-run it follow.
@@ -191,17 +191,17 @@ context.
 
 ## Recommendation in full
 
-- **Default agent model:** `google/gemini-2.5-flash` — 20/20 and 25/25 on
-  the AD audits, a cent and 21 seconds per four-task run.
-- **Cheapest current-generation:** `openai/gpt-6-luna` (a cent, perfect on
-  both), `google/gemini-3.5-flash-lite` or `minimax/minimax-m3` (two to
-  three cents).
+- **Default agent model:** `openai/gpt-6-luna` — 20/20, and 40/40 on the
+  eight AD audits at 10k and 500k, about a cent a run.
+- **Cheapest fast pass on simple lookups:** `google/gemini-2.5-flash` (a
+  cent, 21 seconds, 20/20 on the core tasks) — but 19/40 on the AD audits,
+  so not for set-valued or combined questions.
 - **When answers matter or the demo is on stage:**
-  `anthropic/claude-sonnet-4.5` — 20/20 and 25/25, 34 cents, fewest steps.
-  `claude-sonnet-5`, `claude-opus-5.5` and `claude-fable-5.1` are perfect
-  on both too, at 1.4 to seven times the cost.
-- **Self-hosted weights:** `deepseek/deepseek-v4.1-flash` — perfect on
-  both at four cents.
+  `anthropic/claude-sonnet-4.5` — 20/20 and 40/40 on the AD audits at
+  both sizes. `claude-sonnet-5` and `claude-opus-4.8` are too;
+  `claude-fable-5.1` misses the Kerberoastable-admins audit (35/40).
+- **Self-hosted weights:** `deepseek/deepseek-v4.1-flash` — 20/20 and
+  40/40 on the AD audits at 500k, at a few cents.
 - **Not on this evidence:** `meta-llama/llama-4-maverick` through
   OpenRouter (tool calls as text); `gpt-4o`, `qwen3-coder` and
   `nova-2-lite` for multi-hop questions (0/5 on the two-hop task);
@@ -217,104 +217,112 @@ a number in a talk.
 ## Active Directory audits
 
 The four tasks above run over one host and its software. Directory
-questions are different work: identity data is wide (thousands of
-accounts, groups nested several levels, a forest of domains), and the
-answer is usually a *set* — every account, every group, every server —
-where a missed member is a wrong answer. So a second scorecard
-(`python -m loomctx.agent_eval_ext`) asks five routine audits of the
-synthetic `ad_gen` forest: `corp.local` with a `dev.local` child domain
-and two external trusts — 10,000 users, 1,500 groups, 2,000 computers,
-137,633 observations — imported through the LDAP connector as one
-forest-wide export, plus a second domain (`lab.local`) exported without
-group membership.
+questions are different work: identity data is wide (accounts, groups
+nested several levels, a forest of domains), and the answer is usually a
+*set* — every account, every group, every server — where a missed member
+is a wrong answer. So a second scorecard (`python -m
+loomctx.agent_eval_ext`) asks eight audits of the synthetic `ad_gen`
+forest: `corp.local` with a `dev.local` child domain and two external
+trusts, imported through the LDAP connector as one forest-wide export,
+plus a second domain (`lab.local`) exported without group membership. It
+ran at two sizes: 370,000 users, 55,000 groups and 75,000 computers
+(6,502,512 observations, "500k"), and 10,000 users, 1,500 groups and
+2,000 computers (175,560 observations, "10k"). The data is synthetic.
 
 | Task | The question | Passes when |
 | --- | --- | --- |
 | **xdomain** | Which `dev.local` accounts are effective members of `corp.local`'s Domain Admins, directly or through nested groups, and is each enabled? | all five named (one direct, one through a parent group, three through a nested child group), the disabled one called disabled, no non-member presented as one |
 | **coverage** | Which groups does a `lab.local` account belong to? | the answer says membership was not collected for that domain (the connector records it as a coverage gap, D-082); a confident "none" or a guessed group fails |
 | **groups** | Every group `mreyes` belongs to, direct and nested | the two direct and three nested groups (the last four levels up), not a group nested *into* one of them or a sibling |
-| **delegation** | Which computer accounts other than domain controllers are trusted for unconstrained delegation? | the three servers among 2,000 computers; a domain controller or the server with *constrained* delegation presented as a finding fails |
+| **delegation** | Which computer accounts other than domain controllers are trusted for unconstrained delegation? | the three servers; a domain controller or the server with *constrained* delegation presented as a finding fails |
 | **trusts** | Each domain `corp.local` trusts: direction, transitive, SID filtering | every partner with all three properties as the export states them |
+| **access** | Which Domain Admins (nested) hold rights over workstation WS-AUDIT01, and through what? | both admins named with their grant (one through a group holding GenericAll, one through a direct WriteDacl); the operator who is no admin and the admin with no grant not presented as findings |
+| **localadmin** | Who is local administrator on WS-AUDIT01? | the answer says local group membership is not in an AD export (declared by the connector, D-110); presenting accounts as its local admins fails. The one audit that may pass without a citation |
+| **kerberoast** | Which enabled Domain Admins, nested included, are Kerberoastable? | the nested admin with an SPN; the disabled admin with one and the non-admin service account with one not presented as findings |
 
-Same harness, caps and faithfulness rule as above (a cited observation
-the model saw, none it did not, no answer without a citation), five runs
-of each task per model, rule-scored, and every failure was read by hand
-before these numbers were taken — scorer misses on formatting (bold
-lead-ins, tables without pipes, a finding split across a heading and its
-bullets) were fixed and every run re-scored, with each verdict that
-changed read again.
+The last three (D-113) combine conditions or ask what the export cannot
+say. Same harness, caps and faithfulness rule as above (a cited
+observation the model saw, none it did not, no answer without a citation
+except as noted), five runs of each audit per model, rule-scored. Every
+failure was read by hand before these numbers were taken; scorer misses
+were fixed, every run re-scored, and each verdict that changed read again.
+Run 2026-10-14 on one build, both forests rebuilt from seed 7, as GKE Jobs.
 
-| Model | Passed | xdomain | coverage | groups | delegation | trusts | Time/run | Cost/run | Not run |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `google/gemini-2.5-flash` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 42 s | $0.01 | 0 |
-| `openai/gpt-6-luna` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 226 s | $0.01 | 0 |
-| `minimax/minimax-m3` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 479 s | $0.05 | 0 |
-| `z-ai/glm-5.3-flash` ³ | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 894 s | $0.05 | 0 |
-| `deepseek/deepseek-v4.1-flash` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 254 s | $0.07 | 0 |
-| `minimax/minimax-m2.7` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 203 s | $0.08 | 0 |
-| `deepseek/deepseek-v4-pro-0813` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 367 s | $0.14 | 0 |
-| `qwen/qwen3.5-plus-20260420` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 384 s | $0.18 | 0 |
-| `openai/gpt-6-sol` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 147 s | $0.20 | 0 |
-| `anthropic/claude-haiku-4.5` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 131 s | $0.48 | 0 |
-| `mistralai/mistral-medium-3-5` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 95 s | $0.62 | 0 |
-| `moonshotai/kimi-k3` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 531 s | $0.73 | 0 |
-| `x-ai/grok-4.7` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 342 s | $0.80 | 0 |
-| `anthropic/claude-sonnet-4.5` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 164 s | $0.84 | 0 |
-| `anthropic/claude-sonnet-5` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 266 s | $0.94 | 0 |
-| `qwen/qwen3.8-max-0902` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 1514 s | $1.35 | 0 |
-| `anthropic/claude-opus-5.5` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 232 s | $2.22 | 0 |
-| `anthropic/claude-opus-4.8` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 227 s | $2.81 | 0 |
-| `anthropic/claude-fable-5.1` | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 333 s | $5.42 | 0 |
-| `qwen/qwen3.8-flash` | 24/25 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 768 s | $0.07 | 0 |
-| `openai/gpt-5.2` | 24/25 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 364 s | $0.60 | 0 |
-| `google/gemini-3.5-flash-lite` | 23/25 | 3/5 | 5/5 | 5/5 | 5/5 | 5/5 | 75 s | $0.05 | 0 |
-| `qwen/qwen3-coder` | 22/25 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 78 s | $0.10 | 0 |
-| `deepseek/deepseek-chat-v3.1` | 20/25 | 3/5 | 4/5 | 5/5 | 3/5 | 5/5 | 798 s | $0.21 | 0 |
-| `z-ai/glm-5.3` | 20/25 | 5/5 | 5/5 | 5/5 | 0/5 | 5/5 | 326 s | $0.41 | 0 |
-| `openai/gpt-4o-2024-05-13` | 20/25 | 0/5 | 5/5 | 5/5 | 5/5 | 5/5 | 88 s | $0.74 | 0 |
-| `mistralai/codestral-2508` | 15/25 | 0/5 | 0/5 | 5/5 | 5/5 | 5/5 | 70 s | $0.01 | 0 |
-| `z-ai/glm-4.6v` | 15/25 | 1/5 | 4/5 | 0/5 | 5/5 | 5/5 | 210 s | $0.05 | 0 |
-| `amazon/nova-2-lite-v1` | 15/25 | 1/5 | 5/5 | 1/5 | 3/5 | 5/5 | 82 s | $0.17 | 0 |
-| `cohere/command-a-plus` | 15/25 | 1/5 | 4/5 | 3/5 | 2/5 | 5/5 | 166 s | $0.26 | 0 |
-| `google/gemini-3.8-flash` | 15/25 | 0/5 | 5/5 | 4/5 | 1/5 | 5/5 | 404 s | $0.46 | 0 |
-| `google/gemini-3.5-flash` | 10/25 | 2/5 | 1/5 | 5/5 | 1/5 | 1/5 | 384 s | $1.07 | 0 |
-| `meta-llama/llama-4-maverick` | 0/25 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 41 s | $0.01 | 0 |
-| `mistralai/mistral-large` | 6/6 (incomplete) | not run | not run | 4/4 | 1/1 | 1/1 | 24 s | $0.05 | 19 |
-| `nvidia/nemotron-3-super-120b-a12b` | 23/23 (incomplete) | 4/4 | 5/5 | 4/4 | 5/5 | 5/5 | 1284 s | $0.05 | 2 |
+| Condition | All 8 | First 5 | Harder 3 | Perfect (40/40) | Median audit | Spend |
+| --- | --- | --- | --- | --- | --- | --- |
+| 500k, named queries on | 1209/1371 (88%) | 795/860 (92%) | 414/511 (81%) | 13 | 27 s | $113.68 |
+| 10k, named queries on | 1207/1370 (88%) | 794/857 (93%) | 413/513 (81%) | 11 | 25 s | $114.31 |
+| 500k, named queries off | 1165/1368 (85%) | 770/855 (90%) | 395/513 (77%) | 9 | 30 s | $111.82 |
+| 10k, named queries off | 1162/1366 (85%) | 772/856 (90%) | 390/510 (76%) | 13 | 26 s | $108.32 |
 
-Per-task cells are passes out of five; time and cost are per five-audit
-run. Sorted by pass rate, then cost to two significant figures, then time
-(a faster model outranks one a fraction of a cent cheaper); incomplete
-rows last. The runs are from 2026-09-28. Seven models' xdomain, groups and
-delegation rows are a re-run on the engine with D-101 (a sibling walk that
-kept its chain): those three tasks are the ones whose walks go sideways
-through groups and OUs, and the first run exposed the bug there (Haiku,
-for one, went from 0/5 to 5/5 on xdomain). Their coverage and trusts rows
-are the first run. `mistral-large` was rate-limited upstream and has 6
-scored task-runs of 25; `nemotron-3-super` lost two to rate limits.
+Fifty times the data costs nothing in accuracy, steps or spend. Named
+queries (D-108) are worth about three points overall: 6-12 points on
+xdomain, delegation and kerberoast, against 3-6 points lost on coverage and
+groups at 500k. With them hidden the agent builds each listing itself.
 
-**What the misses are.** Four kinds, in this order of frequency: a set
-stopped short (four of five admins, a nested group missed, the disabled
-account not flagged — most of the xdomain misses); the 20-step cap, from
-walking OUs or groups one at a time instead of asking over the scope
-(`gemini-3.5-flash` and `gemini-3.8-flash` on delegation, most of the
-delegation misses); the faithfulness rule — 27 of 854 scored runs cited nothing, or cited a
-shortened id; and on the
-coverage task, "no groups" for a domain whose membership was never
-exported. `glm-5.3` fails delegation on the 8,000-token output cap. The
-engine returns the same packs to every model; the spread is how models
-use them.
+Per model, 500k with named queries on unless the column says otherwise.
+Per-audit cells are passes out of five; time and cost are per eight-audit
+run. Sorted by pass rate, then cost to two significant figures, then time;
+incomplete rows last.
 
-**It confirms the picks above.** Every model in the short answer —
-`gemini-2.5-flash`, `gpt-6-luna`, `deepseek-v4.1-flash`,
-`claude-sonnet-4.5`, and the Sonnet 5, Opus and Fable lines — is 25/25
-here too; nineteen models are. Some that are perfect on the core tasks
-miss here (`gemini-3.8-flash` 15/25 on the step cap, `qwen3.8-flash` and
-`gpt-5.2` one coverage run each, `gemini-3.5-flash-lite` two xdomain
-runs), and several that miss once there are perfect here
-(`minimax-m2.7`, `deepseek-v4-pro`, `qwen3.5-plus`, `mistral-medium-3-5`,
-`grok-4.7`, `kimi-k3`, `qwen3.8-max`, `glm-5.3-flash`) — the case for
-trying a model on your own data before trusting it.
+| Model | 500k | 10k | 500k, no named queries | Admins | Coverage | Groups | Delegation | Trusts | Access | Local admin | Kerberoast | Time / 8 audits | Cost / 8 audits | Not run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `openai/gpt-6-luna` | 40/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 170 s | $0.01 | 0 |
+| `deepseek/deepseek-v4.1-flash` | 40/40 | 39/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 239 s | $0.05 | 0 |
+| `z-ai/glm-5.3-flash` | 40/40 | 40/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 413 s | $0.05 | 0 |
+| `minimax/minimax-m2.7` | 40/40 | 37/40 | 37/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 573 s | $0.07 | 0 |
+| `openai/gpt-6-sol` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 145 s | $0.24 | 0 |
+| `anthropic/claude-haiku-4.5` | 40/40 | 40/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 141 s | $0.53 | 0 |
+| `x-ai/grok-4.7` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 324 s | $0.59 | 0 |
+| `moonshotai/kimi-k3` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 362 s | $0.66 | 0 |
+| `openai/gpt-5.2` | 40/40 | 36/40 | 36/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 531 s | $0.85 | 0 |
+| `anthropic/claude-sonnet-5` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 206 s | $1.07 | 0 |
+| `anthropic/claude-sonnet-4.5` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 281 s | $2.00 | 0 |
+| `anthropic/claude-opus-5.5` | 40/40 | 37/40 | 34/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 469 s | $2.25 | 0 |
+| `anthropic/claude-opus-4.8` | 40/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 211 s | $2.74 | 0 |
+| `minimax/minimax-m3` | 39/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 295 s | $0.07 | 0 |
+| `deepseek/deepseek-chat-v3.1` | 39/40 | 39/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 761 s | $0.18 | 0 |
+| `qwen/qwen3.5-plus-20260420` | 39/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 642 s | $0.23 | 0 |
+| `deepseek/deepseek-v4-pro-0813` | 39/40 | 39/40 | 40/40 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 593 s | $0.27 | 0 |
+| `z-ai/glm-5.3` | 39/40 | 37/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 559 s | $0.34 | 0 |
+| `mistralai/mistral-medium-3-5` | 39/40 | 36/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 206 s | $1.09 | 0 |
+| `qwen/qwen3.8-max-0902` | 38/40 | 39/40 | 40/40 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 1118 s | $0.87 | 0 |
+| `nvidia/nemotron-3-super-120b-a12b` | 37/40 | 39/40 | 34/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 1187 s | $0.08 | 0 |
+| `google/gemini-3.8-flash` | 37/40 | 36/40 | 38/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 5/5 | 548 s | $0.59 | 0 |
+| `google/gemini-3.5-flash-lite` | 36/40 | 38/40 | 36/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 4/5 | 94 s | $0.06 | 0 |
+| `openai/gpt-4o-2024-05-13` | 35/40 | 28/40 | 20/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 89 s | $1.07 | 0 |
+| `anthropic/claude-fable-5.1` | 35/40 | 34/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 264 s | $4.98 | 0 |
+| `cohere/command-a-plus` | 34/40 | 34/40 | 26/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 3/5 | 4/5 | 435 s | $0.30 | 0 |
+| `qwen/qwen3.8-flash` | 33/40 | 39/40 | 37/40 | 5/5 | 3/5 | 5/5 | 3/5 | 4/5 | 5/5 | 4/5 | 4/5 | 890 s | $0.06 | 0 |
+| `amazon/nova-2-lite-v1` | 33/40 | 33/40 | 24/40 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 68 s | $0.14 | 0 |
+| `z-ai/glm-4.6v` | 30/40 | 31/40 | 32/40 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 378 s | $0.05 | 0 |
+| `qwen/qwen3-coder` | 30/40 | 32/40 | 33/40 | 5/5 | 1/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 95 s | $0.09 | 0 |
+| `google/gemini-3.5-flash` | 29/40 | 33/40 | 34/39 | 5/5 | 0/5 | 5/5 | 5/5 | 5/5 | 1/5 | 3/5 | 5/5 | 1197 s | $1.05 | 0 |
+| `google/gemini-2.5-flash` | 19/40 | 22/40 | 21/40 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 0/5 | 1/5 | 0/5 | 137 s | $0.02 | 0 |
+| `mistralai/codestral-2508` | 19/40 | 18/40 | 12/40 | 5/5 | 0/5 | 5/5 | 1/5 | 5/5 | 0/5 | 0/5 | 3/5 | 201 s | $0.02 | 0 |
+| `meta-llama/llama-4-maverick` | 0/40 | 4/40 | 9/40 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 1100 s | $0.01 | 0 |
+| `mistralai/mistral-large` | 10/11 (incomplete) | 7/10 | 7/9 | 2/2 | 1/1 | — | 4/4 | 3/3 | — | 0/1 | — | 21 s | $0.06 | 29 |
+
+`mistral-large` was rate-limited upstream (11 of 40 task-runs scored).
+
+**What the misses are.** On the first five, as before: a set stopped short
+(an admin or a nested group missed, the disabled account not flagged), and
+on coverage, "no groups" for a domain whose membership was never exported.
+On the harder three: an operator or an idle admin put forward on access, a
+decoy (the disabled admin, the service account) listed on kerberoast, and
+accounts presented as local admins. Some models fail one harder audit
+outright (`claude-fable-5.1` and `gpt-4o` 0/5 on kerberoast,
+`gemini-3.8-flash` and `gemini-3.5-flash-lite` 2/5 on access).
+
+**`gemini-2.5-flash` drops from the picks.** It was 25/25 on the five
+audits of 2026-09-28's plainer forest; here it is 19/40. Four of its five
+groups failures (named queries on) were one call with a guessed handle
+(`user:mreyes@corp.local`) and "not on record" taken as the answer; `of`
+now resolves a name (D-111 addendum), after this run. The rest are real
+misses on xdomain and all three harder audits.
+
+The 2026-09-28 five-audit table (10,000 accounts, an earlier engine) is in
+this file's history.
 
 ## Retrieval, not models: the other scorecard
 
