@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap">
-<link rel="stylesheet" href="assets/site.css?v=3dede94a66">
+<link rel="stylesheet" href="assets/site.css?v=87bd2bf459">
 <script>
   // apply a remembered theme before first paint
   try { var t = localStorage.getItem("loomctx-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
@@ -486,6 +486,53 @@
         <p class="lede">The same agents, pointed at a generated Active Directory export instead. The large forest holds 370,000 users, 55,000 groups and 75,000 computers (6.5 million facts) across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Five standard reviews an identity team runs, five times each per model, pass 92% of the time there and 93% on a 10,000-account forest. Three harder audits, scored separately, show where agents still struggle. The data is synthetic.</p>
       </div>
       <div class="mb-meta" id="ad-meta" aria-label="AD run summary"></div>
+      <div class="mb-pair">
+      <div class="mb-cmp">
+        <h4>10,000 accounts against 500,000 objects</h4>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th scope="col"></th><th scope="col" class="num">10,000 accounts</th><th scope="col" class="num">500,000 objects</th></tr></thead>
+            <tbody>
+              <tr><td>Users / groups / computers</td><td class="num">10,000 / 1,500 / 2,000</td><td class="num">370,000 / 55,000 / 75,000</td></tr>
+              <tr><td>Facts loaded</td><td class="num">175,560</td><td class="num">6,502,512</td></tr>
+              <tr><td>Import, one container</td><td class="num">39 s</td><td class="num">49 min</td></tr>
+              <tr class="hl"><td>Standard audits passed</td><td class="num">93% <small>794 / 857</small></td><td class="num">92% <small>795 / 860</small></td></tr>
+              <tr><td>Models perfect on them (25/25)</td><td class="num">18</td><td class="num">24</td></tr>
+              <tr><td>Standard audits, named queries off</td><td class="num">90% <small>772 / 856</small></td><td class="num">90% <small>770 / 855</small></td></tr>
+              <tr><td>Harder audits passed</td><td class="num">81% <small>413 / 513</small></td><td class="num">81% <small>414 / 511</small></td></tr>
+              <tr><td>Median time per standard audit</td><td class="num">21 s</td><td class="num">23 s</td></tr>
+              <tr><td>Agent steps per standard audit</td><td class="num">5.7</td><td class="num">5.7</td></tr>
+              <tr><td>Tokens the agent read per standard audit</td><td class="num">58.5k</td><td class="num">58.9k</td></tr>
+              <tr><td>Spend on the standard audits, 35 models × 5</td><td class="num">$59.68</td><td class="num">$60.79</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">Same 35 models, five runs each, one build, named queries on unless noted. Only the import grows with the data: what an agent reads depends on the question, not on the size of the directory.</p>
+      </div>
+      <div class="mb-cmp mb-nq">
+        <h4>Named queries, on and off</h4>
+        <p>A <b>named query</b> is a prepared question a connector ships with the schema. The LDAP connector registers seven, such as <code>enabled_members</code>, <code>account_groups</code>, <code>kerberoastable_users</code> and <code>unconstrained_delegation_hosts</code>. An agent runs one in a single call and gets exact, cited rows back:</p>
+        <pre class="nq-code">run_query("enabled_members", group="Domain Admins")</pre>
+        <p>Without them, the agent builds the same answer itself, for instance with a list call that walks <code>member_of</code> into the group and filters on <code>enabled</code>, or with a scoped ask. Every other tool is the same.</p>
+        <p><b>"Named queries off"</b> is the same engine, data and models with <code>run_query</code> hidden (<code>LOOMCTX_MCP_QUERIES=0</code>). It measures what the prepared queries add over the agent composing its own calls. The headline numbers use the default, on.</p>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th scope="col">Audit, 500,000 objects</th><th scope="col" class="num">On</th><th scope="col" class="num">Off</th><th scope="col" class="num">Change</th></tr></thead>
+            <tbody>
+              <tr><td>Cross-domain admins</td><td class="num">93%</td><td class="num">85%</td><td class="num"><span class="up">+8</span></td></tr>
+              <tr><td>Coverage</td><td class="num">87%</td><td class="num">93%</td><td class="num"><span class="down">-6</span></td></tr>
+              <tr><td>Nested groups</td><td class="num">92%</td><td class="num">95%</td><td class="num"><span class="down">-3</span></td></tr>
+              <tr><td>Delegation</td><td class="num">94%</td><td class="num">82%</td><td class="num"><span class="up">+12</span></td></tr>
+              <tr><td>Trusts</td><td class="num">97%</td><td class="num">96%</td><td class="num"><span>+1</span></td></tr>
+              <tr><td>Access <em>harder</em></td><td class="num">76%</td><td class="num">74%</td><td class="num"><span>+2</span></td></tr>
+              <tr><td>Local admin <em>harder</em></td><td class="num">82%</td><td class="num">80%</td><td class="num"><span>+2</span></td></tr>
+              <tr><td>Kerberoastable admins <em>harder</em></td><td class="num">84%</td><td class="num">78%</td><td class="num"><span class="up">+6</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">They help most where a query matches the question (cross-domain admins, delegation, Kerberoastable admins) and cost a few points on coverage and nested groups. Overall: standard audits 92% on against 90% off; harder audits 81% against 77%.</p>
+      </div>
+      </div>
       <div class="mb-tasks">
         <div class="mb-task"><b>Cross-domain admins</b><span>“Which dev.local accounts are effective members of Domain Admins in corp.local, and is each enabled?” Five are, up to three groups deep; one is disabled and must be called out.</span></div>
         <div class="mb-task"><b>Coverage</b><span>“Which groups is lab.local's labsvc-backup in?” That export never collected membership. The right answer says so; a confident “none” or a guessed group fails.</span></div>
