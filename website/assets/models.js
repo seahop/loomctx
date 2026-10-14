@@ -144,7 +144,7 @@
       core: { rows: models, what: "four-task run" },
       ad: { rows: (D.ad ? D.ad.models : []).filter(function (m) { return m.secs != null; }).map(function (m) {
         return Object.assign({}, m, { passes: m.passed[0], scored: m.passed[1], rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0 });
-      }), what: "eight-audit run" }
+      }), what: "five-audit run" }
     };
     var TIME_TICKS = [[15, "15 s"], [30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1200, "20 min"]];
     function draw(view) {
@@ -283,31 +283,32 @@
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function money(v) { return v == null ? "—" : v >= 1 ? "$" + v.toFixed(2) : v >= 0.01 ? "$" + v.toFixed(3) : "$" + v.toFixed(4); }
   var rows = A.models.map(function (m) {
-    return Object.assign({}, m, { rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0 });
+    return Object.assign({}, m, { rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0,
+                                  hardRate: m.hard && m.hard[1] ? m.hard[0] / m.hard[1] : 0 });
   });
   // best first: complete runs, then pass rate, then cost at the precision the
   // table shows (a gap too small to print is a tie), then the faster model
   function shown(v) { return v == null ? Infinity : Number(v.toPrecision(2)); }
   function rank(a, b) {
-    return (a.incomplete - b.incomplete) || (b.rate - a.rate) || (shown(a.cost) - shown(b.cost)) ||
+    return (a.incomplete - b.incomplete) || (b.rate - a.rate) || (b.hardRate - a.hardRate) || (shown(a.cost) - shown(b.cost)) ||
            ((a.secs == null ? Infinity : a.secs) - (b.secs == null ? Infinity : b.secs));
   }
   var perfect = rows.filter(function (m) { return m.rate === 1 && !m.incomplete; }).length;
   function share(t) { return t && t[1] ? Math.round(100 * t[0] / t[1]) + "%" : "—"; }
-  var T = A.totals || {};
+  var S = A.orig5 || {}, H = A.harder3 || {};
   document.getElementById("ad-meta").innerHTML = [
-    ["models", rows.length], ["perfect", perfect + " at " + (TASKS.length * A.runs) + "/" + (TASKS.length * A.runs)],
-    ["runs per model", A.runs + " × " + TASKS.length + " audits"], ["accounts", A.forest.users.toLocaleString("en-US")],
+    ["standard audits passed at 500k", share(S.xl_on)], ["at 10k", share(S.large_on)],
+    ["500k, no named queries", share(S.xl_off)], ["perfect", perfect + " of " + rows.length + " at 25/25"],
+    ["harder audits", share(H.xl_on)], ["accounts", A.forest.users.toLocaleString("en-US")],
     ["facts loaded", A.forest.observations.toLocaleString("en-US")],
-    ["passed at 500k", share(T.xl_on)], ["at 10k", share(T.large_on)], ["500k, no named queries", share(T.xl_off)],
-    ["whole sweep, all four", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
+    ["whole sweep", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
   ].map(function (c) { return "<span><b>" + esc(c[1]) + "</b> " + esc(c[0]) + "</span>"; }).join("");
   var tbody = document.querySelector("#ad-table tbody");
   var state = { key: "passed", dir: -1 };
   function val(m, key) {
     if (key === "name") return m.id;
     if (key === "passed") return (m.incomplete ? -1e6 : 0) + m.rate * 1000 - m.cost / 100;   // partial runs rank last
-    if (key === "passed_10k" || key === "passed_off") { var p = m[key]; return p && p[1] ? p[0] / p[1] : -1; }
+    if (key === "hard" || key === "passed_10k" || key === "passed_off") { var p = m[key]; return p && p[1] ? p[0] / p[1] : -1; }
     if (TASKS.indexOf(key) >= 0) { var t = m.tasks[key]; return t ? t[0] / t[1] : -1; }
     return m[key] == null ? Infinity : m[key];
   }
@@ -322,6 +323,7 @@
       return "<tr><td>" + esc(m.name) + (m.note ? ' <span title="' + esc(m.note) + '">†</span>' : "") + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
         m.passed[0] + "/" + m.passed[1] + (m.incomplete ? "*" : "") + "</span></td>" +
+        '<td class="num">' + cell(m.hard) + "</td>" +
         '<td class="num">' + cell(m.passed_10k) + "</td>" + '<td class="num">' + cell(m.passed_off) + "</td>" +
         TASKS.map(function (t) { return '<td class="num">' + cell(m.tasks[t]) + "</td>"; }).join("") +
         '<td class="num">' + money(m.cost) + "</td>" +
@@ -336,7 +338,7 @@
     function go() {
       var key = th.dataset.sort;
       if (state.key === key) state.dir = -state.dir;
-      else { state.key = key; state.dir = (key === "passed" || key === "passed_10k" || key === "passed_off" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
+      else { state.key = key; state.dir = (key === "passed" || key === "hard" || key === "passed_10k" || key === "passed_off" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
       render();
     }
     th.addEventListener("click", go);

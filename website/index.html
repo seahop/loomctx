@@ -346,7 +346,7 @@
           <li><span>Runs citing data the model never saw (scored as fails)</span><b>2 of 686</b></li>
           <li><span>Cheapest clean pass per 4-task run</span><b>$0.01</b></li>
           <li><span>Whole 35-model sweep, 5 runs each</span><b>≈ $46</b></li>
-          <li><span>Perfect on the 8 AD audits, 500,000-object forest</span><b>13 of 35</b></li>
+          <li><span>Perfect on the 5 standard AD audits, 500,000-object forest</span><b>24 of 35</b></li>
         </ul>
         <span class="src">docs/models.md · 2026-09-28, AD 2026-10-14 · <a href="#models">every model, cost and task below ↓</a></span>
       </div>
@@ -416,7 +416,7 @@
           </div>
           <div class="mb-chips" id="mb-speed-view" role="group" aria-label="Scorecard">
             <button type="button" class="mb-chip" data-view="core" aria-pressed="true">4 core tasks</button>
-            <button type="button" class="mb-chip" data-view="ad" aria-pressed="false">8 AD audits</button>
+            <button type="button" class="mb-chip" data-view="ad" aria-pressed="false">5 AD audits</button>
           </div>
         </div>
         <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-speed" role="img" aria-label="Scatter plot of cost per run against wall-clock time per run, one dot per model, shaded by how many tasks it passed. The full data is in the tables below."></svg></div><div class="chart-tip" id="mb-tip3" hidden></div></div>
@@ -482,8 +482,8 @@
     <div class="mb-ad" id="ad-audits">
       <div class="sec-head">
         <span class="eyebrow">Identity data</span>
-        <h3>Active Directory audits, at 10,000 and 500,000 accounts.</h3>
-        <p class="lede">The same agents, pointed at a generated Active Directory export instead. The large forest holds 370,000 users, 55,000 groups and 75,000 computers (6.5 million facts) across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Eight reviews an identity team runs, five times each per model. The table shows the large forest; the same audits on a 10,000-account forest, and with named queries switched off, are in its second and third columns. The data is synthetic.</p>
+        <h3>92% at half a million objects, the same as at 10,000.</h3>
+        <p class="lede">The same agents, pointed at a generated Active Directory export instead. The large forest holds 370,000 users, 55,000 groups and 75,000 computers (6.5 million facts) across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Five standard reviews an identity team runs, five times each per model, pass 92% of the time there and 93% on a 10,000-account forest. Three harder audits, scored separately, show where agents still struggle. The data is synthetic.</p>
       </div>
       <div class="mb-meta" id="ad-meta" aria-label="AD run summary"></div>
       <div class="mb-tasks">
@@ -492,17 +492,18 @@
         <div class="mb-task"><b>Nested groups</b><span>A membership report for one account: five groups, the last four levels up. A group nested into one of its groups, and a sibling group, must not be listed.</span></div>
         <div class="mb-task"><b>Delegation</b><span>“Which non-DC computers are trusted for unconstrained delegation?” Three servers among the computers; the domain controllers and a constrained-delegation server are distractors.</span></div>
         <div class="mb-task"><b>Trusts</b><span>Every trust corp.local has, with its direction, whether it's transitive and whether SID filtering is on. One partner is non-transitive, one quarantined.</span></div>
-        <div class="mb-task"><b>Access</b><span>“Which Domain Admins have rights over workstation WS-AUDIT01, and through what?” One through a group holding GenericAll, one through a direct WriteDacl grant. An operator who isn't an admin, and an admin with no grant, are decoys.</span></div>
-        <div class="mb-task"><b>Local admin</b><span>“Who is local administrator on WS-AUDIT01?” Local group membership isn't in an AD export. Saying so passes; presenting accounts as its local admins fails.</span></div>
-        <div class="mb-task"><b>Kerberoastable admins</b><span>“Which enabled Domain Admins, nested included, are Kerberoastable?” One nested admin has an SPN. A disabled admin with one, and a service account that isn't an admin, are decoys.</span></div>
+        <div class="mb-task mb-task-hard"><b>Access <em>harder</em></b><span>“Which Domain Admins have rights over workstation WS-AUDIT01, and through what?” One through a group holding GenericAll, one through a direct WriteDacl grant. An operator who isn't an admin, and an admin with no grant, are decoys.</span></div>
+        <div class="mb-task mb-task-hard"><b>Local admin <em>harder</em></b><span>“Who is local administrator on WS-AUDIT01?” Local group membership isn't in an AD export. Saying so passes; presenting accounts as its local admins fails.</span></div>
+        <div class="mb-task mb-task-hard"><b>Kerberoastable admins <em>harder</em></b><span>“Which enabled Domain Admins, nested included, are Kerberoastable?” One nested admin has an SPN. A disabled admin with one, and a service account that isn't an admin, are decoys.</span></div>
       </div>
       <div class="table-wrap mb-table-wrap">
         <table class="mb-table" id="ad-table">
           <thead><tr>
             <th scope="col" data-sort="name">Model</th>
-            <th scope="col" data-sort="passed" class="num">Passed</th>
-            <th scope="col" data-sort="passed_10k" class="num">10k</th>
-            <th scope="col" data-sort="passed_off" class="num">No named queries</th>
+            <th scope="col" data-sort="passed" class="num">Standard 5</th>
+            <th scope="col" data-sort="hard" class="num">Harder 3</th>
+            <th scope="col" data-sort="passed_10k" class="num">Standard, 10k</th>
+            <th scope="col" data-sort="passed_off" class="num">Standard, no named queries</th>
             <th scope="col" data-sort="xdomain" class="num">Admins</th>
             <th scope="col" data-sort="coverage" class="num">Coverage</th>
             <th scope="col" data-sort="groups" class="num">Groups</th>
@@ -511,15 +512,15 @@
             <th scope="col" data-sort="access" class="num">Access</th>
             <th scope="col" data-sort="localadmin" class="num">Local admin</th>
             <th scope="col" data-sort="kerberoast" class="num">Kerberoast</th>
-            <th scope="col" data-sort="cost" class="num">$ / 8 audits</th>
-            <th scope="col" data-sort="secs" class="num">Time / 8 audits</th>
+            <th scope="col" data-sort="cost" class="num">$ / 5 audits</th>
+            <th scope="col" data-sort="secs" class="num">Time / 5 audits</th>
           </tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="mb-foot">
-        <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. The local-admin audit is the one exception on citations: its right answer is that the data isn't there, which may have nothing to cite. Every failing answer was read by hand before these numbers were published. <b>Passed</b>, the audit columns, cost and time are the 500,000-object forest with named queries on (the default). <b>10k</b> is the same eight audits on the 10,000-account forest; <b>No named queries</b> is the large forest with the connector's prepared queries hidden, so agents build every listing themselves. Rows marked * lost task-runs to upstream rate limits.</p>
-        <p><b>The last three audits are harder.</b> They combine conditions (nested membership and an ACL grant, nested membership and an account flag) or ask something the export can't answer. Across all models they pass 81% of the time, against 92% for the first five. This is where agents still slip.</p>
+        <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. The local-admin audit is the one exception on citations: its right answer is that the data isn't there, which may have nothing to cite. Every failing answer was read by hand before these numbers were published. <b>Standard 5</b>, <b>Harder 3</b>, the audit columns, cost and time are the 500,000-object forest with named queries on (the default). <b>Standard, 10k</b> is the five standard audits on the 10,000-account forest; <b>Standard, no named queries</b> is the large forest with the connector's prepared queries hidden, so agents build every listing themselves (90% overall). Rows marked * lost task-runs to upstream rate limits.</p>
+        <p><b>Where agents still struggle.</b> The three harder audits combine conditions (nested membership and an ACL grant, nested membership and an account flag) or ask something the export can't answer. Across all models they pass 81% of the time, at both sizes, against 92% for the standard five. They are scored and shown separately so the headline stays comparable with the standard audits published in September.</p>
         <p><b>Some models are slow.</b> Models marked † took over a minute and a half per audit at the median, so their timing is rough and they are a poor fit for an agent someone is waiting on.</p>
       </div>
     </div>

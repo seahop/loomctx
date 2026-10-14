@@ -13,8 +13,9 @@ Measured 2026-09-28 on OpenRouter: 36 models attempted, 35 scored, five
 full runs each of four tasks (686 scored task-runs, $46), run as GKE Jobs
 against the real corpus — seed hosts plus CISA KEV, NVD and EPSS, 542,100
 observations, embedded — with no hints beyond the MCP server's own
-instructions. A second scorecard, eight Active Directory audits on 10,000- and
-500,000-object forests (2026-10-14), is below ([Active Directory audits](#active-directory-audits)).
+instructions. A second scorecard, Active Directory audits on 10,000- and 500,000-object
+forests (2026-10-14: 92% on the five standard audits at 500k, the same as
+at 10k), is below ([Active Directory audits](#active-directory-audits)).
 
 - **Fifteen models pass every task every time.** From a cent per
   four-task run (`google/gemini-2.5-flash`, `openai/gpt-6-luna`) through
@@ -44,10 +45,10 @@ instructions. A second scorecard, eight Active Directory audits on 10,000- and
 
 | If you want… | Use | Why |
 | --- | --- | --- |
-| one model to start with | **`openai/gpt-6-luna`** | 20/20 here and 40/40 on the eight AD audits at both sizes, about a cent a run |
-| the fastest cheap pass | **`google/gemini-2.5-flash`** on simple lookups | 20/20 here at a cent and 21 s, but 19/40 on the AD audits: not for set-valued or combined questions |
-| the model for when answers matter or it is on stage | **`anthropic/claude-sonnet-4.5`** | 20/20 and 40/40 at both AD sizes; `claude-sonnet-5`, `claude-opus-4.8` and `claude-haiku-4.5` are 40/40 at 500k too |
-| self-hosted weights | **`deepseek/deepseek-v4.1-flash`** | open weights, 20/20 and 40/40 on the AD audits at 500k, a few cents on OpenRouter |
+| one model to start with | **`openai/gpt-6-luna`** | 20/20 here, 25/25 on the standard AD audits and 15/15 on the harder ones at both sizes, about a cent a run |
+| the fastest cheap pass | **`google/gemini-2.5-flash`** on simple lookups | 20/20 here at a cent and 21 s, but 18/25 on the standard AD audits at 500k: not for set-valued or combined questions |
+| the model for when answers matter or it is on stage | **`anthropic/claude-sonnet-4.5`** | 20/20, and perfect on all eight AD audits at both sizes; `claude-sonnet-5`, `claude-opus-4.8` and `claude-haiku-4.5` are perfect at 500k too |
+| self-hosted weights | **`deepseek/deepseek-v4.1-flash`** | open weights, 20/20, and perfect on all eight AD audits at 500k, a few cents on OpenRouter |
 | to avoid | `meta-llama/llama-4-maverick` via OpenRouter (0/20, tool-call format); `gpt-4o`, `qwen3-coder`, `nova-2-lite` (0/5 on the two-hop task) | see the notes under the table |
 
 Model ids age fast. The evidence and the command to re-run it follow.
@@ -191,17 +192,19 @@ context.
 
 ## Recommendation in full
 
-- **Default agent model:** `openai/gpt-6-luna` — 20/20, and 40/40 on the
-  eight AD audits at 10k and 500k, about a cent a run.
+- **Default agent model:** `openai/gpt-6-luna` — 20/20, and perfect on the
+  standard and harder AD audits at 10k and 500k, about a cent a run.
 - **Cheapest fast pass on simple lookups:** `google/gemini-2.5-flash` (a
-  cent, 21 seconds, 20/20 on the core tasks) — but 19/40 on the AD audits,
+  cent, 21 seconds, 20/20 on the core tasks) — but 18/25 on the standard
+  AD audits at 500k,
   so not for set-valued or combined questions.
 - **When answers matter or the demo is on stage:**
-  `anthropic/claude-sonnet-4.5` — 20/20 and 40/40 on the AD audits at
-  both sizes. `claude-sonnet-5` and `claude-opus-4.8` are too;
-  `claude-fable-5.1` misses the Kerberoastable-admins audit (35/40).
+  `anthropic/claude-sonnet-4.5` — 20/20 and perfect on all eight AD audits
+  at both sizes. `claude-sonnet-5` and `claude-opus-4.8` are too;
+  `claude-fable-5.1` is 25/25 on the standard five but misses the
+  Kerberoastable-admins audit every run.
 - **Self-hosted weights:** `deepseek/deepseek-v4.1-flash` — 20/20 and
-  40/40 on the AD audits at 500k, at a few cents.
+  perfect on all eight AD audits at 500k, at a few cents.
 - **Not on this evidence:** `meta-llama/llama-4-maverick` through
   OpenRouter (tool calls as text); `gpt-4o`, `qwen3-coder` and
   `nova-2-lite` for multi-hop questions (0/5 on the two-hop task);
@@ -248,12 +251,21 @@ failure was read by hand before these numbers were taken; scorer misses
 were fixed, every run re-scored, and each verdict that changed read again.
 Run 2026-10-14 on one build, both forests rebuilt from seed 7, as GKE Jobs.
 
-| Condition | All 8 | First 5 | Harder 3 | Perfect (40/40) | Median audit | Spend |
-| --- | --- | --- | --- | --- | --- | --- |
-| 500k, named queries on | 1209/1371 (88%) | 795/860 (92%) | 414/511 (81%) | 13 | 27 s | $113.68 |
-| 10k, named queries on | 1207/1370 (88%) | 794/857 (93%) | 413/513 (81%) | 11 | 25 s | $114.31 |
-| 500k, named queries off | 1165/1368 (85%) | 770/855 (90%) | 395/513 (77%) | 9 | 30 s | $111.82 |
-| 10k, named queries off | 1162/1366 (85%) | 772/856 (90%) | 390/510 (76%) | 13 | 26 s | $108.32 |
+**The headline is the five standard audits: 92% at 500k, 93% at 10k.**
+The harder three are scored and reported separately, as where agents still
+struggle, so the headline stays comparable with the five audits published
+on 2026-09-28.
+
+| Condition | Standard 5 | Perfect on the 5 (25/25) | Median audit (5) | Harder 3 | All 8 |
+| --- | --- | --- | --- | --- | --- |
+| 500k, named queries on | 795/860 (92%) | 24 | 23 s | 414/511 (81%) | 1209/1371 (88%) |
+| 10k, named queries on | 794/857 (93%) | 18 | 21 s | 413/513 (81%) | 1207/1370 (88%) |
+| 500k, named queries off | 770/855 (90%) | 16 | 27 s | 395/513 (77%) | 1165/1368 (85%) |
+| 10k, named queries off | 772/856 (90%) | 20 | 23 s | 390/510 (76%) | 1162/1366 (85%) |
+
+Perfect counts are complete runs only (`mistral-large` passed every run it
+got, 10 of 25). The whole sweep, all four conditions and all eight audits,
+cost $448.
 
 Thirty-seven times the data costs nothing in accuracy, steps or spend. Named
 queries (D-108) are worth about three points overall: 6-12 points on
@@ -261,47 +273,47 @@ xdomain, delegation and kerberoast, against 3-6 points lost on coverage and
 groups at 500k. With them hidden the agent builds each listing itself.
 
 Per model, 500k with named queries on unless the column says otherwise.
-Per-audit cells are passes out of five; time and cost are per eight-audit
-run. Sorted by pass rate, then cost to two significant figures, then time;
-incomplete rows last.
+Per-audit cells are passes out of five; time and cost are per run of the
+five standard audits. Sorted by the standard five, then the harder three,
+then cost to two significant figures, then time; incomplete rows last.
 
-| Model | 500k | 10k | 500k, no named queries | Admins | Coverage | Groups | Delegation | Trusts | Access | Local admin | Kerberoast | Time / 8 audits | Cost / 8 audits | Not run |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `openai/gpt-6-luna` | 40/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 170 s | $0.01 | 0 |
-| `deepseek/deepseek-v4.1-flash` | 40/40 | 39/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 239 s | $0.05 | 0 |
-| `z-ai/glm-5.3-flash` | 40/40 | 40/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 413 s | $0.05 | 0 |
-| `minimax/minimax-m2.7` | 40/40 | 37/40 | 37/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 573 s | $0.07 | 0 |
-| `openai/gpt-6-sol` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 145 s | $0.24 | 0 |
-| `anthropic/claude-haiku-4.5` | 40/40 | 40/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 141 s | $0.53 | 0 |
-| `x-ai/grok-4.7` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 324 s | $0.59 | 0 |
-| `moonshotai/kimi-k3` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 362 s | $0.66 | 0 |
-| `openai/gpt-5.2` | 40/40 | 36/40 | 36/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 531 s | $0.85 | 0 |
-| `anthropic/claude-sonnet-5` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 206 s | $1.07 | 0 |
-| `anthropic/claude-sonnet-4.5` | 40/40 | 40/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 281 s | $2.00 | 0 |
-| `anthropic/claude-opus-5.5` | 40/40 | 37/40 | 34/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 469 s | $2.25 | 0 |
-| `anthropic/claude-opus-4.8` | 40/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 211 s | $2.74 | 0 |
-| `minimax/minimax-m3` | 39/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 295 s | $0.07 | 0 |
-| `deepseek/deepseek-chat-v3.1` | 39/40 | 39/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 761 s | $0.18 | 0 |
-| `qwen/qwen3.5-plus-20260420` | 39/40 | 40/40 | 39/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 642 s | $0.23 | 0 |
-| `deepseek/deepseek-v4-pro-0813` | 39/40 | 39/40 | 40/40 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 593 s | $0.27 | 0 |
-| `z-ai/glm-5.3` | 39/40 | 37/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 559 s | $0.34 | 0 |
-| `mistralai/mistral-medium-3-5` | 39/40 | 36/40 | 40/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 206 s | $1.09 | 0 |
-| `qwen/qwen3.8-max-0902` | 38/40 | 39/40 | 40/40 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 1118 s | $0.87 | 0 |
-| `nvidia/nemotron-3-super-120b-a12b` | 37/40 | 39/40 | 34/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 1187 s | $0.08 | 0 |
-| `google/gemini-3.8-flash` | 37/40 | 36/40 | 38/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 5/5 | 548 s | $0.59 | 0 |
-| `google/gemini-3.5-flash-lite` | 36/40 | 38/40 | 36/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 4/5 | 94 s | $0.06 | 0 |
-| `openai/gpt-4o-2024-05-13` | 35/40 | 28/40 | 20/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 89 s | $1.07 | 0 |
-| `anthropic/claude-fable-5.1` | 35/40 | 34/40 | 35/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 264 s | $4.98 | 0 |
-| `cohere/command-a-plus` | 34/40 | 34/40 | 26/40 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 3/5 | 4/5 | 435 s | $0.30 | 0 |
-| `qwen/qwen3.8-flash` | 33/40 | 39/40 | 37/40 | 5/5 | 3/5 | 5/5 | 3/5 | 4/5 | 5/5 | 4/5 | 4/5 | 890 s | $0.06 | 0 |
-| `amazon/nova-2-lite-v1` | 33/40 | 33/40 | 24/40 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 68 s | $0.14 | 0 |
-| `z-ai/glm-4.6v` | 30/40 | 31/40 | 32/40 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 378 s | $0.05 | 0 |
-| `qwen/qwen3-coder` | 30/40 | 32/40 | 33/40 | 5/5 | 1/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 95 s | $0.09 | 0 |
-| `google/gemini-3.5-flash` | 29/40 | 33/40 | 34/39 | 5/5 | 0/5 | 5/5 | 5/5 | 5/5 | 1/5 | 3/5 | 5/5 | 1197 s | $1.05 | 0 |
-| `google/gemini-2.5-flash` | 19/40 | 22/40 | 21/40 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 0/5 | 1/5 | 0/5 | 137 s | $0.02 | 0 |
-| `mistralai/codestral-2508` | 19/40 | 18/40 | 12/40 | 5/5 | 0/5 | 5/5 | 1/5 | 5/5 | 0/5 | 0/5 | 3/5 | 201 s | $0.02 | 0 |
-| `meta-llama/llama-4-maverick` | 0/40 | 4/40 | 9/40 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 1100 s | $0.01 | 0 |
-| `mistralai/mistral-large` | 10/11 (incomplete) | 7/10 | 7/9 | 2/2 | 1/1 | — | 4/4 | 3/3 | — | 0/1 | — | 21 s | $0.06 | 29 |
+| Model | Standard 5 | Harder 3 | Standard 5, 10k | Standard 5, no named queries | Admins | Coverage | Groups | Delegation | Trusts | Access | Local admin | Kerberoast | Time / 5 audits | Cost / 5 audits | Not run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `openai/gpt-6-luna` | 25/25 | 15/15 | 25/25 | 24/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 77 s | $0.01 | 0 |
+| `z-ai/glm-5.3-flash` | 25/25 | 15/15 | 25/25 | 20/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 211 s | $0.03 | 0 |
+| `deepseek/deepseek-v4.1-flash` | 25/25 | 15/15 | 24/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 108 s | $0.03 | 0 |
+| `minimax/minimax-m2.7` | 25/25 | 15/15 | 23/25 | 24/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 277 s | $0.03 | 0 |
+| `openai/gpt-6-sol` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 74 s | $0.12 | 0 |
+| `anthropic/claude-haiku-4.5` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 65 s | $0.23 | 0 |
+| `x-ai/grok-4.7` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 160 s | $0.33 | 0 |
+| `moonshotai/kimi-k3` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 133 s | $0.35 | 0 |
+| `openai/gpt-5.2` | 25/25 | 15/15 | 24/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 258 s | $0.46 | 0 |
+| `anthropic/claude-sonnet-5` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 99 s | $0.53 | 0 |
+| `anthropic/claude-sonnet-4.5` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 127 s | $0.85 | 0 |
+| `anthropic/claude-opus-5.5` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 370 s | $1.21 | 0 |
+| `anthropic/claude-opus-4.8` | 25/25 | 15/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 117 s | $1.51 | 0 |
+| `minimax/minimax-m3` | 25/25 | 14/15 | 25/25 | 24/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 142 s | $0.04 | 0 |
+| `deepseek/deepseek-chat-v3.1` | 25/25 | 14/15 | 25/25 | 24/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 363 s | $0.10 | 0 |
+| `qwen/qwen3.5-plus-20260420` | 25/25 | 14/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 336 s | $0.12 | 0 |
+| `z-ai/glm-5.3` | 25/25 | 14/15 | 23/25 | 20/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 221 s | $0.20 | 0 |
+| `mistralai/mistral-medium-3-5` | 25/25 | 14/15 | 24/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 65 s | $0.43 | 0 |
+| `nvidia/nemotron-3-super-120b-a12b` | 25/25 | 12/15 | 25/25 | 22/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 385 s | $0.03 | 0 |
+| `google/gemini-3.8-flash` | 25/25 | 12/15 | 24/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 5/5 | 304 s | $0.31 | 0 |
+| `google/gemini-3.5-flash-lite` | 25/25 | 11/15 | 25/25 | 23/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 5/5 | 4/5 | 44 s | $0.03 | 0 |
+| `openai/gpt-4o-2024-05-13` | 25/25 | 10/15 | 25/25 | 20/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 41 s | $0.54 | 0 |
+| `anthropic/claude-fable-5.1` | 25/25 | 10/15 | 25/25 | 25/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 | 157 s | $3.19 | 0 |
+| `cohere/command-a-plus` | 25/25 | 9/15 | 24/25 | 16/25 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 3/5 | 4/5 | 146 s | $0.16 | 0 |
+| `deepseek/deepseek-v4-pro-0813` | 24/25 | 15/15 | 24/25 | 25/25 | 5/5 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 270 s | $0.18 | 0 |
+| `qwen/qwen3.8-max-0902` | 24/25 | 14/15 | 24/25 | 25/25 | 5/5 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 | 592 s | $0.47 | 0 |
+| `amazon/nova-2-lite-v1` | 24/25 | 9/15 | 25/25 | 23/25 | 4/5 | 5/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 32 s | $0.07 | 0 |
+| `qwen/qwen3-coder` | 21/25 | 9/15 | 23/25 | 24/25 | 5/5 | 1/5 | 5/5 | 5/5 | 5/5 | 2/5 | 2/5 | 5/5 | 45 s | $0.04 | 0 |
+| `qwen/qwen3.8-flash` | 20/25 | 13/15 | 24/25 | 22/25 | 5/5 | 3/5 | 5/5 | 3/5 | 4/5 | 5/5 | 4/5 | 4/5 | 471 s | $0.03 | 0 |
+| `google/gemini-3.5-flash` | 20/25 | 9/15 | 21/25 | 21/25 | 5/5 | 0/5 | 5/5 | 5/5 | 5/5 | 1/5 | 3/5 | 5/5 | 922 s | $0.46 | 0 |
+| `z-ai/glm-4.6v` | 18/25 | 12/15 | 21/25 | 23/25 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 3/5 | 4/5 | 5/5 | 171 s | $0.03 | 0 |
+| `google/gemini-2.5-flash` | 18/25 | 1/15 | 18/25 | 16/25 | 2/5 | 5/5 | 1/5 | 5/5 | 5/5 | 0/5 | 1/5 | 0/5 | 92 s | $0.01 | 0 |
+| `mistralai/codestral-2508` | 16/25 | 3/15 | 13/25 | 11/25 | 5/5 | 0/5 | 5/5 | 1/5 | 5/5 | 0/5 | 0/5 | 3/5 | 38 s | $0.01 | 0 |
+| `meta-llama/llama-4-maverick` | 0/25 | 0/15 | 4/25 | 9/25 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 0/5 | 866 s | $0.01 | 0 |
+| `mistralai/mistral-large` | 10/10 (incomplete) | 0/1 | 6/7 | 4/5 | 2/2 | 1/1 | — | 4/4 | 3/3 | — | 0/1 | — | 18 s | $0.04 | 29 |
 
 `mistral-large` was rate-limited upstream (11 of 40 task-runs scored).
 
@@ -315,7 +327,8 @@ outright (`claude-fable-5.1` and `gpt-4o` 0/5 on kerberoast,
 `gemini-3.8-flash` and `gemini-3.5-flash-lite` 2/5 on access).
 
 **`gemini-2.5-flash` drops from the picks.** It was 25/25 on the five
-audits of 2026-09-28's plainer forest; here it is 19/40. Four of its five
+audits of 2026-09-28's plainer forest; here it is 18/25 on those five
+and 1/15 on the harder three. Four of its five
 groups failures (named queries on) were one call with a guessed handle
 (`user:mreyes@corp.local`) and "not on record" taken as the answer; `of`
 now resolves a name (D-111 addendum), after this run. The rest are real
