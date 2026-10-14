@@ -350,6 +350,33 @@ class GraphStore(ABC):
         times = [o.observed_at for o in self.iter_observations(namespace)]
         return min(times) if times else None
 
+    def subjects_with_text(
+        self, namespace: str, predicate: str, needle: str, limit: int = 100_000,
+        observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """Distinct subjects with a visible scalar row on `predicate` whose
+        lower-cased JSON text (its first 200 characters, as idx_obs_label and
+        entity search keep it, D-091) contains `needle`, plus every value
+        longer than that cut (a superset; the caller filters) — a `contains` filter's
+        seed (D-110): 'dn_name contains DC=lab' over 370,000 users read every
+        value into Python (52 s) and stopped at the candidate cap. Backends
+        match on the index entries; this default scans."""
+        from . import common
+        want = needle.lower()
+        before = common.iso(observed_before)
+        dead = {t["observation_id"] for t in self.iter_tombstones(namespace)}
+        out: dict[tuple[str, str], EntityRef] = {}
+        for o in self.iter_observations(namespace):
+            if (o.id in dead or o.predicate != predicate or isinstance(o.object, EntityRef)
+                    or (before is not None and common.iso(o.observed_at) > before)):
+                continue
+            text = json.dumps(o.object).lower()
+            if want in text[:200] or len(text) >= 200:
+                out.setdefault((o.subject.type, o.subject.key), o.subject)
+                if len(out) >= limit:
+                    break
+        return list(out.values())
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

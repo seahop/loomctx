@@ -1440,6 +1440,25 @@ class PostgresStore(GraphStore):
         row = rows[0] if rows else None
         return common.parse(row["m"]) if row and row["m"] else None
 
+    def subjects_with_text(
+        self, namespace: str, predicate: str, needle: str, limit: int = 100_000,
+        observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """LIKE on idx_obs_label's lower-cased text: the predicate's index
+        range, matched without reading the rows (D-110). A value the index
+        cut at 200 characters is always returned: the needle may lie past
+        the cut, and the caller's filter decides."""
+        before_sql, before_args = _observed_before("%s", observed_before)
+        pattern = "%" + needle.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql = ("SELECT DISTINCT e.type, e.key FROM observations o" + ""
+               + " JOIN entities e ON e.id = o.subject_id"
+               " WHERE o.namespace = %s AND o.predicate = %s AND o.object_entity_id IS NULL"
+               " AND (lower(left(o.object_json, 200)) LIKE %s ESCAPE '\\' OR length(lower(left(o.object_json, 200))) = 200)"
+               + before_sql + _NOT_TOMBSTONED + " LIMIT %s")
+        with self._tx(read=True):
+            rows = self._q(sql, (namespace, predicate, pattern, *before_args, limit))
+        return [EntityRef(type=r["type"], key=r["key"]) for r in rows]
+
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
         limit: int = 10_000, observed_before: datetime | None = None,

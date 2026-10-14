@@ -157,6 +157,10 @@ class ShardedStore(GraphStore):
     def first_observed(self, namespace: str):
         return self.shard_for(namespace).first_observed(namespace)
 
+    def subjects_with_text(self, namespace: str, predicate: str, needle: str, limit: int = 100_000,
+                           observed_before=None) -> list[EntityRef]:
+        return self.shard_for(namespace).subjects_with_text(namespace, predicate, needle, limit, observed_before)
+
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
         return self.shard_for(namespace).relation_summary(namespace)
 

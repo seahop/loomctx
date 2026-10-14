@@ -41,7 +41,7 @@ _FETCH_CHUNK = 2_000     # candidates whose current values one batched read fetc
 _UPWARD_MAX = 5_000      # a positive seed this small checks membership upward
 _SCAN_RATIO = 20         # scan a predicate when it holds < this many rows per candidate
 _ROW_FRAME = 6           # tokens a row's framing costs beyond its text and cites
-_POSITIVE = ("eq", "in", "exists")
+_POSITIVE = ("eq", "in", "exists", "contains")
 _SELECTIVITY = {"eq": 0, "in": 1, "within": 2, "contains": 3, "exists": 4, "absent": 5, "not_within": 6, "ne": 7}
 _CLOSURE = ("within", "not_within")
 _RANKED = ("eq", "in", "exists", "absent", "ne")   # ops the store's SQL ranking answers (D-111)
@@ -342,13 +342,32 @@ def _seed(store, req, cap) -> tuple[list[Key] | None, bool]:
     is incomplete and never a start set (D-110): `enabled=true` at 500k
     objects hit the 200,001-row limit before the type filter, left 129,098
     users — under the cap, so nothing said "cut" — and the Domain Admins it
-    should have found were not among them: an exact-looking 0."""
+    should have found were not among them: an exact-looking 0. Under an
+    `of` entity a seed only serves to walk upward, so a lookup stops past
+    _UPWARD_MAX: 'principal exists' read 500,000 index rows for the two
+    groups nested in Domain Admins."""
+    if req.of is not None:
+        cap = min(cap, _UPWARD_MAX)
     best: list[Key] | None = None
     for f in sorted(req.where, key=lambda f: _SELECTIVITY[f.op]):
         if f.op not in _POSITIVE or (f.op == "exists" and best is not None):
             continue
         got: dict[Key, None] = {}
         complete = True
+        if f.op == "contains":
+            # matched inside the stored JSON text (ASCII, quotes and
+            # backslashes escaped, Python's quotes respelled), so only a
+            # needle spelled the same in both can seed
+            needle = _text(f.value)
+            if not needle or not needle.isascii() or not needle.isprintable() or any(
+                    c in needle for c in "\"'\\"):
+                continue
+            rows = store.subjects_with_text(req.namespace, f.predicate, needle, cap + 1, req.as_of)
+            complete = len(rows) <= cap
+            got = {_key(r): None for r in rows if req.type is None or r.type == req.type}
+            if complete and (best is None or len(got) < len(best)):
+                best = list(got)
+            continue
         lookups = [None] if f.op == "exists" else [
             vj for w in (f.value if f.op == "in" and isinstance(f.value, list) else [f.value])
             for vj in _value_jsons(w)]
@@ -431,8 +450,17 @@ def list_entities(store: GraphStore, req: ListRequest,
     route: dict = {}   # entity -> (hops, the entity one step closer to `of`); "open" -> onward links
     if req.of is not None:
         root_ref = store.resolve_refs(ns, [req.of]).get(_key(req.of))
+        if root_ref is None:
+            # a name where the handle goes ("user:mreyes@corp.local" for a
+            # SID-keyed account): Gemini 2.5 Flash took "not on record" as the
+            # answer in four groups runs of five (full run, 500k)
+            named = _target(store, ns, {"type": req.of.type, "key": req.of.key})
+            if named is not None:
+                root_ref = _ref(named)
+                notes.append(f"'{req.of.type}:{req.of.key}' is {named[0]}:{named[1]} (matched by name)")
         if root_ref is None or (allowed_types is not None and root_ref.type not in allowed_types):
-            return done(f"entity '{req.of.type}:{req.of.key}' is not on record")
+            return done(f"entity '{req.of.type}:{req.of.key}' is not on record, by handle or by name; "
+                        "find_entity resolves a name to its handle")
         via = list(dict.fromkeys(req.via)) or containment_predicates(schema)
         if not via:
             return done("no `via` predicates named and none registered as containment; "

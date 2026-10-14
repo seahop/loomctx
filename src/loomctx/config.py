@@ -43,12 +43,13 @@ def max_scope_entities() -> int:
     return _positive_int("LOOMCTX_MAX_SCOPE_ENTITIES", _DEFAULT_MAX_SCOPE_ENTITIES)
 
 
-_DEFAULT_MAX_LIST_CANDIDATES = 200_000
+_DEFAULT_MAX_LIST_CANDIDATES = 500_000   # a whole type at 500k objects (370,000 users) fits, D-110
 
 
 def max_list_candidates() -> int:
     """Ceiling on the entities one listing examines (D-107): the members of a
-    group holding every account, at 500,000 objects, are 370,000 of them. A
+    group holding every account, at 500,000 objects, are 370,000 of them —
+    200,000 cut a type scan there short of the accounts asked for. A
     cut makes the page's total a lower bound and says so (`exact` false),
     never silent. LOOMCTX_MAX_LIST_CANDIDATES."""
     return _positive_int("LOOMCTX_MAX_LIST_CANDIDATES", _DEFAULT_MAX_LIST_CANDIDATES)

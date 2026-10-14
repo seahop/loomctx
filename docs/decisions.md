@@ -3710,6 +3710,33 @@ exists: a bulk load defers it into an empty store, D-105). 10k: the
 `contains` scan 1.16 s -> 0.21 s; the plan no longer touches the rest of
 the namespace, which is what grew to hours.
 
+**Addendum (full run, 2026-10-14): `contains` seeds from the index; an `of`
+listing's seed lookups stop early.** The full run's 500k transcripts still
+held whole-type `contains` calls of 17-52 minutes, and replayed on one
+machine (no node sharing two 7.5 GB stores) they took 25-52 s: the pinned
+scan still read every row of a label predicate shared by users, groups and
+computers into Python. `GraphStore.subjects_with_text` matches the needle
+with LIKE on idx_obs_label's own lower-cased text, so `contains` seeds the
+candidates like `eq` does. The seed is a superset (any visible row, and
+every value the index cut at 200 characters); the filter still decides on
+current values. A needle the stored JSON spells differently (a quote, a
+backslash, non-ASCII) does not seed. `dn_name contains DC=lab,DC=local`
+over users: 52 s and an inexact 0 (the type scan stopped at the 200,000
+candidate cap) -> 0.1 s, 6 users, exact. The candidate cap is now 500,000:
+at 500k objects a type holds 370,000 users. Under an `of` entity a seed only
+serves to walk upward (<= `_UPWARD_MAX`), so its lookups stop there:
+"groups nested in Domain Admins with a principal" read 500,000 index rows
+for 2 groups, 6.7 s -> 0.1 s; "enabled, Kerberoastable nested admins" 2.9
+-> 0.1 s. Replayed on one machine, the run's 60 slowest distinct calls
+(35 s to 52 min there) now take at most 8.8 s.
+
+Reading the failures also showed `of` refusing a name: Gemini 2.5 Flash
+guessed `user:mreyes@corp.local` for a SID-keyed account, read "not on
+record" as the answer and stopped — four groups runs of five with named
+queries on. `of` now resolves a name as `within` does (one entity of that
+type the label predicates name, with a note saying so), and an `of` that
+resolves neither way points at `find_entity`.
+
 ## D-112 · An empty entity search retries what the agent meant (2026-10-13)
 
 137 of 2,480 `find_entity` calls in the final A/B's 10k half found nothing,

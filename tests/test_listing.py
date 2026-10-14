@@ -140,6 +140,32 @@ def test_multi_valued_snapshot_and_names(store):
     assert len(row.cites) >= 2
 
 
+def test_contains_seeds_from_the_label_index(store):
+    """'dn_name contains DC=lab' at 500k objects read every user's value into
+    Python; the index's lower-cased text seeds it (D-110). The seed is a
+    superset: a value past the index's 200-character cut is still found, an
+    old value is not current, and LIKE's wildcards are literal."""
+    _claim(store, "user:erin", "displayName", "x" * 250 + " needle_tail")
+    _claim(store, "user:frank", "displayName", "old needle_tail", when=T1)
+    _claim(store, "user:frank", "displayName", "Frank", when=T2)
+    _claim(store, "user:gina", "displayName", "needleXtail")   # '_' is not a wildcard
+    page, stats = run(store, type="user", where=[ListFilter(predicate="displayName", op="contains",
+                                                            value="NEEDLE_TAIL")])
+    assert stats["start"] == "index"
+    assert keys(page) == ["erin"]
+    page, stats = run(store, type="user", where=[ListFilter(predicate="spn", op="contains", value='a"b')])
+    assert stats["start"] == "type" and keys(page) == []   # a needle JSON respells never seeds
+
+
+def test_of_takes_a_name_where_the_handle_goes(store):
+    """An agent guessing 'user:<name>' for an opaquely keyed account read
+    "not on record" as the answer (full run, D-110 addendum)."""
+    page, _ = run(store, of=ref("user:Alice Admin"), via=["member_of"], direction="out", depth=3)
+    assert keys(page) == ["domain-admins"] and "matched by name" in page.notes[0]
+    page, _ = run(store, of=ref("user:no-such-person"), via=["member_of"])
+    assert page.total == 0 and "find_entity" in page.notes[0]
+
+
 def test_type_listing_cites_every_row_and_pages(store):
     page, stats = run(store, type="user", limit=2)
     assert stats["start"] == "type"

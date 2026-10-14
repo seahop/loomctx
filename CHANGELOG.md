@@ -16,6 +16,11 @@ tag is v0.1.0).
 - Connectors declare what they do not collect (`not_collected`); the LDAP
   connector declares local groups, sessions and GPO user rights, and empty
   results and matching questions say so.
+- `contains` filters seed from the label index (`subjects_with_text`): a
+  substring filter over a whole type at 500k objects, 52 s -> 0.1 s. Under
+  an `of` entity, seed lookups stop at the upward-walk limit.
+- A listing's `of` takes a name where the handle goes (`user:mreyes@corp.local`
+  for a SID-keyed account), as `within` does.
 
 ### Faster selective scope walks (D-109)
 
