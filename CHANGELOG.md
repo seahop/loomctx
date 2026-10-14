@@ -8,6 +8,14 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Active Directory audits at 500,000 objects (2026-10-14)
+
+- The five standard AD audits pass 92% at 500,000 objects and 93% at
+  10,000 (35 models × 5; 24 of 35 perfect at 500k), with the same steps and
+  spend at both sizes; 90% with named queries hidden. Three harder audits
+  (access, local admin, Kerberoastable admins; D-113) are scored apart: 81%
+  at both sizes. Full tables in `docs/models.md`.
+
 ### Compound questions; what is not collected (D-110)
 
 - List mode: `within` / `not_within` filters (nested membership), routes on
