@@ -130,11 +130,13 @@
       out.push('<text style="fill:var(--muted);font:500 10.5px var(--f-mono)" x="' + x(v) + '" y="' + (axisY + 14) + '" text-anchor="middle">' + money(v).replace(/0+$/, "").replace(/\.$/, "") + "</text>");
     });
     ranked.forEach(function (m, i) {
-      var cy = T + i * ROW + ROW / 2, t = tier(m);
+      // placed at the value it prints: the order breaks a printed tie on
+      // reliability, so two "$0.0022" dots must sit at the same x
+      var cy = T + i * ROW + ROW / 2, t = tier(m), v = shown(m.per_correct);
       out.push('<text style="fill:var(--ink-2);font:500 10.5px var(--f-mono)" x="' + (L - 10) + '" y="' + (cy + 3.5) + '" text-anchor="end">' + (i + 1) + ". " + esc(m.name) + (m.incomplete ? "*" : "") + "</text>");
-      out.push('<line x1="' + x(0.001) + '" x2="' + x(m.per_correct) + '" y1="' + cy + '" y2="' + cy + '" style="stroke:var(--line-2);stroke-width:2"/>');
-      out.push('<circle cx="' + x(m.per_correct) + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
-      out.push('<text style="fill:var(--ink);font:600 10.5px var(--f-mono)" x="' + (x(m.per_correct) + 9) + '" y="' + (cy + 3.5) + '">' + money(m.per_correct) + "</text>");
+      out.push('<line x1="' + x(0.001) + '" x2="' + x(v) + '" y1="' + cy + '" y2="' + cy + '" style="stroke:var(--line-2);stroke-width:2"/>');
+      out.push('<circle cx="' + x(v) + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
+      out.push('<text style="fill:var(--ink);font:600 10.5px var(--f-mono)" x="' + (x(v) + 9) + '" y="' + (cy + 3.5) + '">' + money(m.per_correct) + "</text>");
       out.push('<rect style="fill:transparent" x="0" y="' + (cy - ROW / 2) + '" width="' + W + '" height="' + ROW + '" data-tip="' +
         esc(m.id + " · " + money(m.per_correct) + " per correct answer · " + m.passes + "/" + m.scored + " passed · " + money(m.cost) + " a run") + '"/>');
     });
