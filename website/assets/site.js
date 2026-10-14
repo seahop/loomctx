@@ -203,13 +203,13 @@
 
   /* ---------------- retrieval scorecard: dot plot ---------------- */
   var ROWS = [
-    { budget: "400", loomctx: 81, vector: 75, recency: 50 },
+    { budget: "400", loomctx: 79, vector: 75, recency: 49 },
     { budget: "800", loomctx: 84, vector: 77, recency: 75 },
-    { budget: "1,600", loomctx: 86, vector: 79, recency: 75 },
-    { budget: "3,200", loomctx: 96, vector: 87, recency: 77 }
+    { budget: "1,600", loomctx: 86, vector: 78, recency: 75 },
+    { budget: "3,200", loomctx: 96, vector: 86, recency: 76 }
   ];
   var SERIES = [
-    { key: "recency", name: "Most recent", fill: "var(--surface)", stroke: "var(--muted)", r: 5.5 },
+    { key: "recency", name: "Newest facts only", fill: "var(--surface)", stroke: "var(--muted)", r: 5.5 },
     { key: "vector", name: "Vector top-k", fill: "var(--muted)", r: 6 },
     { key: "loomctx", name: "LoomCtx", fill: "var(--woad)", r: 7.5 }
   ];

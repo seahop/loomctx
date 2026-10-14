@@ -123,18 +123,18 @@
     </div>
     <div class="contrast">
       <div>
-        <div class="big red">127,715<small>tokens</small></div>
+        <div class="big red">127,717<small>tokens</small></div>
         <p>Mean prompt when the model is handed the full record for each question. The largest ran to 1.87 million tokens, and six multi-hop questions were too big to send at all.</p>
-        <span class="src">full-context baseline · 95% on the 47 it could send</span>
+        <span class="src">full-context baseline · 96% on the 47 it could send</span>
       </div>
       <div>
-        <div class="big blue">611<small>tokens</small></div>
+        <div class="big blue">616<small>tokens</small></div>
         <p>Mean prompt for a LoomCtx context pack at a 3,200-token budget. Accuracy: 96% on all 53 questions, including the multi-hop ones.</p>
         <span class="src">loomctx@3200 · same corpus, same reader model</span>
       </div>
       <div>
         <div class="big">15<small>of 18</small></div>
-        <p>“Which CISA-KEV CVEs affect software this host runs?” LoomCtx answered it in 15 of 18 runs. Vector search, recency and full context got 0 of 18.</p>
+        <p>“Which CISA-KEV CVEs affect software this host runs?” LoomCtx answered it in 15 of 18 runs. Vector search, newest facts only and full context got 0 of 18.</p>
         <span class="src">542,099 real observations: CISA KEV + NVD + EPSS</span>
       </div>
     </div>
@@ -313,29 +313,29 @@
     <div class="evidence">
       <div class="card">
         <h3>Retrieval accuracy by token budget</h3>
-        <p class="sub">53 questions over 542,099 real vulnerability observations. The reader is deepseek-chat-v3.1; each figure is the mean of 3 runs, and every condition gets the same token budget.</p>
+        <p class="sub">53 questions over 542,099 real vulnerability observations. The reader is deepseek-chat-v3.1; each figure is the mean of 3 runs. All three start from the same facts with the same token budget and differ only in which facts they pick: LoomCtx's ranked pack, the facts most similar to the question (vector), or simply the newest ones.</p>
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>LoomCtx context pack</span>
           <span><i class="dot" style="background:var(--muted)"></i>Vector top-k</span>
-          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)"></i>Most recent</span>
+          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)"></i>Newest facts only</span>
         </div>
         <div class="chart-box">
-          <svg id="scorechart" viewBox="0 0 560 250" role="img" aria-label="Accuracy by budget. At 400 tokens: LoomCtx 81%, vector 75%, recency 50%. 800: 84, 77, 75. 1,600: 86, 79, 75. 3,200: 96, 87, 77."></svg>
+          <svg id="scorechart" viewBox="0 0 560 250" role="img" aria-label="Accuracy by budget. At 400 tokens: LoomCtx 79%, vector 75%, newest facts only 49%. 800: 84, 77, 75. 1,600: 86, 78, 75. 3,200: 96, 86, 76."></svg>
           <div class="chart-tip" id="chart-tip" hidden></div>
         </div>
         <details class="tbl">
           <summary>Show as table</summary>
           <table>
-            <thead><tr><th scope="col">Budget</th><th scope="col">LoomCtx</th><th scope="col">Vector</th><th scope="col">Recency</th></tr></thead>
+            <thead><tr><th scope="col">Budget</th><th scope="col">LoomCtx</th><th scope="col">Vector</th><th scope="col">Newest facts only</th></tr></thead>
             <tbody>
-              <tr><td>400</td><td>81%</td><td>75%</td><td>50%</td></tr>
+              <tr><td>400</td><td>79%</td><td>75%</td><td>49%</td></tr>
               <tr><td>800</td><td>84%</td><td>77%</td><td>75%</td></tr>
-              <tr><td>1,600</td><td>86%</td><td>79%</td><td>75%</td></tr>
-              <tr><td>3,200</td><td>96%</td><td>87%</td><td>77%</td></tr>
+              <tr><td>1,600</td><td>86%</td><td>78%</td><td>75%</td></tr>
+              <tr><td>3,200</td><td>96%</td><td>86%</td><td>76%</td></tr>
             </tbody>
           </table>
         </details>
-        <span class="src">docs/evaluation.md · 2026-09-24. Reruns on 2026-09-26, 2026-09-27 and 2026-09-29 (the current engine) reproduced it within variance.</span>
+        <span class="src">docs/evaluation.md · 2026-10-14, the current build. Runs since 2026-09-24 all agree within 2 points.</span>
       </div>
 
       <div class="card">
@@ -722,7 +722,7 @@ curl -s -X POST localhost:8000/v1/ask \
   </div>
 </footer>
 
-<script src="assets/site.js?v=13431abf3e"></script>
+<script src="assets/site.js?v=be8f098eb7"></script>
 <script src="assets/models-data.js?v=5c6b3417b4"></script>
 <script src="assets/models.js?v=ba22a9e6a9"></script>
 </body>
