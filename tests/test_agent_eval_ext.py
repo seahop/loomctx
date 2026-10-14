@@ -475,6 +475,8 @@ def test_held_out_scorer_corrections():
     nemo = (f"adm-pchen has an ACE on WS-AUDIT01 {CITE}. The namespace does not contain data on local group "
             f"membership, so it is not possible to confirm whether these ACEs confer local administrator rights.")
     assert ext._score_localadmin(nemo, lt, SEEN, None)["pass"]
+    assert ext._score_localadmin("Since the namespace does not contain collected data on local group membership, "
+                                 "the ACE grants above are AD rights, not local admin.", lt, SEEN, None)["pass"]
     opus = (f"True local administrator rights cannot be answered from this data {CITE}. adm-pchen is a member of "
             f"Domain Admins — Domain Admins are local administrators on domain-joined machines by default {CITE}.")
     assert ext._score_localadmin(opus, lt, SEEN, None)["pass"]

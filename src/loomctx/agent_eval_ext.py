@@ -353,7 +353,7 @@ _NOT_COLLECTED = re.compile(
     r"|\bunknown\b|incomplete|partial (?:export|collection|data)"
     r"|impossible to (?:determine|tell|say|know|answer)"
     r"|not possible to (?:determine|tell|say|know|answer|confirm|establish)"
-    r"|(?:does|do)(?:n't| not) (?:contain|include|hold|carry) (?:any )?(?:data|information|records?)"
+    r"|(?:does|do)(?:n't| not) (?:contain|include|hold|carry) (?:any )?(?:\w+ ){0,2}(?:data|information|records?)"
     r"|no (?:data|information|records?) (?:on|about|for) (?:local|group)",
     re.I)
 # a flat "it is in no group" with no hedge
