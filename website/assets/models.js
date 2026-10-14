@@ -236,7 +236,7 @@
       return "<tr>" +
         "<td>" + esc(m.name) + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
-          m.passes + "/" + m.scored + (m.incomplete ? "*" : "") + "</span></td>" +
+          '<span class="mb-n">' + m.passes + "/" + m.scored + '</span><span class="mb-mark">' + (m.incomplete ? "*" : "") + "</span></span></td>" +
         '<td class="num">' + cell(m.tasks.exposure) + "</td><td class=\"num\">" + cell(m.tasks.lease) + "</td>" +
         '<td class="num">' + cell(m.tasks.conflict) + "</td><td class=\"num\">" + cell(m.tasks.os) + "</td>" +
         '<td class="num">' + money(m.cost) + "</td>" +
@@ -322,7 +322,7 @@
     tbody.innerHTML = sorted.map(function (m) {
       return "<tr><td>" + esc(m.name) + (m.note ? ' <span title="' + esc(m.note) + '">†</span>' : "") + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
-        m.passed[0] + "/" + m.passed[1] + (m.incomplete ? "*" : "") + "</span></td>" +
+        '<span class="mb-n">' + m.passed[0] + "/" + m.passed[1] + '</span><span class="mb-mark">' + (m.incomplete ? "*" : "") + "</span></span></td>" +
         '<td class="num">' + cell(m.hard) + "</td>" +
         '<td class="num">' + cell(m.passed_10k) + "</td>" + '<td class="num">' + cell(m.passed_off) + "</td>" +
         TASKS.map(function (t) { return '<td class="num">' + cell(m.tasks[t]) + "</td>"; }).join("") +
