@@ -80,7 +80,7 @@ Through the LDAP connector, as a user loads data:
 | SQLite, GKE job | 10k forest (175,560 facts) | 173 s | 39 s (D-105) |
 | SQLite, GKE job | 500k forest (6.5M facts) | 8,296 s | 2,945 s (D-105) |
 | Postgres, same host (laptop) | 10k forest | 109 s | 65 s (87c050a) |
-| Postgres, separate node (GKE, pd-ssd) | 500k forest | ~283 facts/s, ~6.5 h (ca15cbb) | measured after the 2026-10-14 sweep |
+| Postgres, separate node (GKE, pd-ssd) | 500k forest (6,502,512 facts) | 22,586 s, ~288 facts/s (ca15cbb) | measured after the 2026-10-14 sweep |
 
 Over a network, Postgres writes were bound by round trips (four to six
 statements per fact) until 87c050a batched them (D-105 addendum).
@@ -90,6 +90,7 @@ statements per fact) until 87c050a batched them (D-105 addendum).
 | Store | Facts | Size |
 | --- | --- | --- |
 | SQLite, 500k forest | 6,502,512 | 7.5 GB (table 3.2 GB; `idx_obs_event` 0.85 GB) |
+| Postgres 17 + pgvector, 500k forest | 6,502,512 | 9.8 GB after ANALYZE (2026-10-14) |
 | SQLite, vulnerability corpus | 542,100 | 3.9 GB, embedded |
 
 Reducing this is future-work item 6.
