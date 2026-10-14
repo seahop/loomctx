@@ -255,7 +255,7 @@ Run 2026-10-14 on one build, both forests rebuilt from seed 7, as GKE Jobs.
 | 500k, named queries off | 1165/1368 (85%) | 770/855 (90%) | 395/513 (77%) | 9 | 30 s | $111.82 |
 | 10k, named queries off | 1162/1366 (85%) | 772/856 (90%) | 390/510 (76%) | 13 | 26 s | $108.32 |
 
-Fifty times the data costs nothing in accuracy, steps or spend. Named
+Thirty-seven times the data costs nothing in accuracy, steps or spend. Named
 queries (D-108) are worth about three points overall: 6-12 points on
 xdomain, delegation and kerberoast, against 3-6 points lost on coverage and
 groups at 500k. With them hidden the agent builds each listing itself.
