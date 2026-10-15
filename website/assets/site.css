@@ -443,3 +443,6 @@ table.cmp tr.hl td:last-child { color: var(--woad); font-weight: 600; }
 #ad-table { min-width: 1340px; }
 .mb-nq table.cmp td:nth-child(2) { color: var(--ink); font-weight: 600; }
 .mb-nq table.cmp td:nth-child(3) { color: var(--muted); }
+table.cmp.pgt td:nth-child(2) { color: var(--ink); font-weight: 600; }
+table.cmp.pgt tr.hl td:nth-child(2) { color: var(--woad); }
+table.cmp.pgt tr.hl td:last-child { color: var(--ink); font-weight: 400; }

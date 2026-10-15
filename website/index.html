@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap">
-<link rel="stylesheet" href="assets/site.css?v=e1264bb794">
+<link rel="stylesheet" href="assets/site.css?v=0c5d950f64">
 <script>
   // apply a remembered theme before first paint
   try { var t = localStorage.getItem("loomctx-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
@@ -359,8 +359,9 @@
           <li><span>Ingest through the gateway</span><b>237 /s</b></li>
           <li><span>Asks, p50</span><b>83 ms</b></li>
           <li><span>Ask throughput</span><b>186 /s</b></li>
+          <li><span>Standard AD audits at 500k, one shared Postgres</span><b>91%</b></li>
         </ul>
-        <span class="src">GKE, auth on, real corpus, 0 errors · 2026-09-27</span>
+        <span class="src">GKE, auth on, real corpus, 0 errors · 2026-09-27; AD on Postgres 2026-10-15</span>
       </div>
       <div class="card">
         <h3>When the primary dies</h3>
@@ -537,6 +538,29 @@
           </table>
         </div>
         <p class="mb-cmp-note">They help most where a query matches the question (cross-domain admins, delegation, Kerberoastable admins) and cost a few points on coverage and nested groups. Overall: standard audits 92% on against 90% off; harder audits 81% against 77%.</p>
+      </div>
+      </div>
+      <div class="mb-pair">
+      <div class="mb-cmp">
+        <h4>On Postgres, the scale deployment</h4>
+        <div class="table-wrap">
+          <table class="cmp pgt">
+            <thead><tr><th scope="col">500,000 objects, one build</th><th scope="col" class="num">Standard 5</th><th scope="col" class="num">Harder 3</th><th scope="col" class="num">Median audit</th></tr></thead>
+            <tbody>
+              <tr class="hl"><td>Postgres, one shared database</td><td class="num">91% <small>777 / 854</small></td><td class="num">80%</td><td class="num">21 s</td></tr>
+              <tr><td>SQLite, a private file per agent</td><td class="num">92% <small>787 / 860</small></td><td class="num">78%</td><td class="num">20 s</td></tr>
+              <tr><td>Postgres, named queries off</td><td class="num">91% <small>774 / 854</small></td><td class="num">79%</td><td class="num">23 s</td></tr>
+              <tr><td>SQLite, named queries off</td><td class="num">89% <small>756 / 845</small></td><td class="num">77%</td><td class="num">25 s</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">35 models, five runs each, all eight audits. Postgres 17 with pgvector served about 13 agents at once from one database, as a Kubernetes deployment would; SQLite gave each agent its own copy. Measured 2026-10-15.</p>
+      </div>
+      <div class="mb-cmp mb-nq">
+        <h4>What differs, and what doesn't</h4>
+        <p><b>Same answers.</b> Replaying 643 recorded agent calls against both returned the same totals and the same listings on every one.</p>
+        <p><b>Per audit, it goes both ways.</b> Cross-domain admins scored higher on SQLite, access and local admin higher on Postgres. The swings sit in a few models that flip all five runs together on tiny input differences, here the observation ids each store mints when it loads. That is store-to-store variance, not the database.</p>
+        <p><b>Speed.</b> Small lookups pay a network hop on Postgres (16 ms against 4 ms at the median); scoped questions take the same time on both; the slowest call of the whole sweep took 29 s. Loading the 6.5 million facts into Postgres takes 45 minutes.</p>
       </div>
       </div>
       <div class="mb-tasks">
