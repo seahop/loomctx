@@ -17,7 +17,7 @@
   },
   "devDependencies": {
     "json-schema-to-typescript": "^15.0.4",
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   },
   "repository": { "type": "git", "url": "https://github.com/seahop/loomctx", "directory": "sdk/typescript" }
 }
