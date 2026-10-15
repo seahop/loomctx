@@ -55,7 +55,9 @@ docker compose exec loomctx python -m loomctx.seed load
 
 ## Deadline
 
-Conference demo + presentation on 2026-10-21 (confirmed 2026-09-29; the site and docs say "late October" for the release). Repo is meant to be public
-(github.com/seahop/loomctx; still private as of 2026-09-24 — flip repo AND GHCR
-package visibility before the talk) — keep `main` green and presentable. k8s manifests in
+Conference demo + presentation on 2026-10-21 (confirmed 2026-09-29). The repo
+(github.com/seahop/loomctx) went public on 2026-10-15; the GHCR packages
+(loomctx, loomctx-gateway) are flipped in the package settings UI. `main` is
+branch-protected: changes land by PR with the five CI jobs green, no force-push.
+Keep `main` green and presentable. k8s manifests in
 `deploy/k8s`; CI publishes the image to ghcr.io/seahop/loomctx on main.
