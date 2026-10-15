@@ -6,6 +6,9 @@ ARG PYTHON_VERSION=3.14
 ARG PYTHON_DIGEST=@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 FROM python:${PYTHON_VERSION}-slim${PYTHON_DIGEST}
 
+LABEL org.opencontainers.image.source="https://github.com/seahop/loomctx" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -19,7 +22,7 @@ WORKDIR /app
 # loomctx/test/consumer/mcp so they can never drift apart (D-011).
 COPY requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps . \
     # The runtime image needs no package manager: pip (with its vendored

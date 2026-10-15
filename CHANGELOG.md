@@ -5,7 +5,17 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
-Nothing yet.
+### License files (2026-10-15)
+
+- A `NOTICE` with the copyright line. `LICENSE` and `NOTICE` are copied into
+  each SDK (`sdk/go`, `sdk/python`, `sdk/typescript`), since each ships on
+  its own and pkg.go.dev hides the docs of a module with no license. CI
+  checks that the copies match the root.
+- Both images carry `LICENSE` and `NOTICE`, plus OCI `licenses` and `source`
+  labels. The gateway image also carries the license file of every module
+  linked into its binary and of the Go runtime, under
+  `/usr/share/licenses/third-party`; a linked module without one fails the
+  build.
 
 ## v0.2.0 — 2026-10-15
 
