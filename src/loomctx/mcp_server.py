@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import threading
@@ -59,10 +60,16 @@ from .context import (build_pack, cite_text, decode_handle, expand_pack, find_pa
                      label_predicates, search_by_name, semantic_search)
 from .contracts import (DEFAULT_PATH_DEPTH, AnswerRequest, AskRequest, ClaimIn, EntityRef,
                         ExpansionHandle,
-                        Observation, PathRequest, PredicateDef, ScopeSpec, ScopeTruncation,
+                        ListFilter, ListRequest, Observation, PathRequest, PredicateDef, QueryRequest,
+                        ScopeSpec,
+                        ScopeTruncation,
                         SemanticSearchResponse)
 from .gates import check_supersedes, scope_counts, scope_schema
+from .listing import list_entities as list_entities_impl
 from .llm import LLMError, embedder_from_env, llm_from_env
+from .queries import find_query
+from .queries import resolve as resolve_query
+from .queries import run_query as run_query_impl
 from .metrics import REJECTED
 from .ratelimit import LimiterPool, RateLimitSettings
 from .registry import validate_claim
@@ -79,6 +86,15 @@ _transport = "stdio"
 # dropped the argument after two calls and spent twelve steps querying an
 # empty 'default'; a deployment that serves one team sets this once.
 _DEFAULT_NS = os.environ.get("LOOMCTX_MCP_NAMESPACE", "").strip() or "default"
+# Named queries on the MCP surface (D-108): on by default. LOOMCTX_MCP_QUERIES=0
+# hides run_query and the `queries` describe_namespace lists — how a run is
+# measured with and without them.
+_QUERIES_ON = os.environ.get("LOOMCTX_MCP_QUERIES", "1").strip().lower() not in ("0", "false", "no", "off")
+# record_claim on the MCP surface: on by default. LOOMCTX_MCP_WRITES=0 hides
+# it, so agents can only read. A scorecard sets it: in the 2026-10-14 run,
+# agents sharing one Postgres store wrote two claims that changed what every
+# later agent's describe_namespace said.
+_WRITES_ON = os.environ.get("LOOMCTX_MCP_WRITES", "1").strip().lower() not in ("0", "false", "no", "off")
 
 Format = Literal["concise", "detailed"]
 
@@ -265,6 +281,11 @@ INSTRUCTIONS = (
     "sequence(s) that connect two entities along named predicates "
     "(reachability: host->product->cve, user->group->domain), each hop "
     "cited — it reports the paths that exist, it does not rank them. "
+    "list_entities returns EVERY entity matching conditions with an exact "
+    "count (a group's nested members that are enabled, computers with a "
+    "flag set) — use it when the answer is a set, not a ranked pack. "
+    "describe_namespace lists a namespace's named `queries` (questions it "
+    "answers exactly); run one with run_query(name, params). "
     "purple_report sets a red-team operation's logged actions against the "
     "detections on the same hosts (detected / host_only / missed). Every "
     "pack tool takes format='concise' (default: "
@@ -425,10 +446,12 @@ class AgentPathEdge(TypedDict):
 
 class AgentPath(TypedDict):
     """A path an agent reads: the traversal rendered `A -pred-> B -pred-> C`
-    and one compact citation per hop (D-067)."""
+    and one compact citation per hop (D-067); format='detailed' adds the full
+    PathEdge objects as `edges`."""
     text: str
     hops: int
     cites: list[str]
+    edges: NotRequired[list[dict[str, Any]]]
 
 
 # A PathPack as an agent reads it: connecting paths shortest-first, each an
@@ -457,6 +480,38 @@ PathView = TypedDict("PathView", {
     "truncated": NotRequired[list[ScopeTruncation]],
     "coverage_warning": NotRequired[str],
 })
+
+
+class AgentRoute(TypedDict):
+    text: str
+    cites: list[str]
+
+
+class AgentListRow(TypedDict):
+    """One listed entity: its handle, display name, the current values the
+    listing filtered on or was asked for, how far it is from `of` (`hops`,
+    and `through` the entity one step closer), and the cite tokens backing
+    them."""
+    entity: str
+    name: NotRequired[str]
+    values: NotRequired[dict[str, Any]]
+    hops: NotRequired[int]
+    through: NotRequired[str]
+    path: NotRequired[AgentRoute]
+    cites: list[str]
+
+
+class ListView(TypedDict):
+    """A page of list_entities (D-107): `total` is every match, exact unless
+    `exact` is false; continue with `next_offset`."""
+    namespace: str
+    total: int
+    exact: bool
+    offset: int
+    next_offset: NotRequired[int]
+    charged_tokens: int
+    rows: list[AgentListRow]
+    notes: NotRequired[list[str]]
 
 
 class ObservationList(TypedDict):
@@ -501,12 +556,22 @@ class EntityTypeCount(TypedDict):
     attributes: NotRequired[list[str]]
 
 
+class AgentQuery(TypedDict):
+    """A named query the namespace answers exactly (D-108): run it with
+    run_query(name, params)."""
+    name: str
+    description: str
+    params: list[str]
+
+
 class NamespaceDescription(TypedDict):
     namespace: str
     entity_types: list[EntityTypeCount]
     predicates: list[PredicateDef]
     strict: bool
     hint: str
+    queries: NotRequired[list[AgentQuery]]
+    not_collected: NotRequired[list[dict[str, str]]]
 
 
 class EntityMatch(TypedDict):
@@ -597,6 +662,9 @@ def _agent_view(pack, fmt: Format = "concise") -> AgentPack:
 
 
 def _parse_ref(handle: str) -> EntityRef:
+    # a handle sent JSON-quoted ('"user:S-1-…"') is the same handle: a model
+    # looped to the step cap on "entity not on record" for one (final A/B)
+    handle = handle.strip().strip("\"'").strip()
     etype, sep, key = handle.partition(":")
     if not sep or not etype or not key:
         raise ValueError(
@@ -621,7 +689,17 @@ def _known_namespace(namespace: str, grant: Grant | None = None) -> None:
     (among the namespaces this caller may read)."""
     summary = _summary()
     if namespace not in summary and _get_store().get_schema(namespace) is None:
-        known = ", ".join(_visible(grant, summary)) or "none yet"
+        visible = _visible(grant, summary)
+        known = ", ".join(visible) or "none yet"
+        # an entity's name passed as the namespace (namespace="corp.local"): say
+        # where it lives — Gemini 2.5 Flash read the generic error as "the data
+        # is not here" and gave up on five runs out of five (final A/B, 10k)
+        for ns in visible:
+            hit = next((e for e in _get_store().search_entities(ns, namespace, limit=3)
+                        if e.key.lower() == namespace.lower()), None)
+            if hit is not None and (grant is None or grant.entity_types is None or hit.type in grant.entity_types):
+                raise ValueError(f"{namespace!r} is not a namespace: it is {hit.type}:{hit.key} in namespace "
+                                 f"{ns!r} — call again with namespace={ns!r}")
         raise ValueError(f"namespace {namespace!r} holds no data; namespaces with data: {known}"
                          " — pass namespace=... on every call")
 
@@ -672,13 +750,26 @@ def describe_namespace(namespace: str = _DEFAULT_NS, ctx: Context = None) -> Nam
         if attributes:
             entry["attributes"] = _capped(attributes, _ATTRIBUTES_SHOWN)
         types.append(entry)
-    return {
+    view: dict[str, Any] = {
         "namespace": namespace,
         "entity_types": types,
         "predicates": [p.model_dump(mode="json") for p in (schema.predicates if schema else [])],
         "strict": bool(schema and schema.strict),
         "hint": _path_hint(relations),
     }
+    if schema is not None and schema.not_collected:
+        view["not_collected"] = [{"topic": g.topic, "description": g.description} for g in schema.not_collected]
+    if schema is not None and schema.queries and _QUERIES_ON:
+        view["queries"] = [{"name": q.name, "description": q.description,
+                            "params": [_param_text(p) for p in q.params]} for q in schema.queries]
+    return view  # type: ignore[return-value]
+
+
+def _param_text(p) -> str:
+    """A query parameter as one line: `group (entity: group) — the group`."""
+    kind = f"{p.kind}: {p.entity_type}" if p.entity_type else p.kind
+    text = f"{p.name} ({kind}{'' if p.default is None else f', default {p.default!r}'})"
+    return text + (f" — {p.description}" if p.description else "")
 
 
 # describe_namespace counts against the agent's context: a type's links and
@@ -760,16 +851,28 @@ def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
     labels = label_predicates(store, namespace)
     found, matched = search_by_name(store, namespace, query, limit=limit, types=_allowed(grant))
     names: dict[tuple[str, str], str] = {}
-    lowered = matched.lower()
+    # the name searched for, without the realm a retry appends ("Domain
+    # Admins (corp.local)"): no label starts with that, and the pick fell to
+    # whichever label row came back first — the DN on Postgres, the friendly
+    # name on SQLite, for the same entity (2026-10-14 run)
+    lowered = re.sub(r" \([^()]*\)$", "", matched).lower()
     by_name = [EntityRef(type=e.type, key=e.key) for e in found if not e.key.lower().startswith(lowered)]
     if by_name and labels:
+        schema = store.get_schema(namespace)
+        defs = schema.predicates if schema is not None else []
+        order = {p: i for i, p in enumerate([d.name for d in defs if d.display]
+                                            + [d.name for d in defs if d.label and not d.display])}
         rows = store.observations_for_many(namespace, by_name, limit=20, predicates=list(labels))
         for ref in by_name:
-            values = [str(o.object) for o in rows.get((ref.type, ref.key), [])
-                      if isinstance(o.object, str) and o.subject.key == ref.key]
-            hit = next((v for v in values if v.lower().startswith(lowered)), values[0] if values else None)
-            if hit is not None:
-                names[(ref.type, ref.key)] = hit
+            obs = [o for o in rows.get((ref.type, ref.key), [])
+                   if isinstance(o.object, str) and o.subject.key == ref.key]
+            # whatever order the store returned the rows in: a label starting
+            # with the name searched for, else the display label, then the
+            # registry's order, then the shortest
+            obs.sort(key=lambda o: (not str(o.object).lower().startswith(lowered),
+                                    order.get(o.predicate, len(order)), len(str(o.object)), str(o.object)))
+            if obs:
+                names[(ref.type, ref.key)] = str(obs[0].object)
     return [
         {
             "handle": f"{e.type}:{e.key}",
@@ -866,7 +969,7 @@ def _listed(value: list[str] | str | None) -> list[str]:
 
 def ask_scope(
     subjects: list[str] | str,
-    question: str,
+    question: str = "",
     expand_predicates: list[str] | str | None = None,
     depth: int = 1,
     budget: int = SCOPE_BUDGET_DEFAULT,
@@ -950,7 +1053,10 @@ def _path_view(pack, fmt: Format = "concise") -> PathView:
         raise ValueError(f"format must be 'concise' or 'detailed', got {fmt!r}")
     d = pack.model_dump(mode="json", by_alias=True, exclude_none=True)
     if fmt == "detailed":
-        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges), "edges": dp}
+        # cites too: the output schema requires them in either format, and a
+        # detailed path without them failed validation (the tool errored)
+        paths = [{"text": _path_arrow(pack, edges), "hops": len(edges),
+                  "cites": [cite_text(e.cite) for e in edges], "edges": dp}
                  for edges, dp in zip(pack.paths, d.get("paths", []))]
     else:
         paths = [{"text": _path_arrow(pack, edges), "hops": len(edges),
@@ -1025,6 +1131,191 @@ def find_path(
         as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
     )
     return _path_view(find_paths(_get_store(), req, allowed_types=_allowed(grant)), format)
+
+
+_FILTER_TEXT = re.compile(r"^\s*(!)?\s*([A-Za-z_][\w.-]*)\s*(?:(!=|~=|=)\s*(.*?)|(\?))?\s*$")
+
+
+_WITHIN_TEXT = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s+(not\s+within|within)\s+(\S+?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
+                          re.I)
+
+
+def _filters(where) -> list[ListFilter]:
+    """list_entities' `where`: objects {predicate, op, value}, or text an
+    agent writes naturally — `enabled=false`, `is_dc!=true`, `name~=svc`
+    (contains), `spn?` (has a value), `!spn` (has none); a JSON string of
+    either is accepted too."""
+    if where is None:
+        return []
+    if isinstance(where, str):
+        text = where.strip()
+        if text.startswith(("[", "{")):
+            where = json.loads(text)
+        else:
+            where = []
+            for piece in re.split(r"\s*(?:;|\band\b)\s*", text):
+                parts = [p for p in re.split(r"\s*,\s*", piece) if p]
+                # a comma inside a value (an LDAP DN: CN=Bob,OU=Staff) is
+                # not a separator: split only when no part holds a second '='
+                where += parts if len(parts) > 1 and all(p.count("=") <= 1 for p in parts) else [piece]
+            where = [w for w in where if w]
+    if isinstance(where, dict):
+        where = [where]
+    out: list[ListFilter] = []
+    for item in where:
+        if isinstance(item, dict):
+            out.append(ListFilter.model_validate(item))
+            continue
+        w = _WITHIN_TEXT.match(str(item))
+        if w is not None:
+            pred, op, value, depth = w.groups()
+            out.append(ListFilter(predicate=pred, op="not_within" if op.lower().startswith("not") else "within",
+                                  value=value.strip().strip("'\""), depth=int(depth) if depth else 6))
+            continue
+        m = _FILTER_TEXT.match(str(item))
+        if m is None:
+            raise ValueError(f"cannot read filter {item!r}: write predicate=value, predicate!=value, "
+                             "predicate~=text, predicate?, !predicate or predicate within type:key")
+        neg, pred, op, value, has = m.groups()
+        if neg:
+            out.append(ListFilter(predicate=pred, op="absent"))
+        elif has or op is None:
+            out.append(ListFilter(predicate=pred, op="exists"))
+        else:
+            value = value.strip().strip("'\"")
+            out.append(ListFilter(predicate=pred, op={"=": "eq", "!=": "ne", "~=": "contains"}[op], value=value))
+    return out
+
+
+def _row_route(r) -> str:
+    """A row's route as arrows from the entity, each edge as stored:
+    `user:a -member_of-> group:g -has_ace-> computer:w`."""
+    cur, parts = r.entity, [f"{r.entity.type}:{r.entity.key}"]
+    for e in r.path:
+        if (e.subject.type, e.subject.key) == (cur.type, cur.key):
+            nxt, arrow = e.object, f"-{e.predicate}->"
+        else:
+            nxt, arrow = e.subject, f"<-{e.predicate}-"
+        label = f"{nxt.type}:{nxt.key}" if isinstance(nxt, EntityRef) else str(nxt)
+        parts.append(f"{arrow} {label}")
+        cur = nxt if isinstance(nxt, EntityRef) else cur
+    return " ".join(parts)
+
+
+def _list_view(page) -> ListView:
+    view: dict[str, Any] = {"namespace": page.namespace}
+    if page.notes:
+        view["notes"] = page.notes
+    view.update(total=page.total, exact=page.exact, offset=page.offset, charged_tokens=page.charged_tokens)
+    if page.next_offset is not None:
+        view["next_offset"] = page.next_offset
+    rows = []
+    for r in page.rows:
+        row: dict[str, Any] = {"entity": f"{r.entity.type}:{r.entity.key}"}
+        if r.name:
+            row["name"] = r.name
+        if r.values:
+            row["values"] = {k: (f"{v.type}:{v.key}" if isinstance(v, EntityRef) else v)
+                             for k, v in r.values.items()}
+        if r.hops is not None:
+            row["hops"] = r.hops
+        if r.through is not None:
+            row["through"] = f"{r.through.type}:{r.through.key}"
+        if r.path:
+            row["path"] = {"text": _row_route(r), "cites": [cite_text(e.cite) for e in r.path]}
+        row["cites"] = [cite_text(c) for c in r.cites]
+        rows.append(row)
+    view["rows"] = rows
+    return view  # type: ignore[return-value]
+
+
+def list_entities(
+    type: str | None = None,
+    of: str | None = None,
+    via: list[str] | str | None = None,
+    direction: Literal["in", "out", "any"] = "in",
+    depth: int = 1,
+    where: list[dict[str, Any] | str] | str | None = None,
+    paths: bool = False,
+    fields: list[str] | str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    budget: int = 2000,
+    namespace: str = _DEFAULT_NS,
+    as_of: str | None = None,
+    valid_at: str | None = None,
+    ctx: Context = None,
+) -> ListView:
+    """List EVERY entity matching conditions, with an exact count — "which
+    accounts are disabled?", "which members of Domain Admins (nested) are
+    enabled?", "which computers allow unconstrained delegation and are not
+    domain controllers?". Use it instead of ask/ask_scope when the answer is
+    a set: a pack ranks what fits its budget, a listing returns all matches,
+    paged. `type` keeps one entity type; `of` ('type:key') lists what is
+    connected to that entity along `via` (direction 'in': entities whose
+    edge points at it — a group's members; 'out': what it points at), up to
+    `depth` hops (nested groups: depth 3-6). `where` filters on CURRENT
+    values, all must hold: objects {predicate, op, value} with op eq / ne /
+    in / contains / exists / absent / within / not_within, or text like
+    "enabled=false", "is_dc!=true", "spn?", "member_of within group:<key>"
+    (nested membership in that group, up to depth 6). `ne` includes
+    entities with no value recorded (a note counts them). `paths=true`
+    gives each row of an `of` listing its cited route to `of` (an account
+    reaching a machine through groups and ACL grants: via=["has_ace",
+    "member_of"], direction="in"). `fields` adds predicates to show per
+    row. Every row is cited; `total` counts all matches — page with
+    `offset` / `next_offset`. Name filters by the predicates
+    describe_namespace lists."""
+    grant = _grant(ctx, namespace, "r")
+    root = _parse_ref(of) if of else None
+    if root is not None:
+        _gate_type(grant, root.type)
+    if type:
+        _gate_type(grant, type)
+    _known_namespace(namespace, grant)
+    type = type.strip().strip("\"'").strip() if type else type
+    req = ListRequest(
+        namespace=namespace, type=type or None, of=root, via=_listed(via), direction=direction,
+        depth=depth, where=_filters(where), paths=paths, fields=_listed(fields), limit=limit, offset=offset,
+        budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at),
+    )
+    return _list_view(list_entities_impl(_get_store(), req, allowed_types=_allowed(grant)))
+
+
+def run_query(
+    name: str,
+    params: dict[str, Any] | list[Any] | str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    budget: int = 2000,
+    namespace: str = _DEFAULT_NS,
+    as_of: str | None = None,
+    valid_at: str | None = None,
+    ctx: Context = None,
+) -> ListView:
+    """Run one of the namespace's NAMED QUERIES — questions it answers
+    exactly, listed under `queries` by describe_namespace (an AD namespace:
+    effective_members(group), account_groups(account),
+    unconstrained_delegation_hosts, domain_trusts, …). `params` maps each
+    parameter to its value; an entity parameter takes a 'type:key' handle or
+    a name. Returns every match with an exact `total`, cited, paged like
+    list_entities. Prefer it over composing the same walk by hand."""
+    grant = _grant(ctx, namespace, "r")
+    _known_namespace(namespace, grant)
+    if isinstance(params, str):
+        params = json.loads(params) if params.strip() else {}
+    if isinstance(params, list):
+        # positional, in the query's parameter order: ["group:…", "user"]
+        query = find_query(_get_store().get_schema(namespace), namespace, name)
+        params = {p.name: v for p, v in zip(query.params, params)}
+    req = QueryRequest(namespace=namespace, name=name, params=params or {}, limit=limit, offset=offset,
+                       budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at))
+    _, listed = resolve_query(_get_store(), req, allowed_types=_allowed(grant))
+    if listed.of is not None:
+        _gate_type(grant, listed.of.type)
+    if listed.type:
+        _gate_type(grant, listed.type)
+    return _list_view(run_query_impl(_get_store(), req, allowed_types=_allowed(grant)))
 
 
 class PurpleView(TypedDict):
@@ -1282,6 +1573,8 @@ TOOL_META: dict[str, tuple[str, bool, bool]] = {
     "ask": ("Ask about one entity", True, True),
     "ask_scope": ("Ask about a scope", True, True),
     "find_path": ("Find paths between two entities", True, True),
+    "list_entities": ("List every entity matching conditions", True, True),
+    "run_query": ("Run a named query", True, True),
     "expand": ("Expand a handle", True, True),
     "record_claim": ("Record a claim", False, True),
     "get_observations": ("Get raw observations", True, True),
@@ -1297,6 +1590,8 @@ TOOLS = (
     ask,
     ask_scope,
     find_path,
+    list_entities,
+    run_query,
     expand,
     record_claim,
     get_observations,
@@ -1376,9 +1671,11 @@ def _accept_aliases(fn):
     return wrapped
 
 
-_PACK_TOOLS = ("ask", "ask_scope", "find_path", "expand", "answer")
+_PACK_TOOLS = ("ask", "ask_scope", "find_path", "list_entities", "run_query", "expand", "answer")
 
 for _fn in TOOLS:
+    if (_fn is run_query and not _QUERIES_ON) or (_fn is record_claim and not _WRITES_ON):
+        continue
     _impl = _accept_aliases(_fn)
     _impl = _compact_text(_impl) if _fn.__name__ in _PACK_TOOLS else _impl
     mcp.tool(name=_fn.__name__, title=TOOL_META[_fn.__name__][0],

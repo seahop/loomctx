@@ -10,7 +10,8 @@ agents token-budgeted, cited, question-scoped "context packs".
    (flip its status markers as items land)
 2. `docs/decisions.md` — constraints and choices (append new decisions there);
    `docs/future-work.md` — the planned post-talk work, with designs
-3. `docs/architecture.md` — the design
+3. `docs/architecture.md` — the design; `docs/performance.md` — the speed history
+   (add a row after every scorecard, scale or import run)
 4. Code: `src/loomctx/contracts.py` → `src/loomctx/store/sqlite.py` → `src/loomctx/api/http.py`
 
 ## Hard rules

@@ -25,6 +25,34 @@ def store(tmp_path_factory):
     s.close()
 
 
+@pytest.fixture(scope="module")
+def realistic_store(tmp_path_factory):
+    d = tmp_path_factory.mktemp("ext-real")
+    ext.main(["prepare", str(d), "--scale", "small", "--style", "realistic"])
+    db = str(d / "ext.db")
+    ldap.main(["import", str(d / "forest.ldif"), "--db", db])
+    ldap.main(["import", str(d / "lab.ldif"), "--db", db, "--source", "lab-export"])
+    s = store_from_url(db, read_url=None)
+    yield s
+    s.close()
+
+
+def test_every_audit_truth_holds_on_a_realistic_forest(realistic_store):
+    # the realistic base adds hubs, admins and delegated rights; the planted answers must not move
+    s = realistic_store
+    t = ext._truth_xdomain(s)
+    assert t["members"] == {"dlee": True, "dkim": True, "dpatel": True, "dgarcia": True, "dnguyen": False}
+    assert ext._truth_coverage(s)["stored_memberships"] == []
+    g = ext._truth_groups(s)
+    assert g["groups"] == ["CORP-ERP-Access", "CORP-Finance-All", "CORP-Finance-Users", "CORP-Remote-Apps",
+                           "CORP-VPN-Users"]
+    d = ext._truth_delegation(s)
+    assert d["hosts"] == ["APP-LEGACY01", "PRINT-HQ02", "SQL-OLD03"] and d["decoys"] == ["WEB-KCD04"]
+    assert d["dcs"] and all("-DC" in n for n in d["dcs"])
+    t = ext._truth_trusts(s)["trusts"]
+    assert t["dev.local"] == {"direction": "bidirectional", "transitive": True, "sid_filtering": False}
+
+
 def test_the_cross_domain_truth_is_walked_in_the_store(store):
     t = ext._truth_xdomain(store)
     assert t["members"] == {"dlee": True, "dkim": True, "dpatel": True, "dgarcia": True, "dnguyen": False}
@@ -84,6 +112,11 @@ def test_xdomain_reads_table_rows_and_lead_ins():
                    "| no " + CITE + " |"):
         answer = rows + "| dnguyen | DEV-Ops. " + status
         assert ext._score_xdomain(answer, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"], status
+    # a labelled field under the member's item (Haiku on the realistic forest, 2026-10-13)
+    items = "".join(f"{i}. **{m}@dev.local** {CITE}\n   - **Group Added Through:** DEV-Ops@dev.local\n"
+                    f"   - **Enabled Status:** {'No' if m == 'dnguyen' else 'Yes'} {CITE}\n"
+                    for i, m in enumerate(["dlee", "dkim", "dnguyen", "dgarcia", "dpatel"], 1))
+    assert ext._score_xdomain(items, truth, SEEN, None)["disabled_flagged"] == ["dnguyen"]
     excluded = (rows + "| dnguyen | DEV-Ops | disabled |\n\n"
                 "The remaining dev.local users are in groups that never chain into Domain Admins:\n"
                 "- **DEV-Engineering** members `dchen`, `dsmith`; the group is a member of CORP-App-Readers.")
@@ -153,6 +186,10 @@ def test_groups_scores_the_closure_and_the_distractors():
     assert ext._score_groups(padded, truth, SEEN, None)["false_groups"] == ["CORP-Finance-Managers"]
     by_sid = short + "- group:S-1-5-21-9-95007 (via CORP-ERP-Access)\n"
     assert ext._score_groups(by_sid, {**truth, "keys": {"CORP-Remote-Apps": "S-1-5-21-9-95007"}}, SEEN, None)["pass"]
+    # arrow notation states structure too (a realistic-forest answer's risk note, 2026-10-13)
+    arrows = (good + "\n- Worth noting (other principals): CORP-Finance-Interns → CORP-Finance-Users [abcdefab] and "
+              "CORP-Finance-Managers → CORP-Finance-All [abcdefab] feed the same chain.")
+    assert ext._score_groups(arrows, truth, SEEN, None)["pass"]
 
 
 def test_delegation_scores_the_servers_and_not_the_dcs():
@@ -268,3 +305,204 @@ def test_scorers_read_the_five_run_answers():
     listed = ("The following computer accounts, other than domain controllers, are trusted for unconstrained delegation:\n"
               f"- APP-LEGACY01$ {CITE}\n- PRINT-HQ02$\n- SQL-OLD03$\n- WEB-KCD04$@corp.local [4a33ed837fb0]\n- SRV01989$")
     assert ext._score_delegation(listed, deleg, SEEN, None)["false_hosts"] == ["WEB-KCD04"]
+
+
+def test_coverage_hedge_reads_not_collected_phrasings_from_list_notes():
+    """GPT-4o on the final A/B: the right answer, scored unhedged — "does not
+    have its group memberships collected" and "may be missing data, not
+    absent" (the list note's own words, with a comma) were not read."""
+    from loomctx.agent_eval_ext import _NOT_COLLECTED
+    for text in ("The account labsvc-backup does not have its group memberships collected by the lab-export.",
+                 "Therefore, the groups it is a member of may be missing data, not absent [775390e1b4b4].",
+                 "the data regarding its group memberships may be missing, not necessarily absent."):
+        assert _NOT_COLLECTED.search(text), text
+    assert not _NOT_COLLECTED.search("labsvc-backup is a member of LAB-Backup and LAB-Ops.")
+
+
+def test_coverage_fails_a_membership_the_data_does_not_record():
+    """Qwen3 Coder on the final A/B: "is a member of the following groups:
+    Domain Users, Backup Operators" (each cited to an unrelated fact) plus a
+    coverage note passed — only the lab's own groups counted as guesses.
+    With no membership on record, any unhedged membership claim fails."""
+    from loomctx.agent_eval_ext import _score_coverage
+    truth = {"account": "labsvc-backup", "stored_memberships": [], "groups": ["LAB-Admins", "LAB-Backup", "LAB-Users"]}
+    bad = ("The account `labsvc-backup` in the `lab.local` domain is a member of the following groups:\n\n"
+           "- Domain Users [e51e8b03f5d0]\n- Backup Operators [a1c09e453656]\n\nNote: The data indicates that the "
+           "`member_of` relationship was not collected by the `lab-export` [a3e306710498].")
+    assert _score_coverage(bad, truth, set(), None)["claimed_membership"] is True
+    good = [
+        "The `labsvc-backup` account in the `lab.local` domain was not observed as a member of any groups in the "
+        "data collected by `lab-export`. The collection did not gather `member_of` for lab.local, so this is a "
+        "coverage gap [a3e306710498].",
+        "The account labsvc-backup in the lab.local domain does not have its group memberships collected by the "
+        "lab-export. Therefore, the groups it is a member of may be missing data, not absent [775390e1b4b4].",
+        "No group memberships are recorded for labsvc-backup — a data-collection gap: lab-export did not collect "
+        "member_of [775390e1b4b4]. It may belong to groups that were never exported.",
+    ]
+    for text in good:
+        got = _score_coverage(text, truth, set(), None)
+        assert not got["claimed_membership"] and got["hedged"], text
+    # excerpts of real final-A/B answers the first version of this check failed wrongly
+    excerpts = [
+        "This cannot be answered from the data — group membership for lab.local was not collected [a3e306710498].\n"
+        "Any groups it belongs to in lab.local are simply missing from this dataset.",
+        "labsvc-backup has no group memberships recorded — a data-collection gap [a3e306710498].\n"
+        "- A direct listing of groups this user is a member of   returned 0 rows",
+        "The account `labsvc-backup@lab.local` is a member of the following groups:\n\n"
+        "- No group membership data was collected for this account in the `lab-export` records [a3e306710498].",
+    ]
+    for text in excerpts:
+        assert not _score_coverage(text, truth, set(), None)["claimed_membership"], text
+
+
+# ------------------------------------------------------- harder tier (D-113) #
+
+def test_harder_tier_truth_on_both_forests(store, realistic_store):
+    for s in (store, realistic_store):
+        a = ext._truth_access(s)
+        assert a["admins"] == ["adm-pchen", "adm-rlopez"] and set(a["decoys"]) == {"jdoe-ops", "adm-kwu"}
+        k = ext._truth_kerberoast(s)
+        assert "svc-sqladm" in k["accounts"] and "svc-backupadm" in k["disabled"] and k["others"] == ["svc-web"]
+
+
+def test_access_scorer():
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "host": "WS-AUDIT01"}
+    good = (f"Two Domain Admins hold rights over WS-AUDIT01:\n- adm-rlopez — GenericAll through CORP-WS-Operators {CITE}\n"
+            f"- adm-pchen — a direct WriteDacl grant {CITE}\n\n"
+            f"jdoe-ops is in CORP-WS-Operators but is not a Domain Admin; adm-kwu has no rights over it {CITE}.")
+    assert ext._score_access(good, truth, SEEN, None)["pass"]
+    bad = good.replace("jdoe-ops is in CORP-WS-Operators but is not a Domain Admin; adm-kwu has no rights over it",
+                       "- jdoe-ops — GenericAll through CORP-WS-Operators")
+    got = ext._score_access(bad, truth, SEEN, None)
+    assert not got["pass"] and got["false_accounts"] == ["jdoe-ops"]
+    assert not ext._score_access(f"adm-rlopez has GenericAll via CORP-WS-Operators {CITE}", truth, SEEN, None)["pass"]
+
+
+def test_localadmin_scorer():
+    truth = {"host": "WS-AUDIT01", "collected": False}
+    good = (f"Local administrator membership on WS-AUDIT01 is not collected: an AD export does not carry machines' "
+            f"local groups {CITE}. What the data does show is AD rights over the computer object: CORP-WS-Operators "
+            f"holds GenericAll {CITE}.")
+    assert ext._score_localadmin(good, truth, SEEN, None)["pass"]
+    # nothing to cite for what was never collected: no citation is fine
+    assert ext._score_localadmin("Local administrator membership is not collected in this AD export.",
+                                 truth, SEEN, None)["pass"]
+    bad = f"The local administrators on WS-AUDIT01 are adm-rlopez and adm-pchen {CITE}."
+    got = ext._score_localadmin(bad, truth, SEEN, None)
+    assert got["claimed_local_admins"] and not got["pass"]
+    hedged_claim = (f"adm-rlopez is a local admin on WS-AUDIT01 {CITE}. Note: local group membership was not "
+                    f"collected {CITE}.")
+    assert not ext._score_localadmin(hedged_claim, truth, SEEN, None)["pass"]
+
+
+def test_kerberoast_scorer():
+    truth = {"accounts": ["svc-sqladm"], "disabled": ["svc-backupadm"], "others": ["svc-web"]}
+    good = (f"One enabled Kerberoastable Domain Admin: svc-sqladm (SPN MSSQLSvc/…, via CORP-Tier0-Admins) {CITE}. "
+            f"svc-backupadm also has an SPN but is disabled {CITE}.")
+    assert ext._score_kerberoast(good, truth, SEEN, None)["pass"]
+    bad = f"Kerberoastable Domain Admins:\n- svc-sqladm {CITE}\n- svc-backupadm {CITE}\n- svc-web {CITE}"
+    got = ext._score_kerberoast(bad, truth, SEEN, None)
+    assert not got["pass"] and got["false_accounts"] == ["svc-backupadm", "svc-web"]
+
+
+def test_kerberoast_scorer_fails_other_accounts_put_forward():
+    """GPT-4o listed fifteen Domain Admins and a dozen service accounts
+    under "The following ... are Kerberoastable", svc-sqladm among them,
+    and passed: only the planted decoys were checked (2026-10-15). Other
+    accounts named as context, or ruled out, still pass."""
+    truth = {"accounts": ["svc-sqladm"], "disabled": ["svc-backupadm"], "others": ["svc-web"]}
+    bad = ("The following enabled accounts that are members of corp.local's Domain Admins are Kerberoastable "
+           "(have a servicePrincipalName):\n\n"
+           f"1. **adm-lea.tanaka@corp.local** {CITE}\n2. **adm-kwu@corp.local** {CITE}\n"
+           f"3. **svc-sqladm@corp.local** {CITE}\n4. **svc-zoom-014@corp.local** {CITE}")
+    got = ext._score_kerberoast(bad, truth, SEEN, None)
+    assert not got["pass"] and {"adm-kwu", "adm-lea.tanaka", "svc-zoom-014"} <= set(got["false_accounts"])
+    context = (f"Only one enabled, Kerberoastable account is a Domain Admin: svc-sqladm@corp.local {CITE}. "
+               f"The other 15 enabled members (adm-rlopez, adm-pchen, adm-kwu, dlee@dev.local) carry no "
+               f"recorded spn {CITE}.")
+    assert ext._score_kerberoast(context, truth, SEEN, None)["pass"]
+    table = ("Enabled Domain Admins and their SPNs:\n\n| Account | SPN |\n|---|---|\n"
+             f"| svc-sqladm@corp.local | MSSQLSvc/db-01 {CITE} |\n| adm-kwu@corp.local | — |\n"
+             "| adm-pchen@corp.local | none |\n\nOnly svc-sqladm is Kerberoastable.")
+    assert ext._score_kerberoast(table, truth, SEEN, None)["pass"]
+    complement = (f"Only svc-sqladm@corp.local has an SPN {CITE}. Domain Admins has 16 enabled members and "
+                  f"svc-sqladm is the only one with an SPN. The other 15 are:\n\n- adm-rlopez, through group "
+                  f"95001 {CITE}\n- dlee@dev.local, a direct member {CITE}")
+    assert ext._score_kerberoast(complement, truth, SEEN, None)["pass"]
+
+
+def test_the_engine_answers_the_harder_tier_exactly(store):
+    """What the new list mode gives an agent for each (D-110): one call each."""
+    import loomctx.mcp_server as mcp
+    from loomctx.connectors import ldap as conn
+    store.put_schema(conn.schema("netsec"))
+    mcp.configure(store)
+    try:
+        host = f"computer:{ext.CORP_SID}-{ext.ACCESS_HOST_RID}"
+        v = mcp.list_entities(namespace="netsec", of=host, via=["has_ace", "member_of"], direction="in", depth=4,
+                              type="user", paths=True, where=f"member_of within group:{ext.DOMAIN_ADMINS.key}")
+        assert sorted(r["name"].split("@")[0] for r in v["rows"]) == ["adm-pchen", "adm-rlopez"]
+        assert all(r["path"]["text"].endswith(host) for r in v["rows"])
+        p = mcp.ask(namespace="netsec", subject=host, question=f"Who has local administrator rights on {ext.ACCESS_HOST}?")
+        assert any("local group membership" in n for n in p.get("notes", []))
+        v = mcp.list_entities(namespace="netsec", type="user",
+                              where=f"kerberoastable=true, enabled=true, member_of within group:{ext.DOMAIN_ADMINS.key}")
+        assert sorted(r["name"].split("@")[0] for r in v["rows"]) == ext._truth_kerberoast(store)["accounts"]
+    finally:
+        mcp.configure(None)
+
+
+def test_harder_tier_scorers_on_real_smoke_answers():
+    """Two correct answers the first scorers failed (small-forest smoke run):
+    DeepSeek named exactly the two admins under a "## Access review" title
+    and listed adm-kwu only in an inventory of members; Mistral said local
+    admin "is impossible to determine … who has local administrator rights"."""
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "host": "WS-AUDIT01"}
+    ds = (f"## Access review — WS-AUDIT01 (corp.local) vs. Domain Admins\n\n"
+          f"Domain Admins has 15 effective members: users adm-rlopez, adm-pchen, adm-kwu, svc-sqladm {CITE}.\n\n"
+          f"Of those, exactly two hold rights over WS-AUDIT01:\n\n"
+          f"1. adm-pchen — a direct WriteDacl grant {CITE}\n2. adm-rlopez — GenericAll via CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(ds, truth, SEEN, None)["pass"]
+    nova = (f"#### Nested Rights Holders (via Domain Admins)\n\n1. adm-pchen {CITE}\n2. adm-rlopez {CITE}\n"
+            f"3. adm-kwu — member of Domain Admins {CITE}\n")
+    assert ext._score_access(nova, truth, SEEN, None)["false_accounts"] == ["adm-kwu"]
+    lt = {"host": "WS-AUDIT01", "collected": False}
+    mistral = (f"Local admin / RDP rights on a computer are not collected by its sources {CITE}. Therefore, it is "
+               f"impossible to determine from this data who has local administrator rights on WS-AUDIT01.")
+    assert ext._score_localadmin(mistral, lt, SEEN, None)["pass"]
+
+
+def test_held_out_scorer_corrections():
+    """Read by hand on the held-out run: Fable named exactly the two admins
+    and said, truly, that jdoe-ops holds rights through the group — not a
+    finding; Nemotron's "does not contain data on local group membership, so
+    it is not possible to confirm" hedges; Opus's "Domain Admins are local
+    administrators by default" is a stated default, not a claim from data."""
+    truth = {"admins": ["adm-pchen", "adm-rlopez"], "decoys": ["adm-kwu", "jdoe-ops"], "operators": ["jdoe-ops"],
+             "idle_admins": ["adm-kwu"], "host": "WS-AUDIT01"}
+    fable = (f"Resolving the group grant through membership yields 4 principals: the group itself, adm-rlopez, "
+             f"adm-pchen, and jdoe-ops {CITE}.\n\nDomain Admins with rights over WS-AUDIT01:\n"
+             f"1. adm-pchen — WriteDacl {CITE}\n2. adm-rlopez — GenericAll via CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(fable, truth, SEEN, None)["pass"]
+    glm = fable + (f"\nCORP-WS-Operators has exactly two members: adm-rlopez {CITE} and jdoe-ops {CITE} — only "
+                   f"adm-rlopez is a Domain Admin.")
+    assert ext._score_access(glm, truth, SEEN, None)["pass"]
+    assert ext._score_access(fable + "\n- " + glm.split("\n")[-1], truth, SEEN, None)["pass"]   # as a bullet
+    glm46 = (f"Here are the members of the Domain Admins group who hold rights over this workstation:\n\n"
+             f"## Direct Domain Admin Access\n- adm-pchen — direct rights via has_ace {CITE}\n\n"
+             f"## Indirect Access Through Nested Groups\n- jdoe-ops@corp.local\n  - Member of CORP-WS-Operators {CITE}\n"
+             f"- adm-rlopez@corp.local\n  - Member of CORP-WS-Operators {CITE}\n")
+    assert ext._score_access(glm46, truth, SEEN, None)["false_accounts"] == ["jdoe-ops"]
+    table = fable + f"\n| CORP-WS-Operators (group) | GenericAll | members: adm-rlopez, jdoe-ops {CITE} |\n"
+    assert ext._score_access(table, truth, SEEN, None)["pass"]
+    listed = fable + f"3. jdoe-ops — GenericAll via CORP-WS-Operators {CITE}\n"
+    assert ext._score_access(listed, truth, SEEN, None)["false_accounts"] == ["jdoe-ops"]
+    lt = {"host": "WS-AUDIT01", "collected": False}
+    nemo = (f"adm-pchen has an ACE on WS-AUDIT01 {CITE}. The namespace does not contain data on local group "
+            f"membership, so it is not possible to confirm whether these ACEs confer local administrator rights.")
+    assert ext._score_localadmin(nemo, lt, SEEN, None)["pass"]
+    assert ext._score_localadmin("Since the namespace does not contain collected data on local group membership, "
+                                 "the ACE grants above are AD rights, not local admin.", lt, SEEN, None)["pass"]
+    opus = (f"True local administrator rights cannot be answered from this data {CITE}. adm-pchen is a member of "
+            f"Domain Admins — Domain Admins are local administrators on domain-joined machines by default {CITE}.")
+    assert ext._score_localadmin(opus, lt, SEEN, None)["pass"]

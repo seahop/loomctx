@@ -4,6 +4,11 @@ for ingest validation and scope expansion. Persistence is the store's job
 
 Domain knowledge lives here as *data* (hard constraint 6): the core never
 knows what a "host" or "member_of" is, only that a namespace declared them.
+
+    python -m loomctx.registry draft SAMPLE [--format ...] [--namespace NS] [--out FILE]
+
+drafts a registration from a sample export for review (D-106,
+`loomctx.schema_draft`); it never registers anything.
 """
 
 from __future__ import annotations
@@ -38,14 +43,31 @@ class RegistryCache:
         self._cache.pop(namespace, None)
 
 
+_LAST_INDEX: tuple = (None, {}, set())
+
+
+def _index(schema: SchemaRegistration) -> tuple[dict, set[str]]:
+    """The registry's predicates by name and its entity type names, kept for
+    the last schema seen: a batch validates every claim against the same
+    cached registration (D-105), and rebuilding both per claim was most of
+    the cost of validating it."""
+    global _LAST_INDEX
+    last = _LAST_INDEX
+    if last[0] is schema:
+        return last[1], last[2]
+    predicates = {p.name: p for p in schema.predicates}
+    types = {t.name for t in schema.entity_types}
+    _LAST_INDEX = (schema, predicates, types)
+    return predicates, types
+
+
 def validate_claim(schema: SchemaRegistration | None, claim: ClaimIn) -> str | None:
     """Why this claim violates the namespace's registry, or None if it is
     acceptable. Registered predicates always enforce their object_types;
     `strict` additionally rejects anything unregistered."""
     if schema is None:
         return None
-    predicates = {p.name: p for p in schema.predicates}
-    types = {t.name for t in schema.entity_types}
+    predicates, types = _index(schema)
     pred = predicates.get(claim.predicate)
     if pred is None:
         if schema.strict:
@@ -73,3 +95,54 @@ def containment_predicates(schema: SchemaRegistration | None) -> list[str]:
     if schema is None:
         return []
     return sorted(p.name for p in schema.predicates if p.containment)
+
+
+# ---------------------------------------------------------------------- CLI #
+
+def main(argv: list[str] | None = None) -> None:
+    """`python -m loomctx.registry draft SAMPLE...`: propose a registration
+    from a sample export for a person to review (D-106). Prints the draft and
+    its review notes; registers nothing."""
+    import argparse
+    import sys
+
+    from . import schema_draft
+
+    parser = argparse.ArgumentParser(prog="loomctx.registry", description=main.__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    d = sub.add_parser("draft", help="draft a SchemaRegistration from a sample export",
+                       description=schema_draft.__doc__,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    d.add_argument("samples", nargs="+", metavar="SAMPLE",
+                   help="sample export(s): connector envelope NDJSON, JSON records, "
+                        "NDJSON records or LDIF ('-' reads stdin)")
+    d.add_argument("--format", default="auto", choices=schema_draft.FORMATS,
+                   help="input format (default: from the extension and content)")
+    d.add_argument("--namespace", help="namespace of the draft (default: the envelopes' "
+                                       "namespace, else 'default')")
+    d.add_argument("--out", help="write the draft JSON here instead of stdout")
+    d.add_argument("--notes", help="also write the review notes here (they always go to stderr)")
+    d.add_argument("--keep-names", action="store_true",
+                   help="keep source field names (snake_cased) instead of house-style names")
+    args = parser.parse_args(argv)
+
+    try:
+        result = schema_draft.draft_files(args.samples, args.format, args.namespace,
+                                          args.keep_names)
+    except (OSError, ValueError) as exc:
+        parser.exit(2, f"loomctx.registry draft: {exc}\n")
+    text = result.registration.model_dump_json(indent=2) + "\n"
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    else:
+        sys.stdout.write(text)
+    notes = result.notes_text()
+    sys.stderr.write(notes)
+    if args.notes:
+        with open(args.notes, "w", encoding="utf-8") as fh:
+            fh.write(notes)
+
+
+if __name__ == "__main__":
+    main()

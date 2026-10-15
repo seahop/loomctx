@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import abc
 import inspect
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from typing import Iterator
 
@@ -133,6 +134,33 @@ class ShardedStore(GraphStore):
                            lease: tuple[str, float] | None = None) -> list[tuple[str, EntityRef, int]]:
         return self._fill("dossier_candidates", limit, min_new, min_total, lease=lease)
 
+    def subjects_with_value(self, namespace: str, predicate: str, value_json: str | None = None,
+                            limit: int = 100_000, observed_before=None) -> list[EntityRef]:
+        return self.shard_for(namespace).subjects_with_value(namespace, predicate, value_json, limit,
+                                                             observed_before)
+
+    def entity_refs_of_type(self, namespace: str, type: str, limit: int = 100_000) -> list[EntityRef]:
+        return self.shard_for(namespace).entity_refs_of_type(namespace, type, limit)
+
+    def lite_rows(self, namespace: str, refs: list[EntityRef], predicates: list[str], side: str = "subject",
+                  limit: int = 1_000_000, observed_before=None) -> list:
+        return self.shard_for(namespace).lite_rows(namespace, refs, predicates, side, limit, observed_before)
+
+    def lite_scalars(self, namespace: str, predicate: str, observed_before=None) -> Iterator:
+        return self.shard_for(namespace).lite_scalars(namespace, predicate, observed_before)
+
+    def current_scalar_subjects(self, namespace: str, predicate: str, value_jsons: list[str] | None = None,
+                                observed_before=None, valid_at=None):
+        return self.shard_for(namespace).current_scalar_subjects(namespace, predicate, value_jsons,
+                                                                 observed_before, valid_at)
+
+    def first_observed(self, namespace: str):
+        return self.shard_for(namespace).first_observed(namespace)
+
+    def subjects_with_text(self, namespace: str, predicate: str, needle: str, limit: int = 100_000,
+                           observed_before=None) -> list[EntityRef]:
+        return self.shard_for(namespace).subjects_with_text(namespace, predicate, needle, limit, observed_before)
+
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
         return self.shard_for(namespace).relation_summary(namespace)
 
@@ -146,10 +174,10 @@ class ShardedStore(GraphStore):
 
     def observations_for_many(self, namespace: str, refs: list[EntityRef], limit: int = 100,
                               observed_before: datetime | None = None,
-                              predicates: list[str] | None = None,
+                              predicates: list[str] | None = None, side: str | None = None,
                               ) -> dict[tuple[str, str], list[Observation]]:
         return self.shard_for(namespace).observations_for_many(
-            namespace, refs, limit, observed_before=observed_before, predicates=predicates)
+            namespace, refs, limit, observed_before=observed_before, predicates=predicates, side=side)
 
     def edges_to_carriers(self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
                           limit: int = 10_000, observed_before: datetime | None = None,
@@ -220,6 +248,13 @@ class ShardedStore(GraphStore):
     def refresh_statistics(self) -> None:
         for s in self._all:
             s.refresh_statistics()
+
+    @contextmanager
+    def bulk_load(self) -> Iterator[None]:
+        with ExitStack() as stack:
+            for s in self._all:
+                stack.enter_context(s.bulk_load())
+            yield
 
     def close(self) -> None:
         for s in self._all:

@@ -883,7 +883,9 @@ def main(argv: list[str] | None = None) -> None:
         lines = to_lines(envelopes(cache, args.namespace, years, sources, args.epss, args.bridge_seed_hosts,
                                    stats, epss_ledger=ledger, kev_lookup=kev_lookup))
         totals = (post_batches(args.url, lines, args.batch, args.key) if args.url
-                  else load_direct(args.db, lines, args.batch))
+                  # the KEV lookup reads the store being written: keep it in
+                  # lock-step with committed batches (D-105)
+                  else load_direct(args.db, lines, args.batch, bulk=reader is None))
     finally:
         if reader is not None:
             reader.close()

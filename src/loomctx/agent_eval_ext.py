@@ -85,6 +85,22 @@ GROUP_DISTRACTORS = {"CORP-Finance-Interns": (95009, "CORP-Finance-Users"),     
 DELEGATION_HOSTS = {"APP-LEGACY01": (95201, True, None), "PRINT-HQ02": (95202, True, None),
                     "SQL-OLD03": (95203, True, None), "WEB-KCD04": (95204, False, "HTTP/intranet.corp.local")}
 UAC_WORKSTATION, UAC_UNCONSTRAINED = 0x1000, 0x80000
+# the harder tier (D-113): access to one workstation, its local admins (not
+# collected), and Kerberoastable admins — a few planted accounts in the forest
+ACCESS_HOST = "WS-AUDIT01"
+ACCESS_HOST_RID = 95300
+ACCESS_GROUP = ("CORP-WS-Operators", 95301)            # GenericAll on the workstation
+ACCESS_ACCOUNTS = {                                    # sam: (rid, enabled, memberOf names, direct right)
+    "adm-rlopez": (95310, True, ["CORP-Tier0-Admins", "CORP-WS-Operators"], None),   # admin, via the group
+    "adm-pchen": (95311, True, ["Domain Admins"], "WriteDacl"),                      # admin, direct grant
+    "jdoe-ops": (95312, True, ["CORP-WS-Operators"], None),                           # access, not an admin
+    "adm-kwu": (95313, True, ["Domain Admins"], None),                                # admin, no access
+}
+KERBEROAST_ACCOUNTS = {                                # sam: (rid, enabled, memberOf names)
+    "svc-sqladm": (95320, True, ["CORP-Tier0-Admins"]),        # nested admin, Kerberoastable
+    "svc-backupadm": (95321, False, ["Domain Admins"]),        # admin, disabled
+    "svc-web": (95322, True, ["CORP-App-Readers"]),            # Kerberoastable, not an admin
+}
 EXPORT_AT = "2026-09-20T09:00:00Z"
 
 
@@ -93,9 +109,9 @@ def _sd() -> str:
     return ad_gen.b64(ad_gen.build_sd([]))
 
 
-def _obj(dn: str, classes: list[str], sid: str, name: str, **attrs) -> str:
+def _obj(dn: str, classes: list[str], sid: str, name: str, sd: str | None = None, **attrs) -> str:
     lines = [f"dn: {dn}", *[f"objectClass: {c}" for c in ["top", *classes]], f"objectSid: {sid}",
-             f"name: {name}", f"nTSecurityDescriptor:: {_sd()}"]
+             f"name: {name}", f"nTSecurityDescriptor:: {sd or _sd()}"]
     for k, v in attrs.items():
         for item in (v if isinstance(v, list) else [v]):
             lines.append(f"{k}: {item}")
@@ -107,11 +123,11 @@ def _user(dn: str, sid: str, sam: str, enabled: bool, **attrs) -> str:
                 userAccountControl=512 if enabled else 514, **attrs)
 
 
-def forest_ldif(seed: int = 7, scale: str = "large") -> str:
+def forest_ldif(seed: int = 7, scale: str = "large", style: str = "plain") -> str:
     """The generated corp.local directory plus a dev.local child domain and
     the parent groups that nest it, the groups task's account and groups and
     the delegation task's servers — one forest-wide export."""
-    base, _ = ad_gen.generate(seed, scale)
+    base, _ = ad_gen.generate(seed, scale, style)
     dev = lambda name: f"CN={name},CN=Users,{DEV}"   # noqa: E731
     corp = lambda name: f"CN={name},CN=Users,{CORP}"  # noqa: E731
     out = [_obj(DEV, ["domain", "domainDNS"], DEV_SID, "dev.local")]
@@ -147,6 +163,24 @@ def forest_ldif(seed: int = 7, scale: str = "large") -> str:
                         sAMAccountName=f"{name}$", operatingSystem="Windows Server 2016 Standard",
                         userAccountControl=UAC_WORKSTATION | (UAC_UNCONSTRAINED if unconstrained else 0),
                         **extra))
+    # the harder tier (D-113): one workstation, the group holding GenericAll
+    # on it, an admin with a direct WriteDacl grant, decoys either way, and
+    # three service accounts with SPNs around Domain Admins
+    names = {"Domain Admins": DA_DN, "CORP-Tier0-Admins": corp("CORP-Tier0-Admins"),
+             "CORP-WS-Operators": corp(ACCESS_GROUP[0]), "CORP-App-Readers": corp("CORP-App-Readers")}
+    out.append(_obj(corp(ACCESS_GROUP[0]), ["group"], f"{CORP_SID}-{ACCESS_GROUP[1]}", ACCESS_GROUP[0],
+                    sAMAccountName=ACCESS_GROUP[0]))
+    aces = [ad_gen.ace_for_right(f"{CORP_SID}-{ACCESS_GROUP[1]}", "GenericAll")]
+    for sam, (rid, enabled, groups, right) in ACCESS_ACCOUNTS.items():
+        out.append(_user(corp(sam), f"{CORP_SID}-{rid}", sam, enabled, memberOf=[names[g] for g in groups]))
+        if right:
+            aces.append(ad_gen.ace_for_right(f"{CORP_SID}-{rid}", right))
+    out.append(_obj(f"CN={ACCESS_HOST},OU=Workstations,{CORP}", ["computer"], f"{CORP_SID}-{ACCESS_HOST_RID}",
+                    ACCESS_HOST, sd=ad_gen.b64(ad_gen.build_sd(aces)), sAMAccountName=f"{ACCESS_HOST}$",
+                    operatingSystem="Windows 11 Enterprise", userAccountControl=UAC_WORKSTATION))
+    for sam, (rid, enabled, groups) in KERBEROAST_ACCOUNTS.items():
+        out.append(_user(corp(sam), f"{CORP_SID}-{rid}", sam, enabled, memberOf=[names[g] for g in groups],
+                         servicePrincipalName=f"MSSQLSvc/{sam}.corp.local:1433"))
     return base.rstrip("\n") + "\n\n" + "\n\n".join(out) + "\n"
 
 
@@ -204,8 +238,10 @@ _EXCLUDES = re.compile(r"\b(?:not|no|none|neither|nor|never|without|excluded?|is
 _DISABLED = re.compile(r"\bdisabled\b|\bnot enabled\b|\binactive\b|\baccountdisable\b", re.I)
 
 
-# a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no"
-_DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b|\benabled\W{0,6}(?:no|false)\b", re.I)
+# a table cell or a field saying "not enabled": "| no |", "| **No**—…", "enabled: no",
+# "**Enabled Status:** No" (a label word between, as the realistic forest's answers write it)
+_DISABLED_CELL = re.compile(r"\|\s*\**\s*(?:no|false)\b"
+                            r"|\benabled(?:\s+(?:status|state|flag))?\W{0,6}(?:no|false)\b", re.I)
 _BLOCK_LINE = re.compile(r"\s*(?:[-+|]|\*(?!\*)|\d+[.)])")     # "**Bold:**" is a lead-in, not a bullet
 _ADMIN = re.compile(r"domain admins|tier0|tier-0", re.I)
 # typographic apostrophes some models emit ("can’t", "isn’t")
@@ -310,11 +346,15 @@ _NOT_COLLECTED = re.compile(
     r"|no (?:group[- ]?)?membership (?:data|information|attributes?|records?)"
     r"|(?:membership|group) (?:data|information|attributes?) (?:is |are |was |were )?(?:missing|absent|unavailable)"
     r"|(?:did(?:n't| not)|does(?:n't| not)|do(?:n't| not)) (?:collect|export|include|capture|record)"
-    r"|missing (?:data )?(?:rather than|not) (?:empty|absen\w*|none)"
-    r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any )?collected"
+    r"|missing(?: data)?,? (?:rather than|not) (?:necessarily )?(?:empty|absen\w*|none)"
+    r"|(?:does(?:n't| not)|do(?:n't| not)) have (?:any |its |their )?(?:group )?(?:memberships? )?collected"
     r"|coverage|(?:can(?:not|'t)|could(?:n't| not)|unable to) (?:be )?"
-    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list)\w*"
-    r"|\bunknown\b|incomplete|partial (?:export|collection|data)",
+    r"(?:determin|tell|confirm|say|verif|identify|establish|reliably|name|list|answer)\w*"
+    r"|\bunknown\b|incomplete|partial (?:export|collection|data)"
+    r"|impossible to (?:determine|tell|say|know|answer)"
+    r"|not possible to (?:determine|tell|say|know|answer|confirm|establish)"
+    r"|(?:does|do)(?:n't| not) (?:contain|include|hold|carry) (?:any )?(?:\w+ ){0,2}(?:data|information|records?)"
+    r"|no (?:data|information|records?) (?:on|about|for) (?:local|group)",
     re.I)
 # a flat "it is in no group" with no hedge
 _DEFINITIVE_NONE = re.compile(r"not a member of any|\bis (?:not|no) member|\bno group memberships?\b|"
@@ -327,6 +367,21 @@ _NO_ACCOUNT = re.compile(r"no (?:such )?(?:account|user|entity)\b[^.]{0,40}?\b(?
                          r"|(?:account|user)\b[^.]{0,40}?\b(?:does not|doesn't) exist"
                          r"|(?:could(?:n't| not)|can(?:not|'t)|unable to|did not|didn't) (?:find|locate|resolve) "
                          r"(?:the |an |any |that )?(?:account|user|entity)\b(?!'s)(?!\s+(?:group|membership))", re.I)
+
+
+# an affirmative membership claim: "is a member of the following groups",
+# "is a direct member of X", "belongs to X" — not "is not a member", not "a
+# member of any/no group"
+# what follows must be a list or a name ("the following", "these", a capital,
+# a quote/backtick): "the groups it belongs to are missing" and "groups this
+# user is a member of returned 0 rows" are hedges, not claims
+_MEMBER_CLAIM = re.compile(
+    r"\b(?:is|are) (?:a |an )?(?:direct |nested |direct or nested |effective )?members? of "
+    r"(?:the following\b|these\b|[A-Z`\"'*])"
+    r"|\bbelongs? to (?:the following\b|these\b|[A-Z`\"'*])")
+_NONE_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])?\s*(?:\*\*)?(?:no|none)\b", re.I)
+_MODAL = re.compile(r"\b(?:may|might|could|would|if|whether|likely|probably|possibly|perhaps|not|no|never|"
+                    r"cannot|can't|unable)\b", re.I)
 
 
 def _score_coverage(answer: str, truth: dict, seen: set[str], store) -> dict:
@@ -343,11 +398,25 @@ def _score_coverage(answer: str, truth: dict, seen: set[str], store) -> dict:
                                  re.search(r"\b(?:may|might|could|likely|probably|possibly|perhaps)\b", s, re.I))
                             for s in _sentences(answer, g)))
     no_account = bool(_NO_ACCOUNT.search(_asserted(answer)))    # anywhere, asides aside
+    # with no membership on record, an unhedged "is a member of …" is a claim
+    # the data cannot support, whatever group it names: Qwen3 Coder listed
+    # Domain Users and Backup Operators, each cited to an unrelated fact, then
+    # noted the gap — and passed, since only the lab's own groups were checked
+    lines = [ln for ln in asserted.splitlines() if ln.strip()]
+
+    def _claims(i: int, sent: str) -> bool:
+        if not _MEMBER_CLAIM.search(sent) or _MODAL.search(sent) or _NOT_COLLECTED.search(sent):
+            return False
+        # "is a member of the following groups:" over a list that says "No groups…"
+        return not (sent.rstrip().endswith(":") and i + 1 < len(lines) and _NONE_ITEM.search(lines[i + 1]))
+    claimed = (not truth.get("stored_memberships")) and any(
+        _claims(i, sent) for i, line in enumerate(lines) for sent in _SENTENCE.split(line))
     cites = _cited(answer, seen)
     # flat_none is reported, not failed on: "the expansion returned no group
     # memberships" describes the data; an answer that never hedges fails anyway
-    ok = hedged and not guessed and not no_account
+    ok = hedged and not guessed and not no_account and not claimed
     return {"hedged": hedged, "flat_none": flat_none, "guessed_groups": guessed, "no_account": no_account,
+            "claimed_membership": claimed,
             "first_sentence": first[:120], **cites, "pass": ok and _faithful(cites)}
 
 
@@ -381,11 +450,12 @@ def _score_groups(answer: str, truth: dict, seen: set[str], store) -> dict:
         if _EXCLUDES.search(line) or _EXCLUDES.search(lead):
             return False
         # "CORP-Finance-Interns (…) is a member of CORP-Finance-Users" states
-        # the directory's structure; it puts the distractor forward only
-        # where the line also says the account inherits it
+        # the directory's structure — as does "CORP-Finance-Interns →
+        # CORP-Finance-Users"; it puts the distractor forward only where the
+        # line also says the account inherits it
         plain = line.replace("*", "").replace("`", "")
-        child = re.search(re.escape(d) + r"\S*\s*(?:\([^)]*\)\s*)*(?:is|are)?\s*(?:a\s+)?(?:member|nested|contained)\w*\s+(?:of|in|into|inside)\b",
-                          plain, re.I)
+        child = re.search(re.escape(d) + r"\S*\s*(?:\([^)]*\)\s*)*(?:(?:is|are)?\s*(?:a\s+)?(?:member|nested|contained)\w*\s+"
+                          r"(?:of|in|into|inside)\b|(?:→|->|=>))", plain, re.I)
         return not (child and not re.search(r"inherit|\b" + re.escape(truth.get("account", GROUPS_ACCOUNT)), plain, re.I))
     false_groups = sorted(d for d in truth["distractors"] if any(
         claims(line, lead, d) for line, lead in _lines(answer, d, names)))
@@ -565,6 +635,222 @@ def _score_trusts(answer: str, truth: dict, seen: set[str], store) -> dict:
             **cites, "pass": ok and _faithful(cites)}
 
 
+# ------------------------------------------------------- harder tier (D-113) #
+
+def _members_closure(store, group: EntityRef) -> set[str]:
+    """Keys of every principal whose member_of chain reaches `group`."""
+    seen, todo = set(), deque([group])
+    while todo:
+        g = todo.popleft()
+        for o in _obs(store, g, limit=100_000):
+            if (o.predicate == "member_of" and isinstance(o.object, EntityRef) and o.object.key == g.key
+                    and o.subject.key not in seen):
+                seen.add(o.subject.key)
+                todo.append(o.subject)
+    return seen
+
+
+def _sam(store, key: str) -> str:
+    facts = {o.predicate: o.object for o in _obs(store, EntityRef(type="user", key=key), limit=50)}
+    return str(facts.get("sam", key))
+
+
+def _truth_access(store) -> dict:
+    """The Domain Admins (nested) whose own grant, or a group's they reach,
+    is an ACL right over the workstation — walked in the store."""
+    host = EntityRef(type="computer", key=f"{CORP_SID}-{ACCESS_HOST_RID}")
+    trustees = {o.subject.key for o in _obs(store, host, limit=5000)
+                if o.predicate == "has_ace" and isinstance(o.object, EntityRef) and o.object.key == host.key}
+    admins = _members_closure(store, DOMAIN_ADMINS)
+    holders = set(trustees)
+    for t in trustees:
+        holders |= _members_closure(store, EntityRef(type="group", key=t))
+    users = {k for k in admins if k.startswith(CORP_SID)}
+    with_access = sorted(_sam(store, k) for k in users & holders
+                         if any(o.predicate == "sam" for o in _obs(store, EntityRef(type="user", key=k), limit=20)))
+    decoys = sorted(s for s in ACCESS_ACCOUNTS if s not in with_access)
+    planted = {s: f"{CORP_SID}-{rid}" for s, (rid, *_rest) in ACCESS_ACCOUNTS.items()}
+    operators = sorted(s for s in decoys if planted[s] in holders)       # rights, no admin
+    idle = sorted(s for s in decoys if planted[s] in admins)             # admin, no rights
+    return {"admins": with_access, "decoys": decoys, "operators": operators, "idle_admins": idle,
+            "host": ACCESS_HOST}
+
+
+_ACCESS_WORDS = re.compile(r"\b(?:rights?|access|genericall|generic all|writedacl|write dacl|grant\w*|control|ace|"
+                           r"permission\w*|full control)\b", re.I)
+
+
+def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """Every admin with rights named; a decoy (an operator who is no admin,
+    an admin with no grant) counts against the answer where a line puts it
+    forward with rights and neither the line nor its lead-in rules it out."""
+    answer = answer.translate(_QUOTES)
+    names = (*truth["admins"], *truth["decoys"])
+    named = sorted(a for a in truth["admins"] if _mentions(answer, a))
+    if "operators" in truth:
+        operators = set(truth["operators"])
+    else:   # transcripts scored before the field: the planted design says which decoy is which
+        operators = {d for d in truth["decoys"]
+                     if d in ACCESS_ACCOUNTS and not {"Domain Admins", "CORP-Tier0-Admins"} & set(ACCESS_ACCOUNTS[d][2])}
+    admin_words = re.compile(r"domain admins?|\bDA\b|tier0|tier-0|\badmins?\b", re.I)
+    # the answer's opening, up to its first heading or list: "here are the
+    # members of the Domain Admins group who hold rights over …"
+    opening = []
+    for ln in answer.splitlines():
+        if ln.lstrip().startswith("#") or _BLOCK_LINE.match(ln):
+            break
+        opening.append(ln)
+    opening = " ".join(opening)
+
+    def others_singled(text: str, name: str) -> bool:
+        """"… — only adm-rlopez is a Domain Admin": the claim is someone else's."""
+        return bool(re.search(r"\bonly\b", text, re.I)
+                    and not re.search(rf"\bonly\W+(?:\w+\W+)?{re.escape(name)}", text, re.I))
+
+    def put_forward(line: str, lead: str, name: str) -> bool:
+        """An operator (rights, no admin) counts where it is put forward as an
+        admin — "adm-rlopez, adm-pchen and jdoe-ops hold rights" is true and
+        no finding; an idle admin (admin, no rights) where it is given rights."""
+        if _EXCLUDES.search(line) or _EXCLUDES.search(lead) or re.search(
+                r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I):
+            return False
+        words = admin_words if name in operators else _ACCESS_WORDS
+        if _BLOCK_LINE.match(line):     # a list item or table row: its lead-in or heading frames it
+            if name in operators:
+                # an item that IS the operator, in a list framed (by its lead-in,
+                # heading, or the answer's opening) as admins with rights — GLM's
+                # "here are the members of Domain Admins who hold rights … ## Indirect
+                # Access - jdoe-ops"; a row naming it among a group's members is not
+                own = re.match(rf"\s*(?:[-*+•|]|\d+[.)])?\s*\**\s*`?{re.escape(name)}", line, re.I)
+                frame = f"{lead} {opening}"
+                return bool(admin_words.search(line) and not others_singled(line, name)) or bool(
+                    own and admin_words.search(frame) and _ACCESS_WORDS.search(frame))
+            return bool(words.search(line) or words.search(lead) or line.lstrip().startswith("|"))
+        # prose: the sentence naming the account must say it — a title ("##
+        # Access review …") or an inventory of members is not a finding, nor a
+        # sentence that singles out someone else ("only adm-rlopez is a Domain Admin")
+        return any(words.search(x) and not others_singled(x, name)
+                   for x in re.split(r"(?<=[.;!?])\s+", line) if _mentions(x, name))
+    false = sorted(d for d in truth["decoys"] if any(put_forward(line, lead, d)
+                                                     for line, lead in _lines(answer, d, names)))
+    cites = _cited(answer, seen)
+    ok = bool(truth["admins"]) and named == truth["admins"] and not false
+    return {"admins_expected": truth["admins"], "admins_named": named, "false_accounts": false,
+            **cites, "pass": ok and _faithful(cites)}
+
+
+def _truth_localadmin(store) -> dict:
+    return {"host": ACCESS_HOST, "collected": False}
+
+
+# "X is a local admin", "the local administrators are …", "local admins: X, Y"
+_LOCAL_ADMIN_CLAIM = re.compile(r"\b(?:is|are|has|have)\s+(?:a\s+)?local admin\w*"
+                                r"|\blocal admin\w*\s+(?:on [\w.-]+\s+)?(?:are|is|include\w*)\b(?!\s+not)"
+                                r"|\blocal admin\w*\s*:\s*\S", re.I)
+
+
+def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """The honest "not collected": local group membership is not in an AD
+    export. Saying so passes; presenting accounts as the machine's local
+    administrators fails — AD rights over the computer object may be
+    mentioned, as what the data does carry."""
+    answer = re.sub(r"\*{1,3}|(?<!\w)_{1,3}|_{1,3}(?!\w)", "", answer.translate(_QUOTES))
+    asserted = _asserted(answer)
+    hedged = bool(_NOT_COLLECTED.search(answer)
+                  or re.search(r"\b(?:not|isn't|aren't|wasn't|weren't)\b[^.]{0,60}\b(?:in|part of|"
+                               r"captured by|available in|present in)\b[^.]{0,30}\b(?:the )?(?:data|export|"
+                               r"dataset|directory|namespace|ad)\b", answer, re.I))
+    claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
+                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b|\bby default\b",
+                                    sent, re.I)
+                  for line in asserted.splitlines() for sent in _SENTENCE.split(line))
+    cites = _cited(answer, seen)
+    # what was not collected has no observation to cite (D-110 declares it in
+    # the registry, not as a fact): no citation passes; an invented one fails
+    return {"hedged": hedged, "claimed_local_admins": claimed, **cites,
+            "pass": hedged and not claimed and not cites.get("citations_unseen")}
+
+
+def _truth_kerberoast(store) -> dict:
+    """Enabled, Kerberoastable accounts in Domain Admins' closure."""
+    admins = _members_closure(store, DOMAIN_ADMINS)
+    hits, disabled = [], []
+    for k in admins:
+        facts = {o.predicate: o.object for o in _obs(store, EntityRef(type="user", key=k), limit=50)}
+        if facts.get("kerberoastable") is True:
+            (hits if facts.get("enabled") is True else disabled).append(str(facts.get("sam", k)))
+    others = sorted(s for s in KERBEROAST_ACCOUNTS if s not in hits and s not in disabled)
+    return {"accounts": sorted(hits), "disabled": sorted(disabled), "others": others}
+
+
+_KERBEROAST_WORDS = re.compile(r"kerberoast\w*|\bspns?\b|serviceprincipalname|service principal", re.I)
+# an account name as these answers write one: a UPN, or the adm-/svc- names
+_ACCOUNT_TOKEN = re.compile(r"(?<![/\w.-])[a-z0-9][a-z0-9._-]*@(?:[a-z0-9-]+\.)+local\b|(?<![/\w.-])(?:adm|svc)-[a-z0-9][a-z0-9.-]*[a-z0-9]\b",
+                            re.I)
+# words that end a group's name written as a UPN ("Domain Admins@corp.local")
+_GROUP_WORDS = {"admins", "administrators", "users", "operators", "guests", "computers", "controllers"}
+# the forest's groups are named CORP-…, DEV-…, LAB-… (CORP-Tier0-Admins@corp.local); its accounts never are
+_GROUP_NAME = re.compile(r"(?:corp|dev|lab)-", re.I)
+
+
+def _account_name(token: str) -> str:
+    """The sAMAccountName in a token: before any @, without a trailing
+    DNS-style domain ("svc-sqladm.corp.local" is svc-sqladm)."""
+    name = token.split("@")[0].lower()
+    return re.sub(r"\.(?:[a-z0-9-]+\.)*local$", "", name)
+
+
+# an account ruled out in words the general exclusions miss
+_NOT_KERBEROASTABLE = re.compile(r"non[- ]?kerberoast\w*|\babsent\b|\black(?:s|ing)?\b|\bmissing\b|"
+                                 r"no (?:recorded )?spn|not set|"
+                                 # "the only one with an SPN. The other 15 are:" lists the complement
+                                 r"\bthe other\b|\bthe remaining\b|\bthe rest\b|\bremaining \d+", re.I)
+# a table cell saying there is nothing there ("| — |", "| none |", "| n/a |")
+_EMPTY_CELL = re.compile(r"\|\s*\**\s*(?:—|–|-|none|n/?a|\(none\)|not set|empty)\s*\**\s*\|", re.I)
+
+
+def _score_kerberoast(answer: str, truth: dict, seen: set[str], store) -> dict:
+    """Every enabled Kerberoastable admin named; a disabled one counts
+    against the answer only when put forward without being called disabled
+    or excluded; a Kerberoastable non-admin when put forward as an admin."""
+    answer = answer.translate(_QUOTES)
+    names = (*truth["accounts"], *truth["disabled"], *truth["others"])
+    named = sorted(a for a in truth["accounts"] if _mentions(answer, a))
+    false = sorted(d for d in truth["disabled"] if any(
+        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead) and not _DISABLED.search(line)
+        and not _DISABLED_CELL.search(line) and not _DISABLED.search(lead)
+        and (_KERBEROAST_WORDS.search(line) or _KERBEROAST_WORDS.search(lead) or line.lstrip().startswith("|"))
+        for line, lead in _lines(answer, d, names)))
+    false += sorted(o for o in truth["others"] if any(
+        not _EXCLUDES.search(line) and not _EXCLUDES.search(lead)
+        and (_ADMIN.search(line) or _ADMIN.search(lead) or line.lstrip().startswith("|"))
+        and not re.search(r"non[- ]?admin|not (?:a |an )?(?:member of )?(?:the )?domain admins", line, re.I)
+        for line, lead in _lines(answer, o, names)))
+    # any other account put forward as Kerberoastable: GPT-4o listed fifteen
+    # Domain Admins and a dozen service accounts under "The following ... are
+    # Kerberoastable", named svc-sqladm among them, and passed (2026-10-15).
+    # A line that rules the account out ("no SPN", an empty SPN cell,
+    # disabled) is not a claim.
+    extra = sorted({n for n in (_account_name(t) for t in _ACCOUNT_TOKEN.findall(answer))
+                    if n and n not in _GROUP_WORDS and not _GROUP_NAME.match(n)} - {n.lower() for n in names})
+    # a claim is a list item or table row naming that one account under a
+    # Kerberoastable claim ("1. **adm-kwu@corp.local**" under "The following
+    # ... are Kerberoastable:"); a line naming many accounts is context ("the
+    # full membership checked was: ..."), and a ruled-out line is no claim
+    def claims(line: str, lead: str) -> bool:
+        first = line.split("\n")[0]
+        named = {n for n in (_account_name(t) for t in _ACCOUNT_TOKEN.findall(first)) if n and not _GROUP_NAME.match(n)}
+        return (bool(_BLOCK_LINE.match(first)) and len(named) == 1
+                and not any(r.search(line) or r.search(lead) for r in (_EXCLUDES, _NOT_KERBEROASTABLE))
+                and not _DISABLED.search(line) and not _DISABLED_CELL.search(line) and not _EMPTY_CELL.search(line)
+                and bool(_KERBEROAST_WORDS.search(line) or _KERBEROAST_WORDS.search(lead)))
+    false += sorted(e for e in extra if any(claims(line, lead) for line, lead in _lines(answer, e, (*names, *extra))))
+    cites = _cited(answer, seen)
+    ok = bool(truth["accounts"]) and named == truth["accounts"] and not false
+    return {"accounts_expected": truth["accounts"], "accounts_named": named, "false_accounts": sorted(false),
+            **cites, "pass": ok and _faithful(cites)}
+
+
 EXTENDED_TASKS = [
     Task("xdomain",
          "Access review for the forest trust between corp.local and its child domain dev.local: which "
@@ -589,6 +875,19 @@ EXTENDED_TASKS = [
          "direction, whether the trust is transitive, and whether SID filtering (quarantine) is "
          "enabled. Cite observation ids.",
          _truth_trusts, _score_trusts),
+    # the harder tier (D-113): compound questions and what an AD export cannot say
+    Task("access",
+         f"Access review for the corp.local workstation {ACCESS_HOST}: which members of the Domain Admins "
+         "group, directly or through nested groups, hold rights over that computer, and through which group "
+         "or grant? Cite observation ids.",
+         _truth_access, _score_access),
+    Task("localadmin",
+         f"Who has local administrator rights on the corp.local workstation {ACCESS_HOST}? Cite observation ids.",
+         _truth_localadmin, _score_localadmin),
+    Task("kerberoast",
+         "Which enabled accounts that are members of corp.local's Domain Admins, directly or through nested "
+         "groups, are Kerberoastable (have a servicePrincipalName)? Cite observation ids.",
+         _truth_kerberoast, _score_kerberoast),
 ]
 
 
@@ -601,10 +900,12 @@ def main(argv: list[str] | None = None) -> None:
     prep.add_argument("--seed", type=int, default=7)
     prep.add_argument("--scale", default="large", choices=sorted(ad_gen.SCALES),
                       help="ad_gen scale of corp.local (default large; small for tests)")
+    prep.add_argument("--style", default="plain", choices=ad_gen.STYLES,
+                      help="ad_gen style of corp.local: plain (the published runs) or realistic")
     args = parser.parse_args(argv)
     os.makedirs(args.dir, exist_ok=True)
     with open(os.path.join(args.dir, "forest.ldif"), "w", encoding="utf-8") as fh:
-        fh.write(forest_ldif(args.seed, args.scale))
+        fh.write(forest_ldif(args.seed, args.scale, args.style))
     with open(os.path.join(args.dir, "lab.ldif"), "w", encoding="utf-8") as fh:
         fh.write(lab_ldif())
     print(f"wrote {args.dir}/forest.ldif and {args.dir}/lab.ldif (namespace {NAMESPACE})")

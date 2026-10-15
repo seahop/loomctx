@@ -89,18 +89,26 @@
       out.push('<line style="stroke:var(--line);stroke-width:1" x1="' + L + '" x2="' + (W - R) + '" y1="' + (T + (i + 1) * ROW) + '" y2="' + (T + (i + 1) * ROW) + '"/>');
       out.push('<text style="fill:var(--ink-2);font:500 10.5px var(--f-mono)" x="' + (L - 12) + '" y="' + (cy + 4) + '" text-anchor="end">' + key + (ms[0].incomplete ? "*" : "") +
                '  <tspan style="fill:var(--muted);font:500 10.5px var(--f-mono)">(' + ms.length + ")</tspan></text>");
-      var placed = [];
-      ms.forEach(function (m) {
-        var px = x(m.cost), dy = 0;
-        [0, -9, 9, -18, 18].some(function (o) {
-          if (!placed.some(function (p) { return p[1] === o && Math.abs(p[0] - px) < 10; })) { dy = o; return true; }
-          return false;
-        });
-        placed.push([px, dy]);
-        var t = tier(m);
-        out.push('<circle cx="' + px + '" cy="' + (cy + dy) + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
-        hits.push('<circle style="fill:transparent" cx="' + px + '" cy="' + (cy + dy) + '" r="8" data-tip="' + esc(m.id + " · " + m.passes + "/" + m.scored + " · " + money(m.cost) + " a run") + '"/>');
-      });
+      // dots that would touch spread sideways along the row, centred on
+      // their costs, so every dot of a row stays on its line
+      var GAP = 10, runs = [];
+      ms.forEach(function (m) { runs.push({ ms: [m], at: x(m.cost), sum: x(m.cost) }); });
+      for (var merged = true; merged;) {
+        merged = false;
+        for (var k = 0; k + 1 < runs.length; k++) {
+          var a = runs[k], b = runs[k + 1];
+          if (a.at + (a.ms.length - 1) * GAP + GAP > b.at) {
+            var ms2 = a.ms.concat(b.ms), sum = a.sum + b.sum;
+            runs.splice(k, 2, { ms: ms2, sum: sum, at: sum / ms2.length - (ms2.length - 1) * GAP / 2 });
+            merged = true; break;
+          }
+        }
+      }
+      runs.forEach(function (r) { r.ms.forEach(function (m, j) {
+        var px = r.at + j * GAP, t = tier(m);
+        out.push('<circle cx="' + px + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
+        hits.push('<circle style="fill:transparent" cx="' + px + '" cy="' + cy + '" r="8" data-tip="' + esc(m.id + " · " + m.passes + "/" + m.scored + " · " + money(m.cost) + " a run") + '"/>');
+      }); });
     });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     svg.innerHTML = out.join("") + hits.join("");
@@ -122,11 +130,13 @@
       out.push('<text style="fill:var(--muted);font:500 10.5px var(--f-mono)" x="' + x(v) + '" y="' + (axisY + 14) + '" text-anchor="middle">' + money(v).replace(/0+$/, "").replace(/\.$/, "") + "</text>");
     });
     ranked.forEach(function (m, i) {
-      var cy = T + i * ROW + ROW / 2, t = tier(m);
+      // placed at the value it prints: the order breaks a printed tie on
+      // reliability, so two "$0.0022" dots must sit at the same x
+      var cy = T + i * ROW + ROW / 2, t = tier(m), v = shown(m.per_correct);
       out.push('<text style="fill:var(--ink-2);font:500 10.5px var(--f-mono)" x="' + (L - 10) + '" y="' + (cy + 3.5) + '" text-anchor="end">' + (i + 1) + ". " + esc(m.name) + (m.incomplete ? "*" : "") + "</text>");
-      out.push('<line x1="' + x(0.001) + '" x2="' + x(m.per_correct) + '" y1="' + cy + '" y2="' + cy + '" style="stroke:var(--line-2);stroke-width:2"/>');
-      out.push('<circle cx="' + x(m.per_correct) + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
-      out.push('<text style="fill:var(--ink);font:600 10.5px var(--f-mono)" x="' + (x(m.per_correct) + 9) + '" y="' + (cy + 3.5) + '">' + money(m.per_correct) + "</text>");
+      out.push('<line x1="' + x(0.001) + '" x2="' + x(v) + '" y1="' + cy + '" y2="' + cy + '" style="stroke:var(--line-2);stroke-width:2"/>');
+      out.push('<circle cx="' + x(v) + '" cy="' + cy + '" r="4.5" style="fill:' + FILL[t] + ";stroke:" + STROKE[t] + ";stroke-width:" + (t === "mid" ? 2 : 1.5) + '"/>');
+      out.push('<text style="fill:var(--ink);font:600 10.5px var(--f-mono)" x="' + (x(v) + 9) + '" y="' + (cy + 3.5) + '">' + money(m.per_correct) + "</text>");
       out.push('<rect style="fill:transparent" x="0" y="' + (cy - ROW / 2) + '" width="' + W + '" height="' + ROW + '" data-tip="' +
         esc(m.id + " · " + money(m.per_correct) + " per correct answer · " + m.passes + "/" + m.scored + " passed · " + money(m.cost) + " a run") + '"/>');
     });
@@ -236,7 +246,7 @@
       return "<tr>" +
         "<td>" + esc(m.name) + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
-          m.passes + "/" + m.scored + (m.incomplete ? "*" : "") + "</span></td>" +
+          '<span class="mb-n">' + m.passes + "/" + m.scored + '</span><span class="mb-mark">' + (m.incomplete ? "*" : "") + "</span></span></td>" +
         '<td class="num">' + cell(m.tasks.exposure) + "</td><td class=\"num\">" + cell(m.tasks.lease) + "</td>" +
         '<td class="num">' + cell(m.tasks.conflict) + "</td><td class=\"num\">" + cell(m.tasks.os) + "</td>" +
         '<td class="num">' + money(m.cost) + "</td>" +
@@ -283,30 +293,36 @@
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function money(v) { return v == null ? "—" : v >= 1 ? "$" + v.toFixed(2) : v >= 0.01 ? "$" + v.toFixed(3) : "$" + v.toFixed(4); }
   var rows = A.models.map(function (m) {
-    return Object.assign({}, m, { rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0 });
+    return Object.assign({}, m, { rate: m.passed[1] ? m.passed[0] / m.passed[1] : 0,
+                                  hardRate: m.hard && m.hard[1] ? m.hard[0] / m.hard[1] : 0 });
   });
   // best first: complete runs, then pass rate, then cost at the precision the
   // table shows (a gap too small to print is a tie), then the faster model
   function shown(v) { return v == null ? Infinity : Number(v.toPrecision(2)); }
   function rank(a, b) {
-    return (a.incomplete - b.incomplete) || (b.rate - a.rate) || (shown(a.cost) - shown(b.cost)) ||
+    return (a.incomplete - b.incomplete) || (b.rate - a.rate) || (b.hardRate - a.hardRate) || (shown(a.cost) - shown(b.cost)) ||
            ((a.secs == null ? Infinity : a.secs) - (b.secs == null ? Infinity : b.secs));
   }
   var perfect = rows.filter(function (m) { return m.rate === 1 && !m.incomplete; }).length;
+  function share(t) { return t && t[1] ? Math.round(100 * t[0] / t[1]) + "%" : "—"; }
+  var S = A.orig5 || {}, H = A.harder3 || {};
   document.getElementById("ad-meta").innerHTML = [
-    ["models", rows.length], ["perfect", perfect + " at " + (TASKS.length * A.runs) + "/" + (TASKS.length * A.runs)],
-    ["runs per model", A.runs + " × " + TASKS.length + " audits"], ["accounts", A.forest.users.toLocaleString("en-US")],
-    ["facts loaded", A.forest.observations.toLocaleString("en-US")], ["whole sweep", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
+    ["standard audits passed at 500k", share(S.xl_on)], ["at 10k", share(S.large_on)],
+    ["500k, no named queries", share(S.xl_off)], ["perfect", perfect + " of " + rows.length + " at 25/25"],
+    ["harder audits", share(H.xl_on)], ["accounts", A.forest.users.toLocaleString("en-US")],
+    ["facts loaded", A.forest.observations.toLocaleString("en-US")],
+    ["whole sweep", "$" + A.total_cost.toFixed(2)], ["measured", A.date]
   ].map(function (c) { return "<span><b>" + esc(c[1]) + "</b> " + esc(c[0]) + "</span>"; }).join("");
   var tbody = document.querySelector("#ad-table tbody");
   var state = { key: "passed", dir: -1 };
   function val(m, key) {
     if (key === "name") return m.id;
     if (key === "passed") return (m.incomplete ? -1e6 : 0) + m.rate * 1000 - m.cost / 100;   // partial runs rank last
+    if (key === "hard" || key === "passed_10k" || key === "passed_off") { var p = m[key]; return p && p[1] ? p[0] / p[1] : -1; }
     if (TASKS.indexOf(key) >= 0) { var t = m.tasks[key]; return t ? t[0] / t[1] : -1; }
     return m[key] == null ? Infinity : m[key];
   }
-  function cell(t) { return t ? t[0] + "/" + t[1] : "—"; }
+  function cell(t) { return t && t[1] ? t[0] + "/" + t[1] : "—"; }
   function render() {
     var sorted = rows.slice().sort(function (a, b) {
       if (state.key === "passed") return rank(a, b) * -state.dir;
@@ -316,7 +332,9 @@
     tbody.innerHTML = sorted.map(function (m) {
       return "<tr><td>" + esc(m.name) + (m.note ? ' <span title="' + esc(m.note) + '">†</span>' : "") + "<small>" + esc(m.vendor) + "</small></td>" +
         '<td class="num"><span class="mb-pass"><span class="mb-bar" aria-hidden="true"><i style="width:' + Math.round(m.rate * 100) + '%"></i></span>' +
-        m.passed[0] + "/" + m.passed[1] + (m.incomplete ? "*" : "") + "</span></td>" +
+        '<span class="mb-n">' + m.passed[0] + "/" + m.passed[1] + '</span><span class="mb-mark">' + (m.incomplete ? "*" : "") + "</span></span></td>" +
+        '<td class="num">' + cell(m.hard) + "</td>" +
+        '<td class="num">' + cell(m.passed_10k) + "</td>" + '<td class="num">' + cell(m.passed_off) + "</td>" +
         TASKS.map(function (t) { return '<td class="num">' + cell(m.tasks[t]) + "</td>"; }).join("") +
         '<td class="num">' + money(m.cost) + "</td>" +
         '<td class="num">' + (m.secs == null ? "—" : Math.round(m.secs) + " s") + "</td></tr>";
@@ -330,7 +348,7 @@
     function go() {
       var key = th.dataset.sort;
       if (state.key === key) state.dir = -state.dir;
-      else { state.key = key; state.dir = (key === "passed" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
+      else { state.key = key; state.dir = (key === "passed" || key === "hard" || key === "passed_10k" || key === "passed_off" || TASKS.indexOf(key) >= 0) ? -1 : 1; }
       render();
     }
     th.addEventListener("click", go);

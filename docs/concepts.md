@@ -160,6 +160,9 @@ observations, and dossiers are scoped to one. Default: `"default"`.
 
 The per-namespace catalog of entity types (with natural-key fields), predicates, and
 facets. What makes the engine domain-agnostic and teams self-serve.
+`python -m loomctx.registry draft SAMPLE` proposes one from a sample export
+for review (it never registers anything); see "Writing your own connector"
+in `real-data.md`.
 
 ### Write path / read path
 

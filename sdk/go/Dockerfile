@@ -1,6 +1,6 @@
 # Go SDK toolchain (D-034): vet, contract drift test, live test against the engine.
 # Same Go as the gateway (gateway/go.mod), pinned by digest.
-FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
+FROM golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
 WORKDIR /app
 # go.sum is committed: downloads are verified against it, never rewritten here
 COPY sdk/go/go.mod sdk/go/go.sum ./

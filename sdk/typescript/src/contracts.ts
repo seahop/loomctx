@@ -19,6 +19,9 @@ export interface LoomCtxContracts {
   ContextPack?: ContextPack;
   PathRequest?: PathRequest;
   PathPack?: PathPack;
+  ListRequest?: ListRequest;
+  ListPage?: ListPage;
+  QueryRequest?: QueryRequest;
   AnswerRequest?: AnswerRequest;
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
@@ -427,6 +430,141 @@ export interface NodeStatus {
   cite: Citation;
 }
 /**
+ * "Which entities ...?" — an exact, paged set of entities instead of a
+ * ranked pack (D-107). The candidates are the entities that reach `of`
+ * along `via` within `depth` edges (group membership, nested), or, without
+ * `of`, every entity of `type`; `where` filters them, all conditions
+ * holding. Every row is cited by the rows that admitted it; the total is
+ * exact unless a cap is noted.
+ */
+export interface ListRequest {
+  namespace?: string;
+  /**
+   * keep only entities of this type (user, computer, host…)
+   */
+  type?: string | null;
+  /**
+   * list entities connected to this one (a group's members, a host's software) instead of a whole type
+   */
+  of?: EntityRef | null;
+  /**
+   * the edge predicates walked from `of`; empty = the namespace's registered containment predicates
+   */
+  via?: string[];
+  /**
+   * in: entities whose edge points AT `of` (members of a group: user member_of group); out: what `of` points at; any: both
+   */
+  direction?: "in" | "out" | "any";
+  /**
+   * the most edges between a listed entity and `of` (nested membership); clamped to 6 and noted
+   */
+  depth?: number;
+  where?: ListFilter[];
+  /**
+   * an `of` listing: give each row its route to `of`, every edge cited (how an account reaches a machine through groups and ACL grants); costs budget
+   */
+  paths?: boolean;
+  /**
+   * predicates whose current value each row should show, cited (beyond the ones `where` already names)
+   */
+  fields?: string[];
+  limit?: number;
+  offset?: number;
+  /**
+   * token budget, charged on each row's rendered text plus its citations; rows past it are left for the next page
+   */
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+/**
+ * One condition on an entity's CURRENT value of a predicate: the newest
+ * visible, unsuperseded, in-scope row (valid at `valid_at` when one is
+ * asked), compared case-insensitively on scalars. `ne` holds for an entity
+ * with no value on record (D-107: "accounts not disabled" includes the
+ * ones whose status was never collected — the page says how many).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "ListFilter".
+ */
+export interface ListFilter {
+  predicate: string;
+  op?: "eq" | "ne" | "in" | "contains" | "exists" | "absent" | "within" | "not_within";
+  /**
+   * the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent
+   */
+  value?: {
+    [k: string]: unknown;
+  };
+  /**
+   * within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> … -> value); clamped to the list depth cap
+   */
+  depth?: number;
+}
+/**
+ * One page of a ListRequest, sorted by entity key so paging is stable.
+ * `total` counts every match, not just this page; `next_offset` is set
+ * while more remain. `notes` say what the listing could not do exactly —
+ * a candidate cap, entities with no value on record for a filter, an
+ * unknown predicate — advice, not evidence (D-064).
+ */
+export interface ListPage {
+  namespace: string;
+  rows?: ListRow[];
+  total?: number;
+  /**
+   * false when a cap stopped the candidate walk, so `total` is a lower bound (the note names the cap)
+   */
+  exact?: boolean;
+  offset?: number;
+  next_offset?: number | null;
+  charged_tokens?: number;
+  notes?: string[];
+}
+/**
+ * One listed entity, its display name when one is registered, the
+ * current values the request filtered on or asked for, and the rows
+ * that back them (an `of` listing also cites the edge that admitted it).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "ListRow".
+ */
+export interface ListRow {
+  entity: EntityRef;
+  name?: string | null;
+  values?: {
+    [k: string]: EntityRef | string | number | boolean;
+  };
+  cites?: Citation[];
+  /**
+   * an `of` listing: edges between this entity and `of` (1 = direct)
+   */
+  hops?: number | null;
+  /**
+   * with `paths`: the edges from this entity to `of`, as stored, each cited
+   */
+  path?: PathEdge[];
+  /**
+   * an `of` listing past one hop: the entity one step closer to `of` on its route
+   */
+  through?: EntityRef | null;
+}
+/**
+ * Run a namespace's named query (D-108); the answer is a ListPage.
+ */
+export interface QueryRequest {
+  namespace?: string;
+  name: string;
+  params?: {
+    [k: string]: unknown;
+  };
+  limit?: number;
+  offset?: number;
+  budget?: number;
+  as_of?: string | null;
+  valid_at?: string | null;
+}
+/**
  * Ask + synthesize: retrieve a context pack, then have the configured
  * LLM produce a cited answer/decision. With neither subject nor scope,
  * subjects are auto-resolved from entity names mentioned in the question.
@@ -474,6 +612,14 @@ export interface SchemaRegistration {
   entity_types?: EntityTypeDef[];
   predicates?: PredicateDef[];
   strict?: boolean;
+  /**
+   * named questions the namespace answers exactly (D-108); a later registration replaces a query of the same name
+   */
+  queries?: QueryDef[];
+  /**
+   * what the namespace's sources do not carry (D-110); merged by topic
+   */
+  not_collected?: NotCollectedDef[];
 }
 /**
  * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
@@ -511,6 +657,63 @@ export interface PredicateDef {
    * the label a pack shows beside its subject's opaque key, over the namespace's other labels: a name that says where the entity lives (`dlee@dev.local`, a UPN) rather than a bare login that reads the same in every domain (D-097)
    */
   display?: boolean;
+}
+/**
+ * A named, parameterized question a namespace answers exactly (D-108):
+ * a ListRequest template whose string values may be `{param}`
+ * placeholders — "effective_members(group)", "unconstrained delegation
+ * hosts that are not DCs". Data, not code: a connector registers the
+ * questions its domain asks, and an agent runs one by name instead of
+ * composing the walk and filters itself. `namespace`, paging and budget
+ * come from the call, never the template.
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "QueryDef".
+ */
+export interface QueryDef {
+  name: string;
+  description: string;
+  params?: QueryParam[];
+  /**
+   * a ListRequest without namespace / limit / offset / budget / as_of / valid_at; '{param}' strings are substituted
+   */
+  request: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * One parameter of a named query (D-108). Without a default it is
+ * required. An `entity` parameter takes a 'type:key' handle or a name the
+ * namespace's label predicates know (resolved like find_entity, within
+ * `entity_type` when set).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "QueryParam".
+ */
+export interface QueryParam {
+  name: string;
+  description?: string;
+  kind?: "string" | "entity" | "integer" | "boolean";
+  entity_type?: string | null;
+  default?: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * Something a namespace's sources do not carry, declared by the
+ * connector (D-110): an LDAP export has no local group membership, so
+ * "local admins of WS-1" cannot be answered from it — and an empty result
+ * must not read as "none". `words` are the plain terms a question uses for
+ * it; the engine notes the declaration when a question names them.
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "NotCollectedDef".
+ */
+export interface NotCollectedDef {
+  topic: string;
+  description: string;
+  words?: string[];
+  source?: string;
 }
 export interface IngestBatchResponse {
   total: number;

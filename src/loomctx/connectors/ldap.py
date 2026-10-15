@@ -94,8 +94,8 @@ from typing import Iterable, Iterator
 
 from .. import coverage
 from .. import identity as ident
-from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, PredicateDef,
-                         SchemaRegistration)
+from ..contracts import (ClaimIn, EntityRef, EntityTypeDef, NotCollectedDef, PredicateDef, QueryDef,
+                         QueryParam, SchemaRegistration)
 
 SOURCE_DEFAULT = "ad-export"
 NAMESPACE_DEFAULT = "netsec"   # one namespace per environment (D-083)
@@ -838,7 +838,72 @@ def schema(namespace: str) -> SchemaRegistration:
             PredicateDef(name="name", label=True, description="friendly name (cn / name)"),
             PredicateDef(name="os", description="operatingSystem"),
         ],
+        queries=QUERIES,
+        not_collected=NOT_COLLECTED,
     )
+
+
+# What a directory export does not carry (D-110): these live on the machines
+# or in logs, not in AD — "who is local admin on WS-1" cannot be answered
+# from an LDAP dump, and an empty result must not read as "nobody".
+NOT_COLLECTED = [
+    NotCollectedDef(topic="local_groups", source="ldap",
+                    description="machines' local group membership (local Administrators, Remote Desktop Users) "
+                                "and so local admin / RDP rights on a computer",
+                    words=["local admin", "local admins", "local administrator", "local administrators",
+                           "admin rights on", "administrator on", "remote desktop", "rdp", "local group"]),
+    NotCollectedDef(topic="sessions", source="ldap",
+                    description="logon sessions — who is or was logged on to a computer",
+                    words=["session", "sessions", "logged on", "logged in", "logon", "logons", "signed in"]),
+    NotCollectedDef(topic="user_rights", source="ldap",
+                    description="user rights assignments applied by GPO (SeDebugPrivilege, log on locally, …)",
+                    words=["user rights", "privilege", "sedebug", "log on locally", "gpo rights"]),
+]
+
+
+# The directory questions an audit asks, answered exactly by list mode
+# (D-108): membership is nested (depth 6, the walk cap), flags are current.
+_GROUP = QueryParam(name="group", kind="entity", entity_type="group",
+                    description="the group: a 'group:<key>' handle or its name")
+_ACCOUNT = QueryParam(name="account", kind="entity",
+                      description="the user, computer or group: a 'type:<key>' handle or its name")
+QUERIES = [
+    QueryDef(name="effective_members", params=[_GROUP, QueryParam(
+                 name="member_type", default="user",
+                 description="user, computer or group: which members to list")],
+             description="every account that is a member of the group, directly or through nested groups",
+             request={"of": "{group}", "via": ["member_of"], "direction": "in", "depth": 6,
+                      "type": "{member_type}", "fields": ["enabled"]}),
+    QueryDef(name="enabled_members", params=[_GROUP],
+             description="the group's effective (nested) user members whose account is enabled",
+             request={"of": "{group}", "via": ["member_of"], "direction": "in", "depth": 6, "type": "user",
+                      "where": [{"predicate": "enabled", "op": "eq", "value": True}]}),
+    QueryDef(name="account_groups", params=[_ACCOUNT],
+             description="every group the account belongs to, directly or through nested groups",
+             request={"of": "{account}", "via": ["member_of"], "direction": "out", "depth": 6,
+                      "type": "group"}),
+    QueryDef(name="unconstrained_delegation_hosts",
+             description="computers trusted for unconstrained Kerberos delegation that are not domain "
+                         "controllers (a DC has it by design)",
+             request={"type": "computer", "fields": ["enabled", "os"],
+                      "where": [{"predicate": "unconstrained_delegation", "op": "eq", "value": True},
+                                {"predicate": "is_dc", "op": "ne", "value": True}]}),
+    QueryDef(name="domain_trusts",
+             description="every trusted / trusting partner domain with the trust's direction, "
+                         "transitivity and SID filtering",
+             request={"type": "domain", "where": [{"predicate": "trust_direction", "op": "exists"}],
+                      "fields": ["trust_transitive", "trust_sid_filtering"]}),
+    QueryDef(name="kerberoastable_users",
+             description="enabled user accounts with a servicePrincipalName (Kerberoastable)",
+             request={"type": "user", "fields": ["spn"],
+                      "where": [{"predicate": "kerberoastable", "op": "eq", "value": True},
+                                {"predicate": "enabled", "op": "eq", "value": True}]}),
+    QueryDef(name="asrep_roastable_users",
+             description="enabled accounts that do not require Kerberos pre-authentication (AS-REP roastable)",
+             request={"type": "user",
+                      "where": [{"predicate": "no_preauth", "op": "eq", "value": True},
+                                {"predicate": "enabled", "op": "eq", "value": True}]}),
+]
 
 
 # ---------------------------------------------------------------------- CLI #

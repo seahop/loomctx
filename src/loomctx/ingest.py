@@ -25,6 +25,7 @@ if a 5xx or a timeout struck after the write.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -125,22 +126,35 @@ def post_batches(url: str, lines: Iterable[str], size: int, key: str | None,
     return totals
 
 
-def load_direct(db: str | None, lines: Iterable[str], size: int) -> dict[str, int]:
+def load_direct(db: str | None, lines: Iterable[str], size: int,
+                bulk: bool = True) -> dict[str, int]:
     """Write straight into a store (no engine running) — the same code path
     the queue consumer uses, so semantics are identical. An explicit `db`
     opens that store alone; None opens what LOOMCTX_DB / LOOMCTX_SHARDS /
     LOOMCTX_BLOB_* configure, so sharding and blob offload apply as they do
-    for the engine."""
+    for the engine.
+
+    `bulk` (D-105) runs the load in the store's bulk mode: every batch is
+    still handled alone and in order, with its own all-or-nothing, but it
+    is committed with its neighbours every few seconds. A caller whose
+    `lines` reads this same store through another connection while it is
+    consumed (to see what earlier batches stored) passes False and keeps a
+    commit per batch."""
     from .consumer import handle_batch
+    from .registry import RegistryCache
     from .store.factory import store_from_env, store_from_url
 
     store = store_from_url(db) if db else store_from_env()
     totals = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
     try:
-        for batch in _batches(lines, size):
-            counts = handle_batch(store, [b.encode() for b in batch])
-            for k in totals:
-                totals[k] += counts.get(k, 0)
+        # one registry cache for the run: it was one per batch, a schema
+        # read every 500 lines
+        registry = RegistryCache(store)
+        with store.bulk_load() if bulk else contextlib.nullcontext():
+            for batch in _batches(lines, size):
+                counts = handle_batch(store, [b.encode() for b in batch], registry)
+                for k in totals:
+                    totals[k] += counts.get(k, 0)
         store.refresh_statistics()
     finally:
         store.close()

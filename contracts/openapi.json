@@ -832,6 +832,323 @@
         "title": "IngestItemResult",
         "type": "object"
       },
+      "ListFilter": {
+        "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
+        "properties": {
+          "depth": {
+            "default": 6,
+            "description": "within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> \u2026 -> value); clamped to the list depth cap",
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "title": "Depth",
+            "type": "integer"
+          },
+          "op": {
+            "default": "eq",
+            "enum": [
+              "eq",
+              "ne",
+              "in",
+              "contains",
+              "exists",
+              "absent",
+              "within",
+              "not_within"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "predicate": {
+            "title": "Predicate",
+            "type": "string"
+          },
+          "value": {
+            "description": "the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent",
+            "title": "Value"
+          }
+        },
+        "required": [
+          "predicate"
+        ],
+        "title": "ListFilter",
+        "type": "object"
+      },
+      "ListPage": {
+        "description": "One page of a ListRequest, sorted by entity key so paging is stable.\n`total` counts every match, not just this page; `next_offset` is set\nwhile more remain. `notes` say what the listing could not do exactly \u2014\na candidate cap, entities with no value on record for a filter, an\nunknown predicate \u2014 advice, not evidence (D-064).",
+        "properties": {
+          "charged_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Charged Tokens",
+            "type": "integer"
+          },
+          "exact": {
+            "default": true,
+            "description": "false when a cap stopped the candidate walk, so `total` is a lower bound (the note names the cap)",
+            "title": "Exact",
+            "type": "boolean"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ListRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "namespace"
+        ],
+        "title": "ListPage",
+        "type": "object"
+      },
+      "ListRequest": {
+        "description": "\"Which entities ...?\" \u2014 an exact, paged set of entities instead of a\nranked pack (D-107). The candidates are the entities that reach `of`\nalong `via` within `depth` edges (group membership, nested), or, without\n`of`, every entity of `type`; `where` filters them, all conditions\nholding. Every row is cited by the rows that admitted it; the total is\nexact unless a cap is noted.",
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "budget": {
+            "default": 1500,
+            "description": "token budget, charged on each row's rendered text plus its citations; rows past it are left for the next page",
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000000.0,
+            "title": "Budget",
+            "type": "integer"
+          },
+          "depth": {
+            "default": 1,
+            "description": "the most edges between a listed entity and `of` (nested membership); clamped to 6 and noted",
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "title": "Depth",
+            "type": "integer"
+          },
+          "direction": {
+            "default": "in",
+            "description": "in: entities whose edge points AT `of` (members of a group: user member_of group); out: what `of` points at; any: both",
+            "enum": [
+              "in",
+              "out",
+              "any"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "fields": {
+            "description": "predicates whose current value each row should show, cited (beyond the ones `where` already names)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "limit": {
+            "default": 50,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "namespace": {
+            "default": "default",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "of": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "list entities connected to this one (a group's members, a host's software) instead of a whole type"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "paths": {
+            "default": false,
+            "description": "an `of` listing: give each row its route to `of`, every edge cited (how an account reaches a machine through groups and ACL grants); costs budget",
+            "title": "Paths",
+            "type": "boolean"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "keep only entities of this type (user, computer, host\u2026)",
+            "title": "Type"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          },
+          "via": {
+            "description": "the edge predicates walked from `of`; empty = the namespace's registered containment predicates",
+            "items": {
+              "type": "string"
+            },
+            "title": "Via",
+            "type": "array"
+          },
+          "where": {
+            "items": {
+              "$ref": "#/components/schemas/ListFilter"
+            },
+            "title": "Where",
+            "type": "array"
+          }
+        },
+        "title": "ListRequest",
+        "type": "object"
+      },
+      "ListRow": {
+        "description": "One listed entity, its display name when one is registered, the\ncurrent values the request filtered on or asked for, and the rows\nthat back them (an `of` listing also cites the edge that admitted it).",
+        "properties": {
+          "cites": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "title": "Cites",
+            "type": "array"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "hops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "an `of` listing: edges between this entity and `of` (1 = direct)",
+            "title": "Hops"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "description": "with `paths`: the edges from this entity to `of`, as stored, each cited",
+            "items": {
+              "$ref": "#/components/schemas/PathEdge"
+            },
+            "title": "Path",
+            "type": "array"
+          },
+          "through": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "an `of` listing past one hop: the entity one step closer to `of` on its route"
+          },
+          "values": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "entity"
+        ],
+        "title": "ListRow",
+        "type": "object"
+      },
       "NodeStatus": {
         "description": "A status fact about an entity a path passes through (D-080): the\nnewest visible value of a `node_status` predicate, as stored and cited.",
         "properties": {
@@ -873,6 +1190,38 @@
           "cite"
         ],
         "title": "NodeStatus",
+        "type": "object"
+      },
+      "NotCollectedDef": {
+        "description": "Something a namespace's sources do not carry, declared by the\nconnector (D-110): an LDAP export has no local group membership, so\n\"local admins of WS-1\" cannot be answered from it \u2014 and an empty result\nmust not read as \"none\". `words` are the plain terms a question uses for\nit; the engine notes the declaration when a question names them.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "topic": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Topic",
+            "type": "string"
+          },
+          "words": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Words",
+            "type": "array"
+          }
+        },
+        "required": [
+          "topic",
+          "description"
+        ],
+        "title": "NotCollectedDef",
         "type": "object"
       },
       "PathEdge": {
@@ -1197,6 +1546,153 @@
         "title": "Provenance",
         "type": "object"
       },
+      "QueryDef": {
+        "description": "A named, parameterized question a namespace answers exactly (D-108):\na ListRequest template whose string values may be `{param}`\nplaceholders \u2014 \"effective_members(group)\", \"unconstrained delegation\nhosts that are not DCs\". Data, not code: a connector registers the\nquestions its domain asks, and an agent runs one by name instead of\ncomposing the walk and filters itself. `namespace`, paging and budget\ncome from the call, never the template.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/QueryParam"
+            },
+            "title": "Params",
+            "type": "array"
+          },
+          "request": {
+            "additionalProperties": true,
+            "description": "a ListRequest without namespace / limit / offset / budget / as_of / valid_at; '{param}' strings are substituted",
+            "title": "Request",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "request"
+        ],
+        "title": "QueryDef",
+        "type": "object"
+      },
+      "QueryParam": {
+        "description": "One parameter of a named query (D-108). Without a default it is\nrequired. An `entity` parameter takes a 'type:key' handle or a name the\nnamespace's label predicates know (resolved like find_entity, within\n`entity_type` when set).",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "entity_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Type"
+          },
+          "kind": {
+            "default": "string",
+            "enum": [
+              "string",
+              "entity",
+              "integer",
+              "boolean"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "QueryParam",
+        "type": "object"
+      },
+      "QueryRequest": {
+        "description": "Run a namespace's named query (D-108); the answer is a ListPage.",
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "budget": {
+            "default": 1500,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000000.0,
+            "title": "Budget",
+            "type": "integer"
+          },
+          "limit": {
+            "default": 50,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "namespace": {
+            "default": "default",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
       "SchemaRegistration": {
         "description": "Per-namespace registry (D-024). Registering is additive (a later POST\nmerges by name). Validation on ingest: a registered predicate's\nobject_types are always enforced; with `strict` the namespace also\nrejects unregistered predicates and entity types.",
         "properties": {
@@ -1212,11 +1708,27 @@
             "title": "Namespace",
             "type": "string"
           },
+          "not_collected": {
+            "description": "what the namespace's sources do not carry (D-110); merged by topic",
+            "items": {
+              "$ref": "#/components/schemas/NotCollectedDef"
+            },
+            "title": "Not Collected",
+            "type": "array"
+          },
           "predicates": {
             "items": {
               "$ref": "#/components/schemas/PredicateDef"
             },
             "title": "Predicates",
+            "type": "array"
+          },
+          "queries": {
+            "description": "named questions the namespace answers exactly (D-108); a later registration replaces a query of the same name",
+            "items": {
+              "$ref": "#/components/schemas/QueryDef"
+            },
+            "title": "Queries",
             "type": "array"
           },
           "strict": {
@@ -2000,6 +2512,45 @@
         "summary": "Ingest Batch"
       }
     },
+    "/v1/list": {
+      "post": {
+        "description": "Every entity matching a ListRequest, exact and paged (D-107). Gated\nlike /v1/path: the namespace grant, then `of`'s and `type`'s entity\ntypes; rows outside the caller's types never appear.",
+        "operationId": "list_route_v1_list_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Route"
+      }
+    },
     "/v1/observations/{observation_id}/prov": {
       "get": {
         "description": "One observation's provenance as PROV-O JSON-LD (D-050): source\nagent, observed time, the artifact span it was derived from, the\nextraction activity, and the supersession chain. Gated like the raw\nobservations route: the reader's namespace, and every entity the\nobservation touches must be in their world \u2014 anything else is\nunknown to them, not forbidden.",
@@ -2105,6 +2656,45 @@
           }
         },
         "summary": "Path"
+      }
+    },
+    "/v1/query": {
+      "post": {
+        "description": "Run a namespace's named query (D-108): the ListRequest its template\nspells, gated like /v1/list. An unknown query or a parameter it cannot\nuse is a 422 that says what the query takes.",
+        "operationId": "query_route_v1_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query Route"
       }
     },
     "/v1/schemas": {

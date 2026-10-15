@@ -323,3 +323,60 @@ and conditional GETs, pure `*_envelopes()` mappers from a source record to
 registration for the namespace, and `load` that streams through
 `loomctx.ingest`. The engine learns nothing about your domain; the schema
 registration carries it.
+
+Before writing a connector, check whether the source already speaks OCSF or
+STIX 2.1: those load through `connectors/ocsf.py` and `connectors/stix.py`
+with no new code.
+
+### Draft the registration from a sample (D-106)
+
+Writing `schema()` by hand is the slow part. `python -m loomctx.registry
+draft` reads a sample export and prints a draft `SchemaRegistration` for you
+to review. It never registers anything; you do that once you've checked it.
+
+```bash
+# 1. draft from what the connector emits (best: works for any connector) ...
+python -m loomctx.connectors.mysource emit sample.json --namespace netsec > sample.ndjson
+python -m loomctx.registry draft sample.ndjson --out draft.json --notes draft.notes.txt
+# ... or straight from the raw export, before any connector exists
+python -m loomctx.registry draft export.json --namespace netsec --out draft.json   # JSON / NDJSON records
+python -m loomctx.registry draft export.ldif --namespace netsec --out draft.json   # LDIF
+
+# 2. review: read draft.notes.txt (also printed on stderr), fix names and flags in draft.json
+# 3. register it (or paste it into the connector's schema())
+curl -X POST http://loomctx:8000/v1/schemas -H 'content-type: application/json' \
+     -H "X-LoomCtx-Key: $KEY" -d @draft.json
+```
+
+The drafter infers:
+
+- **entity types** from claim subject and object types; for raw records,
+  from the array a record sits in (`{"users": [...]}` gives `user`) or from a
+  kind field (`objectClass`, `@odata.type`, `kind`, `type`).
+- **predicates** from claim predicates or record fields (snake_cased, with
+  a few house-style names such as `displayName` to `name` and
+  `userPrincipalName` to `upn`; `--keep-names` turns these off).
+- **`object_types`** where a field's values match another record's key
+  (`id`, a DN, `objectSid`, a unique `*Id`), sit in an `{"id": ...}` object,
+  or are URLs ending in one. They are left open when a predicate reaches
+  four or more types. Lists named for a role (`members`, `owners`) are
+  drafted from the member's side (`member_of`, `owner_of`). A row with two
+  references and no name of its own (an assignment or grant) becomes one
+  predicate between the two.
+- **`containment`** from membership or parentage names (`member_of`,
+  `contains`, `parent`, `children`) and from DN parentage.
+- **`node_status`** for status-like scalars (`enabled`, `disabled`,
+  `active`, `locked`, `suspended`, `status`, `state`).
+- **`label`** for name-like fields (`name`, `sAMAccountName`, `login`,
+  `mail`, ...) and DN-shaped values. **`display`** goes to the one label
+  whose values say where the entity lives (`x@domain`).
+
+Anything the drafter wasn't sure of goes in the notes, never into the JSON:
+fields it marked from their names, edges it left open, ids that matched no
+record, bit fields to decode, binary attributes it skipped, and empty fields.
+Measured against the shipped connectors (D-106), a draft from their emitted
+envelopes reproduces 86–92 % of the predicates. On the predicates it
+reproduces, the containment, status, label and display flags match the
+hand-written ones every time.
+A draft from the raw export reaches a third to a half. Turning raw fields into
+claims (decoding bit fields, naming edges) is the connector's job.

@@ -3317,6 +3317,515 @@ It is not patched yet.") is still a claim. Re-scored with the fix, four
 2026-09-28 runs flip to pass (three Opus 5.5, one Nemotron); none of the
 2026-09-27 run's answers change.
 
+## D-104 · What 500,000 directory objects exposed (2026-10-13)
+
+The first 500k-object run (a realistic AD forest, 6.5M observations, SQLite;
+`docs/future-work.md` item 0) kept answers right — 47 of the first 51 agent
+audits passed — but some calls took minutes. Profiled on the real store, five
+causes, each a fix that changes nothing at small scale:
+
+- **No planner statistics on SQLite.** `refresh_statistics()` was a no-op
+  there (D-081 analyzed Postgres only), so a 12-hex cite lookup used the
+  namespace index and scanned every row (25 s; 107 s under load). It now runs
+  `ANALYZE` with `analysis_limit` (47 s once, at the end of a bulk load), and
+  the prefix query keeps itself on the primary-key range (`+o.namespace`).
+- **A reference check on every open.** `PRAGMA foreign_key_check` walked every
+  foreign key (23 s) each time a store opened, and each MCP session is a new
+  process. It now runs when a migration does — when an old file's dangling
+  rows can exist; enforced writes keep a current file clean.
+- **The relation summary recomputed per session.** `describe_namespace`'s
+  GROUP BY took 86 s (46 s with statistics) and a session's warm-up of it
+  held the store while the agent's first call waited (`list_namespaces`, 9
+  minutes). Both backends now keep it in `loomctx_meta` under a marker of what
+  changes it (newest observation, tombstone and merge counts): computed once
+  per change, read in a millisecond after.
+- **Crowded walks filled the cap with non-carriers.** When a scope's frontier
+  exceeded the entity cap, the topic's carriers went in first (D-061) and
+  arbitrary others filled the remaining 2,000 slots; the pack then gathered
+  and ranked them all (20 s a hop, minutes at depth 3 — 53 minutes for one
+  delegation call). A window whose topic singles out at most a fifth of it
+  (`_SELECTIVE_SHARE`) now admits only the carriers, and records the rest as a
+  `scope_cap` cut. An unselective topic fills the cap as before; on the 10k
+  forest every delegation query's pack is unchanged, and `ad_eval` (plain,
+  large, blind) is 11/11 at every budget as before.
+- **`find_path` with `format="detailed"` failed validation**: its paths lacked
+  the `cites` the output schema requires. Detailed paths carry `cites` and the
+  full `edges`.
+
+Replayed against the 500k store with the fixes: the 53-minute delegation call
+24 s, a 16-minute domain-wide one 4.6 s, `describe_namespace` 0.4 s, a store
+open under a second. The scale numbers are in the scale report.
+
+## D-105 · Bulk import, set at a time (2026-10-13)
+
+The realistic 500,000-object forest (6.5M observations) took 2.3 hours to
+import into SQLite through the LDAP connector: 780 observations/s, using a
+third of a CPU. Profiled (cProfile, the 175k-observation realistic large
+forest, fresh store, 52.7 s): 29% in 706 commits, 23% in 878,000
+`execute` calls (five statements per claim: the replay pre-check, the exact
+entity, the alias, the create-and-reread, the insert), the rest Python
+around them. Importing the same 175k into a 6.5M-row store showed what grows:
+commits were 31 s, and the load wrote 9.8 GiB (56 KB per observation) —
+every 500-line batch dirtied a few thousand random index pages, wrote them
+to the WAL, and the 1,000-page autocheckpoint wrote them again.
+
+- **`record_claims` is set at a time on SQLite.** One query per batch finds
+  the replayed event ids (and their tombstones), one the exact entities, one
+  the aliases; new entities go in through one `executemany`, the rows
+  through another. What lands is what the claim-at-a-time loop stored:
+  replays answer with the stored row (a redacted one as its stand-in), a
+  repeat within the batch with the first's row and no entities of its own,
+  a merged-away ref lands on its canonical, a row that loses the insert race
+  (H-B2) answers with the winner. Nothing in a batch changes what a ref
+  resolves to, which is what makes resolving them up front exact.
+- **A bulk mode on the store** (`GraphStore.bulk_load()`, a no-op by
+  default; SQLite and the sharding wrapper implement it). The direct loader
+  (`loomctx.ingest`, and every connector's `import --db`) runs a file in it.
+  Inside, SQLite holds the writer, makes each write call a savepoint in a
+  transaction committed every 5 s (a call keeps its own all-or-nothing; the
+  calls before an error stay stored, as when each committed alone; reads on
+  the loading thread see its writes, so a claim still cites a document from
+  an earlier batch), and raises the page cache to 256 MiB and the
+  checkpoint interval to 20,000 pages, restored on the way out. Into a store
+  with no observations it also drops the eight query-only observation
+  indexes and builds them once at the end by sort (the dedupe index and the
+  entity indexes stay); a load that dies midway leaves them to the next
+  open, which creates any missing index. Another writer waits up to ~5 s,
+  inside its 15 s busy timeout. A loader whose input reads this same store
+  through another connection passes `bulk=False` (the KEV load, S-29).
+- One registry cache per load (a schema read per batch before), and the
+  registry's predicate index is kept per schema instead of rebuilt per claim.
+
+Measured on one host, the same realistic forests, old (main) vs new, wall
+time of `python -m loomctx.connectors.ldap import --db` into a fresh store:
+medium (56k observations) 11.3–13.4 s → 5.1–5.2 s; large (175k) 49.1–49.4 s
+→ 15.8–17.5 s (3,570 → 10,000–11,100 observations/s), writing 5.5 GiB →
+0.5 GiB; xl (6.5M) 2,516 s → 877.5 s (2,584 → 7,410/s), writing 384 GiB →
+74 GiB. This host has a local NVMe disk; where writes are the bottleneck (the
+2.3-hour run's network disk) the fifth of the bytes should count for more.
+175k more into the 6.5M-row store (no index deferral there): load 72.7–76.0
+s → 31.1 s. The stored
+observations, entities and aliases are identical (a hash over every
+observation's content, ids aside — they are uuid4 either way). Tried and
+dropped: reading the input ahead on a thread (SQLite releases the GIL per
+row, and the two threads convoyed on it: no gain), `model_construct` for the
+Observation (slower than validating), foreign keys off (no change), a 1 GiB
+cache and `mmap_size` (no change beyond 256 MiB). Postgres is unchanged.
+
+
+**Addendum (2026-10-14): Postgres writes set at a time too.** D-105 batched
+SQLite's `record_claims`; Postgres kept a loop of one-claim writes, four to
+six statements each (the event-id check, an exact and an alias lookup and
+an insert per entity end, the row). Loading the 500k forest into a
+Postgres on its own node of a GKE cluster ran at ~283 facts/s with both
+machines near idle: the loader waited on round trips, ~0.5 ms each. Postgres
+now batches the same way, with the same semantics (replays answered,
+repeats within a batch answered with the first, merged-away refs resolved
+to their canonical entity, races with another writer settled by the row
+that exists): one `event_id = ANY(...)` lookup and one tombstone check per
+batch, entities matched through `unnest` arrays and inserted in one
+statement that returns what landed, and observations in multi-row INSERTs
+of 500 with `ON CONFLICT … DO NOTHING RETURNING id`. Tests compare a batch
+with the one-at-a-time path row for row on Postgres. Same host (no network
+in the way): the 10k forest 109 s → 65 s, identical contents. Across the
+network (GKE, the 500k forest into an empty database on the same Postgres
+node, after the 2026-10-14 sweep): 22,586 s → 2,703 s (8.4×), the same
+6,502,512 observations.
+## D-106 · A schema registration drafted from a sample, for review (2026-10-13)
+
+Future-work item 4. Every new source needs a `SchemaRegistration` (entity
+types, predicates, their flags), and writing one by hand was a day of
+connector work. `python -m loomctx.registry draft SAMPLE` now reads a sample
+and prints a draft: valid `SchemaRegistration` JSON (non-strict). It goes
+to stdout or `--out`, and its review notes go to stderr and `--notes`.
+
+- **Where it lives.** `registry.py` already held the registry's meaning
+  (validation, containment) but had no CLI, so it gains a `main()` with one
+  subcommand, `draft`. The heuristics are in a new module,
+  `loomctx/schema_draft.py`, which is pure: it reads files, opens no store,
+  calls no engine, and **never registers anything**. A person reviews the
+  draft and registers it with `POST /v1/schemas`, or pastes it into a
+  connector's `schema()`. No LLM is involved. The design allows one to help
+  with names later, and its output would still be a draft for review.
+- **Inputs, best first.** First, the envelope NDJSON that every
+  connector's `emit` writes. Because it works for any connector, the types
+  and predicates come straight off the claims and only the flags are
+  inferred. Then JSON records: an array, an object of named arrays,
+  OData `value`, or NDJSON records. Then LDIF.
+- **Rules.** All of them key on field names and value shapes. Nothing
+  branches on a source. Entity types come from claim types, the array a
+  record came from, or a kind field (`objectClass`, its most specific
+  class; `@odata.type`; `kind`; `type`). `object_types` come from values
+  that resolve to another record's key: `id`, `dn`, `objectSid`, or a
+  unique `*Id` that names no other record. They can also come from
+  `{"id": ...}` objects and URLs ending in an id. A predicate that reaches
+  four or more types, or most of them, is left open. A list of references
+  named for a role (`members`, `owners`) is drafted from the member's side
+  (`member_of`, `owner_of`), the way the connectors write it. A row with
+  two references and no name of its own becomes one predicate between
+  them. Flags are set from names and shapes:
+  - `containment` for membership or parentage names and for DN parentage;
+  - `node_status` for status names (`enabled`, `status`, `state`, ... but
+    not `security_enabled`);
+  - `label` for name-like fields and DN-shaped values;
+  - `display` for the one label with `x@where` values, ranked
+    UPN/principal/login before mail.
+
+  A short house-style table maps common names to the ones the connectors
+  use (`displayName` → `name`, `userPrincipalName` → `upn`,
+  `accountEnabled` → `enabled`). `--keep-names` turns it off.
+- **Uncertainty goes in the notes, never in the JSON.** The notes list every
+  flag set from a name, edges left open, references mixed with scalars, ids
+  that matched no record, integer bit fields to decode, binary attributes
+  skipped, empty fields, and assignment rows turned into predicates. The
+  JSON always validates; nothing is half-filled.
+
+**Measured** against the hand-written registrations (`iam_gen --scale
+small`, `agent_eval_ext prepare --scale small`):
+
+| Sample | Entity types | Predicates | Flags agree (of matched) | Hand-set flags reproduced |
+|---|---|---|---|---|
+| Entra envelopes vs `entra.schema()` | 89% (8/9) | 86% (24/28) | 88% (21/24) | 79% (11/14) |
+| Okta envelopes vs `okta.schema()` | 86% (6/7) | 92% (22/24) | 91% (20/22) | 75% (9/12) |
+| LDAP envelopes vs `ldap.schema()` | 82% (9/11) | 88% (22/25) | 100% (22/22) | 92% (12/13) |
+| Entra + Okta envelopes vs `iam_schema.SHARED_PREDICATES` | — | 86% (6/7) | 83% (5/6) | 67% (4/6) |
+| Entra raw JSON | 56% (5/9) | 43% (12/28) | 92% (11/12) | 50% (7/14) |
+| Okta raw JSON | 43% (3/7) | 46% (11/24) | 91% (10/11) | 50% (6/12) |
+| LDAP raw LDIF | 45% (5/11) | 32% (8/25) | 100% (8/8) | 46% (6/13) |
+
+Every envelope miss is a predicate the sample never carries (`has_ip`,
+`auth_method`, `rbcd_from`) or an `object_types` list the hand-written
+registration widened so two connectors can share it (`member_of` →
+`group`, `directory_role`). On the predicates it matched, containment,
+node_status, label and display agree 100% for every sample. Raw exports
+score lower because some claims exist only after a connector decodes the
+source: `enabled` from `userAccountControl`, `has_ace` from a security
+descriptor, `principal` built from `sam@domain`. The drafter can't produce
+those. It flags the bit field and the binary attribute instead. Leaving
+out the framework items no raw export contains (coverage, identifier,
+`has_ip`) gives raw entity-type overlap of 83% for Entra, 75% for Okta and
+62% for LDAP.
+
+## D-107 · List mode: exact, paged entity sets (2026-10-13)
+
+A pack ranks what fits a budget. "Which members of Domain Admins, nested,
+are still enabled?" and "which computers allow unconstrained delegation and
+are not DCs?" want every match and a count; agents answered them by paging
+`ask_scope` and counting by hand, which is where the AD audits lost runs
+(step caps, partial lists). New contracts `ListFilter`, `ListRequest`,
+`ListRow`, `ListPage`; HTTP `POST /v1/list`; MCP `list_entities` (13 tools).
+
+- **Semantics.** Candidates are the entities that reach `of` along `via`
+  within `depth` edges (direction `in`: edges pointing at `of` — a group's
+  members; `out`; `any`), or every entity of `type`, or the subjects an
+  indexed positive filter names. `where` filters on CURRENT values: the
+  visible, unsuperseded, sender-asserted rows (valid at `valid_at`, observed
+  by `as_of`) at the newest instant any such row of the predicate was — one
+  snapshot, so a multi-valued attribute keeps every value it last had.
+  Comparison is case-folded with booleans and numbers matched by spelling
+  (`"false"` finds `false`). `ne` holds where no value is recorded, and a
+  note counts those entities (an uncollected status is not "enabled").
+  Rows sort by key; `total` is every match; `offset`/`next_offset` page;
+  the token budget charges each row's shown text plus its citations.
+- **Citations.** Every row cites the rows that admitted it: the edge into
+  the walk (an `of` listing), each filtered or requested value, the name; a
+  row listed by type alone cites its newest row.
+- **Scale.** The work tracks the answer, not the namespace. A positive filter
+  seeds from idx_obs_label (`subjects_with_value`). Walks read one index
+  side (`observations_for_many(side=)`, `lite_rows`), so a walk up from a
+  member never reads a hub group's every inbound edge; a positive seed of at
+  most 5,000 checks membership upward instead of enumerating the group.
+  Each filter reads either per candidate (an IN-list per 2,000) or one scan
+  of the predicate's index range (`lite_scalars`), whichever touches fewer
+  rows by the cached relation summary; most selective first. Walks and
+  filters use `LiteRow` (no Observation construction); only the cited rows
+  of the returned page are read in full. On the 10k forest: the 8,788
+  members of the largest group 0.15 s, a type-wide `ne` filter 0.24 s,
+  seeded filters under 0.1 s. A cap (`LOOMCTX_MAX_LIST_CANDIDATES`, default
+  200,000) makes `total` a lower bound with `exact` false and a note.
+- **Store interface** (no schema change): `subjects_with_value`,
+  `entity_refs_of_type` (the entities' (namespace, type, key) unique index),
+  `lite_rows`, `lite_scalars`, and `side` on `observations_for_many`.
+- The MCP tool also reads filters written as text (`enabled=false`,
+  `is_dc!=true`, `name~=svc`, `spn?`, `!mail`); a comma inside a value (an
+  LDAP DN) does not split it.
+- **Addendum (2026-10-13): a listing notes collection gaps, as packs do.**
+  In the final A/B's 10k run the coverage audit fell from 160/174 to
+  150/170; most of the drop was one model (qwen3-coder, 1 failure -> 5)
+  answering "no groups" from an empty `account_groups` for an account whose
+  domain's membership was never exported — the list said nothing, where an
+  ask notes the gap (D-092). A listing now notes coverage gaps first: an
+  `of` listing for the predicates it walked, from the sources that supplied
+  `of`; a type or filter listing for the predicates its filters name, for
+  the types a gap applies to; each citing its coverage record in brackets.
+- **Addendum (2026-10-13): facts, not coaching.** The gap note's closing
+  imperative ("cite the coverage record and say it was not collected") is
+  removed: notes state what the call did and found, never how to answer.
+  Reading why nested groups fell to 86% with named queries off (91% on the
+  published engine, identical ask_scope packs on both builds) showed list
+  mode's own gaps: a model re-walked hop by hop because rows did not say
+  direct from nested; another looped on a JSON-quoted handle. Rows of an
+  `of` listing now carry `hops` (1 = direct) and `through` (the entity one
+  step closer to `of`); a walk its depth cut says how many entities at that
+  depth link onward; an empty listing says when the other direction has
+  edges; handles and types arrive unquoted. Measured on held-out data (a
+  forest of another seed) before any number is cited.
+
+## D-108 · Named queries: the questions a namespace answers, by name (2026-10-13)
+
+The AD audits are the same few questions every time — a group's effective
+members, an account's groups, unconstrained delegation outside the DCs, the
+trusts — and models lose runs composing them (wrong direction, depth 1 for
+nested groups, forgetting the DC exclusion). A namespace's registration now
+carries `queries`: `QueryDef` (name, description, `QueryParam`s, and a
+ListRequest template whose `{param}` strings are substituted). MCP
+`run_query(name, params)` (14 tools), HTTP `POST /v1/query` (`QueryRequest`
+-> `ListPage`); `describe_namespace` lists each query with its parameters.
+
+- **Data, not code.** A template is validated as a ListRequest at
+  registration (sample values in every placeholder); the call, never the
+  template, supplies namespace, paging, budget and the time axes. Domain
+  questions stay in the registry (hard rule): the LDAP connector registers
+  effective_members, enabled_members, account_groups,
+  unconstrained_delegation_hosts, domain_trusts, kerberoastable_users,
+  asrep_roastable_users. Registration merges by name; a re-registered query
+  replaces the old.
+- **Entity parameters** take a 'type:key' handle or a name the label
+  predicates know (find_entity's resolution, within the parameter's
+  `entity_type`); a name matching several entities is refused with the
+  candidates, never guessed (two domains' "Domain Admins").
+- **Coverage-aware absence** (also list mode): an `ne` match with no value on
+  record is "not set" when coverage records the predicate as collected (LDAP
+  emits `is_dc` only when it holds), and "unknown" with the coverage record
+  to cite when collection was partial.
+- **Measured both ways.** `LOOMCTX_MCP_QUERIES=0` hides run_query and the
+  listed queries, so a run reports agent results with and without them.
+- **Addendum (2026-10-13): the note's cite token is bracketed.** The first
+  10k run of the final A/B showed delegation at 107/174 where 59 of the 67
+  failures named exactly the right hosts and lost only on one "unseen"
+  citation: the coverage record the `ne` note offered, printed as
+  `coverage badea704e74a` instead of `[badea704e74a]`, the form every
+  coverage note uses (D-092) and the agent harness reads as shown. The note
+  now brackets it. That run is re-scored counting a store's coverage-record
+  tokens as seen in runs that called list_entities or run_query (the only
+  tools that printed them); the report gives both counts.
+
+## D-109 · A selective topic narrows large walk windows too (2026-10-13)
+
+On the realistic 10k forest, every slow `ask_scope` of the D-104 build was the
+delegation audit's walk (domain -contains-> OUs -> computers, topic
+`unconstrained_delegation`): 49 calls of 16–20 s, a third of all tool time.
+Three gaps, each found by tracing the walk:
+
+- **Under the cap is not small.** The second hop's window held ~1,990
+  accounts — under the 2,000-entity cap, so not "crowded", so D-104's
+  selective filter never ran; every account was admitted, gathered (40,637
+  rows) and ranked around seven carriers. A window of at least
+  `_LARGE_WINDOW` (500) entities is now narrowed like a crowded one.
+- **Rarity judged in pieces.** With several topic predicates (agents add
+  `enabled`, `is_dc`), the hub carriers and the rest of a window were each
+  judged rare-or-not on their own; in the rest everyone carries `enabled`, so
+  every account was a carrier. The walk now filters on the topic's rare
+  predicates by the namespace's own counts (the cached relation summary;
+  `_rare_topic`); the pack still shows the common ones as display fields
+  (D-100).
+- **Carriers a hop deeper.** A narrowed window keeps, besides its carriers,
+  the entities that lead on — that occur in a link role other than the one
+  they were reached in (an OU inside an OU; never a user reached by
+  `contains`). Once the walk has found carriers, a later large window with
+  neither is cut instead of refilling the cap. With no carriers and nothing
+  leading on anywhere yet, a window is admitted as before (a topic nothing
+  carries still gets a pack).
+- **The cut is not evidence.** Edges from the scope into entities the topic
+  filter cut (an OU's `contains` of a thousand non-carriers) leave the pack's
+  candidate pool: 9,832 rows to 183. A plain entity-cap cut keeps them.
+
+The delegation ask on the 10k store: 2,000 subjects -> 38 (the 4 DCs and the
+3 planted hosts, their OUs), 8.8 s -> 1.3 s in-process; the pack names all
+seven with their flags. Small scopes and unselective topics walk as before:
+`ad_eval` (plain, large, blind) keeps the scope walk at 11/11 at every budget
+in three runs. find_path (untouched here) was 10, 9 and 9 of 11 at 1,500
+tokens across those runs, 11/11 at 3,000 and up: equal-length paths were
+ordered by observation id, random per ingest, so which 4-hop path fit a
+tight budget varied run to run (ordering by the edges' content instead was
+deterministic and worse, 8/11). find_path now orders equal-length paths by
+specificity — the fewest rows on record at their interior entities (largest,
+then total), from the counts the search already holds — then by content,
+ids last: 11/11 at every budget, the same in two runs, no decoy leaked. A
+coincidental route runs through a hub (Domain Users); an escalation through
+the named groups it abuses.
+
+## D-110 · Compound questions in one call; what the data cannot answer (2026-10-13)
+
+"Which Domain Admins have access to WS-123?" is the question people ask, and
+it took two listings and a hand intersection; worse, "access" often means
+local admin or sessions, which an LDAP export does not carry, and nothing
+stopped an empty answer reading as "nobody".
+
+- **Closure filters.** `ListFilter` ops `within` / `not_within` with `depth`
+  (default 6): the entity reaches `value` along `predicate` — `member_of
+  within group:Domain Admins` is nested membership. A filter is evaluated up
+  from a few candidates or down from the entity, as `of` listings are; alone
+  it is the start set ("users in Domain Admins"); beside an `of` it seeds the
+  walk, so the admins walk up to the machine rather than the machine's
+  trustees (Domain Users, at 500k) walking down. Text form: `member_of within
+  group:<key> [depth N]`.
+- **Routes.** `ListRequest.paths` gives each row of an `of` listing its
+  route to `of` as `PathEdge`s, each cited — `user:a -member_of-> group:g
+  -has_ace-> computer:w` — charged against the budget.
+- **Not-collected declarations.** `SchemaRegistration.not_collected`
+  (`NotCollectedDef`: topic, description, words; merged by topic). The LDAP
+  connector declares machines' local groups (local admin / RDP), logon
+  sessions and GPO user rights. `describe_namespace` lists them; a pack
+  whose question uses their words, an empty listing and a path search that
+  found nothing say what is not collected — facts, not advice.
+- **Paging.** A page the limit ended says how many matches remain and the
+  offset to continue from.
+
+**Addendum (held-out 10k + 500k probe): a seed at its limit is not a seed.** An
+indexed positive filter seeds the candidates; its lookup is capped at the
+candidate cap + 1 rows, applied before the type filter. At 500k objects
+`enabled=true` filled that limit with users and computers alike, the type
+filter left 129,098 users — under the cap, so nothing said "cut" — and the
+listing was an arbitrary subset marked exact: "enabled Domain Admins" 0,
+`enabled_members` of a 325k group exactly 129,098. A lookup that reaches its
+limit is now never a start set (the listing starts from another filter, the
+closure, or the type, whose caps are reported), and a `within` closure is
+preferred over a larger index seed. One agent run of the final A/B's 500k
+half touched the path. Also from the held-out run: `within` takes a group's
+name where its handle goes, and an empty listing `as_of` a time before
+anything was observed says so (`GraphStore.first_observed`).
+
+On the 10k forest the access listing answers in 0.2 s (329 principals hold
+rights over the busiest DC through groups; none is a Domain Admin — an
+exact, cited "none" over what is collected, with local admin noted as not
+collected); "enabled Domain Admins" from the closure, 0.8 s.
+
+## D-111 · Current values ranked in SQL for large filters (2026-10-13)
+
+At 500k objects a listing filtering 110,000 accounts on `enabled` took 26 s:
+every row of the predicate came back as a LiteRow and the newest snapshot
+per subject was found in Python. `GraphStore.current_scalar_subjects`
+ranks it in SQL (`RANK() OVER (PARTITION BY subject ORDER BY observed_at
+DESC)` over idx_obs_label's range, visible, sender-asserted, valid at
+`valid_at`, by `as_of`) and returns only (type, key, matched) per subject.
+List mode uses it for `eq` / `in` / `exists` / `absent` / `ne` on large
+candidate sets when the caller is unscoped; `contains` and type-scoped
+callers keep the per-row path. Supersession is by recency here (a
+correction is the newer row); a correction in the same snapshot as what it
+corrects would differ — the per-row path remains the reference, and a test
+forces both paths over the same requests. 10k: unchanged totals, 0.42 ->
+0.38 s and 0.22 -> 0.17 s; the 500k measurement rides the next GKE probe.
+
+**Addendum: the predicate scans are pinned to idx_obs_label.** The final A/B's
+500k transcripts held list calls of 1-2 hours — every one a `contains`
+filter over a whole type (`principal~=lab.local` over 200k users). The scan
+behind it asked for a predicate's rows ordered by subject, and SQLite met
+the ORDER BY by walking the namespace's subject index — all 6.5M rows,
+checking each one's predicate — rather than reading the predicate's ~450k
+rows from idx_obs_label and sorting them. `lite_scalars` and
+`current_scalar_subjects` now say `INDEXED BY idx_obs_label` (when it
+exists: a bulk load defers it into an empty store, D-105). 10k: the
+`contains` scan 1.16 s -> 0.21 s; the plan no longer touches the rest of
+the namespace, which is what grew to hours.
+
+**Addendum (full run, 2026-10-14): `contains` seeds from the index; an `of`
+listing's seed lookups stop early.** The full run's 500k transcripts still
+held whole-type `contains` calls of 17-52 minutes, and replayed on one
+machine (no node sharing two 7.5 GB stores) they took 25-52 s: the pinned
+scan still read every row of a label predicate shared by users, groups and
+computers into Python. `GraphStore.subjects_with_text` matches the needle
+with LIKE on idx_obs_label's own lower-cased text, so `contains` seeds the
+candidates like `eq` does. The seed is a superset (any visible row, and
+every value the index cut at 200 characters); the filter still decides on
+current values. A needle the stored JSON spells differently (a quote, a
+backslash, non-ASCII) does not seed. `dn_name contains DC=lab,DC=local`
+over users: 52 s and an inexact 0 (the type scan stopped at the 200,000
+candidate cap) -> 0.1 s, 6 users, exact. The candidate cap is now 500,000:
+at 500k objects a type holds 370,000 users. Under an `of` entity a seed only
+serves to walk upward (<= `_UPWARD_MAX`), so its lookups stop there:
+"groups nested in Domain Admins with a principal" read 500,000 index rows
+for 2 groups, 6.7 s -> 0.1 s; "enabled, Kerberoastable nested admins" 2.9
+-> 0.1 s. Replayed on one machine, the run's 60 slowest distinct calls
+(35 s to 52 min there) now take at most 8.8 s.
+
+Reading the failures also showed `of` refusing a name: Gemini 2.5 Flash
+guessed `user:mreyes@corp.local` for a SID-keyed account, read "not on
+record" as the answer and stopped — four groups runs of five with named
+queries on. `of` now resolves a name as `within` does (one entity of that
+type the label predicates name, with a note saying so), and an `of` that
+resolves neither way points at `find_entity`.
+
+## D-112 · An empty entity search retries what the agent meant (2026-10-13)
+
+137 of 2,480 `find_entity` calls in the final A/B's 10k half found nothing,
+and an empty search is where an agent either guesses or spends steps. Read
+by hand, they were a few shapes, now retried when the plain search (and the
+D-095 realm retry) finds nothing: a name with its domain as words ("Domain
+Admins corp.local", "corp.local Domain Admins", "LAB\\Domain Admins") — the
+name, keeping only entities whose label values carry that domain (another
+domain's entity of the same name is a different entity: nothing rather than
+it); a domain with a generic word ("corp.local domain"); a 12- or 32-hex
+cite token (the entities its observation is about); an entity type
+("coverage": entities of that type). Generic words inside a name stay
+("Domain Admins"). Replayed on the 10k store: 96 of the 137 now return the
+entity meant; the rest name no entity (a source label, a domain that is not
+there) and still return nothing.
+
+
+**Addendum (2026-10-15): a name must not depend on row order.** The
+Postgres arm of the 2026-10-14 run named Domain Admins
+`CN=Domain Admins,CN=Users,DC=corp,DC=local` in `find_entity` where SQLite
+said `Domain Admins`. The labels of one export share an `observed_at`, so
+their order is a tie each backend breaks its own way, and `find_entity`
+took the first row whenever no label started with the matched text, which
+was always the case after a realm retry ("Domain Admins (corp.local)").
+At temperature 0 that difference, with a ~40-character change in
+`describe_namespace`, flipped Claude Haiku 4.5's cross-domain audit from
+5/5 to 0/5 on otherwise identical calls. `find_entity` now compares
+against the name without the realm and orders candidates by: starts with
+the name, display label, registry order, length, text. Pack names break a
+length tie by the text. Neither depends on what order a store returns
+rows in.
+## D-113 · A harder audit tier: access, local admins, Kerberoastable admins (2026-10-13)
+
+The five AD audits ask one thing each, and 19 models pass all five. The
+questions people will ask combine conditions and touch what an AD export
+cannot say. Three audits join `agent_eval_ext` (future-work item 7, first
+cut), planted in the same forest with truth walked in the store:
+
+- **access** — which Domain Admins (nested) hold rights over workstation
+  WS-AUDIT01, and through what: one admin through a group holding
+  GenericAll, one through a direct WriteDacl grant; an operator who is no
+  admin and an admin with no grant are decoys.
+- **localadmin** — who is local administrator on WS-AUDIT01: local group
+  membership is not in an AD export (declared, D-110); saying so passes,
+  presenting accounts as its local admins fails (AD rights over the
+  computer object may be mentioned as what the data carries).
+- **kerberoast** — which enabled, nested Domain Admins are Kerberoastable: a
+  nested admin with an SPN; a disabled admin with one, and a non-admin
+  service account with one, are decoys.
+
+Each is one list-mode call on the engine (`of` + `via` + `within` + `paths`;
+`within` + value filters; the declared gap) — tested end to end on the
+small forest. The planted accounts change no earlier audit's truth.
+
+
+**Addendum (2026-10-15): the kerberoast scorer checks every account put
+forward, not only the decoys.** Reading the re-scored verdicts of the
+2026-10-14 Postgres run turned up a GPT-4o answer that listed fifteen
+Domain Admins and a dozen service accounts under "The following ... are
+Kerberoastable", svc-sqladm among them, and passed: the scorer looked for
+the two planted decoys only. It now also fails a list item or table row
+that names one other account (a UPN, or an adm-/svc- name) under a
+Kerberoastable claim, unless the line or its lead-in rules it out ("no
+SPN", an empty cell, "non-Kerberoastable", "the other 15 are:"). A line
+naming many accounts is context. Groups (CORP-/DEV-/LAB-…) and names inside
+an SPN string are not accounts. Re-scoring the 2026-10-14 runs changed 16
+verdicts, every one read by hand and every one an answer presenting
+non-Kerberoastable accounts (GPT-4o ×10, Mistral Large ×3, GLM-4.6V,
+Command A+, Codestral); no other audit's verdicts moved. Published effect:
+the 500k harder tier 414 → 412 of 511 (81% either way).
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

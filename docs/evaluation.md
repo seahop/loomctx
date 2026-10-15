@@ -160,7 +160,8 @@ The first table is one row per condition:
   len/3 accounting, D-051), and the model's own prompt token count when it
   reports usage. Compare conditions on *both*: the point of the `full` row
   is its token column.
-- **Build p50 / p95 ms** — pack (or baseline context) build latency.
+- **Build p50 / p95 ms** — pack (or baseline context) build latency. Each
+  run's figures are kept in `docs/performance.md`.
 - **Truth in context** — the ground-truth observation ids were among the
   context's citations: was the evidence there at all. A `loomctx@B` row's
   value is retrieval recall under that budget.
@@ -288,6 +289,16 @@ memo) — reproduced it again: `loomctx` 80 / 85 / 86 / 97 %, `vector`
 3,200 (every other condition 0/18), no hallucination on the 24 abstention
 rows; `full` 96 % on the 47 questions it could send; the 3,200-token pack
 averaged 614 tokens. About $1.30 of reader calls.
+
+The 2026-10-14 run on GKE — the `scale-xl` build (list mode, named queries,
+the D-104…D-113 read-path work), on a fresh snapshot of the same corpus —
+reproduced it again: `loomctx` 79 / 84 / 86 / 96 %, `vector`
+75 / 77 / 78 / 86 %, `recency` 49 / 75 / 75 / 76 %, multi-hop 15/18 at
+3,200 (every other condition 0/18), no hallucination on the 24 abstention
+rows; `full` 96 % on the 47 questions it could send, at a mean prompt of
+127,717 tokens; the 3,200-token pack averaged 616 tokens. Pack build p50 is
+3–6 ms at every budget (vector ranking 388–776 ms). About $1.40 of reader
+calls. These are the numbers on the site and the talk slides.
 
 ## Caveats
 

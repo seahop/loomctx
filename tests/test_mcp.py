@@ -75,6 +75,13 @@ def test_find_path_through_the_tool_manager(store):
     view = res.structured_content
     assert view["from"] == {"type": "user", "key": "jdoe"} and view["paths"]
     assert view["paths"][0]["text"].startswith("user:jdoe")
+    # format='detailed' must pass the output schema too (a detailed path once
+    # lacked `cites`, so every detailed call errored at validation)
+    res = asyncio.run(call({"from": "user:jdoe", "to": "domain:corp.local",
+                            "via": ["logged_in_by", "member_of"], "depth": 2, "format": "detailed"}))
+    assert not res.is_error, res.content
+    p = res.structured_content["paths"][0]
+    assert p["cites"] and p["edges"] and len(p["cites"]) == len(p["edges"]) == p["hops"]
 
 
 def test_find_entity_returns_handles(store):
@@ -104,6 +111,33 @@ def test_find_entity_finds_an_opaque_key_by_name_and_shows_it(store):
         [match] = mcp_server.find_entity(spelled)
         assert match["handle"] == "user:S-1-5-21-9-1101" and match["name"] == "dlee", spelled
     assert mcp_server.find_entity("nobody@dev.local") == []
+
+
+def test_find_entity_names_an_entity_the_same_whatever_the_row_order(store):
+    """On Postgres the label rows of one export (same observed_at) came back
+    DN first and find_entity named Domain Admins
+    'CN=Domain Admins,CN=Users,DC=corp,DC=local'; SQLite returned the
+    friendly name first (2026-10-14 run). The pick no longer depends on row
+    order, and a realm-qualified search compares against the name alone."""
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[
+        PredicateDef(name="sam", label=True), PredicateDef(name="principal", label=True, display=True),
+        PredicateDef(name="dn_name", label=True), PredicateDef(name="name", label=True)]))
+    when = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    for pred, value in (("dn_name", "CN=Domain Admins,CN=Users,DC=corp,DC=local"), ("name", "Domain Admins"),
+                        ("sam", "Domain Admins")):
+        store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-512"), predicate=pred,
+                                   object=value, observed_at=when, source="ldap"))
+    [match] = mcp_server.find_entity("Domain Admins corp.local")
+    assert match["name"] == "Domain Admins"
+    # no label starts with the query: the registry's order decides, never the rows'
+    store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-519"), predicate="dn_name",
+                               object="CN=Enterprise Admins,CN=Users,DC=corp,DC=local", observed_at=when,
+                               source="ldap"))
+    store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-519"), predicate="principal",
+                               object="Enterprise Admins@corp.local", observed_at=when, source="ldap"))
+    named = {m["handle"]: m.get("name") for m in mcp_server.find_entity("CN=Enterprise")}
+    assert named.get("group:S-1-5-21-1-519") in ("CN=Enterprise Admins,CN=Users,DC=corp,DC=local",)
 
 
 def test_ask_and_expand_roundtrip(store):
@@ -696,3 +730,30 @@ def test_start_up_warms_what_describe_namespace_reads(store, monkeypatch):
     assert calls == [mcp_server._DEFAULT_NS]
     mcp_server.describe_namespace(mcp_server._DEFAULT_NS)
     assert calls == [mcp_server._DEFAULT_NS]          # served from the warm cache
+
+
+def test_an_entity_name_passed_as_namespace_says_where_it_lives(store):
+    """Gemini 2.5 Flash passed namespace="corp.local" (a domain), read the
+    generic error as "no data" and gave up; the error now names the entity
+    and the namespace to call with."""
+    with pytest.raises(ValueError, match=r"'corp.local' is not a namespace: it is domain:corp.local in namespace "
+                                         r"'default' — call again with namespace='default'"):
+        mcp_server.find_entity(query="web-01", namespace="corp.local")
+    with pytest.raises(ValueError, match="holds no data"):
+        mcp_server.find_entity(query="web-01", namespace="nowhere")
+
+
+def test_writes_and_queries_can_be_hidden_from_agents():
+    """LOOMCTX_MCP_WRITES=0 leaves a read-only tool surface (a scorecard's
+    agents must not leave claims for the next agent); LOOMCTX_MCP_QUERIES=0
+    hides run_query. Both read at import, so each runs in a fresh process."""
+    import json, os, subprocess, sys
+    code = ("import asyncio, json, loomctx.mcp_server as m; "
+            "print(json.dumps(sorted(t.name for t in asyncio.run(m.mcp.list_tools()))))")
+    def tools(**env):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env={**os.environ, **env}, check=True).stdout
+        return set(json.loads(out.strip().splitlines()[-1]))
+    assert {"record_claim", "run_query"} <= tools()
+    assert "record_claim" not in tools(LOOMCTX_MCP_WRITES="0") and "run_query" in tools(LOOMCTX_MCP_WRITES="0")
+    assert "run_query" not in tools(LOOMCTX_MCP_QUERIES="0")

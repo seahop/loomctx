@@ -256,8 +256,9 @@ def _pack_names(store: GraphStore, namespace: str, observations: list[Observatio
             self_named.add((o.subject.type, o.subject.key))
         if o.predicate in labels and isinstance(o.object, str) and o.object and o.object.lower() != o.subject.key.lower():
             key = (o.subject.type, o.subject.key)
-            rank = (o.predicate not in shown, len(o.object))
-            if key not in names or rank < (not names[key][0], len(names[key][1])):
+            # the text breaks a tie, so the pick never depends on row order
+            rank = (o.predicate not in shown, len(o.object), o.object)
+            if key not in names or rank < (not names[key][0], len(names[key][1]), names[key][1]):
                 names[key] = (o.predicate in shown, o.object)
     for o in observations:
         offer(o)
@@ -1066,7 +1067,72 @@ def search_by_name(store: GraphStore, namespace: str, query: str, limit: int = 1
         found = store.search_entities(namespace, m.group(1), limit=limit, types=types, labels=labels)
         if found:
             return found, m.group(1)
+    if not found:
+        return _search_retries(store, namespace, query.strip(), limit, types, labels)
     return found, query
+
+
+_REALM = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+_GENERIC_WORDS = {"domain", "group", "groups", "user", "users", "account", "accounts", "computer", "host", "the"}
+_CITE_TOKEN = re.compile(r"[0-9a-f]{12}|[0-9a-f]{32}")
+
+
+def _search_retries(store: GraphStore, namespace: str, query: str, limit: int,
+                    types: tuple[str, ...] | None, labels: tuple[str, ...]) -> tuple[list, str]:
+    """What an empty search was likely asking for (D-112), from what the
+    final A/B's agents typed — 137 of 2,480 searches found nothing: a name
+    and its domain as words ("Domain Admins corp.local", "corp.local\\Domain
+    Admins": the name, preferring entities whose labels carry that domain),
+    a domain with a generic word ("corp.local domain"), a cite token (the
+    entity its observation is about), an entity type ("coverage": entities
+    of that type). Real matches, or none — never a guess."""
+    # a cite token: the entities its observation is about
+    if _CITE_TOKEN.fullmatch(query):
+        out = []
+        for o in store.observations_by_prefix(namespace, query)[:limit]:
+            for ref in (o.subject, o.object):
+                if isinstance(ref, EntityRef) and (types is None or ref.type in types):
+                    ent = store.get_entity(namespace, ref)
+                    if ent is not None and all((e.type, e.key) != (ent.type, ent.key) for e in out):
+                        out.append(ent)
+        return out, f"cite {query}"
+    # an entity type: entities of that type
+    schema = _schema(store, namespace)
+    known = {t.name for t in schema.entity_types} if schema is not None else set()
+    if query.lower() in known and (types is None or query.lower() in types):
+        refs = store.entity_refs_of_type(namespace, query.lower(), limit)
+        return [e for e in (store.get_entity(namespace, r) for r in refs) if e is not None], f"type {query.lower()}"
+    # a name with its domain as separate words, or REALM\name with spaces
+    realm, name = None, query
+    if "\\" in query:
+        realm, _, name = query.partition("\\")
+    else:
+        words = query.replace(",", " ").split()
+        realms = [w for w in words if _REALM.match(w)]
+        rest = [w for w in words if w not in realms]
+        content = [w for w in rest if w.lower() not in _GENERIC_WORDS]
+        if realms and content:      # "Domain Admins corp.local": generic words inside a name stay
+            realm, name = realms[0], " ".join(rest)
+        elif realms:                # "corp.local domain": the domain itself
+            name = realms[0]
+        elif content and len(content) < len(words):
+            name = " ".join(content)
+    name = name.strip()
+    if not name or name == query:
+        return [], query
+    found = store.search_entities(namespace, name, limit=max(limit, 20), types=types, labels=labels)
+    if realm and found:
+        rows = store.observations_for_many(namespace, [EntityRef(type=e.type, key=e.key) for e in found],
+                                           limit=20, predicates=list(labels)) if labels else {}
+        mark = realm.lower()
+        dn = ",".join(f"dc={p}" for p in mark.split("."))
+        local = [e for e in found
+                 if any(isinstance(o.object, str) and (o.object.lower().endswith("@" + mark) or dn in o.object.lower())
+                        for o in rows.get((e.type, e.key), []))]
+        # a named domain is a constraint: another domain's entity of that
+        # name is a different entity, not a near match
+        found = local
+    return found[:limit], name if not realm else f"{name} ({realm})"
 
 
 def display_predicates(store: GraphStore, namespace: str) -> frozenset[str]:
@@ -1260,6 +1326,7 @@ def resolve_scope_paths(
     gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
     question: str | None = None,
     core_out: set[tuple[str, str]] | None = None,
+    topic_cut_out: set[tuple[str, str]] | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """The scope walk (`_walk_scope`). A walk with `siblings` is two (D-101):
     the no-turn-back walk first, then the sibling walk's other entities in
@@ -1269,16 +1336,16 @@ def resolve_scope_paths(
     the answer — were never reached."""
     if not scope.siblings:
         return _walk_scope(store, namespace, scope, truncated, as_of, valid_at, allowed_types,
-                           gathered_out, question)
+                           gathered_out, question, topic_cut_out)
     from .config import max_scope_entities
     truncated = truncated if truncated is not None else {}
     base, base_paths = _walk_scope(store, namespace, scope.model_copy(update={"siblings": False}), truncated,
-                                   as_of, valid_at, allowed_types, gathered_out, question)
+                                   as_of, valid_at, allowed_types, gathered_out, question, topic_cut_out)
     if core_out is not None:   # the pack ships these entities' facts first
         core_out.update((r.type, r.key) for r in base)
     wide_truncated: Truncations = {}
     wide, wide_paths = _walk_scope(store, namespace, scope, wide_truncated, as_of, valid_at, allowed_types,
-                                   gathered_out, question)
+                                   gathered_out, question, topic_cut_out)
     have = {(r.type, r.key) for r in base}
     room = max(0, max_scope_entities() - len(base))
     extra = [r for r in wide if (r.type, r.key) not in have]
@@ -1299,6 +1366,7 @@ def _walk_scope(
     allowed_types: tuple[str, ...] | None = None,
     gathered_out: dict[tuple[str, str], list[Observation]] | None = None,
     question: str | None = None,
+    topic_cut_out: set[tuple[str, str]] | None = None,
 ) -> tuple[list[EntityRef], Paths]:
     """`resolve_scope` plus, for every entity the BFS reached, the chain of
     edges it was reached through (root -> ... -> entity). A fact about a
@@ -1346,7 +1414,11 @@ def _walk_scope(
     held = 0                                # rows gathered for the walk
     beyond: set[tuple[str, str]] = set()   # reached, but past the entity cap
     cut_at: EntityRef | None = None
+    filtered_at: EntityRef | None = None    # where a selective topic narrowed a crowded window
     topic: frozenset[str] | None = None     # computed once the first rows are in
+    carrier_topic: frozenset[str] = frozenset()   # the topic's rare predicates, the walk's filter (D-109)
+    roles: dict[str, set[tuple[str, bool]]] = {}  # entity type -> (expand predicate, is subject) it occurs as
+    found_carriers = False                  # the topic singled out some far end on this walk
 
     def walkable(obs: Observation, retired) -> bool:
         return (obs.predicate in expand and obs.id not in retired
@@ -1411,20 +1483,30 @@ def _walk_scope(
             hubs = [ref for ref in chunk
                     if (t := truncated.get((ref.type, ref.key))) is not None and t.reason == "gather_limit"]
             crowded = len(resolved) + len(window) > cap
-            if (hubs or crowded) and topic is None:
+            # a window this large is narrowed by a selective topic even when
+            # the cap would hold it: every entity admitted is gathered and
+            # ranked, and 2,000 accounts around seven carriers cost a pack
+            # 16-20 s at 10k (D-109)
+            narrow = crowded or len(window) >= _LARGE_WINDOW
+            if (hubs or narrow) and topic is None:
                 topic = scope_topic(store, namespace, scope, question,
                                     [o for rows in gathered.values() for o in rows], expand)
+                if topic:
+                    summary = store.relation_summary(namespace)
+                    carrier_topic = _rare_topic(topic, summary)
+                    roles = _walk_roles(summary, expand - topic)
             carriers: Reach = {}
-            if topic and (hubs or crowded):
+            if topic and (hubs or narrow):
                 # an attribute named in expand is the topic, not a link (D-064)
-                carriers, read = _hub_carriers(store, namespace, hubs, expand - topic, topic, seen, as_of,
-                                               valid_at, allowed_types, walkable, window, truncated)
+                carriers, read = _hub_carriers(store, namespace, hubs, expand - topic, carrier_topic, seen,
+                                               as_of, valid_at, allowed_types, walkable, window, truncated)
                 held += read
-                if crowded:   # the rest of the window, by probe
+                if narrow:   # the rest of the window, by probe
                     hub_keys = {(h.type, h.key) for h in hubs}
                     rest = {k: r for k, r in window.items()
                             if k not in carriers and (r[0].type, r[0].key) not in hub_keys}
-                    more, read = _topic_carriers(store, namespace, rest, topic, as_of, valid_at, allowed_types)
+                    more, read = _topic_carriers(store, namespace, rest, carrier_topic, as_of, valid_at,
+                                                 allowed_types)
                     held += read
                     carriers.update(more)
                 # in walk order: the window's carriers, then those past it
@@ -1435,11 +1517,39 @@ def _walk_scope(
             # the ones that do (D-061). Past the window only carriers enter.
             for ref, end, obs in carriers.values():
                 admit(ref, end, obs, next_frontier)
-            for ref, end, obs in window.values():
-                admit(ref, end, obs, next_frontier)
+            # A crowded window whose topic singles out a few far ends admits
+            # only those (D-104): filling the cap with arbitrary non-carriers
+            # cost a pack 20 s per hop at 500k objects (an OU of 14,800
+            # computers, three of them with unconstrained delegation), and
+            # minutes at depth 3. The rest is a recorded cut, not a silent one.
+            # Its entities that lead on (an OU under the OU, D-109) still go
+            # in: the carriers may sit a hop deeper, and a window with none
+            # of its own used to admit every leaf and fill the cap before
+            # the walk got there (a 10k forest's delegation computers sit in
+            # nested OUs; 16-20 s per ask, the answer cut away).
+            # Once the walk has found carriers, a later large window with none
+            # and nothing leading on is cut too, not admitted to refill the cap.
+            leads_on = ({k: r for k, r in window.items() if k not in carriers
+                         and _leads_on(r[1], r[2], roles, scope.siblings)}
+                        if topic and narrow else {})
+            found_carriers = found_carriers or bool(carriers)
+            if narrow and topic and ((carriers and len(carriers) <= _SELECTIVE_SHARE * len(window))
+                                     or (not carriers and (leads_on or found_carriers))):
+                for ref, end, obs in leads_on.values():
+                    admit(ref, end, obs, next_frontier)
+                cut = [k for k in window if k not in seen]
+                beyond.update(cut)
+                if topic_cut_out is not None:   # the pack leaves their edges out of its pool (D-109)
+                    topic_cut_out.update(cut)
+                filtered_at = filtered_at or chunk[0]
+            else:
+                for ref, end, obs in window.values():
+                    admit(ref, end, obs, next_frontier)
         frontier = next_frontier
     if cut_at is not None:
         _record_scope_cap(truncated, cut_at, len(resolved), len(resolved) + len(beyond))
+    elif filtered_at is not None:
+        _record_scope_cap(truncated, filtered_at, len(resolved), len(resolved) + len(beyond))
     return resolved, paths
 
 
@@ -1448,6 +1558,12 @@ Reach = dict[tuple[str, str], tuple[EntityRef, EntityRef, Observation]]  # far e
 
 def _is_subject(obs: Observation, ref: EntityRef) -> bool:
     return obs.subject.type == ref.type and obs.subject.key == ref.key
+
+
+def _edge_sort_key(obs: Observation) -> tuple:
+    end = obs.object
+    far = (end.type, end.key) if isinstance(end, EntityRef) else ("", str(end))
+    return (obs.subject.type, obs.subject.key, obs.predicate, *far, obs.id)
 
 
 def _turns(before: Observation, after: Observation, pivot: EntityRef) -> bool:
@@ -1563,6 +1679,43 @@ def _topic_carriers(store: GraphStore, namespace: str, candidates: Reach, topic:
     return carriers, sum(len(rows) for rows in probe.values())
 
 
+def _rare_topic(topic: frozenset[str], summary) -> frozenset[str]:
+    """The topic predicates a walk filters on (D-109): with several, the rare
+    ones by the namespace's own counts (on at most a fifth as many rows as
+    the most common one) — `enabled` on every account beside
+    `unconstrained_delegation` on seven made every account a carrier when
+    rarity was judged per window piece. One predicate, or none rare: all."""
+    if len(topic) < 2:
+        return topic
+    counts = {p: 0 for p in topic}
+    for _, p, _, n in summary:
+        if p in counts:
+            counts[p] += n
+    widest = max(counts.values(), default=0)
+    rare = frozenset(p for p, c in counts.items() if c and c <= _SELECTIVE_SHARE * widest)
+    return rare or topic
+
+
+def _walk_roles(summary, expand: set[str]) -> dict[str, set[tuple[str, bool]]]:
+    """Entity type -> the (predicate, as subject?) roles it holds on the
+    walk's links, from the namespace's relation summary."""
+    roles: dict[str, set[tuple[str, bool]]] = {}
+    for s_type, p, o_type, _ in summary:
+        if p in expand and o_type is not None:
+            roles.setdefault(s_type, set()).add((p, True))
+            roles.setdefault(o_type, set()).add((p, False))
+    return roles
+
+
+def _leads_on(end: EntityRef, obs: Observation, roles, siblings: bool) -> bool:
+    """Whether a far end can take the walk further: it occurs in some link
+    role other than the one it was reached in (an OU reached as the object
+    of `contains` is also its subject; a user is not) — or in any role when
+    the walk may turn back (siblings)."""
+    reached = (obs.predicate, _is_subject(obs, end))
+    return any(siblings or role != reached for role in roles.get(end.type, ()))
+
+
 def _rare_carriers(carried: dict[tuple[str, str], set[str]]) -> set[tuple[str, str]]:
     """Of entities and the topic predicates each carries, the ones a
     several-predicate topic admits (D-100): those carrying a rare predicate
@@ -1590,6 +1743,7 @@ def _unwalkable(store: GraphStore, namespace: str, scope: ScopeSpec, observation
 
 
 _SELECTIVE_SHARE = 0.2   # a topic predicate on at most this share of the most common one's carriers filters (D-100)
+_LARGE_WINDOW = 500      # a walk window this large is narrowed by a selective topic under the cap too (D-109)
 _RARE_BOOST = 1000.0     # its facts rank ahead of the topic's display fields
 
 
@@ -1714,11 +1868,12 @@ def _walk_and_gather(store: GraphStore, req: AskRequest, allowed_types: tuple[st
     gathered: dict[tuple[str, str], list[Observation]] = {}
     widened: list[str] = []
     core: set[tuple[str, str]] = set()
+    topic_cut: set[tuple[str, str]] = set()
     if req.scope is not None:
         subjects, paths = resolve_scope_paths(
             store, req.namespace, req.scope, truncated,
             as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
-            gathered_out=gathered, question=req.question, core_out=core)
+            gathered_out=gathered, question=req.question, core_out=core, topic_cut_out=topic_cut)
         if not paths and req.scope.expand and req.scope.depth > 0:
             # a walk that reached nothing along what it named — an invented
             # predicate, attributes only — walks the containment too (D-099):
@@ -1731,13 +1886,15 @@ def _walk_and_gather(store: GraphStore, req: AskRequest, allowed_types: tuple[st
                 wider = req.scope.model_copy(update={"expand": [*req.scope.expand, *widened]})
                 more_truncated: Truncations = {}
                 more_gathered: dict[tuple[str, str], list[Observation]] = {}
+                more_cut: set[tuple[str, str]] = set()
                 more_subjects, more_paths = resolve_scope_paths(
                     store, req.namespace, wider, more_truncated,
                     as_of=req.as_of, valid_at=req.valid_at, allowed_types=allowed_types,
-                    gathered_out=more_gathered, question=req.question)
+                    gathered_out=more_gathered, question=req.question, topic_cut_out=more_cut)
                 if more_paths:
                     req = req.model_copy(update={"scope": wider})
                     subjects, paths, truncated, gathered = more_subjects, more_paths, more_truncated, more_gathered
+                    topic_cut = more_cut
                 else:
                     widened = []
     else:
@@ -1782,6 +1939,16 @@ def _walk_and_gather(store: GraphStore, req: AskRequest, allowed_types: tuple[st
             if obs.id not in seen_ids and _in_scope(obs, allowed_types):
                 seen_ids.add(obs.id)
                 observations.append(obs)
+    # A selective topic cut entities from the walk (D-109): the edges from
+    # the scope into them (an OU's "contains" of a thousand accounts that
+    # do not carry the topic) are the cut, not evidence — 9,832 candidate
+    # rows around seven carriers, 193 without them.
+    topic_cut -= {(s.type, s.key) for s in subjects}
+    if topic_cut:
+        chained = {o.id for chain in paths.values() for o in chain}
+        observations = [o for o in observations if o.id in chained or not isinstance(o.object, EntityRef)
+                        or ((o.subject.type, o.subject.key) not in topic_cut
+                            and (o.object.type, o.object.key) not in topic_cut)]
     observations.sort(key=lambda o: _aware(o.observed_at), reverse=True)
     out = (req, subjects, paths, truncated, gathered, examined, core, widened, observations)
     if memo is not None:
@@ -1872,6 +2039,12 @@ def _build_pack(
             "a fact about this entity that those records would carry may be missing data, not absent")
         if gap_note:
             notes.append(gap_note)
+    # what the namespace's sources declare they do not carry, when the
+    # question asks about it (D-110): "local admins of WS-1" over an LDAP
+    # export that has no local groups is unanswerable, not "none"
+    nc_note = not_collected_note(store, req.namespace, req.question)
+    if nc_note:
+        notes.append(nc_note)
     # A subject question's named attribute ("what is the has_severity of
     # CVE-X", "the largest invoiced_amount ever recorded") orders its
     # conflicts and ships before the orientation layers, exempt from the
@@ -2014,6 +2187,24 @@ def _close_predicates(name: str, definitions, vocabulary: set[str]) -> list[str]
     if best:
         out += [n for n in names if shared[n] == best and n not in out]
     return out[:_MAX_SUGGESTIONS]
+
+
+def not_collected_note(store: GraphStore, namespace: str, question: str | None,
+                       fallback_all: bool = False) -> str | None:
+    """The namespace's declared not-collected topics (D-110) whose words the
+    question (or the unknown predicates a request named) uses; with
+    `fallback_all`, every topic when none matches by word. A statement of
+    what the data cannot carry, not advice."""
+    schema = _schema(store, namespace)
+    gaps = list(schema.not_collected) if schema is not None else []
+    if question is not None:
+        text = f" {question.lower()} "
+        matched = [g for g in gaps if any(re.search(rf"\b{re.escape(w.lower())}\b", text) for w in g.words)]
+        gaps = matched or (gaps if fallback_all else [])
+    if not gaps:
+        return None
+    return ("not collected by this namespace's sources: " + "; ".join(g.description for g in gaps)
+            + " — a question about these cannot be answered from here")
 
 
 def request_notes(store: GraphStore, namespace: str, scope: ScopeSpec | None, asked: list[EntityRef],
@@ -2219,6 +2410,7 @@ def find_paths(
     work = 0            # edge extensions examined: partials made + reach checks
     materialized = 0    # partial paths held for a next hop
     searched = bool(via_set) and endpoints_ok and src_key != dst_key
+    degree: dict[tuple[str, str], int] = {}   # rows on record per gathered entity (D-109)
 
     if searched:
         cap, row_cap = max_scope_entities(), max_scope_observations()
@@ -2415,8 +2607,22 @@ def find_paths(
         if retired:
             complete = [edges for edges in complete if not any(e.id in retired for e in edges)]
 
-    # shortest first, then a stable order by the edges' ids
-    complete.sort(key=lambda edges: (len(edges), tuple(e.id for e in edges)))
+    # Shortest first; among equal lengths the most specific — through the
+    # entities with the fewest rows on record (a planted escalation goes
+    # through a named group, a coincidental route through Domain Users) —
+    # then by what the edges say. Ids last: they are random per ingest, and
+    # ordering by them returned different paths for the same data (D-109).
+    if searched:
+        degree = {k: (t.total if (t := truncated.get(k)) is not None and t.reason == "gather_limit"
+                      else len(rows)) for k, rows in gathered.items()}
+
+    def specificity(edges: tuple[Observation, ...]) -> tuple[int, int]:
+        inner = {(r.type, r.key) for e in edges for r in (e.subject, e.object)
+                 if isinstance(r, EntityRef)} - {src_key, dst_key}
+        counts = [degree.get(k, 0) for k in inner]
+        return (max(counts, default=0), sum(counts))
+
+    complete.sort(key=lambda edges: (len(edges), specificity(edges), tuple(_edge_sort_key(e) for e in edges)))
     budget = min(req.budget, max_budget())
     returned: list[tuple[Observation, ...]] = []
     charged = 0
@@ -2516,6 +2722,11 @@ def find_paths(
     if not returned and searched:
         notes.append(f"no path found from {src.type}:{src.key} to {dst.type}:{dst.key} within "
                      f"depth {depth} along {', '.join(sorted(via_set))}")
+        unknown_via = sorted(via_set - _registry_predicates(store, ns) - seen_preds)
+        nc_note = (not_collected_note(store, ns, " ".join(unknown_via).replace("_", " "), fallback_all=True)
+                   if unknown_via else None)
+        if nc_note:
+            notes.append(nc_note)
     if searched:
         gap_note = coverage.note(
             coverage.gaps(store, ns, via_set | status_preds, req.as_of),

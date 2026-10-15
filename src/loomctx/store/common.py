@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import re
 
@@ -167,6 +167,31 @@ def parse(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
+# relation_summary is a GROUP BY over a namespace's observations (86 s at
+# 6.5M rows on SQLite), and every MCP session — a fresh process — asked for
+# it. Backends cache it in loomctx_meta under a marker of what changes it
+# (the newest observation, the tombstone and merge counts), so it is computed
+# once per change, not once per session.
+SUMMARY_KEY = "relsum:{namespace}"
+
+
+def summary_value(marker: str, rows: list) -> str:
+    return json.dumps({"marker": marker, "rows": rows})
+
+
+def cached_summary(raw: str | None, marker: str) -> list[tuple] | None:
+    """The cached rows when `raw` was written under `marker`, else None."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("marker") != marker:
+        return None
+    return [tuple(r) for r in data.get("rows", [])]
+
+
 def prefix_bounds(prefix: str) -> tuple[str, str | None]:
     """(lo, hi) such that `lo <= s < hi` holds exactly for the strings that
     start with `prefix`: hi is the prefix with its last code point
@@ -206,6 +231,41 @@ def merge_search(key_rows, label_rows, lowered: str, limit: int) -> list[Entity]
             seen.add(r["id"])
             out.append(row_to_entity(r))
     return out[:limit]
+
+
+class LiteRow(NamedTuple):
+    """An observation's walk-and-filter fields only (D-107): what a listing
+    needs to decide whether a row is current, in scope and walkable, with
+    none of the model construction a full Observation costs — 370,000 of
+    those were most of a listing's time at 500,000 objects. Times are the
+    canonical UTC ISO text the stores hold (they order lexically); `object`
+    is the scalar value, or (type, key) for an edge. Cited rows are read
+    back in full by id."""
+    id: str
+    subject: tuple[str, str]
+    predicate: str
+    object: Any
+    observed_at: str
+    valid_from: str | None
+    valid_to: str | None
+    supersedes: str | None
+    source: str
+    extracted: bool
+
+
+# the projection lite_row decodes: subject `s`, optional object entity `t`;
+# attrs are read only on the rare row that mentions extraction
+LITE_COLS = ("o.id, s.type AS st, s.key AS sk, o.predicate, o.object_json, oe.type AS ot, oe.key AS okey,"
+             " o.observed_at, o.valid_from, o.valid_to, o.supersedes, o.source,"
+             " CASE WHEN o.attrs_json LIKE '%%extracted%%' THEN o.attrs_json END AS xattrs")
+
+
+def lite_row(r: Mapping[str, Any]) -> LiteRow:
+    obj = (r["ot"], r["okey"]) if r["ot"] is not None else json.loads(r["object_json"])
+    x = r["xattrs"]
+    extracted = (bool(json.loads(x).get("extracted")) if x else False) or r["source"].startswith("doc:")
+    return LiteRow(r["id"], (r["st"], r["sk"]), r["predicate"], obj, r["observed_at"], r["valid_from"],
+                   r["valid_to"], r["supersedes"], r["source"], extracted)
 
 
 def row_to_observation(row: Mapping[str, Any]) -> Observation:
@@ -394,9 +454,15 @@ def merge_schema(existing: SchemaRegistration | None,
             "label": old.label or p.label,
             "display": old.display or p.display,
             "description": p.description or old.description})
+    queries = {q.name: q for q in existing.queries}
+    queries.update((q.name, q) for q in incoming.queries)   # a re-registered query replaces (D-108)
+    gaps = {g.topic: g for g in existing.not_collected}
+    gaps.update((g.topic, g) for g in incoming.not_collected)   # by topic (D-110)
     return SchemaRegistration(
         namespace=incoming.namespace,
         entity_types=list(types.values()),
         predicates=list(preds.values()),
         strict=incoming.strict,
+        queries=list(queries.values()),
+        not_collected=list(gaps.values()),
     )

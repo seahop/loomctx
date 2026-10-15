@@ -30,6 +30,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -394,6 +395,7 @@ class SqliteStore(GraphStore):
         self._lock = threading.RLock()
         self._depth = 0
         self._owner: int | None = None      # the thread inside the write transaction
+        self._bulk: float | None = None     # inside bulk_load: when it last committed
         self._local = threading.local()     # the read connection a thread borrowed
         self._ticks: dict[str, int] = {}   # tick-scan calls per mark (R-9)
         self._path = str(path)
@@ -422,9 +424,13 @@ class SqliteStore(GraphStore):
         self._vec = self._load_vec()
         # Referential integrity is per-connection in SQLite (H-B10). Old
         # files may hold dangling rows from before this was on; report,
-        # don't refuse to start.
+        # don't refuse to start. Checked when a migration ran, not on every
+        # open: the check walks every reference (23 s at 6.5M observations)
+        # and every MCP session opens the store anew; a file already at this
+        # version has had it, and enforced writes keep it clean (D-104).
         self._conn.execute("PRAGMA foreign_keys=ON")
-        dangling = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        dangling = (self._conn.execute("PRAGMA foreign_key_check").fetchall()
+                    if current < SCHEMA_VERSION else [])
         if dangling:
             logging.getLogger("loomctx.store").warning(
                 "sqlite: %d row(s) violate foreign keys (pre-existing data);"
@@ -818,7 +824,9 @@ class SqliteStore(GraphStore):
         lo, hi = common.prefix_bounds(prefix)
         with self._tx(read=True):
             rows = self._conn.execute(
-                _OBS_SELECT + " WHERE o.namespace = ? AND o.id >= ?"
+                # `+o.namespace`: keep the planner on the primary-key range;
+                # it once took the namespace index and scanned every row
+                _OBS_SELECT + " WHERE +o.namespace = ? AND o.id >= ?"
                 + (" AND o.id < ?" if hi is not None else "") + _NOT_TOMBSTONED
                 + " ORDER BY o.id LIMIT ?",
                 (namespace, lo, *((hi,) if hi is not None else ()), self._PREFIX_CAP)).fetchall()
@@ -859,19 +867,121 @@ class SqliteStore(GraphStore):
             if self._depth == 0:
                 self._owner = me
             self._depth += 1
+            # inside a bulk load (depth 1 is the load itself) each outermost
+            # write call is a savepoint in the load's longer transaction
+            call = self._bulk is not None and self._depth == 2 and not read
+            if call:
+                if not self._writer.in_transaction:
+                    self._writer.execute("BEGIN")
+                self._writer.execute("SAVEPOINT loomctx_call")
             try:
                 yield
             except BaseException:
                 if self._depth == 1:
                     self._writer.rollback()
+                elif call:
+                    self._undo_call()
                 raise
             else:
                 if self._depth == 1:
                     self._writer.commit()
+                elif call:
+                    self._writer.execute("RELEASE loomctx_call")
+                    if time.monotonic() - self._bulk >= self._BULK_COMMIT_SECONDS:
+                        self._writer.commit()
+                        self._bulk = time.monotonic()
             finally:
                 self._depth -= 1
                 if self._depth == 0:
                     self._owner = None
+
+    def _undo_call(self) -> None:
+        """Roll back the failed write call of a bulk load, keeping the
+        calls before it."""
+        try:
+            if self._writer.in_transaction:
+                self._writer.execute("ROLLBACK TO loomctx_call")
+                self._writer.execute("RELEASE loomctx_call")
+        except sqlite3.Error:
+            # an error SQLite answers by rolling back the whole transaction
+            # (a full disk, an I/O error) took the load's uncommitted calls
+            # with it; there is nothing left to undo
+            pass
+
+    # Bulk loads (D-105). A 256 MiB page cache keeps the hot index pages of a
+    # multi-million-row store in memory (the default 2 MB re-read them from
+    # the OS on every insert); a 20,000-page WAL checkpoint interval writes a
+    # hot page back once per ~80 MB of log, not once per batch; and a commit
+    # every 5 s, not per 500-line batch, writes a dirty index page once per
+    # commit instead of once per batch that touched it (on a 6.5M-row store
+    # 5 s beat 1 s by a fifth; a 1 GiB cache bought nothing more). Another
+    # writer waits up to about that long, well inside its 15 s busy timeout.
+    _BULK_CACHE_KIB = 256 * 1024
+    _BULK_WAL_PAGES = 20_000
+    _BULK_COMMIT_SECONDS = 5.0
+    # The observation indexes no write path reads (dedupe uses idx_obs_event,
+    # resolution the entity indexes; these serve queries, merges' foreign-key
+    # checks and worker scans). Each takes a random-page insert per row: on
+    # a 6.5M-row store they were three quarters of the bytes a load wrote.
+    # A load into a store with no observations yet builds them once at the
+    # end, by sort, instead. They are derived: what is stored is unchanged,
+    # and a load that dies before the end leaves them to the next open,
+    # which creates any missing index (`_INDEXES`).
+    _BULK_DEFERRED_INDEXES = (
+        "idx_obs_subject", "idx_obs_object", "idx_obs_recorded", "idx_obs_prov_artifact",
+        "idx_obs_supersedes", "idx_obs_subject_recorded", "idx_obs_object_entity", "idx_obs_label",
+    )
+
+    @contextmanager
+    def bulk_load(self) -> Iterator[None]:
+        """GraphStore.bulk_load: hold the writer for the run, make each write
+        call a savepoint in a transaction committed every few seconds, and
+        raise the page cache and checkpoint interval — all restored, and the
+        last calls committed, on the way out (an error included: the calls
+        that succeeded stay, the failed one was rolled back to its
+        savepoint, exactly as when every call committed on its own). Into
+        an empty store the query-only observation indexes are built at the
+        end instead of row by row."""
+        with self._lock:
+            if self._depth:     # already inside a transaction on this thread: join it
+                yield
+                return
+            writer = self._writer
+            cache = writer.execute("PRAGMA cache_size").fetchone()[0]
+            wal = writer.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+            writer.execute(f"PRAGMA cache_size=-{self._BULK_CACHE_KIB}")
+            writer.execute(f"PRAGMA wal_autocheckpoint={self._BULK_WAL_PAGES}")
+            deferred = self._defer_indexes()
+            self._owner, self._depth = threading.get_ident(), 1
+            self._bulk = time.monotonic()
+            try:
+                yield
+            finally:
+                self._bulk = None
+                try:
+                    if writer.in_transaction:
+                        writer.commit()
+                finally:
+                    self._depth, self._owner = 0, None
+                    try:
+                        if deferred:    # what every open runs: creates the missing ones
+                            writer.executescript(_INDEXES)
+                    finally:
+                        writer.execute(f"PRAGMA cache_size={int(cache)}")
+                        writer.execute(f"PRAGMA wal_autocheckpoint={int(wal)}")
+                        writer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+
+    def _defer_indexes(self) -> bool:
+        """Drop the deferrable observation indexes when the store has no
+        observations (and this build runs its own DDL); whether it did."""
+        writer = self._writer
+        if (self._meta_version() > SCHEMA_VERSION
+                or writer.execute("SELECT 1 FROM observations LIMIT 1").fetchone() is not None):
+            return False
+        for name in self._BULK_DEFERRED_INDEXES:
+            writer.execute(f"DROP INDEX IF EXISTS {name}")
+        writer.commit()
+        return True
 
     # ------------------------------------------------------------ public API
 
@@ -1315,7 +1425,7 @@ class SqliteStore(GraphStore):
 
     def record_claims(self, claims: list[ClaimIn]) -> list[Observation]:
         with self._tx():
-            return [self._record_claim(c) for c in claims]
+            return self._record_batch(claims)
 
     def observations_for(
         self, namespace: str, ref: EntityRef, limit: int = 100,
@@ -1381,7 +1491,8 @@ class SqliteStore(GraphStore):
 
     def _many_query(self, namespace: str, ids: list[str], limit: int,
                     observed_before: datetime | None,
-                    predicates: list[str] | None = None) -> tuple[str, tuple]:
+                    predicates: list[str] | None = None,
+                    side: str | None = None) -> tuple[str, tuple]:
         """The `hits` body of the batched gather and its parameters: per
         entity, the newest `limit` rows of each side as its own index range
         with its own LIMIT (idx_obs_subject / idx_obs_object, D-035), so a
@@ -1402,15 +1513,21 @@ class SqliteStore(GraphStore):
                + _NOT_TOMBSTONED + before_sql + pred_sql
                + " ORDER BY o.observed_at DESC LIMIT ?)")
         params: list = []
+        parts: list[str] = []
         for eid in ids:
-            params += (namespace, eid, *before_args, *pred_args, limit,
-                       namespace, eid, eid, *before_args, *pred_args, limit)
-        return " UNION ALL ".join([subj, obj] * len(ids)), tuple(params)
+            if side != "object":
+                parts.append(subj)
+                params += (namespace, eid, *before_args, *pred_args, limit)
+            if side != "subject":
+                parts.append(obj)
+                params += (namespace, eid, eid, *before_args, *pred_args, limit)
+        return " UNION ALL ".join(parts), tuple(params)
 
     def observations_for_many(
         self, namespace: str, refs: list[EntityRef], limit: int = 100,
         observed_before: datetime | None = None,
         predicates: list[str] | None = None,
+        side: str | None = None,
     ) -> dict[tuple[str, str], list[Observation]]:
         result: dict[tuple[str, str], list[Observation]] = {}
         if not refs or (predicates is not None and not predicates):
@@ -1420,7 +1537,7 @@ class SqliteStore(GraphStore):
             ids = list(owners)
             for start in range(0, len(ids), self._GATHER_CHUNK):
                 chunk = ids[start:start + self._GATHER_CHUNK]
-                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates)
+                hits, params = self._many_query(namespace, chunk, limit, observed_before, predicates, side)
                 rows = self._conn.execute(
                     "WITH hits AS (" + hits + "),"
                     " ranked AS (SELECT *, row_number() OVER (PARTITION BY ent ORDER BY observed_at DESC) AS rn FROM hits)"
@@ -1432,6 +1549,147 @@ class SqliteStore(GraphStore):
                     for ref in owners[row["ent"]]:
                         result.setdefault((ref.type, ref.key), []).append(obs)
         return result
+
+    def subjects_with_value(
+        self, namespace: str, predicate: str, value_json: str | None = None,
+        limit: int = 100_000, observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """idx_obs_label serves it: (namespace, predicate, the value's
+        lower-cased JSON text) — the expression written verbatim so the index
+        applies (D-107)."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        value_sql, value_args = "", ()
+        if value_json is not None:
+            value_sql, value_args = " AND lower(substr(o.object_json, 1, 200)) = ?", (value_json.lower()[:200],)
+        sql = ("SELECT DISTINCT e.type, e.key FROM observations o JOIN entities e ON e.id = o.subject_id"
+               " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               + value_sql + before_sql + _NOT_TOMBSTONED + " LIMIT ?")
+        with self._tx(read=True):
+            rows = self._conn.execute(sql, (namespace, predicate, *value_args, *before_args, limit)).fetchall()
+        return [EntityRef(type=r["type"], key=r["key"]) for r in rows]
+
+    def entity_refs_of_type(self, namespace: str, type: str, limit: int = 100_000) -> list[EntityRef]:
+        with self._tx(read=True):
+            rows = self._conn.execute(
+                "SELECT key FROM entities WHERE namespace = ? AND type = ? ORDER BY key LIMIT ?",
+                (namespace, type, limit)).fetchall()
+        return [EntityRef(type=type, key=r["key"]) for r in rows]
+
+    _LITE_FROM = (" FROM observations o JOIN entities s ON s.id = o.subject_id"
+                  " LEFT JOIN entities oe ON oe.id = o.object_entity_id")
+
+    def _label_index(self) -> str:
+        """' INDEXED BY idx_obs_label' when the index exists. A predicate's
+        rows ordered or partitioned by subject made the planner walk the
+        namespace's whole subject index (6.5M rows at 500k, every row's
+        predicate checked) to skip one sort: list mode's `contains` scans
+        took 1-2 hours on the final A/B's 500k forest. The label range plus
+        a sort of that predicate's rows is what is wanted. Absent (a bulk
+        load deferring it into an empty store, D-105), no hint."""
+        with self._tx(read=True):
+            found = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_obs_label'").fetchone()
+        return " INDEXED BY idx_obs_label" if found else ""
+
+    def lite_rows(
+        self, namespace: str, refs: list[EntityRef], predicates: list[str], side: str = "subject",
+        limit: int = 1_000_000, observed_before: datetime | None = None,
+    ) -> list[common.LiteRow]:
+        """One indexed IN-list read per chunk on the side's index
+        (idx_obs_subject / idx_obs_object), every row, no window (D-107)."""
+        if not refs or not predicates:
+            return []
+        col = "o.subject_id" if side == "subject" else "o.object_entity_id"
+        before_sql, before_args = _observed_before("?", observed_before)
+        out: list[common.LiteRow] = []
+        with self._tx(read=True):
+            ids = list(self._resolve_many(namespace, refs))
+            for start in range(0, len(ids), self._MANY_CHUNK):
+                chunk = ids[start:start + self._MANY_CHUNK]
+                sql = ("SELECT " + common.LITE_COLS + self._LITE_FROM
+                       + f" WHERE o.namespace = ? AND {col} IN ({','.join(['?'] * len(chunk))})"
+                       + f" AND o.predicate IN ({','.join(['?'] * len(predicates))})"
+                       + before_sql + _NOT_TOMBSTONED + " LIMIT ?")
+                rows = self._conn.execute(
+                    sql, (namespace, *chunk, *predicates, *before_args, limit - len(out))).fetchall()
+                out.extend(common.lite_row(r) for r in rows)
+                if len(out) >= limit:
+                    break
+        return out
+
+    def lite_scalars(
+        self, namespace: str, predicate: str, observed_before: datetime | None = None,
+    ) -> Iterator[common.LiteRow]:
+        """One idx_obs_label range, ordered by subject, streamed (D-107)."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        from_ = self._LITE_FROM.replace(" o JOIN", f" o{self._label_index()} JOIN", 1)
+        sql = ("SELECT " + common.LITE_COLS + from_
+               + " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               + before_sql + _NOT_TOMBSTONED + " ORDER BY o.subject_id")
+        params = (namespace, predicate, *before_args)
+        with self._tx(read=True):
+            cur = self._conn.execute(sql, params)
+            while True:
+                rows = cur.fetchmany(5000)
+                if not rows:
+                    return
+                for r in rows:
+                    yield common.lite_row(r)
+
+    def current_scalar_subjects(
+        self, namespace: str, predicate: str, value_jsons: list[str] | None = None,
+        observed_before: datetime | None = None, valid_at: datetime | None = None,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """The newest snapshot per subject ranked in SQL over idx_obs_label's
+        range (D-111): only (type, key, matched) per subject comes back."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        valid_sql, valid_args = "", ()
+        if valid_at is not None:
+            v = common.iso(valid_at)
+            valid_sql = (" AND (o.valid_from IS NULL OR o.valid_from <= ?)"
+                         " AND (o.valid_to IS NULL OR o.valid_to > ?)")
+            valid_args = (v, v)
+        wanted = sorted({w.lower()[:200] for w in (value_jsons or [])})
+        hit = (f"MAX(CASE WHEN cur.v IN ({','.join(['?'] * len(wanted))}) THEN 1 ELSE 0 END)"
+               if wanted else "0")
+        sql = ("WITH cur AS (SELECT o.subject_id, lower(substr(o.object_json, 1, 200)) AS v,"
+               " RANK() OVER (PARTITION BY o.subject_id ORDER BY o.observed_at DESC) AS rk"
+               " FROM observations o" + self._label_index()
+               + " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               + before_sql + valid_sql
+               + " AND o.source NOT LIKE 'doc:%%' AND coalesce(json_extract(o.attrs_json, '$.extracted'), 0) IN (0, 'false')" + _NOT_TOMBSTONED + ")"
+               " SELECT e.type AS type, e.key AS key, " + hit + " AS hit"
+               " FROM cur JOIN entities e ON e.id = cur.subject_id WHERE cur.rk = 1 GROUP BY e.type, e.key")
+        params = (namespace, predicate, *before_args, *valid_args, *wanted)
+        with self._tx(read=True):
+            rows = self._conn.execute(sql, params).fetchall()
+        any_ = {(r["type"], r["key"]) for r in rows}
+        return any_, {(r["type"], r["key"]) for r in rows if r["hit"]}
+
+    def first_observed(self, namespace: str) -> datetime | None:
+        with self._tx(read=True):
+            row = self._conn.execute("SELECT min(observed_at) FROM observations WHERE namespace = ?",
+                                     (namespace,)).fetchone()
+        return common.parse(row[0]) if row and row[0] else None
+
+    def subjects_with_text(
+        self, namespace: str, predicate: str, needle: str, limit: int = 100_000,
+        observed_before: datetime | None = None,
+    ) -> list[EntityRef]:
+        """LIKE on idx_obs_label's lower-cased text: the predicate's index
+        range, matched without reading the rows (D-110). A value the index
+        cut at 200 characters is always returned: the needle may lie past
+        the cut, and the caller's filter decides."""
+        before_sql, before_args = _observed_before("?", observed_before)
+        pattern = "%" + needle.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql = ("SELECT DISTINCT e.type, e.key FROM observations o" + self._label_index()
+               + " JOIN entities e ON e.id = o.subject_id"
+               " WHERE o.namespace = ? AND o.predicate = ? AND o.object_entity_id IS NULL"
+               " AND (lower(substr(o.object_json, 1, 200)) LIKE ? ESCAPE '\\' OR length(lower(substr(o.object_json, 1, 200))) = 200)"
+               + before_sql + _NOT_TOMBSTONED + " LIMIT ?")
+        with self._tx(read=True):
+            rows = self._conn.execute(sql, (namespace, predicate, pattern, *before_args, limit)).fetchall()
+        return [EntityRef(type=r["type"], key=r["key"]) for r in rows]
 
     def edges_to_carriers(
         self, namespace: str, hubs: list[EntityRef], via: list[str], predicates: list[str],
@@ -1955,6 +2213,15 @@ class SqliteStore(GraphStore):
             yield common.row_to_observation(row)
 
     def relation_summary(self, namespace: str) -> list[tuple[str, str, str | None, int]]:
+        key = common.SUMMARY_KEY.format(namespace=namespace)
+        with self._tx(read=True):
+            marker = "|".join(str(v) for v in self._conn.execute(
+                "SELECT (SELECT max(rowid) FROM observations), (SELECT count(*) FROM tombstones),"
+                " (SELECT count(*) FROM merge_log)").fetchone())
+            cached = self._conn.execute("SELECT value FROM loomctx_meta WHERE key = ?", (key,)).fetchone()
+        hit = common.cached_summary(cached["value"] if cached else None, marker)
+        if hit is not None:
+            return hit
         sql = ("SELECT s.type AS stype, o.predicate AS predicate, e.type AS otype, COUNT(*) AS n"
                " FROM observations o JOIN entities s ON s.id = o.subject_id"
                " LEFT JOIN entities e ON e.id = o.object_entity_id"
@@ -1963,8 +2230,16 @@ class SqliteStore(GraphStore):
                " GROUP BY s.type, o.predicate, e.type")
         with self._tx(read=True):
             rows = self._conn.execute(sql, (namespace,)).fetchall()
-        return sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
-                      key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        out = sorted(((r["stype"], r["predicate"], r["otype"], int(r["n"])) for r in rows),
+                     key=lambda r: (-r[3], r[0], r[1], r[2] or ""))
+        try:
+            with self._tx():
+                self._conn.execute("INSERT INTO loomctx_meta (key, value) VALUES (?, ?)"
+                                   " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                   (key, common.summary_value(marker, out)))
+        except sqlite3.Error:   # a read-only store still answers; it just can't remember
+            pass
+        return out
 
     def namespace_summary(self) -> dict[str, dict[str, int]]:
         with self._tx(read=True):
@@ -2093,6 +2368,15 @@ class SqliteStore(GraphStore):
             self._put_tombstone(namespace, observation_id, reason, recorded_at)
             self._drop_briefs_citing(namespace, observation_id)
 
+    def refresh_statistics(self) -> None:
+        """ANALYZE after a bulk load (D-081, now for SQLite too): without
+        sqlite_stat1 the planner chooses indexes blind — at 6.5M observations
+        it served a 12-hex cite lookup from the namespace index, scanning every
+        row. analysis_limit samples each index, so this stays quick at size."""
+        with self._tx():
+            self._conn.execute("PRAGMA analysis_limit=1000")
+            self._conn.execute("ANALYZE")
+
     def wipe(self) -> None:
         with self._tx():
             for table in ("tombstones", "embeddings", "dossiers", "doc_chunks",
@@ -2217,52 +2501,220 @@ class SqliteStore(GraphStore):
         ).fetchone()
         return common.redacted_view(obs) if tomb else obs
 
-    def _record_claim(self, claim: ClaimIn) -> Observation:
-        if claim.event_id is not None:
-            existing = self._existing_by_event(claim.namespace, claim.event_id)
-            if existing is not None:
-                metrics.INGEST_DEDUPED.inc()
-                return existing
+    # bound parameters per batched lookup: well under SQLite's variable cap
+    _WRITE_CHUNK = 400
+
+    def _record_batch(self, claims: list[ClaimIn]) -> list[Observation]:
+        """record_claims, set at a time (D-105). What lands is what a loop of
+        one-claim writes in order stored: the same replays answered, the same
+        entities resolved or created, the same rows. The lookups run once per
+        batch (replayed event ids, exact entities, aliases) and the rows go
+        in through one executemany, instead of four to six statements per
+        claim. Nothing in here changes which entity or alias a ref resolves
+        to, so resolving every ref up front gives the loop's answers."""
+        out: list[Observation | None] = [None] * len(claims)
+        known = self._existing_by_events(
+            {(c.namespace, c.event_id) for c in claims if c.event_id is not None})
+        todo: list[int] = []
+        repeats: list[int] = []    # an event id already claimed earlier in this batch
+        seen: set[tuple[str, str]] = set()
+        for i, claim in enumerate(claims):
+            if claim.event_id is not None:
+                mark = (claim.namespace, claim.event_id)
+                if mark in known:
+                    metrics.INGEST_DEDUPED.inc()
+                    out[i] = known[mark]
+                    continue
+                if mark in seen:
+                    repeats.append(i)
+                    continue
+                seen.add(mark)
+            todo.append(i)
 
         # A ref that was merged away resolves to its canonical entity: a
         # claim naming the old `ip_address:10.0.4.7` lands on `ip:10.0.4.7`
         # instead of resurrecting the folded node beside its alias.
-        subject = self._resolve_or_create(claim.namespace, claim.subject)
-        object_entity_id = None
-        obj = claim.object
-        if isinstance(claim.object, EntityRef):
-            target = self._resolve_or_create(claim.namespace, claim.object)
-            object_entity_id = target.id
-            obj = EntityRef(type=target.type, key=target.key)
-            object_json = json.dumps(obj.model_dump())
-        else:
-            object_json = json.dumps(claim.object)
+        wanted: dict[str, dict[tuple[str, str], None]] = {}
+        for i in todo:
+            claim = claims[i]
+            refs = wanted.setdefault(claim.namespace, {})
+            refs[(claim.subject.type, claim.subject.key)] = None
+            if isinstance(claim.object, EntityRef):
+                refs[(claim.object.type, claim.object.key)] = None
+        entities: dict[tuple[str, str, str], Entity] = {}
+        for namespace, refs in wanted.items():
+            for (etype, key), entity in self._resolve_or_create_many(namespace, list(refs)).items():
+                entities[(namespace, etype, key)] = entity
 
-        obs = Observation(
-            id=uuid.uuid4().hex,
-            namespace=claim.namespace,
-            event_id=claim.event_id,
-            subject=EntityRef(type=subject.type, key=subject.key),
-            predicate=claim.predicate,
-            object=obj,
-            observed_at=claim.observed_at,
-            valid_from=claim.valid_from,
-            valid_to=claim.valid_to,
-            recorded_at=common.now(),
-            source=claim.source,
-            confidence=claim.confidence,
-            provenance=self._resolve_provenance(claim),
-            supersedes=claim.supersedes,
-            attrs=claim.attrs,
-        )
-        cur = self._conn.execute(
-            _OBS_INSERT + _ON_EVENT_CONFLICT,
-            self._obs_row(obs, subject.id, object_json, object_entity_id),
-        )
-        if cur.rowcount == 0:  # another writer landed this event_id first (H-B2)
+        rows: list[tuple] = []
+        for i, (obs, row) in zip(todo, self._observation_rows([claims[i] for i in todo], entities)):
+            out[i] = obs
+            rows.append(row)
+        if rows:
+            cur = self._conn.executemany(_OBS_INSERT + _ON_EVENT_CONFLICT, rows)
+            if cur.rowcount != len(rows):
+                # another writer landed some of these event ids first (H-B2):
+                # a row that did not go in answers with the stored one
+                landed = self._present(
+                    "SELECT id FROM observations WHERE id IN ({})", [row[0] for row in rows])
+                for i in todo:
+                    if out[i].id not in landed:
+                        metrics.INGEST_DEDUPED.inc()
+                        out[i] = self._existing_by_event(claims[i].namespace, claims[i].event_id)
+        for i in repeats:
             metrics.INGEST_DEDUPED.inc()
-            return self._existing_by_event(claim.namespace, claim.event_id)
-        return obs
+            out[i] = self._existing_by_event(claims[i].namespace, claims[i].event_id)
+        return out  # type: ignore[return-value]
+
+    def _present(self, sql: str, values: list[str]) -> set[str]:
+        """The first column of `sql` (one `IN ({})` placeholder) over
+        `values`, chunked under the bound-parameter cap."""
+        hits: set[str] = set()
+        for start in range(0, len(values), self._WRITE_CHUNK):
+            chunk = values[start:start + self._WRITE_CHUNK]
+            hits.update(r[0] for r in self._conn.execute(
+                sql.format(",".join("?" * len(chunk))), chunk))
+        return hits
+
+    def _existing_by_events(self, marks: set[tuple[str, str]]) -> dict[tuple[str, str], Observation]:
+        """`_existing_by_event` for many (namespace, event_id) pairs at once:
+        the stored observation per replayed pair, a redacted one as its
+        content-free stand-in."""
+        found: dict[tuple[str, str], Observation] = {}
+        by_ns: dict[str, list[str]] = {}
+        for namespace, event_id in marks:
+            by_ns.setdefault(namespace, []).append(event_id)
+        for namespace, event_ids in by_ns.items():
+            for start in range(0, len(event_ids), self._WRITE_CHUNK):
+                chunk = event_ids[start:start + self._WRITE_CHUNK]
+                for row in self._conn.execute(
+                        _OBS_SELECT + " WHERE o.namespace = ? AND o.event_id IN"
+                        f" ({','.join('?' * len(chunk))})", (namespace, *chunk)):
+                    found[(namespace, row["event_id"])] = common.row_to_observation(row)
+        if found:
+            dead = self._present("SELECT observation_id FROM tombstones WHERE observation_id IN ({})",
+                                 [obs.id for obs in found.values()])
+            if dead:
+                found = {mark: common.redacted_view(obs) if obs.id in dead else obs
+                         for mark, obs in found.items()}
+        return found
+
+    def _entities_by_refs(self, namespace: str,
+                          refs: list[tuple[str, str]]) -> dict[tuple[str, str], Entity]:
+        """Exact (type, key) matches for many refs: `_get_entity`, batched."""
+        found: dict[tuple[str, str], Entity] = {}
+        step = self._WRITE_CHUNK // 2
+        for start in range(0, len(refs), step):
+            chunk = refs[start:start + step]
+            params: list[str] = [namespace]
+            for etype, key in chunk:
+                params += (etype, key)
+            for row in self._conn.execute(
+                    "SELECT * FROM entities WHERE namespace = ? AND (type, key) IN"
+                    f" (VALUES {','.join(['(?, ?)'] * len(chunk))})", params):
+                found[(row["type"], row["key"])] = common.row_to_entity(row)
+        return found
+
+    def _resolve_or_create_many(self, namespace: str,
+                                refs: list[tuple[str, str]]) -> dict[tuple[str, str], Entity]:
+        """`_resolve_or_create` for many refs: the exact node, else the
+        canonical one an alias points at, else a new node."""
+        found = self._entities_by_refs(namespace, refs)
+        missing = [ref for ref in refs if ref not in found]
+        for start in range(0, len(missing), self._WRITE_CHUNK):
+            names = {f"{etype}:{key}": (etype, key)
+                     for etype, key in missing[start:start + self._WRITE_CHUNK]}
+            for row in self._conn.execute(
+                    "SELECT a.alias AS alias_name, e.* FROM aliases a"
+                    " JOIN entities e ON e.id = a.entity_id"
+                    f" WHERE a.namespace = ? AND a.alias IN ({','.join('?' * len(names))})",
+                    (namespace, *names)):
+                found[names[row["alias_name"]]] = common.row_to_entity(row)
+        fresh = [ref for ref in missing if ref not in found]
+        if fresh:
+            created = [Entity(id=uuid.uuid4().hex, namespace=namespace, type=etype, key=key,
+                              created_at=common.now()) for etype, key in fresh]
+            cur = self._conn.executemany(
+                "INSERT OR IGNORE INTO entities (id, namespace, type, key, provisional,"
+                " created_at, norm_key) VALUES (?, ?, ?, ?, 0, ?, ?)",
+                [(e.id, namespace, e.type, e.key, common.iso(e.created_at), common.norm_key(e.key))
+                 for e in created])
+            if cur.rowcount == len(created):
+                found.update(((e.type, e.key), e) for e in created)
+            else:
+                # another process inserted some of these keys between our
+                # SELECT and INSERT; the row that actually exists wins
+                stored = self._entities_by_refs(namespace, fresh)
+                for e in created:
+                    found[(e.type, e.key)] = stored.get((e.type, e.key), e)
+        return found
+
+    def _observation_rows(self, claims: list[ClaimIn],
+                          entities: dict[tuple[str, str, str], Entity]
+                          ) -> Iterator[tuple[Observation, tuple]]:
+        """The observation each fresh claim becomes, and its row — what
+        `_obs_row` writes, with the per-batch repeats computed once: an
+        entity's ref and JSON, a timestamp's stored text."""
+        refs: dict[str, tuple[EntityRef, str]] = {}
+
+        def ref(entity: Entity) -> tuple[EntityRef, str]:
+            hit = refs.get(entity.id)
+            if hit is None:
+                hit = refs[entity.id] = (
+                    EntityRef(type=entity.type, key=entity.key),
+                    # == json.dumps(EntityRef.model_dump()): fields in order
+                    json.dumps({"type": entity.type, "key": entity.key}))
+            return hit
+
+        stamps: dict[datetime, str] = {}
+
+        def iso(dt: datetime | None) -> str | None:
+            # equal instants store the same UTC text, so a repeat is a lookup
+            if dt is None:
+                return None
+            text = stamps.get(dt)
+            if text is None:
+                text = stamps[dt] = common.iso(dt)
+            return text
+
+        for claim in claims:
+            ns = claim.namespace
+            subject = entities[(ns, claim.subject.type, claim.subject.key)]
+            object_entity_id = None
+            obj = claim.object
+            if isinstance(obj, EntityRef):
+                target = entities[(ns, obj.type, obj.key)]
+                object_entity_id = target.id
+                obj, object_json = ref(target)
+            else:
+                object_json = json.dumps(obj)
+            provenance = self._resolve_provenance(claim)
+            recorded_at = common.now()
+            obs = Observation(
+                id=uuid.uuid4().hex,
+                namespace=ns,
+                event_id=claim.event_id,
+                subject=ref(subject)[0],
+                predicate=claim.predicate,
+                object=obj,
+                observed_at=claim.observed_at,
+                valid_from=claim.valid_from,
+                valid_to=claim.valid_to,
+                recorded_at=recorded_at,
+                source=claim.source,
+                confidence=claim.confidence,
+                provenance=provenance,
+                supersedes=claim.supersedes,
+                attrs=claim.attrs,
+            )
+            yield obs, (
+                obs.id, ns, claim.event_id, subject.id, claim.predicate,
+                object_json, object_entity_id, iso(claim.observed_at),
+                iso(claim.valid_from), iso(claim.valid_to),
+                common.iso(recorded_at), claim.source, claim.confidence,
+                json.dumps(provenance.model_dump()) if provenance else None,
+                json.dumps(claim.attrs) if claim.attrs else "{}", claim.supersedes,
+            )
 
     @staticmethod
     def _obs_row(obs: Observation, subject_id: str, object_json: str,

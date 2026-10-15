@@ -350,11 +350,20 @@ footer a { color: var(--ink-2); }
 
 /* ---------- model breakdown ---------- */
 .mb-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+.mb-key { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0 0 28px; }
+.mb-key > div { display: flex; gap: 12px; align-items: flex-start; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+.mb-key b { display: block; font: 600 .9rem/1.3 var(--f-mono); color: var(--ink); margin-bottom: 4px; }
+.mb-key span { color: var(--ink-2); font-size: .88rem; }
+.mb-key .mb-key-n { flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--woad); color: var(--bg); display: grid; place-items: center; font: 600 .8rem/1 var(--f-mono); }
+.mb-label { font: 600 .74rem/1.2 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+@media (max-width: 760px) { .mb-key { grid-template-columns: minmax(0, 1fr); } }
 .mb-meta span { font: 500 .8rem/1 var(--f-mono); padding: 8px 10px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-2); }
 .mb-meta b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .mb-tasks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .mb-task { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; display: grid; gap: 6px; align-content: start; }
 .mb-task b { font: 600 .92rem/1.2 var(--f-mono); color: var(--ink); }
+.mb-task-hard { border-style: dashed; }
+.mb-task b em { font: 500 .66rem/1 var(--f-mono); font-style: normal; letter-spacing: .05em; text-transform: uppercase; color: var(--madder); margin-left: 6px; vertical-align: 1px; }
 .mb-task span { color: var(--ink-2); font-size: .88rem; line-height: 1.5; }
 .mb-rule { color: var(--ink-2); font-size: .93rem; margin: 16px 0 28px; max-width: 80ch; }
 .mb-charts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; margin-bottom: 28px; }
@@ -385,8 +394,10 @@ footer a { color: var(--ink-2); }
 .mb-table td:first-child small { display: block; font: 400 .72rem/1.3 var(--f-mono); color: var(--muted); }
 .mb-table td:nth-child(2) { color: var(--ink); }
 .mb-table td:nth-child(3), .mb-table td:nth-child(4), .mb-table td:nth-child(5), .mb-table td:nth-child(6) { color: var(--ink-2); }
-.mb-table td:last-child { white-space: normal; min-width: 220px; color: var(--muted); font-size: .8rem; }
+.mb-table td:last-child { white-space: normal; min-width: 300px; color: var(--muted); font-size: .8rem; }
 .mb-pass { display: inline-flex; align-items: center; gap: 8px; }
+.mb-n { min-width: 5ch; text-align: right; }   /* "0/20" and "20/20" put the bar in the same place */
+.mb-mark { width: 1ch; margin-left: -6px; text-align: left; }   /* the partial-run marker sits outside the count */
 .mb-bar { width: 44px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; display: inline-block; }
 .mb-bar i { display: block; height: 100%; background: var(--woad); border-radius: 3px; }
 .mb-tag { font: 500 .66rem/1 var(--f-mono); letter-spacing: .05em; text-transform: uppercase; padding: 3px 5px; border-radius: 4px; background: var(--woad-soft); color: var(--woad); margin-left: 6px; vertical-align: 1px; }
@@ -396,6 +407,31 @@ footer a { color: var(--ink-2); }
 .mb-tasks-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .mb-ad { margin-top: 64px; padding-top: 48px; border-top: 1px solid var(--line); }
 .mb-ad .mb-tasks { margin-bottom: 20px; }
+.mb-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; margin: 8px 0 28px; align-items: start; }
+@media (max-width: 960px) { .mb-pair { grid-template-columns: minmax(0, 1fr); } }
+.mb-cmp { margin: 0; }
+.mb-nq p { color: var(--ink-2); font-size: .88rem; margin: 0 0 10px; }
+.mb-nq code { font: 500 .8rem var(--f-mono); }
+.nq-code { background: var(--code-bg); color: var(--code-ink); font: 400 .8rem/1.5 var(--f-mono); padding: 10px 14px; border-radius: 8px; margin: 0 0 10px; overflow-x: auto; }
+table.cmp em { font: 500 .62rem/1 var(--f-mono); font-style: normal; letter-spacing: .05em; text-transform: uppercase; color: var(--madder); margin-left: 6px; }
+table.cmp .up { color: var(--woad); font-weight: 600; }
+table.cmp .down { color: var(--madder); font-weight: 600; }
+.mb-cmp h4 { font: 600 .8rem/1.2 var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+table.cmp { min-width: 0; font-size: .88rem; font-variant-numeric: tabular-nums; }
+table.cmp th, table.cmp td { padding: 9px 14px; }
+table.cmp .num { text-align: right; white-space: nowrap; }
+table.cmp td:first-child { white-space: normal; font-weight: 500; }
+table.cmp small { color: var(--muted); font: 400 .74rem/1 var(--f-mono); margin-left: 6px; }
+table.cmp tr.hl td { background: var(--woad-soft); }
+table.cmp tr.hl td:last-child { color: var(--woad); font-weight: 600; }
+.mb-cmp-note { color: var(--ink-2); font-size: .86rem; margin: 10px 0 0; }
+@media (max-width: 560px) {
+  table.cmp { font-size: .8rem; }
+  table.cmp th, table.cmp td { padding: 8px 8px; }
+  table.cmp .num { white-space: normal; }
+  table.cmp td:first-child { min-width: 118px; }
+  table.cmp small { display: block; margin: 4px 0 0; }
+}
 @media (max-width: 960px) { .mb-tasks { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .mb-tasks { grid-template-columns: 1fr; } }
 .mb-chart-scroll { overflow-x: auto; }
@@ -404,4 +440,9 @@ footer a { color: var(--ink-2); }
 /* a card's single implicit column must be allowed to shrink, or a scrolling chart inside widens the page */
 .card { grid-template-columns: minmax(0, 1fr); }
 .mb-chart-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; justify-content: space-between; }
-#ad-table { min-width: 900px; }
+#ad-table { min-width: 1340px; }
+.mb-nq table.cmp td:nth-child(2) { color: var(--ink); font-weight: 600; }
+.mb-nq table.cmp td:nth-child(3) { color: var(--muted); }
+table.cmp.pgt td:nth-child(2) { color: var(--ink); font-weight: 600; }
+table.cmp.pgt tr.hl td:nth-child(2) { color: var(--woad); }
+table.cmp.pgt tr.hl td:last-child { color: var(--ink); font-weight: 400; }

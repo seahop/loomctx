@@ -482,6 +482,11 @@ def call_model(p: Provider, system: str, messages: list, tools, max_tokens: int 
                 args = {}
             calls.append((tc["id"], fn["name"], args))
         u = data.get("usage") or {}
+        # sent back as returned (reasoning_details included, as OpenRouter asks
+        # for Gemini), except a null content: one provider's template adds it
+        # to a string and rejected the next turn (DeepSeek V3.1 via CoreWeave,
+        # 400 "tried to use + operator on undefined and string")
+        msg = {**msg, "content": msg.get("content") or ""}
         return Turn(msg.get("content") or "", calls, msg,
                     {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0),
                      "cost": float(u.get("cost") or 0.0)}, choice.get("finish_reason") or "")

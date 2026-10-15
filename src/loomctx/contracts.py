@@ -560,6 +560,135 @@ class PathPack(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+MAX_LIST_DEPTH = 6
+MAX_LIST_LIMIT = 1000
+
+
+class ListFilter(BaseModel):
+    """One condition on an entity's CURRENT value of a predicate: the newest
+    visible, unsuperseded, in-scope row (valid at `valid_at` when one is
+    asked), compared case-insensitively on scalars. `ne` holds for an entity
+    with no value on record (D-107: "accounts not disabled" includes the
+    ones whose status was never collected — the page says how many)."""
+
+    predicate: str
+    op: Literal["eq", "ne", "in", "contains", "exists", "absent", "within", "not_within"] = "eq"
+    value: Any = Field(
+        default=None,
+        description="the compared value: a scalar for eq / ne / contains, a "
+        "list for in; an entity ('type:key') for within / not_within; ignored "
+        "by exists / absent",
+    )
+    depth: int = Field(
+        default=6, ge=1, le=32,
+        description="within / not_within: the most `predicate` edges from the "
+        "entity to `value` (nested membership: user -member_of-> group "
+        "-member_of-> … -> value); clamped to the list depth cap",
+    )
+
+
+class ListRequest(BaseModel):
+    """"Which entities ...?" — an exact, paged set of entities instead of a
+    ranked pack (D-107). The candidates are the entities that reach `of`
+    along `via` within `depth` edges (group membership, nested), or, without
+    `of`, every entity of `type`; `where` filters them, all conditions
+    holding. Every row is cited by the rows that admitted it; the total is
+    exact unless a cap is noted."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    namespace: str = DEFAULT_NAMESPACE
+    type: str | None = Field(
+        default=None,
+        description="keep only entities of this type (user, computer, host…)",
+    )
+    of: EntityRef | None = Field(
+        default=None,
+        description="list entities connected to this one (a group's members, "
+        "a host's software) instead of a whole type",
+    )
+    via: list[str] = Field(
+        default_factory=list,
+        description="the edge predicates walked from `of`; empty = the "
+        "namespace's registered containment predicates",
+    )
+    direction: Literal["in", "out", "any"] = Field(
+        default="in",
+        description="in: entities whose edge points AT `of` (members of a "
+        "group: user member_of group); out: what `of` points at; any: both",
+    )
+    depth: int = Field(
+        default=1, ge=1, le=32,
+        description="the most edges between a listed entity and `of` "
+        f"(nested membership); clamped to {MAX_LIST_DEPTH} and noted",
+    )
+    where: list[ListFilter] = Field(default_factory=list)
+    paths: bool = Field(
+        default=False,
+        description="an `of` listing: give each row its route to `of`, every "
+        "edge cited (how an account reaches a machine through groups and ACL "
+        "grants); costs budget",
+    )
+    fields: list[str] = Field(
+        default_factory=list,
+        description="predicates whose current value each row should show, "
+        "cited (beyond the ones `where` already names)",
+    )
+    limit: int = Field(default=50, gt=0, le=MAX_LIST_LIMIT)
+    offset: int = Field(default=0, ge=0)
+    budget: int = Field(
+        default=1500, gt=0, le=1_000_000,
+        description="token budget, charged on each row's rendered text plus "
+        "its citations; rows past it are left for the next page",
+    )
+    as_of: datetime | None = None
+    valid_at: datetime | None = None
+
+
+class ListRow(BaseModel):
+    """One listed entity, its display name when one is registered, the
+    current values the request filtered on or asked for, and the rows
+    that back them (an `of` listing also cites the edge that admitted it)."""
+
+    entity: EntityRef
+    name: str | None = None
+    values: dict[str, ObjectValue] = Field(default_factory=dict)
+    cites: list[Citation] = Field(default_factory=list)
+    hops: int | None = Field(
+        default=None,
+        description="an `of` listing: edges between this entity and `of` (1 = direct)",
+    )
+    path: list[PathEdge] = Field(
+        default_factory=list,
+        description="with `paths`: the edges from this entity to `of`, as stored, each cited",
+    )
+    through: EntityRef | None = Field(
+        default=None,
+        description="an `of` listing past one hop: the entity one step closer to `of` on its route",
+    )
+
+
+class ListPage(BaseModel):
+    """One page of a ListRequest, sorted by entity key so paging is stable.
+    `total` counts every match, not just this page; `next_offset` is set
+    while more remain. `notes` say what the listing could not do exactly —
+    a candidate cap, entities with no value on record for a filter, an
+    unknown predicate — advice, not evidence (D-064)."""
+
+    namespace: str
+    rows: list[ListRow] = Field(default_factory=list)
+    total: int = Field(default=0, ge=0)
+    exact: bool = Field(
+        default=True,
+        description="false when a cap stopped the candidate walk, so `total` "
+        "is a lower bound (the note names the cap)",
+    )
+    offset: int = Field(default=0, ge=0)
+    next_offset: int | None = None
+    charged_tokens: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Schema registry — what makes the core domain-agnostic                       #
 # --------------------------------------------------------------------------- #
@@ -604,6 +733,95 @@ class PredicateDef(BaseModel):
     )
 
 
+class QueryParam(BaseModel):
+    """One parameter of a named query (D-108). Without a default it is
+    required. An `entity` parameter takes a 'type:key' handle or a name the
+    namespace's label predicates know (resolved like find_entity, within
+    `entity_type` when set)."""
+
+    name: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str = ""
+    kind: Literal["string", "entity", "integer", "boolean"] = "string"
+    entity_type: str | None = None
+    default: Any = None
+
+
+class QueryDef(BaseModel):
+    """A named, parameterized question a namespace answers exactly (D-108):
+    a ListRequest template whose string values may be `{param}`
+    placeholders — "effective_members(group)", "unconstrained delegation
+    hosts that are not DCs". Data, not code: a connector registers the
+    questions its domain asks, and an agent runs one by name instead of
+    composing the walk and filters itself. `namespace`, paging and budget
+    come from the call, never the template."""
+
+    name: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str
+    params: list[QueryParam] = Field(default_factory=list)
+    request: dict[str, Any] = Field(
+        description="a ListRequest without namespace / limit / offset / "
+        "budget / as_of / valid_at; '{param}' strings are substituted",
+    )
+
+    @model_validator(mode="after")
+    def _template_is_a_list_request(self) -> "QueryDef":
+        reserved = {"namespace", "limit", "offset", "budget", "as_of", "valid_at"} & set(self.request)
+        if reserved:
+            raise ValueError(f"query '{self.name}': the call supplies {sorted(reserved)}, not the template")
+        sample = {p.name: {"string": "x", "entity": "t:x", "integer": 1, "boolean": True}[p.kind]
+                  for p in self.params}
+        ListRequest.model_validate(fill_template(self.request, sample))
+        return self
+
+
+def fill_template(value: Any, params: dict[str, Any]) -> Any:
+    """`value` with every '{name}' string replaced by params[name]: a whole
+    placeholder takes the value as typed (an entity handle 'type:key'
+    becomes a ref where an EntityRef is expected), one inside a longer
+    string is spelled in."""
+    if isinstance(value, dict):
+        filled = {k: fill_template(v, params) for k, v in value.items()}
+        if isinstance(filled.get("of"), str):
+            t, _, k = filled["of"].partition(":")
+            filled["of"] = {"type": t, "key": k}
+        return filled
+    if isinstance(value, list):
+        return [fill_template(v, params) for v in value]
+    if isinstance(value, str):
+        whole = value[1:-1] if value.startswith("{") and value.endswith("}") else None
+        if whole in params:
+            return params[whole]
+        for name, v in params.items():
+            value = value.replace("{" + name + "}", str(v))
+    return value
+
+
+class QueryRequest(BaseModel):
+    """Run a namespace's named query (D-108); the answer is a ListPage."""
+
+    namespace: str = DEFAULT_NAMESPACE
+    name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=50, gt=0, le=MAX_LIST_LIMIT)
+    offset: int = Field(default=0, ge=0)
+    budget: int = Field(default=1500, gt=0, le=1_000_000)
+    as_of: datetime | None = None
+    valid_at: datetime | None = None
+
+
+class NotCollectedDef(BaseModel):
+    """Something a namespace's sources do not carry, declared by the
+    connector (D-110): an LDAP export has no local group membership, so
+    "local admins of WS-1" cannot be answered from it — and an empty result
+    must not read as "none". `words` are the plain terms a question uses for
+    it; the engine notes the declaration when a question names them."""
+
+    topic: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    description: str
+    words: list[str] = Field(default_factory=list)
+    source: str = ""
+
+
 class SchemaRegistration(BaseModel):
     """Per-namespace registry (D-024). Registering is additive (a later POST
     merges by name). Validation on ingest: a registered predicate's
@@ -614,3 +832,12 @@ class SchemaRegistration(BaseModel):
     entity_types: list[EntityTypeDef] = Field(default_factory=list)
     predicates: list[PredicateDef] = Field(default_factory=list)
     strict: bool = False
+    queries: list[QueryDef] = Field(
+        default_factory=list,
+        description="named questions the namespace answers exactly (D-108); "
+        "a later registration replaces a query of the same name",
+    )
+    not_collected: list[NotCollectedDef] = Field(
+        default_factory=list,
+        description="what the namespace's sources do not carry (D-110); merged by topic",
+    )

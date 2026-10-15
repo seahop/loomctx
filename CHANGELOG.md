@@ -8,6 +8,82 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 Everything below is on `main` and not yet in a tagged release (the latest
 tag is v0.1.0).
 
+### Active Directory audits at 500,000 objects (2026-10-14)
+
+- The five standard AD audits pass 92% at 500,000 objects and 93% at
+  10,000 (35 models × 5; 24 of 35 perfect at 500k), with the same steps and
+  spend at both sizes; 90% with named queries hidden. Three harder audits
+  (access, local admin, Kerberoastable admins; D-113) are scored apart: 81%
+  at both sizes. Full tables in `docs/models.md`.
+
+### Compound questions; what is not collected (D-110)
+
+- List mode: `within` / `not_within` filters (nested membership), routes on
+  rows (`paths`), and a paging note. "Which Domain Admins have rights over
+  WS-1" is one call.
+- Connectors declare what they do not collect (`not_collected`); the LDAP
+  connector declares local groups, sessions and GPO user rights, and empty
+  results and matching questions say so.
+- `contains` filters seed from the label index (`subjects_with_text`): a
+  substring filter over a whole type at 500k objects, 52 s -> 0.1 s. Under
+  an `of` entity, seed lookups stop at the upward-walk limit.
+- Postgres writes claims set at a time, as SQLite has since D-105: a 500k
+  import across a network 6.3 h → 45 min (22,586 s → 2,703 s).
+- `LOOMCTX_MCP_WRITES=0` hides `record_claim`, for read-only agents and
+  scorecards (agents sharing one store must not leave claims for the next).
+- `find_entity` and pack names no longer depend on the order a store returns
+  label rows in (Postgres named groups by their DN where SQLite used the
+  friendly name).
+- A listing's `of` takes a name where the handle goes (`user:mreyes@corp.local`
+  for a SID-keyed account), as `within` does.
+
+### Faster selective scope walks (D-109)
+
+- A walk window of 500+ entities is narrowed by a selective topic even under
+  the entity cap; rarity is judged on the namespace's counts; entities that
+  lead deeper (nested OUs) are kept; edges into the cut leave the pack's
+  pool. The AD delegation ask: 8.8 s -> 1.3 s on a 10k forest, same answer.
+- find_path orders equal-length paths by specificity (fewest rows at their
+  interior entities), not by random ids: the same data returns the same
+  paths, and the blind AD benchmark's find_path is 11/11 at every budget.
+
+### List mode (D-107)
+
+- `POST /v1/list` and MCP `list_entities`: every entity matching conditions,
+  with an exact count — a group's nested members, filtered on current values
+  (`enabled=false`, `is_dc!=true`), paged and cited. Seeded from indexes and
+  read set-wise, so it costs the same shape at 10k objects as at 500k.
+
+### Named queries (D-108)
+
+- A schema registration can carry `queries`: named, parameterized list
+  templates. `POST /v1/query`, MCP `run_query`; `describe_namespace` lists
+  them. The LDAP connector registers effective_members, enabled_members,
+  account_groups, unconstrained_delegation_hosts, domain_trusts,
+  kerberoastable_users and asrep_roastable_users.
+- `LOOMCTX_MCP_QUERIES=0` hides them on the MCP surface.
+
+### Draft a schema registration from a sample (D-106)
+
+- `python -m loomctx.registry draft SAMPLE [--format envelopes|ndjson|json|ldif]
+  [--namespace NS] [--out FILE] [--notes FILE]` reads a connector's emitted
+  envelope NDJSON, JSON records or LDIF and prints a draft `SchemaRegistration`.
+  It infers entity types, predicates, `object_types`, containment, node_status,
+  label and display. Review notes say what it guessed. It never registers
+  anything. On the shipped connectors' envelopes it reproduces 86–92 % of the
+  hand-written predicates.
+
+### Bulk import about 3x faster (D-105)
+
+- SQLite records a batch of claims set at a time (one lookup per batch for
+  replays, entities and aliases; `executemany` for the rows), and the direct
+  loader (`loomctx.ingest`, every connector's `import --db`) runs in a new
+  store bulk mode: commits every 5 s, a larger page cache and checkpoint
+  interval, and into an empty store the query indexes built once at the end.
+  The 175k-observation realistic forest imports in 16 s instead of 49 s
+  (a tenth of the disk writes), the 6.5M-observation one in 15 minutes
+  instead of 42 (a fifth of the writes); what is stored is unchanged.
+
 ### Model scorecard 2026-09-28; Active Directory audits published
 
 - `docs/models.md` re-measured on the current engine: 35 models, five runs of

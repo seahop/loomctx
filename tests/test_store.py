@@ -327,6 +327,10 @@ def test_dedupe_survives_losing_the_insert_race(store, monkeypatch):
         calls["n"] += 1
         return None if calls["n"] == 1 else real(namespace, event_id)
 
+    if hasattr(store, "_existing_by_events"):
+        # SQLite pre-checks a whole batch at once (D-105): hide it there
+        monkeypatch.setattr(store, "_existing_by_events", lambda marks: {})
+        calls["n"] = 1
     monkeypatch.setattr(store, "_existing_by_event", flaky)
     replay = store.record_claim(_claim(event_id="race-1"))
     assert replay.id == first.id and calls["n"] == 2
@@ -1266,6 +1270,58 @@ def test_subjects_citing_maps_documents_back_to_entities(store):
         for i in range(2, 9)])
     assert store.subjects_citing("ns", [a.id], per_artifact=2) == {a.id: [cve, EntityRef(type="host", key="h1")]}
     assert len(store.subjects_citing("ns", [a.id], per_artifact=100)[a.id]) == 9
+
+
+def test_relation_summary_is_cached_until_the_data_changes(store):
+    """describe_namespace's map is a GROUP BY over every observation (86 s at
+    6.5M rows), and each MCP session is a fresh process: the store keeps it
+    until a write changes what it counts (D-104)."""
+    def logins() -> int:
+        return sum(r[3] for r in store.relation_summary("default") if r[1] == "logged_in_by")
+    obs = store.record_claim(login_claim())
+    first = store.relation_summary("default")
+    assert store.relation_summary("default") == first and logins() == 1
+    store.record_claim(login_claim().model_copy(update={"object": EntityRef(type="user", key="other")}))
+    assert logins() == 2                       # a new observation invalidates it
+    store.redact("default", obs.id, "x")
+    assert logins() == 1                       # so does a tombstone
+
+
+def test_sqlite_checks_references_on_migration_not_every_open(tmp_path, caplog):
+    """foreign_key_check walks every reference (23 s at 6.5M observations)
+    and every MCP session opened the store anew: it runs when a migration
+    does, which is when an old file's dangling rows can still be there."""
+    import logging
+    import sqlite3
+    from loomctx.store.sqlite import SCHEMA_VERSION, SqliteStore
+    path = str(tmp_path / "fk.db")
+    SqliteStore(path).close()
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("INSERT INTO aliases (namespace, alias, entity_id) VALUES ('default', 'dangling', 'nowhere')")
+    c.execute("UPDATE loomctx_meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION - 1),))
+    c.commit()
+    c.close()
+    with caplog.at_level(logging.WARNING, logger="loomctx.store"):
+        SqliteStore(path).close()                     # migrates: checked, and reported
+    assert any("violate foreign keys" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="loomctx.store"):
+        SqliteStore(path).close()                     # already current: not walked again
+    assert not any("violate foreign keys" in r.message for r in caplog.records)
+
+
+def test_sqlite_refresh_statistics_analyzes(tmp_path):
+    """The SQLite planner chose indexes blind without sqlite_stat1 (a cite
+    lookup scanned 6.5M rows): a bulk load now ends with ANALYZE."""
+    import sqlite3
+    from loomctx.store.sqlite import SqliteStore
+    s = SqliteStore(str(tmp_path / "a.db"))
+    s.record_claim(login_claim())
+    s.refresh_statistics()
+    s.close()
+    c = sqlite3.connect(str(tmp_path / "a.db"))
+    assert c.execute("SELECT count(*) FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone()[0] == 1
 
 
 def test_observations_by_prefix_resolves_cite_tokens(store):
@@ -2223,7 +2279,9 @@ def test_hub_completion_learns_the_attribute_from_the_registry(store, monkeypatc
 def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
     """With the entity cap binding, the walk cuts entities that do not
     carry the question's topic, not the ones that do (D-061); the cut is
-    still reported as scope_cap."""
+    still reported as scope_cap. A topic this selective (three carriers in
+    a crowded window) admits only its carriers rather than filling the cap
+    with the rest (D-104)."""
     from loomctx import context
     from loomctx.context import resolve_scope_paths
     from loomctx.contracts import ScopeSpec
@@ -2234,14 +2292,14 @@ def test_topic_carriers_go_first_when_the_entity_cap_binds(store, monkeypatch):
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
                                  truncated=truncated, question=_KEV_Q)
     keys = [r.key for r in got]
-    assert len(got) == 8 and set(keys[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
-    assert any(t.reason == "scope_cap" for t in truncated.values())
+    assert set(keys[2:]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"} and len(got) == 5
+    assert any(t.reason == "scope_cap" and t.total > t.gathered for t in truncated.values())
     # no hub at all, just a crowded frontier: the carriers are probed for
     monkeypatch.setattr(context, "_GATHER_LIMIT", 1000)
     truncated = {}
     got, _ = resolve_scope_paths(store, "v", ScopeSpec(subjects=[host], **_KEV_SCOPE),
                                  truncated=truncated, question=_KEV_Q)
-    assert len(got) == 8 and set(r.key for r in got[2:5]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"}
+    assert set(r.key for r in got[2:]) == {"CVE-2026-0000", "CVE-2026-0001", "CVE-2026-0002"} and len(got) == 5
     assert not any(t.reason == "gather_limit" for t in truncated.values())
 
 

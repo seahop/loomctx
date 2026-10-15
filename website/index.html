@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap">
-<link rel="stylesheet" href="assets/site.css?v=dce2a2f390">
+<link rel="stylesheet" href="assets/site.css?v=0c5d950f64">
 <script>
   // apply a remembered theme before first paint
   try { var t = localStorage.getItem("loomctx-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
@@ -123,18 +123,18 @@
     </div>
     <div class="contrast">
       <div>
-        <div class="big red">127,715<small>tokens</small></div>
+        <div class="big red">127,717<small>tokens</small></div>
         <p>Mean prompt when the model is handed the full record for each question. The largest ran to 1.87 million tokens, and six multi-hop questions were too big to send at all.</p>
-        <span class="src">full-context baseline · 95% on the 47 it could send</span>
+        <span class="src">full-context baseline · 96% on the 47 it could send</span>
       </div>
       <div>
-        <div class="big blue">611<small>tokens</small></div>
+        <div class="big blue">616<small>tokens</small></div>
         <p>Mean prompt for a LoomCtx context pack at a 3,200-token budget. Accuracy: 96% on all 53 questions, including the multi-hop ones.</p>
         <span class="src">loomctx@3200 · same corpus, same reader model</span>
       </div>
       <div>
         <div class="big">15<small>of 18</small></div>
-        <p>“Which CISA-KEV CVEs affect software this host runs?” LoomCtx answered it in 15 of 18 runs. Vector search, recency and full context got 0 of 18.</p>
+        <p>“Which CISA-KEV CVEs affect software this host runs?” LoomCtx answered it in 15 of 18 runs. Vector search, newest facts only and full context got 0 of 18.</p>
         <span class="src">542,099 real observations: CISA KEV + NVD + EPSS</span>
       </div>
     </div>
@@ -313,29 +313,29 @@
     <div class="evidence">
       <div class="card">
         <h3>Retrieval accuracy by token budget</h3>
-        <p class="sub">53 questions over 542,099 real vulnerability observations. The reader is deepseek-chat-v3.1; each figure is the mean of 3 runs, and every condition gets the same token budget.</p>
+        <p class="sub">53 questions over 542,099 real vulnerability observations. The reader is deepseek-chat-v3.1; each figure is the mean of 3 runs. All three start from the same facts with the same token budget and differ only in which facts they pick: LoomCtx's ranked pack, the facts most similar to the question (vector), or simply the newest ones.</p>
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>LoomCtx context pack</span>
           <span><i class="dot" style="background:var(--muted)"></i>Vector top-k</span>
-          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)"></i>Most recent</span>
+          <span><i class="dot" style="background:var(--surface);box-shadow:inset 0 0 0 2px var(--muted)"></i>Newest facts only</span>
         </div>
         <div class="chart-box">
-          <svg id="scorechart" viewBox="0 0 560 250" role="img" aria-label="Accuracy by budget. At 400 tokens: LoomCtx 81%, vector 75%, recency 50%. 800: 84, 77, 75. 1,600: 86, 79, 75. 3,200: 96, 87, 77."></svg>
+          <svg id="scorechart" viewBox="0 0 560 250" role="img" aria-label="Accuracy by budget. At 400 tokens: LoomCtx 79%, vector 75%, newest facts only 49%. 800: 84, 77, 75. 1,600: 86, 78, 75. 3,200: 96, 86, 76."></svg>
           <div class="chart-tip" id="chart-tip" hidden></div>
         </div>
         <details class="tbl">
           <summary>Show as table</summary>
           <table>
-            <thead><tr><th scope="col">Budget</th><th scope="col">LoomCtx</th><th scope="col">Vector</th><th scope="col">Recency</th></tr></thead>
+            <thead><tr><th scope="col">Budget</th><th scope="col">LoomCtx</th><th scope="col">Vector</th><th scope="col">Newest facts only</th></tr></thead>
             <tbody>
-              <tr><td>400</td><td>81%</td><td>75%</td><td>50%</td></tr>
+              <tr><td>400</td><td>79%</td><td>75%</td><td>49%</td></tr>
               <tr><td>800</td><td>84%</td><td>77%</td><td>75%</td></tr>
-              <tr><td>1,600</td><td>86%</td><td>79%</td><td>75%</td></tr>
-              <tr><td>3,200</td><td>96%</td><td>87%</td><td>77%</td></tr>
+              <tr><td>1,600</td><td>86%</td><td>78%</td><td>75%</td></tr>
+              <tr><td>3,200</td><td>96%</td><td>86%</td><td>76%</td></tr>
             </tbody>
           </table>
         </details>
-        <span class="src">docs/evaluation.md · 2026-09-24. Reruns on 2026-09-26, 2026-09-27 and 2026-09-29 (the current engine) reproduced it within variance.</span>
+        <span class="src">docs/evaluation.md · 2026-10-14, the current build. Runs since 2026-09-24 all agree within 2 points.</span>
       </div>
 
       <div class="card">
@@ -346,9 +346,9 @@
           <li><span>Runs citing data the model never saw (scored as fails)</span><b>2 of 686</b></li>
           <li><span>Cheapest clean pass per 4-task run</span><b>$0.01</b></li>
           <li><span>Whole 35-model sweep, 5 runs each</span><b>≈ $46</b></li>
-          <li><span>Perfect on the 5 AD audits, 10,000-account forest</span><b>19 of 35</b></li>
+          <li><span>Perfect on the 5 standard AD audits, 500,000-object forest</span><b>24 of 35</b></li>
         </ul>
-        <span class="src">docs/models.md · 2026-09-28 · <a href="#models">every model, cost and task below ↓</a></span>
+        <span class="src">docs/models.md · 2026-09-28, AD 2026-10-14 · <a href="#models">every model, cost and task below ↓</a></span>
       </div>
     </div>
 
@@ -359,8 +359,9 @@
           <li><span>Ingest through the gateway</span><b>237 /s</b></li>
           <li><span>Asks, p50</span><b>83 ms</b></li>
           <li><span>Ask throughput</span><b>186 /s</b></li>
+          <li><span>Standard AD audits at 500k, one shared Postgres</span><b>91%</b></li>
         </ul>
-        <span class="src">GKE, auth on, real corpus, 0 errors · 2026-09-27</span>
+        <span class="src">GKE, auth on, real corpus, 0 errors · 2026-09-27; AD on Postgres 2026-10-15</span>
       </div>
       <div class="card">
         <h3>When the primary dies</h3>
@@ -394,6 +395,12 @@
       <p class="lede">LoomCtx doesn't ship a model. Your agent brings its own, so we ran 36 of them through the same four tasks, five times each, against real data. Every number below is what the run measured and what OpenRouter billed.</p>
     </div>
 
+    <div class="mb-key" aria-label="The two scorecards on this page">
+      <div><span class="mb-key-n">1</span><div><b>Core tasks</b><span>Four agent tasks on real vulnerability data (CISA KEV, NVD, EPSS; 542,100 facts). 35 models, 5 runs each, 2026-09-28. Everything from here to the AD section.</span></div></div>
+      <div><span class="mb-key-n">2</span><div><b>Active Directory audits</b><span>Eight identity audits on generated forests of 10,000 and 500,000 objects. 35 models, 5 runs each, 2026-10-14. <a href="#ad-audits">Jump to it ↓</a></span></div></div>
+    </div>
+
+    <p class="mb-label">Scorecard 1 · Core tasks on real vulnerability data</p>
     <div class="mb-meta" id="mb-meta" aria-label="Run summary"></div>
 
     <div class="mb-tasks">
@@ -407,7 +414,7 @@
     <div class="mb-charts">
       <div class="card">
         <h3>Speed, cost and reliability</h3>
-        <p class="sub">Each dot is a model: how long one run took end to end, what it cost, and how often it was right. The best picks sit bottom left in solid blue; those are named. Both axes are log scale; hover any dot for its name and numbers. Switch to the Active Directory audits to see the same trade-off on a 10,000-account forest.</p>
+        <p class="sub">Each dot is a model: how long one run took end to end, what it cost, and how often it was right. The best picks sit bottom left in solid blue; those are named. Both axes are log scale; hover any dot for its name and numbers. It starts on the core tasks; switch to the Active Directory audits to see the same trade-off for the five standard audits on the 500,000-object forest.</p>
         <div class="mb-chart-head">
           <div class="chart-legend" aria-hidden="true">
             <span><i class="dot" style="background:var(--woad)"></i>passed every task</span>
@@ -415,14 +422,14 @@
             <span><i class="dot" style="background:var(--muted)"></i>passed less</span>
           </div>
           <div class="mb-chips" id="mb-speed-view" role="group" aria-label="Scorecard">
-            <button type="button" class="mb-chip" data-view="core" aria-pressed="true">4 core tasks</button>
-            <button type="button" class="mb-chip" data-view="ad" aria-pressed="false">5 AD audits</button>
+            <button type="button" class="mb-chip" data-view="core" aria-pressed="true">Core tasks</button>
+            <button type="button" class="mb-chip" data-view="ad" aria-pressed="false">AD audits, 500k</button>
           </div>
         </div>
         <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-speed" role="img" aria-label="Scatter plot of cost per run against wall-clock time per run, one dot per model, shaded by how many tasks it passed. The full data is in the tables below."></svg></div><div class="chart-tip" id="mb-tip3" hidden></div></div>
       </div>
       <div class="card">
-        <h3>Reliability against cost</h3>
+        <h3>Core tasks · reliability against cost</h3>
         <p class="sub">One row per result, from all 20 tasks passed down. Each dot is a model, placed by what one four-task run cost. Further left is cheaper; hover a dot for its name. The count in brackets is how many models got that result. * Mistral Large was rate-limited, so only 5 of its 20 task-runs were scored.</p>
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
@@ -432,7 +439,7 @@
         <div class="chart-box"><div class="mb-chart-scroll"><svg id="mb-scatter" role="img" aria-label="Scatter plot of tasks passed out of 20 against cost per four-task run, one dot per model. The full data is in the table below."></svg></div><div class="chart-tip" id="mb-tip" hidden></div></div>
       </div>
       <div class="card">
-        <h3>Cost per correct answer</h3>
+        <h3>Core tasks · cost per correct answer</h3>
         <p class="sub">What a run cost, divided by the tasks it got right. This ranks price and reliability together. Log scale. * Mistral Large had only 5 scored task-runs.</p>
         <div class="chart-legend" aria-hidden="true">
           <span><i class="dot" style="background:var(--woad)"></i>passed all 20</span>
@@ -481,28 +488,107 @@
 
     <div class="mb-ad" id="ad-audits">
       <div class="sec-head">
-        <span class="eyebrow">Identity data</span>
-        <h3>Active Directory audits, on a 10,000-account forest.</h3>
-        <p class="lede">The same agents, pointed at a generated Active Directory export instead: 10,000 users, 1,500 groups and 2,000 computers across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Five standard reviews an identity team runs, five times each per model.</p>
+        <span class="eyebrow">Scorecard 2 · Active Directory audits</span>
+        <h3>92% at half a million objects, the same as at 10,000.</h3>
+        <p class="lede">The same agents, pointed at a generated Active Directory export instead. The large forest holds 370,000 users, 55,000 groups and 75,000 computers (6.5 million facts) across a parent domain, a child domain and two external trusts, plus a second domain exported without group membership. Five standard reviews an identity team runs, five times each per model, pass 92% of the time there and 93% on a 10,000-account forest. Three harder audits, scored separately, show where agents still struggle. The data is synthetic.</p>
       </div>
       <div class="mb-meta" id="ad-meta" aria-label="AD run summary"></div>
-      <div class="mb-tasks mb-tasks-5">
+      <div class="mb-pair">
+      <div class="mb-cmp">
+        <h4>10,000 accounts against 500,000 objects</h4>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th scope="col"></th><th scope="col" class="num">10,000 accounts</th><th scope="col" class="num">500,000 objects</th></tr></thead>
+            <tbody>
+              <tr><td>Users / groups / computers</td><td class="num">10,000 / 1,500 / 2,000</td><td class="num">370,000 / 55,000 / 75,000</td></tr>
+              <tr><td>Facts loaded</td><td class="num">175,560</td><td class="num">6,502,512</td></tr>
+              <tr><td>Import, one container</td><td class="num">39 s</td><td class="num">49 min</td></tr>
+              <tr class="hl"><td>Standard audits passed</td><td class="num">93% <small>794 / 857</small></td><td class="num">92% <small>795 / 860</small></td></tr>
+              <tr><td>Models perfect on them (25/25)</td><td class="num">18</td><td class="num">24</td></tr>
+              <tr><td>Standard audits, named queries off</td><td class="num">90% <small>772 / 856</small></td><td class="num">90% <small>770 / 855</small></td></tr>
+              <tr><td>Harder audits passed</td><td class="num">81% <small>413 / 513</small></td><td class="num">81% <small>412 / 511</small></td></tr>
+              <tr><td>Median time per standard audit</td><td class="num">21 s</td><td class="num">23 s</td></tr>
+              <tr><td>Agent steps per standard audit</td><td class="num">5.7</td><td class="num">5.7</td></tr>
+              <tr><td>Tokens the agent read per standard audit</td><td class="num">58.5k</td><td class="num">58.9k</td></tr>
+              <tr><td>Spend on the standard audits, 35 models × 5</td><td class="num">$59.68</td><td class="num">$60.79</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">Same 35 models, five runs each, one build, named queries on unless noted. Only the import grows with the data: what an agent reads depends on the question, not on the size of the directory.</p>
+      </div>
+      <div class="mb-cmp mb-nq">
+        <h4>Named queries, on and off</h4>
+        <p>A <b>named query</b> is a prepared question a connector ships with the schema. The LDAP connector registers seven, such as <code>enabled_members</code>, <code>account_groups</code>, <code>kerberoastable_users</code> and <code>unconstrained_delegation_hosts</code>. An agent runs one in a single call and gets exact, cited rows back:</p>
+        <pre class="nq-code">run_query("enabled_members", group="Domain Admins")</pre>
+        <p>Without them, the agent builds the same answer itself, for instance with a list call that walks <code>member_of</code> into the group and filters on <code>enabled</code>, or with a scoped ask. Every other tool is the same.</p>
+        <p><b>"Named queries off"</b> is the same engine, data and models with <code>run_query</code> hidden (<code>LOOMCTX_MCP_QUERIES=0</code>). It measures what the prepared queries add over the agent composing its own calls. The headline numbers use the default, on.</p>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th scope="col">Audit, 500,000 objects</th><th scope="col" class="num">On</th><th scope="col" class="num">Off</th><th scope="col" class="num">Change</th></tr></thead>
+            <tbody>
+              <tr><td>Cross-domain admins</td><td class="num">93%</td><td class="num">85%</td><td class="num"><span class="up">+8</span></td></tr>
+              <tr><td>Coverage</td><td class="num">87%</td><td class="num">93%</td><td class="num"><span class="down">-6</span></td></tr>
+              <tr><td>Nested groups</td><td class="num">92%</td><td class="num">95%</td><td class="num"><span class="down">-3</span></td></tr>
+              <tr><td>Delegation</td><td class="num">94%</td><td class="num">82%</td><td class="num"><span class="up">+12</span></td></tr>
+              <tr><td>Trusts</td><td class="num">97%</td><td class="num">96%</td><td class="num"><span>+1</span></td></tr>
+              <tr><td>Access <em>harder</em></td><td class="num">76%</td><td class="num">74%</td><td class="num"><span>+2</span></td></tr>
+              <tr><td>Local admin <em>harder</em></td><td class="num">82%</td><td class="num">80%</td><td class="num"><span>+2</span></td></tr>
+              <tr><td>Kerberoastable admins <em>harder</em></td><td class="num">84%</td><td class="num">78%</td><td class="num"><span class="up">+6</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">They help most where a query matches the question (cross-domain admins, delegation, Kerberoastable admins) and cost a few points on coverage and nested groups. Overall: standard audits 92% on against 90% off; harder audits 81% against 77%.</p>
+      </div>
+      </div>
+      <div class="mb-pair">
+      <div class="mb-cmp">
+        <h4>On Postgres, the scale deployment</h4>
+        <div class="table-wrap">
+          <table class="cmp pgt">
+            <thead><tr><th scope="col">500,000 objects, one build</th><th scope="col" class="num">Standard 5</th><th scope="col" class="num">Harder 3</th><th scope="col" class="num">Median audit</th></tr></thead>
+            <tbody>
+              <tr class="hl"><td>Postgres, one shared database</td><td class="num">91% <small>777 / 854</small></td><td class="num">80%</td><td class="num">21 s</td></tr>
+              <tr><td>SQLite, a private file per agent</td><td class="num">92% <small>787 / 860</small></td><td class="num">78%</td><td class="num">20 s</td></tr>
+              <tr><td>Postgres, named queries off</td><td class="num">91% <small>774 / 854</small></td><td class="num">79%</td><td class="num">23 s</td></tr>
+              <tr><td>SQLite, named queries off</td><td class="num">89% <small>756 / 845</small></td><td class="num">77%</td><td class="num">25 s</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mb-cmp-note">35 models, five runs each, all eight audits. Postgres 17 with pgvector served about 13 agents at once from one database, as a Kubernetes deployment would; SQLite gave each agent its own copy. Measured 2026-10-15.</p>
+      </div>
+      <div class="mb-cmp mb-nq">
+        <h4>What differs, and what doesn't</h4>
+        <p><b>Same answers.</b> Replaying 643 recorded agent calls against both returned the same totals and the same listings on every one.</p>
+        <p><b>Per audit, it goes both ways.</b> Cross-domain admins scored higher on SQLite, access and local admin higher on Postgres. The swings sit in a few models that flip all five runs together on tiny input differences, here the observation ids each store mints when it loads. That is store-to-store variance, not the database.</p>
+        <p><b>Speed.</b> Small lookups pay a network hop on Postgres (16 ms against 4 ms at the median); scoped questions take the same time on both; the slowest call of the whole sweep took 29 s. Loading the 6.5 million facts into Postgres takes 45 minutes.</p>
+      </div>
+      </div>
+      <div class="mb-tasks">
         <div class="mb-task"><b>Cross-domain admins</b><span>“Which dev.local accounts are effective members of Domain Admins in corp.local, and is each enabled?” Five are, up to three groups deep; one is disabled and must be called out.</span></div>
         <div class="mb-task"><b>Coverage</b><span>“Which groups is lab.local's labsvc-backup in?” That export never collected membership. The right answer says so; a confident “none” or a guessed group fails.</span></div>
         <div class="mb-task"><b>Nested groups</b><span>A membership report for one account: five groups, the last four levels up. A group nested into one of its groups, and a sibling group, must not be listed.</span></div>
-        <div class="mb-task"><b>Delegation</b><span>“Which non-DC computers are trusted for unconstrained delegation?” Three servers among 2,000 computers; the domain controllers and a constrained-delegation server are distractors.</span></div>
+        <div class="mb-task"><b>Delegation</b><span>“Which non-DC computers are trusted for unconstrained delegation?” Three servers among the computers; the domain controllers and a constrained-delegation server are distractors.</span></div>
         <div class="mb-task"><b>Trusts</b><span>Every trust corp.local has, with its direction, whether it's transitive and whether SID filtering is on. One partner is non-transitive, one quarantined.</span></div>
+        <div class="mb-task mb-task-hard"><b>Access <em>harder</em></b><span>“Which Domain Admins have rights over workstation WS-AUDIT01, and through what?” One through a group holding GenericAll, one through a direct WriteDacl grant. An operator who isn't an admin, and an admin with no grant, are decoys.</span></div>
+        <div class="mb-task mb-task-hard"><b>Local admin <em>harder</em></b><span>“Who is local administrator on WS-AUDIT01?” Local group membership isn't in an AD export. Saying so passes; presenting accounts as its local admins fails.</span></div>
+        <div class="mb-task mb-task-hard"><b>Kerberoastable admins <em>harder</em></b><span>“Which enabled Domain Admins, nested included, are Kerberoastable?” One nested admin has an SPN. A disabled admin with one, and a service account that isn't an admin, are decoys.</span></div>
       </div>
       <div class="table-wrap mb-table-wrap">
         <table class="mb-table" id="ad-table">
           <thead><tr>
             <th scope="col" data-sort="name">Model</th>
-            <th scope="col" data-sort="passed" class="num">Passed</th>
+            <th scope="col" data-sort="passed" class="num">Standard 5</th>
+            <th scope="col" data-sort="hard" class="num">Harder 3</th>
+            <th scope="col" data-sort="passed_10k" class="num">Standard, 10k</th>
+            <th scope="col" data-sort="passed_off" class="num">Standard, no named queries</th>
             <th scope="col" data-sort="xdomain" class="num">Admins</th>
             <th scope="col" data-sort="coverage" class="num">Coverage</th>
             <th scope="col" data-sort="groups" class="num">Groups</th>
             <th scope="col" data-sort="delegation" class="num">Delegation</th>
             <th scope="col" data-sort="trusts" class="num">Trusts</th>
+            <th scope="col" data-sort="access" class="num">Access</th>
+            <th scope="col" data-sort="localadmin" class="num">Local admin</th>
+            <th scope="col" data-sort="kerberoast" class="num">Kerberoast</th>
             <th scope="col" data-sort="cost" class="num">$ / 5 audits</th>
             <th scope="col" data-sort="secs" class="num">Time / 5 audits</th>
           </tr></thead>
@@ -510,8 +596,9 @@
         </table>
       </div>
       <div class="mb-foot">
-        <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. Every failing answer was read by hand before these numbers were published. Seven models' xdomain, groups and delegation runs are a re-run after an engine fix the first run surfaced (sideways walks through groups and OUs lost their chain, D-101). Rows marked * lost task-runs to upstream rate limits: most of Mistral Large's, two of Nemotron's.</p>
-        <p><b>GLM-5.3 Flash is slow.</b> It scored 25/25, but a five-audit run took it about fifteen minutes, and a single audit anywhere from half a minute to over twelve minutes (median two, against five seconds for Gemini 2.5 Flash). Read its timing as rough. Whatever it scores, it is a poor fit for an agent someone is waiting on. Marked † in the table. Nemotron 3 Super, Qwen 3.8 Max, Qwen 3.8 Flash and DeepSeek Chat v3.1 are in the same slow tier.</p>
+        <p><b>Same rules and order.</b> Scored as sets, on what an answer claims: every expected account, group, host or trust property present, no distractor put forward as an answer, and faithful citations. The local-admin audit is the one exception on citations: its right answer is that the data isn't there, which may have nothing to cite. Every failing answer was read by hand before these numbers were published. <b>Standard 5</b>, <b>Harder 3</b>, the audit columns, cost and time are the 500,000-object forest with named queries on (the default). <b>Standard, 10k</b> is the five standard audits on the 10,000-account forest; <b>Standard, no named queries</b> is the large forest with the connector's prepared queries hidden, so agents build every listing themselves (90% overall). Rows marked * lost task-runs to upstream rate limits.</p>
+        <p><b>Where agents still struggle.</b> The three harder audits combine conditions (nested membership and an ACL grant, nested membership and an account flag) or ask something the export can't answer. Across all models they pass 81% of the time, at both sizes, against 92% for the standard five. They are scored and shown separately so the headline stays comparable with the standard audits published in September.</p>
+        <p><b>Some models are slow.</b> Models marked † took over a minute and a half per audit at the median, so their timing is rough and they are a poor fit for an agent someone is waiting on.</p>
       </div>
     </div>
   </div>
@@ -541,13 +628,13 @@
     <div class="surfaces">
       <div class="surface">
         <h3>MCP, for agents</h3>
-        <p>Twelve tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
-        <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
+        <p>Fourteen tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
+        <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">list_entities</span><span class="chip">run_query</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
       </div>
       <div class="surface">
         <h3>HTTP, for everything</h3>
         <p>FastAPI with an OpenAPI spec. Ingest single envelopes or up to 1,000 as a batch or NDJSON stream.</p>
-        <div class="chips"><span class="chip">/v1/ask</span><span class="chip">/v1/path</span><span class="chip">/v1/expand</span><span class="chip">/v1/ingest/batch</span></div>
+        <div class="chips"><span class="chip">/v1/ask</span><span class="chip">/v1/path</span><span class="chip">/v1/list</span><span class="chip">/v1/query</span><span class="chip">/v1/expand</span><span class="chip">/v1/ingest/batch</span></div>
       </div>
       <div class="surface">
         <h3>SDKs</h3>
@@ -596,7 +683,7 @@
       <li><b>Supply chain:</b> digest-pinned images, SHA-pinned actions, Trivy gate, SBOM and provenance</li>
       <li><b>Data lifecycle:</b> tombstone redaction, retention purge, JSONL export and migration</li>
       <li><b>Bring any model:</b> OpenRouter, Anthropic, OpenAI, Groq, Venice, or self-hosted Ollama / vLLM</li>
-      <li><b>954 tests</b>: 841 run on SQLite and 936 on the Postgres lane, plus a scale-shape smoke test in CI</li>
+      <li><b>1,083 tests</b>, run on SQLite and on a Postgres lane, plus a scale-shape smoke test in CI</li>
     </ul>
   </div>
 </section>
@@ -659,8 +746,8 @@ curl -s -X POST localhost:8000/v1/ask \
   </div>
 </footer>
 
-<script src="assets/site.js?v=13431abf3e"></script>
-<script src="assets/models-data.js?v=006d7d7d6e"></script>
-<script src="assets/models.js?v=3232bd6fd9"></script>
+<script src="assets/site.js?v=be8f098eb7"></script>
+<script src="assets/models-data.js?v=6a46742b7d"></script>
+<script src="assets/models.js?v=ba22a9e6a9"></script>
 </body>
 </html>
