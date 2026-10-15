@@ -27,8 +27,8 @@ tag is v0.1.0).
 - `contains` filters seed from the label index (`subjects_with_text`): a
   substring filter over a whole type at 500k objects, 52 s -> 0.1 s. Under
   an `of` entity, seed lookups stop at the upward-walk limit.
-- Postgres writes claims set at a time, as SQLite has since D-105: the
-  one-at-a-time loop held a 500k import to ~283 facts/s across a network.
+- Postgres writes claims set at a time, as SQLite has since D-105: a 500k
+  import across a network 6.3 h → 45 min (22,586 s → 2,703 s).
 - `LOOMCTX_MCP_WRITES=0` hides `record_claim`, for read-only agents and
   scorecards (agents sharing one store must not leave claims for the next).
 - `find_entity` and pack names no longer depend on the order a store returns

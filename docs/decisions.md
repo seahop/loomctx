@@ -3427,8 +3427,10 @@ batch, entities matched through `unnest` arrays and inserted in one
 statement that returns what landed, and observations in multi-row INSERTs
 of 500 with `ON CONFLICT … DO NOTHING RETURNING id`. Tests compare a batch
 with the one-at-a-time path row for row on Postgres. Same host (no network
-in the way): the 10k forest 109 s → 65 s, identical contents; the
-across-the-network measurement follows the 2026-10-14 Postgres run.
+in the way): the 10k forest 109 s → 65 s, identical contents. Across the
+network (GKE, the 500k forest into an empty database on the same Postgres
+node, after the 2026-10-14 sweep): 22,586 s → 2,703 s (8.4×), the same
+6,502,512 observations.
 ## D-106 · A schema registration drafted from a sample, for review (2026-10-13)
 
 Future-work item 4. Every new source needs a `SchemaRegistration` (entity
