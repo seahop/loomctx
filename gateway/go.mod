@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/nats-io/nats.go v1.37.0
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/time v0.8.0
 )
 
