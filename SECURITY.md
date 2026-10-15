@@ -33,7 +33,7 @@ D-023). In short:
 
 ## Supported versions
 
-`main` and the latest tagged release (`v0.1.0`, 2026-09-09) are
+`main` and the latest tagged release (`v0.2.0`, 2026-10-15) are
 supported; a fix lands on `main` first and is re-tagged from the gated
 image when it warrants a release (D-045). Older tags get no backports.
 

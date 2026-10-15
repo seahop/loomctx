@@ -5,8 +5,24 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
-Everything below is on `main` and not yet in a tagged release (the latest
-tag is v0.1.0).
+Nothing yet.
+
+## v0.2.0 — 2026-10-15
+
+Scale to half a million directory objects, exact set answers for agents
+(list mode, named queries, compound filters, "not collected" declarations),
+batched Postgres writes, identity and security-data connectors, the second
+agent scorecard, and the review batches since v0.1.0. The repository went
+public with this release.
+
+### Security updates (2026-10-15)
+
+- Gateway and Go SDK on Go 1.27.2: six standard-library advisories that
+  govulncheck flags on 1.27.1 (GO-2026-6608, -6610, -6611, -6612, -6613,
+  -6617).
+- Engine base image re-pinned to the `python:3.14-slim` digest that carries
+  the Debian pcre2 and OpenSSL fixes (`~deb13u3`), and Python 3.14.8.
+- `santhosh-tekuri/jsonschema/v6` 6.0.3 in the gateway and the Go SDK.
 
 ### Active Directory audits at 500,000 objects (2026-10-14)
 
