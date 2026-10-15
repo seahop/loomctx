@@ -351,6 +351,26 @@ default `ask_scope`.
 
 ---
 
+## 9b. The same answer from every load of the same data
+
+**Evidence.** On one build, Postgres and SQLite returned the same totals
+and listings for every replayed call, yet Claude Haiku 4.5 passed the
+cross-domain audit 5/5 on one store and 0/5 on the other, with every tool
+result the same length: the difference was observation ids (random,
+minted at load) and the tie-breaks that use them. Temperature-0 models
+flip on such tokens all-or-nothing, so two loads of identical data score
+differently.
+
+**Design.** Mint observation ids from what makes a claim itself (the
+namespace and event id, or for a claim without one a hash of its subject,
+predicate, object, source and times) instead of uuid4, so a reload
+reproduces them; and break ranking ties on content (predicate, object,
+time) rather than id. Ids stay opaque to agents; the change is a schema
+note, not a contract change, but needs a migration path for stored ids.
+
+**Done when.** Loading the 500k forest twice, on either backend, gives
+byte-identical packs for the replay sample.
+
 ## 10. Carried over, unchanged
 
 - **Entity resolution review queue** (was item 5): hold low-confidence

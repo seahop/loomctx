@@ -109,6 +109,27 @@ scans and closures over hundreds of thousands of rows are 1.5–2.5× slower
 there; scoped packs are as fast or faster. Precomputed membership
 (future-work item 5) and set-based reads are where Postgres gains most.
 
+## Under load: the 2026-10-15 sweep, Postgres vs SQLite at 500k
+
+Every model x5, all eight audits, named queries on. Postgres: about 13
+agent jobs at once on the one database. SQLite: a private file per job,
+four per 64 GB node (all in the page cache). MCP round trip per tool call:
+
+| Tool | Postgres p50 / p95 / worst | SQLite p50 / p95 / worst |
+| --- | --- | --- |
+| `ask` | 436 ms / 903 ms / 7.9 s | 446 ms / 746 ms / 2.1 s |
+| `ask_scope` | 624 ms / 1,637 ms / 7.8 s | 591 ms / 1,806 ms / 9.4 s |
+| `list_entities` | 381 ms / 5,729 ms / 29 s | 117 ms / 4,453 ms / 18 s |
+| `run_query` | 44 ms / 3,859 ms / 8.0 s | 14 ms / 296 ms / 6.9 s |
+| `find_path` | 32 ms / 455 ms / 1.3 s | 20 ms / 258 ms / 0.7 s |
+| `find_entity` | 16 ms / 430 ms / 1.5 s | 4 ms / 227 ms / 0.3 s |
+| `describe_namespace` | 9 ms / 428 ms / 8.6 s | 8 ms / 240 ms / 22 s |
+
+The worst call of the whole sweep took 29 s; the 2026-10-14 run's worst
+took 52 minutes (the `contains` scan fixed in 482e25e, and two stores per
+32 GB node reading from disk). Median audit time: 21 s on Postgres, 20 s on
+SQLite.
+
 ## Imports
 
 Through the LDAP connector, as a user loads data:
@@ -144,7 +165,5 @@ Reducing this is future-work item 6.
 
 ## Pending
 
-- The 2026-10-14 model sweep's tool latencies with 16 agents sharing one
-  Postgres database, against SQLite's private copies.
 - A standing replay benchmark on each candidate build (future-work item 4).
   When it exists, it writes its table here.

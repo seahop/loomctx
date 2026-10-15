@@ -317,6 +317,27 @@ then cost to two significant figures, then time; incomplete rows last.
 
 `mistral-large` was rate-limited upstream (11 of 40 task-runs scored).
 
+**On Postgres (2026-10-15).** The same 500k forest loaded into Postgres 17
+(one shared database serving every agent at once, the scale deployment's
+shape) against SQLite (a private copy per agent), one build, every model x5:
+
+| Condition | Standard 5 | Harder 3 | Median audit |
+| --- | --- | --- | --- |
+| Postgres, named queries on | 777/854 (91%) | 408/508 (80%) | 21 s |
+| SQLite, named queries on | 787/860 (92%) | 401/515 (78%) | 20 s |
+| Postgres, named queries off | 774/854 (91%) | 404/511 (79%) | 23 s |
+| SQLite, named queries off | 756/845 (89%) | 387/501 (77%) | 25 s |
+
+The backends return the same totals and listings (the model-free replay of
+643 recorded calls agreed on every one); per-audit differences go both ways
+(cross-domain admins 85% Postgres / 93% SQLite with named queries on;
+access 77% / 72%; local admin 84% / 78%) and sit in a few temperature-0
+models that flip all five runs together. Their inputs differ only in what
+is arbitrary per store, observation ids and the tie-breaks that use them,
+so this is store-to-store variance, not Postgres. Full report and method:
+`docs/performance.md`; the cross-domain and Kerberoastable cells are a
+re-run on the build with the D-112 naming fix, both backends.
+
 **What the misses are.** On the first five, as before: a set stopped short
 (an admin or a nested group missed, the disabled account not flagged), and
 on coverage, "no groups" for a domain whose membership was never exported.
