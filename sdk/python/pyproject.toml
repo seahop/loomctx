@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loomctx-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Thin, stdlib-only Python client for the LoomCtx context engine"
 readme = "README.md"
 requires-python = ">=3.10"

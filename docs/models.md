@@ -36,9 +36,9 @@ at 10k), is below ([Active Directory audits](#active-directory-audits)).
   stop, a CVE named from memory — not a pack change: every exposure walk
   returned the same chain at the same size. Four of the nineteen models that
   were 20/20 there lost one exposure run each here.
-- **The faithfulness check holds:** 5 citations to an unseen observation in
-  686 task-runs (`gemini-3.5-flash` 4, `minimax-m2.7` 1), each failing its
-  run. Six models named CVE ids that do not exist in the store; the check
+- **The faithfulness check holds:** 5 citations to an unseen observation, in
+  2 of 686 task-runs (`gemini-3.5-flash` 4, `minimax-m2.7` 1), and both runs
+  failed. Six models named CVE ids that do not exist in the store; the check
   failed those runs.
 
 ## Short answer

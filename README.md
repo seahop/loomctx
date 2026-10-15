@@ -44,7 +44,7 @@ without touching LoomCtx's code.
 | Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
 | A graph database | traversal power, but the agent talks to the graph and gets whatever the query returns | the graph is the index, not the payload: the agent gets a question-scoped pack, and a multi-hop question is one `ask_scope` call |
 | SIEM search | fast search over events; entities are a pivot, not a memory | entity-centric memory across sources with provenance, conflict detection and time travel built into every read |
-| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that fails an invented one: across 695 task-runs on 35 models no answer cited an id it was not shown, and the runs that named a CVE that does not exist were failed (`docs/models.md`) |
+| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that fails an invented one: in 686 scored task-runs on 35 models, 2 cited an id the model was not shown, and both failed, as did every run that named a CVE that does not exist (`docs/models.md`) |
 
 ## Repository layout
 
@@ -150,7 +150,7 @@ shape** — a load-balanced tier of Go ingest gateways feeding a NATS buffer
 
 ## Limitations
 
-Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.md`.
+Known and deliberate, as of `v0.2.0`; the open list is `docs/hardening.md`.
 
 - **Ranking without an embedder is lexical.** Set `LOOMCTX_EMBED_*` for
   semantic ranking, document excerpts and `find_related`; without it the
@@ -183,24 +183,22 @@ Known and deliberate, as of unreleased `main`; the open list is `docs/hardening.
 
 ## Status
 
-Latest tag `v0.1.0` (2026-09-09); `main` carries the unreleased work listed
-under "Unreleased" in `CHANGELOG.md` (review fixes, recorded supersession,
-PROV-O export, honest budgets and hybrid ranking, schema v7, rate limiting,
-security-data connectors from directories and IdPs to host artifacts and
-red-team logs, identity resolution across tools, coverage and format-drift
-reporting, purple-team correlation). Working end to end: contracts,
+Latest release `v0.2.0` (2026-10-15); anything newer on `main` is listed
+under "Unreleased" in `CHANGELOG.md`. Working end to end: contracts,
 SQLite/Postgres stores, claim + document ingestion (single, batch, Go
 gateway, Kafka, shippers), context packs with scopes, relation chains and
-coverage reporting (`/v1/ask`, `/v1/expand`), cited reachability paths
+coverage reporting (`/v1/ask`, `/v1/expand`), exact paged listings and
+named queries for set-valued questions, cited reachability paths
 (`/v1/path`, D-067), provider-flexible answering
-(`/v1/answer`), an MCP server for agents, async enrichment, opt-in
-Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV, NVD,
-EPSS — `docs/real-data.md`) and with eighteen LLM agents over MCP
-(`docs/models.md`). Measured (laptop, generator co-located): 511k
-envelopes loaded in 81 s to SQLite, single-entity ask 2–5 ms at 465k
-observations, two-hop scope over 1,077 entities in 0.5 s; on GKE with
-real nodes, auth on and real data, 435/s load, 178/s ingest, 201/s ask
-(D-063, `deploy/README.md`).
+(`/v1/answer`), an MCP server for agents (14 tools), async enrichment,
+opt-in Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV,
+NVD, EPSS — `docs/real-data.md`); with 35 LLM agents over MCP, five runs
+each (`docs/models.md`); and on synthetic Active Directory forests of
+10,000 and 500,000 objects, where agents pass the five standard audits 93%
+and 92% of the time (91% on one shared Postgres at 500,000). On GKE with
+auth on and real data: asks at 186/s with an 83 ms median, ingest at
+237/s through the gateway (`deploy/README.md`). Speed history:
+`docs/performance.md`.
 Demo script: `docs/demo.md`. Milestones: `docs/roadmap.md` (conference:
 2026-10-21).
 

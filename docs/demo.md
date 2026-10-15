@@ -206,7 +206,7 @@ its `cite` token. Transcript: `demo/act3-writeback-claude-code.json`.
 - Pipelines tie in without code: batch API, Fluent Bit, Vector, Kafka,
   SDKs in Python, TypeScript, Go, OpenAPI for the rest.
 - `docs/models.md`: which models drive it well, measured, with cost.
-- Repo, Apache-2.0, `v0.1.0`.
+- Repo, Apache-2.0, `v0.2.0`.
 
 ## Fallbacks
 

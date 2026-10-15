@@ -87,7 +87,7 @@ async def _lifespan(app: FastAPI):
     app.state.store.close()
 
 
-app = FastAPI(title="LoomCtx", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="LoomCtx", version="0.2.0", lifespan=_lifespan)
 
 
 def _max_body_bytes() -> int:

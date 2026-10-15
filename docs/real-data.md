@@ -225,7 +225,7 @@ What the runs changed in the MCP surface, each with a test:
   pack carries `host:web-01 runs_software linux_kernel` → `CVE-2026-53362
   affects linux_kernel` → `CVE-2026-53362 exploited_in_wild True`.
 
-Eighteen models measured the same way, three runs each, with cost: `docs/models.md`.
+Thirty-five models measured the same way, five runs each, with cost: `docs/models.md`.
 
 What is honest about the remaining gap: the surface now delivers the
 answer in one correctly formed call, and a capable small model makes that
