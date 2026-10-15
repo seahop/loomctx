@@ -29,6 +29,9 @@ tag is v0.1.0).
   an `of` entity, seed lookups stop at the upward-walk limit.
 - Postgres writes claims set at a time, as SQLite has since D-105: the
   one-at-a-time loop held a 500k import to ~283 facts/s across a network.
+- `find_entity` and pack names no longer depend on the order a store returns
+  label rows in (Postgres named groups by their DN where SQLite used the
+  friendly name).
 - A listing's `of` takes a name where the handle goes (`user:mreyes@corp.local`
   for a SID-keyed account), as `within` does.
 

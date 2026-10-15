@@ -3770,6 +3770,21 @@ cite token (the entities its observation is about); an entity type
 entity meant; the rest name no entity (a source label, a domain that is not
 there) and still return nothing.
 
+
+**Addendum (2026-10-15): a name must not depend on row order.** The
+Postgres arm of the 2026-10-14 run named Domain Admins
+`CN=Domain Admins,CN=Users,DC=corp,DC=local` in `find_entity` where SQLite
+said `Domain Admins`. The labels of one export share an `observed_at`, so
+their order is a tie each backend breaks its own way, and `find_entity`
+took the first row whenever no label started with the matched text, which
+was always the case after a realm retry ("Domain Admins (corp.local)").
+At temperature 0 that difference, with a ~40-character change in
+`describe_namespace`, flipped Claude Haiku 4.5's cross-domain audit from
+5/5 to 0/5 on otherwise identical calls. `find_entity` now compares
+against the name without the realm and orders candidates by: starts with
+the name, display label, registry order, length, text. Pack names break a
+length tie by the text. Neither depends on what order a store returns
+rows in.
 ## D-113 · A harder audit tier: access, local admins, Kerberoastable admins (2026-10-13)
 
 The five AD audits ask one thing each, and 19 models pass all five. The

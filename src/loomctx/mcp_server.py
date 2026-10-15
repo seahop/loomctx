@@ -846,16 +846,28 @@ def find_entity(query: str, namespace: str = _DEFAULT_NS, limit: int = 10,
     labels = label_predicates(store, namespace)
     found, matched = search_by_name(store, namespace, query, limit=limit, types=_allowed(grant))
     names: dict[tuple[str, str], str] = {}
-    lowered = matched.lower()
+    # the name searched for, without the realm a retry appends ("Domain
+    # Admins (corp.local)"): no label starts with that, and the pick fell to
+    # whichever label row came back first — the DN on Postgres, the friendly
+    # name on SQLite, for the same entity (2026-10-14 run)
+    lowered = re.sub(r" \([^()]*\)$", "", matched).lower()
     by_name = [EntityRef(type=e.type, key=e.key) for e in found if not e.key.lower().startswith(lowered)]
     if by_name and labels:
+        schema = store.get_schema(namespace)
+        defs = schema.predicates if schema is not None else []
+        order = {p: i for i, p in enumerate([d.name for d in defs if d.display]
+                                            + [d.name for d in defs if d.label and not d.display])}
         rows = store.observations_for_many(namespace, by_name, limit=20, predicates=list(labels))
         for ref in by_name:
-            values = [str(o.object) for o in rows.get((ref.type, ref.key), [])
-                      if isinstance(o.object, str) and o.subject.key == ref.key]
-            hit = next((v for v in values if v.lower().startswith(lowered)), values[0] if values else None)
-            if hit is not None:
-                names[(ref.type, ref.key)] = hit
+            obs = [o for o in rows.get((ref.type, ref.key), [])
+                   if isinstance(o.object, str) and o.subject.key == ref.key]
+            # whatever order the store returned the rows in: a label starting
+            # with the name searched for, else the display label, then the
+            # registry's order, then the shortest
+            obs.sort(key=lambda o: (not str(o.object).lower().startswith(lowered),
+                                    order.get(o.predicate, len(order)), len(str(o.object)), str(o.object)))
+            if obs:
+                names[(ref.type, ref.key)] = str(obs[0].object)
     return [
         {
             "handle": f"{e.type}:{e.key}",

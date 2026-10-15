@@ -256,8 +256,9 @@ def _pack_names(store: GraphStore, namespace: str, observations: list[Observatio
             self_named.add((o.subject.type, o.subject.key))
         if o.predicate in labels and isinstance(o.object, str) and o.object and o.object.lower() != o.subject.key.lower():
             key = (o.subject.type, o.subject.key)
-            rank = (o.predicate not in shown, len(o.object))
-            if key not in names or rank < (not names[key][0], len(names[key][1])):
+            # the text breaks a tie, so the pick never depends on row order
+            rank = (o.predicate not in shown, len(o.object), o.object)
+            if key not in names or rank < (not names[key][0], len(names[key][1]), names[key][1]):
                 names[key] = (o.predicate in shown, o.object)
     for o in observations:
         offer(o)

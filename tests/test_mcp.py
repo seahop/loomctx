@@ -113,6 +113,33 @@ def test_find_entity_finds_an_opaque_key_by_name_and_shows_it(store):
     assert mcp_server.find_entity("nobody@dev.local") == []
 
 
+def test_find_entity_names_an_entity_the_same_whatever_the_row_order(store):
+    """On Postgres the label rows of one export (same observed_at) came back
+    DN first and find_entity named Domain Admins
+    'CN=Domain Admins,CN=Users,DC=corp,DC=local'; SQLite returned the
+    friendly name first (2026-10-14 run). The pick no longer depends on row
+    order, and a realm-qualified search compares against the name alone."""
+    from loomctx.contracts import PredicateDef, SchemaRegistration
+    store.put_schema(SchemaRegistration(namespace="default", predicates=[
+        PredicateDef(name="sam", label=True), PredicateDef(name="principal", label=True, display=True),
+        PredicateDef(name="dn_name", label=True), PredicateDef(name="name", label=True)]))
+    when = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    for pred, value in (("dn_name", "CN=Domain Admins,CN=Users,DC=corp,DC=local"), ("name", "Domain Admins"),
+                        ("sam", "Domain Admins")):
+        store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-512"), predicate=pred,
+                                   object=value, observed_at=when, source="ldap"))
+    [match] = mcp_server.find_entity("Domain Admins corp.local")
+    assert match["name"] == "Domain Admins"
+    # no label starts with the query: the registry's order decides, never the rows'
+    store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-519"), predicate="dn_name",
+                               object="CN=Enterprise Admins,CN=Users,DC=corp,DC=local", observed_at=when,
+                               source="ldap"))
+    store.record_claim(ClaimIn(subject=EntityRef(type="group", key="S-1-5-21-1-519"), predicate="principal",
+                               object="Enterprise Admins@corp.local", observed_at=when, source="ldap"))
+    named = {m["handle"]: m.get("name") for m in mcp_server.find_entity("CN=Enterprise")}
+    assert named.get("group:S-1-5-21-1-519") in ("CN=Enterprise Admins,CN=Users,DC=corp,DC=local",)
+
+
 def test_ask_and_expand_roundtrip(store):
     pack = mcp_server.ask("host:web-01", "who logged in?", budget=2000)
     assert any("jdoe" in i["text"] for i in pack["items"])
