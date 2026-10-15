@@ -118,7 +118,7 @@ Through the LDAP connector, as a user loads data:
 | SQLite, GKE job | 10k forest (175,560 facts) | 173 s | 39 s (D-105) |
 | SQLite, GKE job | 500k forest (6.5M facts) | 8,296 s | 2,945 s (D-105) |
 | Postgres, same host (laptop) | 10k forest | 109 s | 65 s (87c050a) |
-| Postgres, separate node (GKE, pd-ssd) | 500k forest (6,502,512 facts) | 22,586 s, ~288 facts/s (ca15cbb) | measured after the 2026-10-14 sweep |
+| Postgres, separate node (GKE, pd-ssd) | 500k forest (6,502,512 facts) | 22,586 s, ~288 facts/s (ca15cbb) | 2,703 s, ~2,400 facts/s, 8.4× (87c050a) |
 
 Over a network, Postgres writes were bound by round trips (four to six
 statements per fact) until 87c050a batched them (D-105 addendum).
@@ -146,6 +146,5 @@ Reducing this is future-work item 6.
 
 - The 2026-10-14 model sweep's tool latencies with 16 agents sharing one
   Postgres database, against SQLite's private copies.
-- The batched Postgres writer's 500k import, same machine.
 - A standing replay benchmark on each candidate build (future-work item 4).
   When it exists, it writes its table here.
