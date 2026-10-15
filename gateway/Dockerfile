@@ -19,7 +19,7 @@ ARG GOVULNCHECK_VERSION=v1.8.0
 RUN go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
 RUN CGO_ENABLED=0 go build -trimpath -o /gateway .
 
-FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 COPY --from=build /gateway /usr/local/bin/gateway
 COPY contracts/schemas.json /etc/loomctx/schemas.json
 # non-root (H-F8): the gateway reads only its schema and a mounted keys file
