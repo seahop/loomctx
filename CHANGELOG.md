@@ -29,6 +29,8 @@ tag is v0.1.0).
   an `of` entity, seed lookups stop at the upward-walk limit.
 - Postgres writes claims set at a time, as SQLite has since D-105: the
   one-at-a-time loop held a 500k import to ~283 facts/s across a network.
+- `LOOMCTX_MCP_WRITES=0` hides `record_claim`, for read-only agents and
+  scorecards (agents sharing one store must not leave claims for the next).
 - `find_entity` and pack names no longer depend on the order a store returns
   label rows in (Postgres named groups by their DN where SQLite used the
   friendly name).

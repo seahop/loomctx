@@ -90,6 +90,11 @@ _DEFAULT_NS = os.environ.get("LOOMCTX_MCP_NAMESPACE", "").strip() or "default"
 # hides run_query and the `queries` describe_namespace lists — how a run is
 # measured with and without them.
 _QUERIES_ON = os.environ.get("LOOMCTX_MCP_QUERIES", "1").strip().lower() not in ("0", "false", "no", "off")
+# record_claim on the MCP surface: on by default. LOOMCTX_MCP_WRITES=0 hides
+# it, so agents can only read. A scorecard sets it: in the 2026-10-14 run,
+# agents sharing one Postgres store wrote two claims that changed what every
+# later agent's describe_namespace said.
+_WRITES_ON = os.environ.get("LOOMCTX_MCP_WRITES", "1").strip().lower() not in ("0", "false", "no", "off")
 
 Format = Literal["concise", "detailed"]
 
@@ -1669,7 +1674,7 @@ def _accept_aliases(fn):
 _PACK_TOOLS = ("ask", "ask_scope", "find_path", "list_entities", "run_query", "expand", "answer")
 
 for _fn in TOOLS:
-    if _fn is run_query and not _QUERIES_ON:
+    if (_fn is run_query and not _QUERIES_ON) or (_fn is record_claim and not _WRITES_ON):
         continue
     _impl = _accept_aliases(_fn)
     _impl = _compact_text(_impl) if _fn.__name__ in _PACK_TOOLS else _impl

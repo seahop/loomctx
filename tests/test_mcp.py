@@ -741,3 +741,19 @@ def test_an_entity_name_passed_as_namespace_says_where_it_lives(store):
         mcp_server.find_entity(query="web-01", namespace="corp.local")
     with pytest.raises(ValueError, match="holds no data"):
         mcp_server.find_entity(query="web-01", namespace="nowhere")
+
+
+def test_writes_and_queries_can_be_hidden_from_agents():
+    """LOOMCTX_MCP_WRITES=0 leaves a read-only tool surface (a scorecard's
+    agents must not leave claims for the next agent); LOOMCTX_MCP_QUERIES=0
+    hides run_query. Both read at import, so each runs in a fresh process."""
+    import json, os, subprocess, sys
+    code = ("import asyncio, json, loomctx.mcp_server as m; "
+            "print(json.dumps(sorted(t.name for t in asyncio.run(m.mcp.list_tools()))))")
+    def tools(**env):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env={**os.environ, **env}, check=True).stdout
+        return set(json.loads(out.strip().splitlines()[-1]))
+    assert {"record_claim", "run_query"} <= tools()
+    assert "record_claim" not in tools(LOOMCTX_MCP_WRITES="0") and "run_query" in tools(LOOMCTX_MCP_WRITES="0")
+    assert "run_query" not in tools(LOOMCTX_MCP_QUERIES="0")

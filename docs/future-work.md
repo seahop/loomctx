@@ -100,7 +100,8 @@ definitions and are almost never called in read-only audits (`answer` 0.01
 calls a run, the other two never).
 
 **Design.**
-- **Tool profiles.** `LOOMCTX_MCP_TOOLS=read` (the default for a read-only
+- **Tool profiles.** (First slice done: `LOOMCTX_MCP_WRITES=0` hides
+  `record_claim`; scorecards should set it.) `LOOMCTX_MCP_TOOLS=read` (the default for a read-only
   key) exposes the eleven read tools; `full` adds `record_claim`, `answer`
   and `purple_report`. A read-only key already cannot write; this makes the
   advertised surface follow it, so a read-only agent never pays for the
