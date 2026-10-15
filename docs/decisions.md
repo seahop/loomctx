@@ -3808,6 +3808,22 @@ Each is one list-mode call on the engine (`of` + `via` + `within` + `paths`;
 `within` + value filters; the declared gap) — tested end to end on the
 small forest. The planted accounts change no earlier audit's truth.
 
+
+**Addendum (2026-10-15): the kerberoast scorer checks every account put
+forward, not only the decoys.** Reading the re-scored verdicts of the
+2026-10-14 Postgres run turned up a GPT-4o answer that listed fifteen
+Domain Admins and a dozen service accounts under "The following ... are
+Kerberoastable", svc-sqladm among them, and passed: the scorer looked for
+the two planted decoys only. It now also fails a list item or table row
+that names one other account (a UPN, or an adm-/svc- name) under a
+Kerberoastable claim, unless the line or its lead-in rules it out ("no
+SPN", an empty cell, "non-Kerberoastable", "the other 15 are:"). A line
+naming many accounts is context. Groups (CORP-/DEV-/LAB-…) and names inside
+an SPN string are not accounts. Re-scoring the 2026-10-14 runs changed 16
+verdicts, every one read by hand and every one an answer presenting
+non-Kerberoastable accounts (GPT-4o ×10, Mistral Large ×3, GLM-4.6V,
+Command A+, Codestral); no other audit's verdicts moved. Published effect:
+the 500k harder tier 414 → 412 of 511 (81% either way).
 ## D-017 · License: Apache-2.0 (2026-09-04)
 
 Public framework needs a real license; Apache-2.0 for the patent grant and

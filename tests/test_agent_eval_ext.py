@@ -405,6 +405,32 @@ def test_kerberoast_scorer():
     assert not got["pass"] and got["false_accounts"] == ["svc-backupadm", "svc-web"]
 
 
+def test_kerberoast_scorer_fails_other_accounts_put_forward():
+    """GPT-4o listed fifteen Domain Admins and a dozen service accounts
+    under "The following ... are Kerberoastable", svc-sqladm among them,
+    and passed: only the planted decoys were checked (2026-10-15). Other
+    accounts named as context, or ruled out, still pass."""
+    truth = {"accounts": ["svc-sqladm"], "disabled": ["svc-backupadm"], "others": ["svc-web"]}
+    bad = ("The following enabled accounts that are members of corp.local's Domain Admins are Kerberoastable "
+           "(have a servicePrincipalName):\n\n"
+           f"1. **adm-lea.tanaka@corp.local** {CITE}\n2. **adm-kwu@corp.local** {CITE}\n"
+           f"3. **svc-sqladm@corp.local** {CITE}\n4. **svc-zoom-014@corp.local** {CITE}")
+    got = ext._score_kerberoast(bad, truth, SEEN, None)
+    assert not got["pass"] and {"adm-kwu", "adm-lea.tanaka", "svc-zoom-014"} <= set(got["false_accounts"])
+    context = (f"Only one enabled, Kerberoastable account is a Domain Admin: svc-sqladm@corp.local {CITE}. "
+               f"The other 15 enabled members (adm-rlopez, adm-pchen, adm-kwu, dlee@dev.local) carry no "
+               f"recorded spn {CITE}.")
+    assert ext._score_kerberoast(context, truth, SEEN, None)["pass"]
+    table = ("Enabled Domain Admins and their SPNs:\n\n| Account | SPN |\n|---|---|\n"
+             f"| svc-sqladm@corp.local | MSSQLSvc/db-01 {CITE} |\n| adm-kwu@corp.local | — |\n"
+             "| adm-pchen@corp.local | none |\n\nOnly svc-sqladm is Kerberoastable.")
+    assert ext._score_kerberoast(table, truth, SEEN, None)["pass"]
+    complement = (f"Only svc-sqladm@corp.local has an SPN {CITE}. Domain Admins has 16 enabled members and "
+                  f"svc-sqladm is the only one with an SPN. The other 15 are:\n\n- adm-rlopez, through group "
+                  f"95001 {CITE}\n- dlee@dev.local, a direct member {CITE}")
+    assert ext._score_kerberoast(complement, truth, SEEN, None)["pass"]
+
+
 def test_the_engine_answers_the_harder_tier_exactly(store):
     """What the new list mode gives an agent for each (D-110): one call each."""
     import loomctx.mcp_server as mcp

@@ -784,6 +784,29 @@ def _truth_kerberoast(store) -> dict:
 
 
 _KERBEROAST_WORDS = re.compile(r"kerberoast\w*|\bspns?\b|serviceprincipalname|service principal", re.I)
+# an account name as these answers write one: a UPN, or the adm-/svc- names
+_ACCOUNT_TOKEN = re.compile(r"(?<![/\w.-])[a-z0-9][a-z0-9._-]*@(?:[a-z0-9-]+\.)+local\b|(?<![/\w.-])(?:adm|svc)-[a-z0-9][a-z0-9.-]*[a-z0-9]\b",
+                            re.I)
+# words that end a group's name written as a UPN ("Domain Admins@corp.local")
+_GROUP_WORDS = {"admins", "administrators", "users", "operators", "guests", "computers", "controllers"}
+# the forest's groups are named CORP-…, DEV-…, LAB-… (CORP-Tier0-Admins@corp.local); its accounts never are
+_GROUP_NAME = re.compile(r"(?:corp|dev|lab)-", re.I)
+
+
+def _account_name(token: str) -> str:
+    """The sAMAccountName in a token: before any @, without a trailing
+    DNS-style domain ("svc-sqladm.corp.local" is svc-sqladm)."""
+    name = token.split("@")[0].lower()
+    return re.sub(r"\.(?:[a-z0-9-]+\.)*local$", "", name)
+
+
+# an account ruled out in words the general exclusions miss
+_NOT_KERBEROASTABLE = re.compile(r"non[- ]?kerberoast\w*|\babsent\b|\black(?:s|ing)?\b|\bmissing\b|"
+                                 r"no (?:recorded )?spn|not set|"
+                                 # "the only one with an SPN. The other 15 are:" lists the complement
+                                 r"\bthe other\b|\bthe remaining\b|\bthe rest\b|\bremaining \d+", re.I)
+# a table cell saying there is nothing there ("| — |", "| none |", "| n/a |")
+_EMPTY_CELL = re.compile(r"\|\s*\**\s*(?:—|–|-|none|n/?a|\(none\)|not set|empty)\s*\**\s*\|", re.I)
 
 
 def _score_kerberoast(answer: str, truth: dict, seen: set[str], store) -> dict:
@@ -803,6 +826,25 @@ def _score_kerberoast(answer: str, truth: dict, seen: set[str], store) -> dict:
         and (_ADMIN.search(line) or _ADMIN.search(lead) or line.lstrip().startswith("|"))
         and not re.search(r"non[- ]?admin|not (?:a |an )?(?:member of )?(?:the )?domain admins", line, re.I)
         for line, lead in _lines(answer, o, names)))
+    # any other account put forward as Kerberoastable: GPT-4o listed fifteen
+    # Domain Admins and a dozen service accounts under "The following ... are
+    # Kerberoastable", named svc-sqladm among them, and passed (2026-10-15).
+    # A line that rules the account out ("no SPN", an empty SPN cell,
+    # disabled) is not a claim.
+    extra = sorted({n for n in (_account_name(t) for t in _ACCOUNT_TOKEN.findall(answer))
+                    if n and n not in _GROUP_WORDS and not _GROUP_NAME.match(n)} - {n.lower() for n in names})
+    # a claim is a list item or table row naming that one account under a
+    # Kerberoastable claim ("1. **adm-kwu@corp.local**" under "The following
+    # ... are Kerberoastable:"); a line naming many accounts is context ("the
+    # full membership checked was: ..."), and a ruled-out line is no claim
+    def claims(line: str, lead: str) -> bool:
+        first = line.split("\n")[0]
+        named = {n for n in (_account_name(t) for t in _ACCOUNT_TOKEN.findall(first)) if n and not _GROUP_NAME.match(n)}
+        return (bool(_BLOCK_LINE.match(first)) and len(named) == 1
+                and not any(r.search(line) or r.search(lead) for r in (_EXCLUDES, _NOT_KERBEROASTABLE))
+                and not _DISABLED.search(line) and not _DISABLED_CELL.search(line) and not _EMPTY_CELL.search(line)
+                and bool(_KERBEROAST_WORDS.search(line) or _KERBEROAST_WORDS.search(lead)))
+    false += sorted(e for e in extra if any(claims(line, lead) for line, lead in _lines(answer, e, (*names, *extra))))
     cites = _cited(answer, seen)
     ok = bool(truth["accounts"]) and named == truth["accounts"] and not false
     return {"accounts_expected": truth["accounts"], "accounts_named": named, "false_accounts": sorted(false),
