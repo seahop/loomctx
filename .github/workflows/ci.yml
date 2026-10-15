@@ -143,6 +143,13 @@ jobs:
           docker run --rm -v "$PWD:/w:ro" -w /w \
             ghcr.io/astral-sh/ruff:0.16.8@sha256:ec3c84a063840fc9a678004f4d958ea4e1e79de1ee3f94dc0f0df3a4a3a1f1a7 \
             check --no-cache .
+      - name: License files in every published package match the root
+        # each SDK ships on its own (pkg.go.dev hides docs without a LICENSE)
+        run: |
+          for d in sdk/go sdk/python sdk/typescript; do
+            cmp LICENSE "$d/LICENSE"
+            cmp NOTICE "$d/NOTICE"
+          done
 
   scale-smoke:
     # The scale shape end to end (D-045): lb -> 2 gateways -> JetStream -> consumer -> store -> engine.

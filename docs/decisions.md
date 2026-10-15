@@ -3831,6 +3831,20 @@ the 500k harder tier 414 → 412 of 511 (81% either way).
 Public framework needs a real license; Apache-2.0 for the patent grant and
 infrastructure-ecosystem norm. Canonical text in `LICENSE`.
 
+**Addendum (2026-10-15).** The repo went public, so the license files now
+travel with everything that ships:
+- **`NOTICE` holds the copyright line.** Apache-2.0 doesn't require one, but
+  once it exists, redistributors must keep it (§4(d)). So it carries the
+  attribution, and it is kept to that alone.
+- **Each SDK carries `LICENSE` and `NOTICE`,** because each is published on
+  its own. CI's lint job fails if a copy drifts from the root.
+- **Both images carry the license text and the OCI labels.** The gateway
+  binary statically links third-party modules and the Go runtime, whose
+  BSD/Apache terms ask for their notices to travel with a binary
+  distribution. The build copies the license files of every module in
+  `go list -deps` (linked code only, not test-only modules) and fails on a
+  module that has none.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~
