@@ -571,7 +571,12 @@ class ListFilter(BaseModel):
     with no value on record (D-107: "accounts not disabled" includes the
     ones whose status was never collected — the page says how many)."""
 
-    predicate: str
+    predicate: str = Field(
+        description="the predicate compared; for within / not_within, the edge "
+        "predicates walked, comma-separated for any mix of them (D-116): "
+        "'has_ace,member_of' within computer:X holds for every account with rights "
+        "over X, directly or through its groups",
+    )
     op: Literal["eq", "ne", "in", "contains", "exists", "absent", "within", "not_within"] = "eq"
     value: Any = Field(
         default=None,
@@ -697,6 +702,13 @@ class EntityTypeDef(BaseModel):
     name: str
     description: str = ""
     facets: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="other names a question or an agent uses for this type (an LDAP "
+        "'computer' is a 'machine' or 'workstation', a 'user' an 'account'): a request "
+        "naming an alias that is not itself a registered type reads it as this type, "
+        "with a note (D-116)",
+    )
 
 
 class PredicateDef(BaseModel):
@@ -723,6 +735,13 @@ class PredicateDef(BaseModel):
         "displayName, UPN, login): entity search matches its values as well "
         "as keys, so an entity keyed by an opaque id (a SID, a GUID) can be "
         "found by name (D-091)",
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="the source's own attribute names and plain words for this "
+        "predicate (servicePrincipalName, sAMAccountName, operatingSystem): a request "
+        "naming one that is not itself a registered predicate reads it as this "
+        "predicate, with a note (D-116)",
     )
     display: bool = Field(
         default=False,
@@ -802,6 +821,12 @@ class QueryRequest(BaseModel):
     namespace: str = DEFAULT_NAMESPACE
     name: str
     params: dict[str, Any] = Field(default_factory=dict)
+    where: list[ListFilter] = Field(
+        default_factory=list,
+        description="more conditions, added to the query's own (D-116): "
+        "enabled_members(Domain Admins) with kerberoastable=true is one call",
+    )
+    fields: list[str] = Field(default_factory=list, description="more predicates to show per row (D-116)")
     limit: int = Field(default=50, gt=0, le=MAX_LIST_LIMIT)
     offset: int = Field(default=0, ge=0)
     budget: int = Field(default=1500, gt=0, le=1_000_000)
@@ -820,6 +845,12 @@ class NotCollectedDef(BaseModel):
     description: str
     words: list[str] = Field(default_factory=list)
     source: str = ""
+    mistaken_for: list[str] = Field(
+        default_factory=list,
+        description="predicates whose facts are commonly taken for this gap (an LDAP "
+        "export's has_ace, rights over the directory object, read as local admin): a "
+        "result carrying them notes the difference (D-116)",
+    )
 
 
 class SchemaRegistration(BaseModel):

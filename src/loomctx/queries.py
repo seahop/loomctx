@@ -102,6 +102,13 @@ def resolve(store: GraphStore, req: QueryRequest, allowed_types=None) -> tuple[Q
     listed = ListRequest.model_validate({
         **body, "namespace": req.namespace, "limit": req.limit, "offset": req.offset,
         "budget": req.budget, "as_of": req.as_of, "valid_at": req.valid_at})
+    if req.where or req.fields:
+        # the caller's conditions and columns, added to the query's (D-116):
+        # gpt-4o ran enabled_members and kerberoastable_users apart and
+        # failed 10 of 10; one call composes them
+        listed = listed.model_copy(update={
+            "where": [*listed.where, *req.where],
+            "fields": list(dict.fromkeys([*listed.fields, *req.fields]))})
     return query, listed
 
 

@@ -503,3 +503,29 @@ def test_a_shared_group_is_not_a_route_unless_siblings_asked(tmp_path):
     both = find_paths(store, req.model_copy(update={"siblings": True}))
     assert [e.predicate for e in both.paths[0]] == ["member_of", "member_of", "has_role"]
     store.close()
+
+
+def test_one_account_in_two_groups_is_a_route(tmp_path):
+    """Domain Admins <-member_of- Tier0 <-member_of- rlopez -member_of->
+    WS-Operators -has_ace-> WS-1: rlopez is an admin through Tier0 and holds
+    rights through WS-Operators. The account is the subject of both
+    member_of edges, so this is a route, not a shared group (D-115); the
+    access audit missed rlopez in 22 runs while this turn was refused. A
+    sideways step through a shared group is still refused, and says so."""
+    store = SqliteStore(tmp_path / "two.db")
+    _edge(store, "ad", ("group", "tier0"), ("group", "da"), pred="member_of")
+    _edge(store, "ad", ("user", "rlopez"), ("group", "tier0"), pred="member_of")
+    _edge(store, "ad", ("user", "rlopez"), ("group", "ws-ops"), pred="member_of")
+    _edge(store, "ad", ("group", "ws-ops"), ("computer", "ws-1"), pred="has_ace")
+    _edge(store, "ad", ("user", "jdoe"), ("group", "ws-ops"), pred="member_of")   # a co-member, not an admin
+    req = PathRequest(namespace="ad", **{"from": EntityRef(type="group", key="da")},
+                      to=EntityRef(type="computer", key="ws-1"), via=["member_of", "has_ace"], depth=5)
+    got = find_paths(store, req)
+    routes = [[(e.subject.key, e.predicate, e.object.key) for e in p] for p in got.paths]
+    assert routes == [[("tier0", "member_of", "da"), ("rlopez", "member_of", "tier0"),
+                       ("rlopez", "member_of", "ws-ops"), ("ws-ops", "has_ace", "ws-1")]]
+    # jdoe shares ws-ops with rlopez: reaching jdoe that way is co-membership
+    to_jdoe = find_paths(store, req.model_copy(update={"to": EntityRef(type="user", key="jdoe")}))
+    assert to_jdoe.paths == []
+    assert any("sideways through a group" in n for n in to_jdoe.notes)
+    store.close()

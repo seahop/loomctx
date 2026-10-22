@@ -371,6 +371,24 @@ def schema(namespace: str) -> SchemaRegistration:
 
 # ---------------------------------------------------------------------- CLI #
 
+
+# Other names the types and predicates go by (D-116): a request naming one
+# reads it as the registered name, with a note.
+_PREDICATE_ALIASES = {
+    "listens_on_port": ["port", "ports", "open_port", "open_ports", "listens_on"],
+    "runs_service": ["service", "services"],
+    "runs_software": ["software", "installed_software", "installed", "runs"],
+    "runs_os": ["os", "operating_system", "operatingSystem"]}
+_TYPE_ALIASES = {
+    "host": ["machine", "server", "device", "asset", "endpoint", "computer"],
+    "product": ["software", "package", "application", "app"]}
+_schema_definitions = schema
+
+
+def schema(namespace: str) -> SchemaRegistration:  # noqa: F811 — the definitions above, with their aliases
+    from ..registry import with_aliases
+    return with_aliases(_schema_definitions(namespace), _PREDICATE_ALIASES, _TYPE_ALIASES)
+
 def _to_lines(envs: Iterable[ClaimIn | DocumentIn]) -> Iterator[str]:
     for env in envs:
         yield env.model_dump_json(exclude_none=True) + "\n"

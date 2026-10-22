@@ -640,6 +640,25 @@ def schema(namespace: str) -> SchemaRegistration:
     )
 
 
+# Other names the types and predicates go by (D-116): a request naming one
+# reads it as the registered name, with a note.
+_PREDICATE_ALIASES = {
+    "upn": ["userPrincipalName", "user_principal_name"],
+    "mail": ["email", "e_mail"],
+    "job_title": ["title", "jobTitle"],
+    "reports_to": ["manager"],
+    "owner_of": ["owns"],
+    "has_app_role": ["app_role", "role"],
+    "privileged": ["is_privileged", "admin", "is_admin"]}
+_TYPE_ALIASES = {
+    "user": ["account", "person", "identity"]}
+_schema_definitions = schema
+
+
+def schema(namespace: str) -> SchemaRegistration:  # noqa: F811 — the definitions above, with their aliases
+    from ..registry import with_aliases
+    return with_aliases(_schema_definitions(namespace), _PREDICATE_ALIASES, _TYPE_ALIASES)
+
 def _to_lines(envs: Iterable[ClaimIn]) -> Iterator[str]:
     for env in envs:
         yield env.model_dump_json(exclude_none=True) + "\n"

@@ -329,9 +329,10 @@ def _closure(store, req, f: ListFilter, among: list[Key] | None, cap, rules) -> 
         return set(), False
     sub = req.model_copy(update={"direction": "in"})
     depth = min(f.depth, MAX_LIST_DEPTH)
+    via = _walked(f)
     if among is not None and len(among) <= _UPWARD_MAX:
-        return set(_walk_up(store, sub, target, among, [f.predicate], depth, cap, rules, {})), False
-    down, cut = _walk_down(store, sub, target, [f.predicate], depth, cap, rules, {})
+        return set(_walk_up(store, sub, target, among, via, depth, cap, rules, {})), False
+    down, cut = _walk_down(store, sub, target, via, depth, cap, rules, {})
     got = set(down)
     return (got & set(among) if among is not None else got), cut
 
@@ -404,7 +405,7 @@ def list_entities(store: GraphStore, req: ListRequest,
     """One page of the entities a ListRequest names, exact and cited (D-107).
     `stats`, when given, receives the work counters (for tests)."""
     from .config import max_list_candidates
-    from .registry import containment_predicates
+    from .registry import containment_predicates, lookalike_notes
 
     ns = req.namespace
     notes: list[str] = []
@@ -414,15 +415,20 @@ def list_entities(store: GraphStore, req: ListRequest,
     definitions = list(schema.predicates) if schema is not None else []
     summary = store.relation_summary(ns)
     vocabulary = {p for _, p, _, _ in summary} | {d.name for d in definitions}
+    req, renamed = _canonical_request(req, schema, vocabulary)
+    notes.extend(renamed)
     page = ListPage(namespace=ns, offset=req.offset)
     st = stats if stats is not None else {}
     st.update(start="", candidates=0, fetched=0, scanned=0)
 
     asked_unknown: list[str] = []
+    suggested: list[str] = []   # unknown names a close match was offered for
 
     def unknown(name: str, what: str) -> None:
         asked_unknown.append(name)
         close = _close_predicates(name, definitions, vocabulary)
+        if close:
+            suggested.append(name)
         hint = f"; did you mean {', '.join(close)}?" if close else ""
         notes.append(f"{what} '{name}' is not a predicate in namespace '{ns}'{hint}")
 
@@ -431,13 +437,22 @@ def list_entities(store: GraphStore, req: ListRequest,
         return page
 
     for f in req.where:
-        if f.predicate not in vocabulary:
-            unknown(f.predicate, "filter")
+        for part in _walked(f) if f.op in _CLOSURE else [f.predicate]:
+            if part not in vocabulary:
+                unknown(part, "filter")
     for name in req.fields:
         if name not in vocabulary:
             unknown(name, "field")
     if req.type is not None and allowed_types is not None and req.type not in allowed_types:
         return done(f"type '{req.type}' is outside this caller's scope")
+    if (req.type is not None and schema is not None and schema.entity_types
+            and req.type not in {t.name for t in schema.entity_types}
+            and not store.entity_refs_of_type(ns, req.type, 1)):
+        # `type="account"` read as an empty set in 30 audit runs (D-116)
+        types = sorted(t.name for t in schema.entity_types
+                       if allowed_types is None or t.name in allowed_types)
+        return done(f"type '{req.type}' is not an entity type in namespace '{ns}' and nothing is "
+                    f"recorded as one; its types are: {', '.join(types)}")
     depth = min(req.depth, MAX_LIST_DEPTH)
     if req.depth > depth:
         notes.append(f"depth {req.depth} exceeds the cap; clamped to {depth}")
@@ -686,11 +701,101 @@ def list_entities(store: GraphStore, req: ListRequest,
         notes.append(f"{len(alive) - end} more match(es) past this page: call again with offset={end}")
     if not alive and asked_unknown:
         # an empty answer to a predicate the namespace does not have — what
-        # its sources declare they do not carry may be what was asked (D-110)
-        nc = not_collected_note(store, ns, " ".join(asked_unknown).replace("_", " "), fallback_all=True)
+        # its sources declare they do not carry may be what was asked (D-110);
+        # every topic only when no close predicate was offered: the whole list
+        # beside "did you mean spn" told an agent Kerberoasting was unknowable
+        nc = not_collected_note(store, ns, " ".join(asked_unknown).replace("_", " "),
+                                fallback_all=len(suggested) < len(asked_unknown))
         if nc:
             notes.append(nc)
+    if not alive and not asked_unknown:
+        notes.extend(_empty_value_notes(store, ns, req))
+    carried = set(via) | {f.predicate for f in req.where if f.op not in _CLOSURE} | set(req.fields) \
+        | {p for f in req.where if f.op in _CLOSURE for p in _walked(f)} \
+        | {e.predicate for r in page.rows for e in r.path}
+    notes.extend(lookalike_notes(schema, carried))
+    if req.of is not None and admitted:
+        member = _membership_note(store, ns, req, schema, via, list(admitted))
+        if member:
+            notes.append(member)
     return done()
+
+
+def _walked(f: ListFilter) -> list[str]:
+    """A within filter's edge predicates: one, or a comma-separated mix
+    walked together (D-116: 'has_ace,member_of' within computer:X)."""
+    return [p.strip() for p in f.predicate.split(",") if p.strip()]
+
+
+def _canonical_request(req: ListRequest, schema, vocabulary) -> tuple[ListRequest, list[str]]:
+    """The request in the namespace's own names (D-116): a type alias
+    ('account' -> 'user'), predicate aliases in filters, fields and via
+    (servicePrincipalName -> spn), each renaming noted."""
+    from .registry import canonical_predicates, canonical_type
+    notes: list[str] = []
+    typ, note = canonical_type(schema, req.type)
+    if note:
+        notes.append(note)
+
+    def names(items: list[str]) -> list[str]:
+        out, said = canonical_predicates(schema, items, vocabulary)
+        notes.extend(n for n in said if n not in notes)
+        return out
+
+    where = []
+    for f in req.where:
+        if f.op in _CLOSURE:
+            where.append(f.model_copy(update={"predicate": ",".join(names(_walked(f)))}))
+        else:
+            where.append(f.model_copy(update={"predicate": names([f.predicate])[0]}))
+    return req.model_copy(update={"type": typ, "where": where, "fields": names(list(req.fields)),
+                                  "via": names(list(req.via))}), notes
+
+
+def _membership_note(store, ns: str, req: ListRequest, schema, via: list[str], admitted: list[Key]) -> str | None:
+    """A walk over a permission edge alone lists the groups that hold it, not
+    their members (D-116): agents walked has_ace without member_of and missed
+    the admin who holds rights through a group. Says how many listed
+    entities are groups others belong to, and what to add."""
+    from .registry import containment_predicates
+    contain = [p for p in containment_predicates(schema) if p not in via]
+    if not contain or set(via) & set(containment_predicates(schema)):
+        return None
+    probe = admitted[:_FETCH_CHUNK]
+    rows = store.lite_rows(ns, [_ref(k) for k in probe], contain, side="object", limit=50 * len(probe),
+                           observed_before=req.as_of)
+    holders = {r.object for r in rows if isinstance(r.object, tuple) and r.object in set(probe)}
+    if not holders:
+        return None
+    more = "+" if len(admitted) > len(probe) else ""
+    return (f"{len(holders)}{more} of the entities reached have members ({', '.join(contain)} points at "
+            f"them): their members reach {req.of.type}:{req.of.key} too but are not listed — add "
+            f"{', '.join(contain)} to via (depth 2 or more), or filter with "
+            f"'{','.join([*via, *contain])}' within {req.of.type}:{req.of.key}")
+
+
+def _empty_value_notes(store, ns: str, req: ListRequest) -> list[str]:
+    """For an empty listing, each eq / in filter whose value no entity
+    carries, with values that are on record (D-116): `enabled=yes` and
+    `os=Windows 10` returned 0 rows and nothing said the value was the
+    reason."""
+    out = []
+    for f in req.where:
+        if f.op not in ("eq", "in"):
+            continue
+        wanted = f.value if isinstance(f.value, list) else [f.value]
+        if any(store.subjects_with_value(ns, f.predicate, vj, 1, req.as_of)
+               for w in wanted for vj in _value_jsons(w)):
+            continue
+        sample: dict[str, str] = {}   # compared form -> as recorded
+        for r in itertools.islice(store.lite_scalars(ns, f.predicate, req.as_of), 2000):
+            sample.setdefault(_text(r.object), json.dumps(r.object, default=str).strip('"'))
+            if len(sample) >= 6:
+                break
+        if sample:
+            out.append(f"no entity has {f.predicate} = {', '.join(map(str, wanted))}; values on record "
+                       f"include: {', '.join(sample.values())}")
+    return out
 
 
 def _gap_note(store, ns: str, req: ListRequest, root: EntityRef | None, via: list[str]) -> str | None:

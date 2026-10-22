@@ -5,6 +5,25 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Flexible asks (D-115, D-116, 2026-10-22)
+
+- `find_path` follows one account through two groups: an admin through
+  Tier0 who holds rights through WS-Operators is a route. Co-membership is
+  still not followed, and the response says how many such steps it skipped.
+- Aliases: connectors declare other names for types and predicates
+  (`account` → `user`, `servicePrincipalName` → `spn`), and requests read
+  them as the registered names, with a note. Spellings that differ only by
+  case or separators map too.
+- `has_ace,member_of within computer:X`: several edge predicates in one
+  within filter. "Which Domain Admins have rights over X" is one listing.
+- Named queries take `where` and `fields`, added to their own.
+- Notes instead of silent empties: unknown types list the real ones, values
+  no entity carries show values that do, a permission walk without
+  membership names the groups it did not open, and facts commonly mistaken
+  for a not-collected topic (`has_ace` for local admin) are flagged.
+- Text conditions split on `AND` in any case, `&&` and `;`, inside list
+  items too. Failed tool calls say how to recover.
+
 ### Faithfulness check: quoted source names are not citations (D-114, 2026-10-22)
 
 - The agent scorecard no longer reads hex inside a source name the agent was

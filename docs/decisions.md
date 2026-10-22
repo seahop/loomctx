@@ -3869,6 +3869,74 @@ short, and the check read the UUID's segments as citations.
   citing an unseen observation: 0 of 686, not 2. Fixed in `docs/models.md`,
   `README.md` and the site.
 
+## D-115 · find_path follows one account through two groups (2026-10-22)
+
+The no-turn-back rule (D-080) refused any two consecutive edges on one
+predicate with the pivot on the same side of both. That rightly stops
+`user -member_of-> Domain Users <-member_of- every other user`, but it also
+refused `Tier0 <-member_of- rlopez -member_of-> WS-Operators`: one account
+in two groups, which is how an admin through Tier0 holds rights through
+WS-Operators. `find_path(Domain Admins -> WS-1, via=[member_of, has_ace])`
+returned only the direct admin, and said nothing; 22 access-audit runs that
+relied on it missed the second admin (24 of 25 that passed `siblings=True`
+found it).
+
+- **A path search refuses only co-membership:** two edges that both point at
+  the pivot. Two edges leaving the pivot are a route. The scope walk
+  (`ask_scope`) keeps D-080's rule, so packs keep their shape.
+- **A refused step is reported:** the response says how many sideways steps
+  through a shared group were not followed, and that `siblings=true`
+  follows them.
+
+## D-116 · Flexible asks: the names agents use, composed conditions, no silent empties (2026-10-22)
+
+Read by hand, most failures in the 2026-10 harder AD audits that were not the
+model's reasoning were requests that returned an exact-looking empty or
+partial answer with no hint why. Each case below now either works or says
+why it didn't. All of it is registry data or generic notes; nothing is
+specific to an audit question.
+
+- **Aliases (contract: `EntityTypeDef.aliases`, `PredicateDef.aliases`).** A
+  connector declares the other names its types and predicates go by
+  (`account` → `user`, `servicePrincipalName` → `spn`, `operatingSystem` →
+  `os`). A request naming one that is not itself registered, or a name that
+  differs from a registered one only by case or separators (`Member-Of`), is
+  read as the registered name in listings, filters, scope `expand` and
+  find_path `via`, with a note. A spelling two definitions claim maps to
+  neither. `type="account"` used to return 0 rows (30 runs).
+- **Unknown types and empty values are explained.** A `type` that is neither
+  registered nor recorded returns the namespace's types. An eq / in filter
+  whose value no entity carries says so and shows values that are on record.
+- **Several edge predicates in one within filter.** `has_ace,member_of within
+  computer:X` holds for every account with rights over X, directly or
+  through its groups. Combined with `member_of within group:DA`, "which
+  Domain Admins have rights over X" is one call (92% of passing access runs
+  used a within filter; about 55% passed without one).
+- **A permission walk without membership names what it left out.** Listing
+  along `has_ace` alone notes how many reached entities are groups with
+  members, and the filter that includes them.
+- **Look-alike facts (contract: `NotCollectedDef.mistaken_for`).** A
+  not-collected topic lists the predicates commonly taken for it (LDAP's
+  `has_ace` for local admin). A listing, pack or path carrying them gets one
+  line saying they are not it. 45 local-admin runs had seen the gap note and
+  still presented `has_ace` holders as local admins.
+- **Named queries compose (contract: `QueryRequest.where`, `.fields`).**
+  Conditions and columns are added to the query's own. gpt-4o failed the
+  Kerberoast audit 10 of 10 running `enabled_members` and
+  `kerberoastable_users` apart; mistral-large passed `where` to run_query
+  and it was silently dropped.
+- **Conditions written as text split on `AND` in any case, `&&` and `;`**,
+  inside list items too. An uppercase AND was read as part of the value and
+  matched nothing.
+- **The full not-collected list rides only when no close predicate was
+  offered.** "Did you mean spn?" next to "local groups, sessions and user
+  rights are not collected" told an agent Kerberoasting was unknowable.
+- **Every failed tool call says how to recover** (correct the arguments, where
+  describe_namespace lists them). Gemini 2.5 Flash abandoned most of its
+  failing audits after one error.
+- **Connectors ship aliases:** LDAP (types and every predicate with an LDAP
+  attribute name), the vulnerability feeds, nmap, Entra and Okta.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

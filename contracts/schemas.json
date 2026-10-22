@@ -1634,6 +1634,7 @@
         "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
         "properties": {
           "predicate": {
+            "description": "the predicate compared; for within / not_within, the edge predicates walked, comma-separated for any mix of them (D-116): 'has_ace,member_of' within computer:X holds for every account with rights over X, directly or through its groups",
             "title": "Predicate",
             "type": "string"
           },
@@ -2120,6 +2121,51 @@
     "type": "object"
   },
   "QueryRequest": {
+    "$defs": {
+      "ListFilter": {
+        "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
+        "properties": {
+          "predicate": {
+            "description": "the predicate compared; for within / not_within, the edge predicates walked, comma-separated for any mix of them (D-116): 'has_ace,member_of' within computer:X holds for every account with rights over X, directly or through its groups",
+            "title": "Predicate",
+            "type": "string"
+          },
+          "op": {
+            "default": "eq",
+            "enum": [
+              "eq",
+              "ne",
+              "in",
+              "contains",
+              "exists",
+              "absent",
+              "within",
+              "not_within"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "default": null,
+            "description": "the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent",
+            "title": "Value"
+          },
+          "depth": {
+            "default": 6,
+            "description": "within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> \u2026 -> value); clamped to the list depth cap",
+            "maximum": 32,
+            "minimum": 1,
+            "title": "Depth",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "predicate"
+        ],
+        "title": "ListFilter",
+        "type": "object"
+      }
+    },
     "description": "Run a namespace's named query (D-108); the answer is a ListPage.",
     "properties": {
       "namespace": {
@@ -2135,6 +2181,22 @@
         "additionalProperties": true,
         "title": "Params",
         "type": "object"
+      },
+      "where": {
+        "description": "more conditions, added to the query's own (D-116): enabled_members(Domain Admins) with kerberoastable=true is one call",
+        "items": {
+          "$ref": "#/$defs/ListFilter"
+        },
+        "title": "Where",
+        "type": "array"
+      },
+      "fields": {
+        "description": "more predicates to show per row (D-116)",
+        "items": {
+          "type": "string"
+        },
+        "title": "Fields",
+        "type": "array"
       },
       "limit": {
         "default": 50,
@@ -2894,6 +2956,14 @@
             },
             "title": "Facets",
             "type": "array"
+          },
+          "aliases": {
+            "description": "other names a question or an agent uses for this type (an LDAP 'computer' is a 'machine' or 'workstation', a 'user' an 'account'): a request naming an alias that is not itself a registered type reads it as this type, with a note (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Aliases",
+            "type": "array"
           }
         },
         "required": [
@@ -2925,6 +2995,14 @@
             "default": "",
             "title": "Source",
             "type": "string"
+          },
+          "mistaken_for": {
+            "description": "predicates whose facts are commonly taken for this gap (an LDAP export's has_ace, rights over the directory object, read as local admin): a result carrying them notes the difference (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Mistaken For",
+            "type": "array"
           }
         },
         "required": [
@@ -2970,6 +3048,14 @@
             "description": "a scalar that names its subject (a sAMAccountName, displayName, UPN, login): entity search matches its values as well as keys, so an entity keyed by an opaque id (a SID, a GUID) can be found by name (D-091)",
             "title": "Label",
             "type": "boolean"
+          },
+          "aliases": {
+            "description": "the source's own attribute names and plain words for this predicate (servicePrincipalName, sAMAccountName, operatingSystem): a request naming one that is not itself a registered predicate reads it as this predicate, with a note (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Aliases",
+            "type": "array"
           },
           "display": {
             "default": false,

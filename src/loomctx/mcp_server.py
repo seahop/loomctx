@@ -1136,8 +1136,25 @@ def find_path(
 _FILTER_TEXT = re.compile(r"^\s*(!)?\s*([A-Za-z_][\w.-]*)\s*(?:(!=|~=|=)\s*(.*?)|(\?))?\s*$")
 
 
-_WITHIN_TEXT = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s+(not\s+within|within)\s+(\S+?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
+_WITHIN_TEXT = re.compile(r"^\s*([A-Za-z_][\w.-]*(?:\s*,\s*[A-Za-z_][\w.-]*)*)\s+(not\s+within|within)\s+"
+                          r"(\S+?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
                           re.I)
+
+
+def _split_conditions(text: str) -> list[str]:
+    """Conditions written as one string: ';', 'and', 'AND' or '&&' separate
+    them (an uppercase AND was read as part of the value and the filter
+    silently matched nothing, D-116), and commas do when no part holds a
+    second '=' — a comma inside a value (an LDAP DN: CN=Bob,OU=Staff) is not
+    a separator, nor is one between the predicates of a within filter."""
+    out: list[str] = []
+    for piece in re.split(r"\s*(?:;|&&|\band\b)\s*", text.strip(), flags=re.I):
+        if _WITHIN_TEXT.match(piece):
+            out.append(piece)
+            continue
+        parts = [p for p in re.split(r"\s*,\s*", piece) if p]
+        out += parts if len(parts) > 1 and all(p.count("=") <= 1 for p in parts) else [piece]
+    return [w for w in out if w]
 
 
 def _filters(where) -> list[ListFilter]:
@@ -1149,18 +1166,12 @@ def _filters(where) -> list[ListFilter]:
         return []
     if isinstance(where, str):
         text = where.strip()
-        if text.startswith(("[", "{")):
-            where = json.loads(text)
-        else:
-            where = []
-            for piece in re.split(r"\s*(?:;|\band\b)\s*", text):
-                parts = [p for p in re.split(r"\s*,\s*", piece) if p]
-                # a comma inside a value (an LDAP DN: CN=Bob,OU=Staff) is
-                # not a separator: split only when no part holds a second '='
-                where += parts if len(parts) > 1 and all(p.count("=") <= 1 for p in parts) else [piece]
-            where = [w for w in where if w]
+        where = json.loads(text) if text.startswith(("[", "{")) else _split_conditions(text)
     if isinstance(where, dict):
         where = [where]
+    # a list item can hold several conditions too: ["enabled=true AND spn?"]
+    where = [piece for item in where
+             for piece in (_split_conditions(item) if isinstance(item, str) else [item])]
     out: list[ListFilter] = []
     for item in where:
         if isinstance(item, dict):
@@ -1169,6 +1180,7 @@ def _filters(where) -> list[ListFilter]:
         w = _WITHIN_TEXT.match(str(item))
         if w is not None:
             pred, op, value, depth = w.groups()
+            pred = ",".join(p.strip() for p in pred.split(","))
             out.append(ListFilter(predicate=pred, op="not_within" if op.lower().startswith("not") else "within",
                                   value=value.strip().strip("'\""), depth=int(depth) if depth else 6))
             continue
@@ -1258,7 +1270,10 @@ def list_entities(
     values, all must hold: objects {predicate, op, value} with op eq / ne /
     in / contains / exists / absent / within / not_within, or text like
     "enabled=false", "is_dc!=true", "spn?", "member_of within group:<key>"
-    (nested membership in that group, up to depth 6). `ne` includes
+    (nested membership in that group, up to depth 6), or several edge
+    predicates at once: "has_ace,member_of within computer:<key>" holds for
+    every account with rights over that computer, directly or through its
+    groups. Conditions join with ';' or AND. `ne` includes
     entities with no value recorded (a note counts them). `paths=true`
     gives each row of an `of` listing its cited route to `of` (an account
     reaching a machine through groups and ACL grants: via=["has_ace",
@@ -1285,6 +1300,8 @@ def list_entities(
 def run_query(
     name: str,
     params: dict[str, Any] | list[Any] | str | None = None,
+    where: list[dict[str, Any] | str] | str | None = None,
+    fields: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
     budget: int = 2000,
@@ -1298,8 +1315,11 @@ def run_query(
     effective_members(group), account_groups(account),
     unconstrained_delegation_hosts, domain_trusts, …). `params` maps each
     parameter to its value; an entity parameter takes a 'type:key' handle or
-    a name. Returns every match with an exact `total`, cited, paged like
-    list_entities. Prefer it over composing the same walk by hand."""
+    a name. `where` and `fields` add conditions and columns to the query's
+    own, written as list_entities takes them: enabled_members of Domain
+    Admins with where="kerberoastable=true" is one call. Returns every match
+    with an exact `total`, cited, paged like list_entities. Prefer it over
+    composing the same walk by hand."""
     grant = _grant(ctx, namespace, "r")
     _known_namespace(namespace, grant)
     if isinstance(params, str):
@@ -1308,7 +1328,8 @@ def run_query(
         # positional, in the query's parameter order: ["group:…", "user"]
         query = find_query(_get_store().get_schema(namespace), namespace, name)
         params = {p.name: v for p, v in zip(query.params, params)}
-    req = QueryRequest(namespace=namespace, name=name, params=params or {}, limit=limit, offset=offset,
+    req = QueryRequest(namespace=namespace, name=name, params=params or {}, where=_filters(where),
+                       fields=_listed(fields), limit=limit, offset=offset,
                        budget=budget, as_of=_parse_time(as_of), valid_at=_parse_time(valid_at))
     _, listed = resolve_query(_get_store(), req, allowed_types=_allowed(grant))
     if listed.of is not None:
@@ -1618,10 +1639,26 @@ def _surface_errors(fn):
     def wrapped(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except (ValueError, PermissionError, LLMError) as exc:
+        except PermissionError as exc:
             raise ToolError(str(exc)) from exc
+        except (ValueError, LLMError) as exc:
+            # say how to recover: Gemini 2.5 Flash gave up on the task after
+            # one failed call in most of its failing audits (D-116)
+            raise ToolError(f"{exc} {_RETRY_HINT.get(fn.__name__, _RETRY_HINT_DEFAULT)}") from exc
 
     return wrapped
+
+
+_RETRY_HINT_DEFAULT = ("(This call failed on its arguments; correct them and call again — "
+                       "describe_namespace lists the types, predicates and queries.)")
+_RETRY_HINT = {
+    "list_entities": "(This call failed on its arguments; correct them and call again. where takes "
+                     "'predicate=value', 'predicate?', '!predicate' or 'predicate within type:key', joined "
+                     "by ';' or AND — describe_namespace lists the predicates.)",
+    "run_query": "(This call failed on its arguments; correct them and call again — describe_namespace "
+                 "lists each query's parameters, or list_entities answers the same question.)",
+    "answer": "(The answer step failed; ask or ask_scope still return the cited facts.)",
+}
 
 
 def _compact_text(fn):

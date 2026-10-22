@@ -488,6 +488,9 @@ export interface ListRequest {
  * via the `definition` "ListFilter".
  */
 export interface ListFilter {
+  /**
+   * the predicate compared; for within / not_within, the edge predicates walked, comma-separated for any mix of them (D-116): 'has_ace,member_of' within computer:X holds for every account with rights over X, directly or through its groups
+   */
   predicate: string;
   op?: "eq" | "ne" | "in" | "contains" | "exists" | "absent" | "within" | "not_within";
   /**
@@ -558,6 +561,14 @@ export interface QueryRequest {
   params?: {
     [k: string]: unknown;
   };
+  /**
+   * more conditions, added to the query's own (D-116): enabled_members(Domain Admins) with kerberoastable=true is one call
+   */
+  where?: ListFilter[];
+  /**
+   * more predicates to show per row (D-116)
+   */
+  fields?: string[];
   limit?: number;
   offset?: number;
   budget?: number;
@@ -629,6 +640,10 @@ export interface EntityTypeDef {
   name: string;
   description?: string;
   facets?: string[];
+  /**
+   * other names a question or an agent uses for this type (an LDAP 'computer' is a 'machine' or 'workstation', a 'user' an 'account'): a request naming an alias that is not itself a registered type reads it as this type, with a note (D-116)
+   */
+  aliases?: string[];
 }
 /**
  * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
@@ -653,6 +668,10 @@ export interface PredicateDef {
    * a scalar that names its subject (a sAMAccountName, displayName, UPN, login): entity search matches its values as well as keys, so an entity keyed by an opaque id (a SID, a GUID) can be found by name (D-091)
    */
   label?: boolean;
+  /**
+   * the source's own attribute names and plain words for this predicate (servicePrincipalName, sAMAccountName, operatingSystem): a request naming one that is not itself a registered predicate reads it as this predicate, with a note (D-116)
+   */
+  aliases?: string[];
   /**
    * the label a pack shows beside its subject's opaque key, over the namespace's other labels: a name that says where the entity lives (`dlee@dev.local`, a UPN) rather than a bare login that reads the same in every domain (D-097)
    */
@@ -714,6 +733,10 @@ export interface NotCollectedDef {
   description: string;
   words?: string[];
   source?: string;
+  /**
+   * predicates whose facts are commonly taken for this gap (an LDAP export's has_ace, rights over the directory object, read as local admin): a result carrying them notes the difference (D-116)
+   */
+  mistaken_for?: string[];
 }
 export interface IngestBatchResponse {
   total: number;

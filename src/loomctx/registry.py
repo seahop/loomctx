@@ -13,6 +13,7 @@ drafts a registration from a sample export for review (D-106,
 
 from __future__ import annotations
 
+import re
 import time
 
 from .contracts import ClaimIn, EntityRef, SchemaRegistration
@@ -96,6 +97,88 @@ def containment_predicates(schema: SchemaRegistration | None) -> list[str]:
         return []
     return sorted(p.name for p in schema.predicates if p.containment)
 
+
+def _spelling(name: str) -> str:
+    """A name with case and separators gone: servicePrincipalName,
+    service_principal_name and service-principal-name are one spelling."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _alias_table(defs) -> dict[str, str]:
+    """spelling -> the one registered name it can mean: each definition's own
+    name respelled and its aliases. A spelling two definitions claim maps
+    to neither (a guess would be worse than the unknown-name note)."""
+    table: dict[str, str] = {}
+    clash: set[str] = set()
+    for d in defs:
+        for alias in [d.name, *d.aliases]:
+            s = _spelling(alias)
+            if s in table and table[s] != d.name:
+                clash.add(s)
+            table.setdefault(s, d.name)
+    return {s: n for s, n in table.items() if s not in clash}
+
+
+def canonical_predicates(schema: SchemaRegistration | None, names: list[str],
+                         vocabulary: set[str] | frozenset[str] = frozenset()) -> tuple[list[str], list[str]]:
+    """Each name as the namespace's own predicate, and a note per renaming
+    (D-116): an agent writing `servicePrincipalName?` or `operatingSystem`
+    got 0 rows and no hint. A registered name, or one the data carries
+    (`vocabulary`), is kept as is."""
+    if schema is None:
+        return list(names), []
+    known = {p.name for p in schema.predicates} | set(vocabulary)
+    table = _alias_table(schema.predicates)
+    out, notes = [], []
+    for name in names:
+        hit = None if name in known else table.get(_spelling(name))
+        if hit is not None and hit != name:
+            out.append(hit)
+            notes.append(f"'{name}' is predicate '{hit}' in namespace '{schema.namespace}'")
+        else:
+            out.append(name)
+    return out, notes
+
+
+def canonical_type(schema: SchemaRegistration | None, name: str | None) -> tuple[str | None, str | None]:
+    """A type as the namespace's own entity type, and a note when renamed
+    (D-116): `type="account"` returned 0 rows in 30 AD audit runs."""
+    if schema is None or name is None or name in {t.name for t in schema.entity_types}:
+        return name, None
+    hit = _alias_table(schema.entity_types).get(_spelling(name))
+    if hit is None or hit == name:
+        return name, None
+    return hit, f"type '{name}' is entity type '{hit}' in namespace '{schema.namespace}'"
+
+
+def lookalike_notes(schema, carried: set[str]) -> list[str]:
+    """For each not-collected topic a result's predicates are commonly taken
+    for, one line saying they are not it (D-116): 45 local-admin audits had
+    seen "local group membership is not collected" and still presented
+    has_ace holders (rights over the directory object) as local admins."""
+    if schema is None:
+        return []
+    out = []
+    for gap in schema.not_collected:
+        hit = sorted(set(gap.mistaken_for) & carried)
+        if hit:
+            out.append(f"{', '.join(hit)} {'is' if len(hit) == 1 else 'are'} not {gap.topic.replace('_', ' ')}: "
+                       f"{gap.description} — not collected"
+                       + (f" by {gap.source}" if gap.source else "")
+                       + "; do not present these rows as it")
+    return out
+
+
+def with_aliases(schema: SchemaRegistration, predicates: dict[str, list[str]] | None = None,
+                 types: dict[str, list[str]] | None = None) -> SchemaRegistration:
+    """A connector's registration with the other names its types and
+    predicates go by (D-116), kept as data beside the definitions."""
+    predicates, types = predicates or {}, types or {}
+    return schema.model_copy(update={
+        "predicates": [p.model_copy(update={"aliases": list(dict.fromkeys([*p.aliases, *predicates.get(p.name, [])]))})
+                       for p in schema.predicates],
+        "entity_types": [t.model_copy(update={"aliases": list(dict.fromkeys([*t.aliases, *types.get(t.name, [])]))})
+                         for t in schema.entity_types]})
 
 # ---------------------------------------------------------------------- CLI #
 
