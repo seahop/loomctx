@@ -101,6 +101,8 @@ With `LOOMCTX_AUTH_FILE` / `LOOMCTX_API_KEYS` set, the HTTP transports require t
 same `X-LoomCtx-Key` / `Authorization: Bearer` header as the REST API on every
 request, and each tool call is scoped by that key's grants (D-024). stdio is
 local trust: the agent that spawned the process already owns the data.
+Per-client setup (Claude Code, Claude Desktop, Cursor, VS Code, generic)
+and the `LOOMCTX_MCP_*` switches: [mcp-clients.md](mcp-clients.md).
 
 Design rules:
 - Every tool result fits the budget and carries citations — an agent can quote LoomCtx
@@ -179,7 +181,9 @@ Typical grants:
 
 A thin, typed, dependency-light client. It contains **no logic** — no retries into
 semantics, no client-side ranking — just typed transport, so it can never drift from
-the server. Target shape:
+the server. None of the three SDKs is on a package registry yet; each README
+(`sdk/*/README.md`) says how to install it today, and
+[releasing.md](releasing.md) how it would be published. Target shape:
 
 ```python
 from loomctx_sdk import LoomCtx

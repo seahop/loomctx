@@ -438,7 +438,10 @@ def merge_schema(existing: SchemaRegistration | None,
     types = {t.name: t for t in existing.entity_types}
     for t in incoming.entity_types:
         old = types.get(t.name)
-        types[t.name] = t if old is None or t.description else old
+        new = t if old is None or t.description else old
+        if old is not None:   # aliases are the union (D-116)
+            new = new.model_copy(update={"aliases": list(dict.fromkeys([*old.aliases, *t.aliases]))})
+        types[t.name] = new
     preds = {p.name: p for p in existing.predicates}
     for p in incoming.predicates:
         old = preds.get(p.name)
@@ -453,6 +456,7 @@ def merge_schema(existing: SchemaRegistration | None,
             "node_status": old.node_status or p.node_status,
             "label": old.label or p.label,
             "display": old.display or p.display,
+            "aliases": list(dict.fromkeys([*old.aliases, *p.aliases])),
             "description": p.description or old.description})
     queries = {q.name: q for q in existing.queries}
     queries.update((q.name, q) for q in incoming.queries)   # a re-registered query replaces (D-108)

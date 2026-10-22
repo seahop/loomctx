@@ -36,10 +36,13 @@ at 10k), is below ([Active Directory audits](#active-directory-audits)).
   stop, a CVE named from memory — not a pack change: every exposure walk
   returned the same chain at the same size. Four of the nineteen models that
   were 20/20 there lost one exposure run each here.
-- **The faithfulness check holds:** 5 citations to an unseen observation, in
-  2 of 686 task-runs (`gemini-3.5-flash` 4, `minimax-m2.7` 1), and both runs
-  failed. Six models named CVE ids that do not exist in the store; the check
-  failed those runs.
+- **The faithfulness check holds:** no run cited an observation the model was
+  not shown. Two runs were flagged at first (`gemini-3.5-flash`,
+  `minimax-m2.7`); read by hand, both were quoting an NVD source label that
+  contains CISA's org UUID, which the checker took for citations. Re-scored
+  under the fixed check (D-114), `gemini-3.5-flash` gains an exposure pass.
+  Six models named CVE ids that do not exist in the store; the check failed
+  those runs.
 
 ## Short answer
 
@@ -121,12 +124,12 @@ per four-task run. Sorted by pass rate, then cost.
 | `deepseek/deepseek-chat-v3.1` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 21 | 161,121/3,097 | 408 s | $0.04 | yes | 0 |
 | `qwen/qwen3.5-plus-20260420` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 17 | 144,009/14,277 | 301 s | $0.07 | yes | 0 |
 | `x-ai/grok-4.7` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 21.4 | 336,247/12,380 | 184 s | $0.33 | no (0 unseen cites, 2 invented) | 0 |
+| `google/gemini-3.5-flash` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 34.2 | 376,351/16,054 | 140 s | $0.40 | yes | 0 |
 | `qwen/qwen3.8-max-0902` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 22.8 | 475,177/19,982 | 486 s | $0.43 | no (0 unseen cites, 10 invented) | 0 |
 | `moonshotai/kimi-k3` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 18.6 | 343,393/18,851 | 448 s | $0.56 | no (0 unseen cites, 3 invented) | 0 |
-| `minimax/minimax-m2.7` | 18/20 | 4/5 | 5/5 | 5/5 | 4/5 | 15.4 | 120,685/5,795 | 126 s | $0.02 | no (1 unseen cites, 0 invented) | 0 |
+| `minimax/minimax-m2.7` | 18/20 | 4/5 | 5/5 | 5/5 | 4/5 | 15.4 | 120,685/5,795 | 126 s | $0.02 | yes | 0 |
 | `deepseek/deepseek-v4-pro-0813` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 21.6 | 515,725/12,636 | 379 s | $0.16 | yes | 0 |
 | `mistralai/mistral-medium-3-5` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 15 | 126,813/2,616 | 51 s | $0.21 | no (0 unseen cites, 1 invented) | 0 |
-| `google/gemini-3.5-flash` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 34.2 | 376,351/16,054 | 140 s | $0.40 | no (4 unseen cites, 0 invented) | 0 |
 | `z-ai/glm-4.6v` | 16/20 | 1/5 | 5/5 | 5/5 | 5/5 | 15.6 | 99,087/3,827 | 111 s | $0.02 | yes | 0 |
 | `cohere/command-a-plus` | 16/20 | 1/5 | 5/5 | 5/5 | 5/5 | 31.6 | 296,614/6,197 | 77 s | $0.10 | yes | 0 |
 | `qwen/qwen3-coder` | 15/20 | 0/5 | 5/5 | 5/5 | 5/5 | 19 | 145,563/2,371 | 37 s | $0.05 | yes | 0 |
@@ -258,10 +261,10 @@ on 2026-09-28.
 
 | Condition | Standard 5 | Perfect on the 5 (25/25) | Median audit (5) | Harder 3 | All 8 |
 | --- | --- | --- | --- | --- | --- |
-| 500k, named queries on | 795/860 (92%) | 24 | 23 s | 412/511 (81%) | 1207/1371 (88%) |
-| 10k, named queries on | 794/857 (93%) | 18 | 21 s | 413/513 (81%) | 1207/1370 (88%) |
-| 500k, named queries off | 770/855 (90%) | 16 | 27 s | 395/513 (77%) | 1165/1368 (85%) |
-| 10k, named queries off | 772/856 (90%) | 20 | 23 s | 390/510 (76%) | 1162/1366 (85%) |
+| 500k, named queries on | 795/860 (92%) | 24 | 23 s | 411/506 (81%) | 1206/1366 (88%) |
+| 10k, named queries on | 794/857 (93%) | 18 | 21 s | 414/506 (82%) | 1208/1363 (89%) |
+| 500k, named queries off | 770/855 (90%) | 16 | 27 s | 396/503 (79%) | 1166/1358 (86%) |
+| 10k, named queries off | 772/856 (90%) | 20 | 23 s | 391/501 (78%) | 1163/1357 (86%) |
 
 Perfect counts are complete runs only (`mistral-large` passed every run it
 got, 10 of 25). The whole sweep, all four conditions and all eight audits,
@@ -323,20 +326,29 @@ shape) against SQLite (a private copy per agent), one build, every model x5:
 
 | Condition | Standard 5 | Harder 3 | Median audit |
 | --- | --- | --- | --- |
-| Postgres, named queries on | 777/854 (91%) | 408/508 (80%) | 21 s |
-| SQLite, named queries on | 787/860 (92%) | 401/515 (78%) | 20 s |
-| Postgres, named queries off | 774/854 (91%) | 404/511 (79%) | 23 s |
-| SQLite, named queries off | 756/845 (89%) | 387/501 (77%) | 25 s |
+| Postgres, named queries on | 777/854 (91%) | 411/500 (82%) ¹ | 21 s |
+| SQLite, named queries on | 787/860 (92%) | 405/510 (79%) | 20 s |
+| Postgres, named queries off | 774/854 (91%) | 408/502 (81%) ¹ | 23 s |
+| SQLite, named queries off | 756/845 (89%) | 387/491 (79%) | 25 s |
 
 The backends return the same totals and listings (the model-free replay of
 643 recorded calls agreed on every one); per-audit differences go both ways
 (cross-domain admins 85% Postgres / 93% SQLite with named queries on;
-access 77% / 72%; local admin 84% / 78%) and sit in a few temperature-0
+access 78% / 73%; local admin 85% / 80%) and sit in a few temperature-0
 models that flip all five runs together. Their inputs differ only in what
 is arbitrary per store, observation ids and the tie-breaks that use them,
 so this is store-to-store variance, not Postgres. Full report and method:
 `docs/performance.md`; the cross-domain and Kerberoastable cells are a
 re-run on the build with the D-112 naming fix, both backends.
+
+¹ Not clean, read by hand on 2026-10-22: the Postgres database was shared
+with writes on, and two agents saved findings with `record_claim` (an
+access answer and a delegation count). Later runs on that database cited
+them: 22 access, 57 local-admin and about 88 delegation answers. The
+access, local-admin and delegation Postgres cells (delegation is one of the
+standard five) are therefore not a clean comparison. Scorecards now run with
+writes off (`LOOMCTX_MCP_WRITES=0`), and those cells will be re-run on a
+fresh copy. All AD figures here are re-scored under D-114 and D-117.
 
 **What the misses are.** On the first five, as before: a set stopped short
 (an admin or a nested group missed, the disabled account not flagged), and

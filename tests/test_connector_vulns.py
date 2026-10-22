@@ -133,6 +133,17 @@ def test_cisa_adp_is_the_third_scorer_with_its_own_source_and_ssvc_points(tmp_pa
     store.close()
 
 
+def test_a_cisa_adp_weakness_is_sourced_cisa_adp_not_its_org_uuid():
+    """CWE entries carry the scorer's org id as their source too: CISA's
+    must read `cisa-adp`, like its CVSS, so a CWE disagreement names a
+    readable source (agents quoted the raw UUID back, D-114)."""
+    item = json.loads(json.dumps(NVD_ITEM))
+    item["cve"]["weaknesses"].append({"source": vulns.CISA_ADP_ORG, "type": "Secondary",
+                                      "description": [{"lang": "en", "value": "CWE-787"}]})
+    weak = {c.object.key: c.source for c in vulns.nvd_envelopes(item, "netsec") if c.predicate == "has_weakness"}
+    assert weak == {"CWE-122": "nvd:nvd@nist.gov", "CWE-787": "cisa-adp"}
+
+
 def test_rejected_cves_keep_only_their_status():
     claims = list(vulns.nvd_envelopes(REJECTED, "netsec"))
     assert [c.predicate for c in claims] == ["status"] and claims[0].object == "Rejected"
@@ -492,7 +503,8 @@ def _kev_cache(cache, released, **changes):
 def _counts(db):
     store = SqliteStore(db)
     try:
-        return (sum(1 for _ in store.iter_observations("netsec")),
+        # source data only: a document's mention links (D-118) are derived from it
+        return (sum(1 for o in store.iter_observations("netsec") if not o.source.endswith(":mentions")),
                 sum(1 for _ in store.iter_artifacts("netsec")))
     finally:
         store.close()

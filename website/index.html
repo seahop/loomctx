@@ -343,7 +343,7 @@
         <p class="sub">Four agent tasks over MCP, five runs each, on 35 models. Rule-scored, and a correct answer without a citation fails.</p>
         <ul class="facts">
           <li><span>Models with a perfect 20/20</span><b>15 of 35</b></li>
-          <li><span>Runs citing data the model never saw (scored as fails)</span><b>2 of 686</b></li>
+          <li><span>Runs citing data the model never saw</span><b>0 of 686</b></li>
           <li><span>Cheapest clean pass per 4-task run</span><b>$0.01</b></li>
           <li><span>Whole 35-model sweep, 5 runs each</span><b>≈ $46</b></li>
           <li><span>Perfect on the 5 standard AD audits, 500,000-object forest</span><b>24 of 35</b></li>
@@ -506,7 +506,7 @@
               <tr class="hl"><td>Standard audits passed</td><td class="num">93% <small>794 / 857</small></td><td class="num">92% <small>795 / 860</small></td></tr>
               <tr><td>Models perfect on them (25/25)</td><td class="num">18</td><td class="num">24</td></tr>
               <tr><td>Standard audits, named queries off</td><td class="num">90% <small>772 / 856</small></td><td class="num">90% <small>770 / 855</small></td></tr>
-              <tr><td>Harder audits passed</td><td class="num">81% <small>413 / 513</small></td><td class="num">81% <small>412 / 511</small></td></tr>
+              <tr><td>Harder audits passed</td><td class="num">82% <small>414 / 506</small></td><td class="num">81% <small>411 / 506</small></td></tr>
               <tr><td>Median time per standard audit</td><td class="num">21 s</td><td class="num">23 s</td></tr>
               <tr><td>Agent steps per standard audit</td><td class="num">5.7</td><td class="num">5.7</td></tr>
               <tr><td>Tokens the agent read per standard audit</td><td class="num">58.5k</td><td class="num">58.9k</td></tr>
@@ -533,7 +533,7 @@
               <tr><td>Trusts</td><td class="num">97%</td><td class="num">96%</td><td class="num"><span>+1</span></td></tr>
               <tr><td>Access <em>harder</em></td><td class="num">76%</td><td class="num">74%</td><td class="num"><span>+2</span></td></tr>
               <tr><td>Local admin <em>harder</em></td><td class="num">82%</td><td class="num">80%</td><td class="num"><span>+2</span></td></tr>
-              <tr><td>Kerberoastable admins <em>harder</em></td><td class="num">84%</td><td class="num">78%</td><td class="num"><span class="up">+6</span></td></tr>
+              <tr><td>Kerberoastable admins <em>harder</em></td><td class="num">85%</td><td class="num">82%</td><td class="num"><span class="up">+3</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -547,14 +547,14 @@
           <table class="cmp pgt">
             <thead><tr><th scope="col">500,000 objects, one build</th><th scope="col" class="num">Standard 5</th><th scope="col" class="num">Harder 3</th><th scope="col" class="num">Median audit</th></tr></thead>
             <tbody>
-              <tr class="hl"><td>Postgres, one shared database</td><td class="num">91% <small>777 / 854</small></td><td class="num">80%</td><td class="num">21 s</td></tr>
-              <tr><td>SQLite, a private file per agent</td><td class="num">92% <small>787 / 860</small></td><td class="num">78%</td><td class="num">20 s</td></tr>
-              <tr><td>Postgres, named queries off</td><td class="num">91% <small>774 / 854</small></td><td class="num">79%</td><td class="num">23 s</td></tr>
-              <tr><td>SQLite, named queries off</td><td class="num">89% <small>756 / 845</small></td><td class="num">77%</td><td class="num">25 s</td></tr>
+              <tr class="hl"><td>Postgres, one shared database</td><td class="num">91% <small>777 / 854</small></td><td class="num">82%¹</td><td class="num">21 s</td></tr>
+              <tr><td>SQLite, a private file per agent</td><td class="num">92% <small>787 / 860</small></td><td class="num">79%</td><td class="num">20 s</td></tr>
+              <tr><td>Postgres, named queries off</td><td class="num">91% <small>774 / 854</small></td><td class="num">81%¹</td><td class="num">23 s</td></tr>
+              <tr><td>SQLite, named queries off</td><td class="num">89% <small>756 / 845</small></td><td class="num">79%</td><td class="num">25 s</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="mb-cmp-note">35 models, five runs each, all eight audits. Postgres 17 with pgvector served about 13 agents at once from one database, as a Kubernetes deployment would; SQLite gave each agent its own copy. Measured 2026-10-15.</p>
+        <p class="mb-cmp-note">35 models, five runs each, all eight audits. Postgres 17 with pgvector served about 13 agents at once from one database, as a Kubernetes deployment would; SQLite gave each agent its own copy. Measured 2026-10-15. ¹ The shared database had writes on, and later runs cited findings two agents saved there, so the Postgres access, local-admin and delegation cells are not a clean comparison; they will be re-run on a fresh copy with writes off.</p>
       </div>
       <div class="mb-cmp mb-nq">
         <h4>What differs, and what doesn't</h4>
@@ -628,13 +628,13 @@
     <div class="surfaces">
       <div class="surface">
         <h3>MCP, for agents</h3>
-        <p>Fourteen tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
-        <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">list_entities</span><span class="chip">run_query</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
+        <p>Fifteen tools over stdio or streamable HTTP, aligned to MCP 2026-07-28 with output schemas and structured content.</p>
+        <div class="chips"><span class="chip">ask</span><span class="chip">ask_scope</span><span class="chip">find_path</span><span class="chip">list_entities</span><span class="chip">run_query</span><span class="chip">search_documents</span><span class="chip">expand</span><span class="chip">record_claim</span><span class="chip">answer</span></div>
       </div>
       <div class="surface">
         <h3>HTTP, for everything</h3>
         <p>FastAPI with an OpenAPI spec. Ingest single envelopes or up to 1,000 as a batch or NDJSON stream.</p>
-        <div class="chips"><span class="chip">/v1/ask</span><span class="chip">/v1/path</span><span class="chip">/v1/list</span><span class="chip">/v1/query</span><span class="chip">/v1/expand</span><span class="chip">/v1/ingest/batch</span></div>
+        <div class="chips"><span class="chip">/v1/ask</span><span class="chip">/v1/path</span><span class="chip">/v1/list</span><span class="chip">/v1/query</span><span class="chip">/v1/documents/search</span><span class="chip">/v1/expand</span><span class="chip">/v1/ingest/batch</span></div>
       </div>
       <div class="surface">
         <h3>SDKs</h3>

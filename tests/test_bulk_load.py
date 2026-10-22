@@ -57,8 +57,10 @@ def _content(s):
             # artifact ids are minted per store; the cited event id is compared
             " o.attrs_json, json_remove(o.provenance_json, '$.artifact_id')"
             " FROM observations o JOIN entities e ON e.id = o.subject_id"
+            # a document's mention links (D-118) key the document by its artifact id
+            " WHERE o.source NOT LIKE '%:mentions'"
         ).fetchall()
-        ents = s._conn.execute("SELECT type, key FROM entities").fetchall()
+        ents = s._conn.execute("SELECT type, key FROM entities WHERE type != 'document'").fetchall()
         aliases = s._conn.execute("SELECT alias FROM aliases").fetchall()
     return sorted(map(tuple, rows), key=repr), sorted(map(tuple, ents)), sorted(map(tuple, aliases))
 
@@ -184,7 +186,8 @@ def test_bulk_load_reads_its_own_writes_and_restores_the_store(tmp_path):
     indexes = {r[0] for r in s._writer.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert set(SqliteStore._BULK_DEFERRED_INDEXES) <= indexes
     other = sqlite3.connect(tmp_path / "s.db")
-    assert other.execute("SELECT count(*) FROM observations").fetchone()[0] == 1
+    # the cited claim; the document's own title fact (D-118) rides beside it
+    assert other.execute("SELECT count(*) FROM observations WHERE source NOT LIKE '%:mentions'").fetchone()[0] == 1
 
 
 def test_bulk_load_keeps_each_call_atomic_and_the_calls_before_an_error(tmp_path):

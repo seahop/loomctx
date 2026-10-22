@@ -376,6 +376,27 @@ def test_access_scorer():
     got = ext._score_access(bad, truth, SEEN, None)
     assert not got["pass"] and got["false_accounts"] == ["jdoe-ops"]
     assert not ext._score_access(f"adm-rlopez has GenericAll via CORP-WS-Operators {CITE}", truth, SEEN, None)["pass"]
+    # ruled out as "non-DA", "didn't find it among", "**not**": no finding (eight runs were failed)
+    for out in ("jdoe-ops (non-DA) is in CORP-WS-Operators", "jdoe-ops holds rights, but I didn't find it among the Domain Admins",
+                "jdoe-ops is **not** a Domain Admin", "jdoe-ops — a non-Domain Admin member of CORP-WS-Operators"):
+        answer = good.replace("jdoe-ops is in CORP-WS-Operators but is not a Domain Admin", out)
+        assert ext._score_access(answer, truth, SEEN, None)["pass"], out
+    # an admin named only to rule it out is not found (seven runs passed that way)
+    for out in ("adm-rlopez — a non-Domain Admin member of CORP-WS-Operators",
+                "adm-rlopez holds no rights through CORP-WS-Operators"):
+        answer = good.replace("adm-rlopez — GenericAll through CORP-WS-Operators", out)
+        got = ext._score_access(answer, truth, SEEN, None)
+        assert not got["pass"] and got["admins_named"] == ["adm-pchen"], out
+    # '*' bullets stay list items: an idle admin in a list framed as "have rights" is put forward
+    framed = (f"The following members of Domain Admins have rights over WS-AUDIT01:\n"
+              f"*   **adm-rlopez@corp.local** {CITE} (through CORP-Tier0-Admins)\n"
+              f"*   **adm-pchen@corp.local** {CITE} (direct member)\n*   **adm-kwu@corp.local** {CITE} (direct member)")
+    got = ext._score_access(framed, truth, SEEN, None)
+    assert not got["pass"] and got["false_accounts"] == ["adm-kwu"]
+    # "no direct ACE" is not "no rights"
+    answer = good.replace("adm-rlopez — GenericAll through CORP-WS-Operators",
+                          "adm-rlopez — no direct ACE, but GenericAll through CORP-WS-Operators")
+    assert ext._score_access(answer, truth, SEEN, None)["pass"]
 
 
 def test_localadmin_scorer():
@@ -393,6 +414,12 @@ def test_localadmin_scorer():
     hedged_claim = (f"adm-rlopez is a local admin on WS-AUDIT01 {CITE}. Note: local group membership was not "
                     f"collected {CITE}.")
     assert not ext._score_localadmin(hedged_claim, truth, SEEN, None)["pass"]
+    # negated or conditional sentences are not claims (seven runs were failed on these)
+    for hedge in ("That doesn't mean nobody is a local admin on WS-AUDIT01.",
+                  "Neither adm-rlopez nor adm-pchen is a local admin as far as this data shows.",
+                  "GenericAll is a path to local admin: adm-rlopez could gain local admin rights through it."):
+        answer = f"Local group membership on WS-AUDIT01 is not collected in this AD export {CITE}. {hedge}"
+        assert ext._score_localadmin(answer, truth, SEEN, None)["pass"], hedge
 
 
 def test_kerberoast_scorer():

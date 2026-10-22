@@ -83,6 +83,9 @@ class ShardedStore(GraphStore):
     def restore_artifact(self, artifact: Artifact) -> None:
         self.shard_for(artifact.namespace).restore_artifact(artifact)
 
+    def search_artifacts(self, namespace: str, terms: list[str], limit: int = 50) -> list[Artifact]:
+        return self.shard_for(namespace).search_artifacts(namespace, terms, limit)
+
     def restore_entity(self, entity: Entity) -> None:
         self.shard_for(entity.namespace).restore_entity(entity)
 

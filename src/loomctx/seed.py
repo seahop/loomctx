@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .contracts import ClaimIn, DocumentIn, EntityRef
+from .mentions import link_quietly
 from .store.common import redact_dsn
 from .store.factory import store_from_env, store_from_url
 
@@ -282,7 +283,7 @@ def cmd_load(db_path: str | None, seed: int) -> None:
         # corrections go last, pointing at the observation ids just minted
         store.record_claims(resolve_supersessions(claims, recorded))
         for doc in docs:
-            store.store_artifact(doc)
+            link_quietly(store, store.store_artifact(doc), doc.text)   # D-118
     finally:
         store.close()
     where = redact_dsn(db_path) if db_path else f"{redact_dsn(os.environ.get('LOOMCTX_DB', 'loomctx.db'))} (env)"

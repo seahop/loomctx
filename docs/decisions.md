@@ -3845,6 +3845,214 @@ travel with everything that ships:
   `go list -deps` (linked code only, not test-only modules) and fails on a
   module that has none.
 
+## D-114 · Hex quoted from a source name is not a citation (2026-10-22)
+
+The faithfulness check takes any 8–32 hex run in an answer as a citation and
+fails the run if it matches no observation id the agent was shown. Read by
+hand after the talk, the only two runs it failed in the 2026-09-28
+scorecard (`gemini-3.5-flash`, `minimax-m2.7`, both on exposure) cited
+nothing unseen: they quoted CWE source labels such as
+`nvd:134c704f-9b21-4f2e-91b3-4a467353bcc0`, CISA's NVD org id, whole or cut
+short, and the check read the UUID's segments as citations.
+
+- **What the agent was shown inside a name doesn't count either way.** While a run
+  is collected, every dashed UUID and every hex run in a `"source"` value
+  of a tool result is kept as a quoted name. An answer token that sits inside
+  one is neither a seen nor an unseen citation. Observation ids are 32
+  undashed hex, so no real citation is lost; an invented id is still caught.
+- **CISA's CWE entries read `cisa-adp`,** as its CVSS entries already did
+  (D-069's mapping now covers `has_weakness`), so agents see a readable
+  source name rather than the UUID.
+- **Re-scored, model-free, from the saved answers.** `gemini-3.5-flash` 18/20 →
+  19/20 (that run named all 32 KEV CVEs with full precision);
+  `minimax-m2.7` stays 18/20 (its run named 6 of the 16 required). Runs
+  citing an unseen observation: 0 of 686, not 2. Fixed in `docs/models.md`,
+  `README.md` and the site.
+
+## D-115 · find_path follows one account through two groups (2026-10-22)
+
+The no-turn-back rule (D-080) refused any two consecutive edges on one
+predicate with the pivot on the same side of both. That rightly stops
+`user -member_of-> Domain Users <-member_of- every other user`, but it also
+refused `Tier0 <-member_of- rlopez -member_of-> WS-Operators`: one account
+in two groups, which is how an admin through Tier0 holds rights through
+WS-Operators. `find_path(Domain Admins -> WS-1, via=[member_of, has_ace])`
+returned only the direct admin, and said nothing; 22 access-audit runs that
+relied on it missed the second admin (24 of 25 that passed `siblings=True`
+found it).
+
+- **A path search refuses only co-membership:** two edges that both point at
+  the pivot. Two edges leaving the pivot are a route. The scope walk
+  (`ask_scope`) keeps D-080's rule, so packs keep their shape.
+- **A refused step is reported:** the response says how many sideways steps
+  through a shared group were not followed, and that `siblings=true`
+  follows them.
+
+## D-116 · Flexible asks: the names agents use, composed conditions, no silent empties (2026-10-22)
+
+Read by hand, most failures in the 2026-10 harder AD audits that were not the
+model's reasoning were requests that returned an exact-looking empty or
+partial answer with no hint why. Each case below now either works or says
+why it didn't. All of it is registry data or generic notes; nothing is
+specific to an audit question.
+
+- **Aliases (contract: `EntityTypeDef.aliases`, `PredicateDef.aliases`).** A
+  connector declares the other names its types and predicates go by
+  (`account` → `user`, `servicePrincipalName` → `spn`, `operatingSystem` →
+  `os`). A request naming one that is not itself registered, or a name that
+  differs from a registered one only by case or separators (`Member-Of`), is
+  read as the registered name in listings, filters, scope `expand` and
+  find_path `via`, with a note. A spelling two definitions claim maps to
+  neither. `type="account"` used to return 0 rows (30 runs).
+- **Unknown types and empty values are explained.** A `type` that is neither
+  registered nor recorded returns the namespace's types. An eq / in filter
+  whose value no entity carries says so and shows values that are on record.
+- **Several edge predicates in one within filter.** `has_ace,member_of within
+  computer:X` holds for every account with rights over X, directly or
+  through its groups. Combined with `member_of within group:DA`, "which
+  Domain Admins have rights over X" is one call (92% of passing access runs
+  used a within filter; about 55% passed without one).
+- **A permission walk without membership names what it left out.** Listing
+  along `has_ace` alone notes how many reached entities are groups with
+  members, and the filter that includes them.
+- **Look-alike facts (contract: `NotCollectedDef.mistaken_for`).** A
+  not-collected topic lists the predicates commonly taken for it (LDAP's
+  `has_ace` for local admin). A listing, pack or path carrying them gets one
+  line saying they are not it. 45 local-admin runs had seen the gap note and
+  still presented `has_ace` holders as local admins.
+- **Named queries compose (contract: `QueryRequest.where`, `.fields`).**
+  Conditions and columns are added to the query's own. gpt-4o failed the
+  Kerberoast audit 10 of 10 running `enabled_members` and
+  `kerberoastable_users` apart; mistral-large passed `where` to run_query
+  and it was silently dropped.
+- **Conditions written as text split on `AND` in any case, `&&` and `;`**,
+  inside list items too. An uppercase AND was read as part of the value and
+  matched nothing.
+- **The full not-collected list rides only when no close predicate was
+  offered.** "Did you mean spn?" next to "local groups, sessions and user
+  rights are not collected" told an agent Kerberoasting was unknowable.
+- **Every failed tool call says how to recover** (correct the arguments, where
+  describe_namespace lists them). Gemini 2.5 Flash abandoned most of its
+  failing audits after one error.
+- **Connectors ship aliases:** LDAP (types and every predicate with an LDAP
+  attribute name), the vulnerability feeds, nmap, Entra and Okta.
+
+## D-117 · AD scorer misreadings fixed, provider blanks are not run, Postgres cells flagged (2026-10-22)
+
+A by-hand read of about 25 failing answers per harder audit found the
+scorer misjudging in both directions.
+
+- **Access: negations read.** "jdoe-ops (non-DA)", "I didn't find it among
+  the Domain Admins" and "is **not** a Domain Admin" rule the operator out.
+  Emphasis is stripped first, keeping `*` bullets so list items keep their
+  lead-ins. 8 runs were failed for a correct answer.
+- **Access: an admin counts only where a sentence puts it forward.** Naming
+  adm-rlopez to call it a "Non-Domain Admin", or to say it "holds no rights
+  through CORP-WS-Operators", is no finding. "No direct ACE" is not "no
+  rights". 4 runs passed that way and now fail. The other 3 suspected
+  passes are correct on rereading.
+- **Local admin: negated and conditional sentences are not claims.**
+  "Doesn't mean nobody is a local admin", "neither … is a local admin",
+  "GenericAll is a path to local admin". 9 runs were failed, all model
+  answers that name the gap and the has_ace caveat exactly.
+- **A provider's blank is not run, not a fail.** A run that ends on an empty
+  completion twice with zero output tokens (claude-fable-5.1 and
+  claude-opus-5.5 on the Kerberoast prompt: 94 runs across both sweeps, no
+  tool call made) is marked infra. `run_task` does the same from now on.
+- **D-114 applies to the AD audits** when every unseen example is a piece of a
+  UUID the answer quotes.
+
+Re-scored from saved transcripts, model-free; every flip was read. 500k,
+named queries on: standard five 92% (unchanged), harder three 81% (411/506;
+was 412/511). 10k: 93%, harder 82% (was 81%). The Postgres harder cells
+move up about two points, but the Postgres access, local-admin and
+delegation cells ran on a shared database where two agents had saved
+findings (`record_claim`) that later runs cited. They are flagged as not
+clean in `docs/models.md` and on the site, to be re-run on a fresh copy
+with writes off.
+
+## D-118 · Documents tied to structured data without an LLM (2026-10-22)
+
+Until now a document reached the graph only through LLM claim extraction,
+and was found only by `find_related`, which needs an embedder. With neither
+configured, an incident report was stored and invisible: no pack, listing
+or path could reach it, and no tool could find it by its words. Joining what
+a report says with what the directory, scans and feeds say is the point of
+holding both.
+
+- **Mention links at ingest.** When a document arrives, its identifier-like
+  tokens (account logins, hostnames, CVE ids, IPs, dashed or dotted names)
+  and capitalised two- or three-word names are looked up as entity keys
+  and as label values. Each entity found, if the token names no more than
+  two, gets one fact, `entity mentioned_in document:<artifact id>`. The fact
+  is cited to the span where the document first names it, with the source
+  `<document source>:mentions` and `attrs.mention`. The document gets a
+  `title` label (its title attribute, else its first line, else its
+  filename). It is deterministic and idempotent by event id, and it runs
+  after the batch's claims are recorded, so a connector that sends a document
+  with its facts links to entities in the same batch. A plain word never
+  links.
+- **The registry learns the document type.** On a namespace's first document,
+  `document`, `mentioned_in` and `title` (label) are merged into its registry
+  (additive, D-083). A strict namespace's other rules still apply.
+- **`search_documents` (MCP) and `POST /v1/documents/search` (contract:
+  `DocumentSearchRequest`, `DocumentPage`, `DocumentHit`).** Query terms
+  (quoted phrases whole, words of three or more letters minus stop words)
+  are matched as substrings in the store (`search_artifacts`, new on every
+  backend). Matches are ranked by term frequency, weighted by how few
+  matching documents hold each term, then by recency. A hit carries its
+  best passage, cited to its span, the title, and the entities it names. A
+  key without the `document` entity type gets nothing.
+- **Kept out of exports.** STIX export skips mention links: derived from the
+  text, not intelligence a source asserted.
+- **Limits.** Matching is lexical. Synonyms are `find_related`'s job when an
+  embedder is configured, and claim extraction (an LLM) still mines what a
+  document says about the entities it names. A body offloaded to blob
+  storage is not searched. A token naming more than two entities is too
+  vague to link.
+- **Refined on the seed (same day).** The seed's incident report linked to
+  nothing: its namespace registers predicates but no entity types, and
+  `jdoe` is a plain word. A token is now looked up as every type the
+  namespace registers or carries, in batched key lookups. Plain words of
+  four letters or more that are not common words may match an entity key,
+  but never a label value. A document loaded before the entities it names
+  is linked by `python -m loomctx.mentions relink`.
+- **Mention links stay out of packs unless the question is about documents**
+  ("report", "incident", "advisory", "mentioned"…) or the scope walks
+  `mentioned_in`, and never under `valid_at`. Before this, two reports
+  naming web-01 read as a `mentioned_in` conflict, and the IP-lease answer
+  grew from 120 to 203 tokens with a September report in an August
+  question. Listings and find_path reach them when asked.
+
+## D-119 · Held-out and hybrid agent tasks (2026-10-22)
+
+Eight AD audits measured what agents do with eight questions. Whether a
+person can ask LoomCtx about the data in their own words is a different
+measurement, and the one the product promises. Two task families join
+`agent_eval` (selectable by name, never part of a default run):
+
+- **Flexibility (`flex_*`, eight tasks)** over the same forest: worded unlike
+  the audits and asking for combinations they do not. Disabled Domain
+  Admins (nested); who controls a workstation without being an admin; the
+  Kerberoast audit in other words; delegation servers with each one's OS;
+  logon sessions (not collected); one account's membership chain; a yes/no
+  on nested membership three levels up; whether a partner domain's SID
+  history gets through its trust. Truths are walked in the store. The floor
+  to report is named queries off.
+- **Hybrid (`hyb_*`, three tasks)** need an incident report AND the
+  directory. The question names no entity. The agent finds the report by
+  its words (`search_documents`, D-118), takes the entity it names, and
+  answers from the facts: the Kerberoasted account's status and admin
+  path, the phished user's machines, and the attacked server's delegation
+  and OS. Four reports ship with the forest (`agent_eval_flex prepare`),
+  one a deliberate near miss (Kerberos clock skew).
+- **Scorers follow D-117's lessons:** negations and back-references ("It is
+  disabled") are read, a decoy counts only where a sentence puts it forward,
+  and citations must be faithful.
+
+Not yet measured. They run with the next paid sweep, beside the eight
+audits, named queries on and off.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

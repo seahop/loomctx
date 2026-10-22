@@ -335,6 +335,14 @@ func (c *Client) Semantic(ctx context.Context, question string, limit int) (map[
 	return out, c.get(ctx, "/v1/entities/semantic", url.Values{"q": {question}, "limit": {strconv.Itoa(orDefault(limit, 10))}}, &out)
 }
 
+// SearchDocuments: stored documents found by their words, no embedder needed (D-118);
+// each hit has the best passage, cited, and the entities the document names.
+func (c *Client) SearchDocuments(ctx context.Context, query string, limit int) (map[string]any, error) {
+	var out map[string]any
+	body := map[string]any{"namespace": c.Namespace, "query": query, "limit": orDefault(limit, 10)}
+	return out, c.post(ctx, "/v1/documents/search", body, nil, &out)
+}
+
 func (c *Client) Observations(ctx context.Context, subject EntityRef, limit int) (map[string]any, error) {
 	var out map[string]any
 	p := "/v1/entities/" + url.PathEscape(subject.Type) + "/" + url.PathEscape(subject.Key) + "/observations"

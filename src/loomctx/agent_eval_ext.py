@@ -234,7 +234,16 @@ def _truth_xdomain(store) -> dict:
 
 # a sentence that names an account only to exclude it
 _EXCLUDES = re.compile(r"\b(?:not|no|none|neither|nor|never|without|excluded?|isn't|aren't|doesn't|don't|"
-                       r"rather than|instead of)\b", re.I)
+                       r"didn't|wasn't|weren't|rather than|instead of)\b", re.I)
+# "non-DA", "non-Domain Admin", "not a Domain Admin": a line ruling an account out of the admins
+_NOT_ADMIN = re.compile(r"\bnon[- ]?(?:da|domain[- ]admins?|admins?|privileged)\b"
+                        r"|\bnot (?:a |an )?(?:member of (?:the )?)?(?:da|domain admins?)\b|\bis not an admin\b", re.I)
+# "holds no rights", "has no access", "does not hold rights": a line ruling an account's rights out
+_NO_RIGHTS = re.compile(r"\b(?:holds?|has|have|with)\s+no\s+(?:\w+\s+)?(?:rights?|access|permissions?)\b"
+                        r"|\bno (?:rights?|access|permissions?) (?:over|on|to)\b"
+                        r"|\bwithout (?:any )?(?:rights?|access|permissions?)\b"
+                        r"|\b(?:does|do|did)(?:n't| not)\s+(?:hold|have)\s+(?:any\s+)?(?:rights?|access|permissions?|grants?)\b",
+                        re.I)
 _DISABLED = re.compile(r"\bdisabled\b|\bnot enabled\b|\binactive\b|\baccountdisable\b", re.I)
 
 
@@ -246,6 +255,18 @@ _BLOCK_LINE = re.compile(r"\s*(?:[-+|]|\*(?!\*)|\d+[.)])")     # "**Bold:**" is 
 _ADMIN = re.compile(r"domain admins|tier0|tier-0", re.I)
 # typographic apostrophes some models emit ("can’t", "isn’t")
 _QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'"})
+
+
+def _unemphasized(text: str) -> str:
+    """Markdown emphasis gone ("is **not** a Domain Admin" reads as "is not
+    a Domain Admin"), a line's '* ' bullet marker kept: it is what makes the
+    line a list item with a lead-in."""
+    out = []
+    for ln in text.split("\n"):
+        head = re.match(r"\s*\*\s+", ln)
+        head = head.group(0) if head else ""
+        out.append(head + re.sub(r"\*{1,3}|(?<!\w)_{1,3}|_{1,3}(?!\w)", "", ln[len(head):]))
+    return "\n".join(out)
 
 
 def _sentences(answer: str, key: str) -> list[str]:
@@ -684,9 +705,17 @@ def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
     """Every admin with rights named; a decoy (an operator who is no admin,
     an admin with no grant) counts against the answer where a line puts it
     forward with rights and neither the line nor its lead-in rules it out."""
-    answer = answer.translate(_QUOTES)
+    answer = _unemphasized(answer.translate(_QUOTES))
     names = (*truth["admins"], *truth["decoys"])
-    named = sorted(a for a in truth["admins"] if _mentions(answer, a))
+
+    def credited(name: str) -> bool:
+        """An admin counts where some sentence naming it does not rule it
+        out — "adm-rlopez (non-Domain Admin)" or "only adm-pchen holds
+        rights … adm-rlopez holds no rights through WS-Operators" name it
+        without finding it (seven runs passed that way)."""
+        sents = [x for ln in answer.splitlines() for x in re.split(r"(?<=[.;!?])\s+", ln) if _mentions(x, name)]
+        return any(not _NOT_ADMIN.search(x) and not _NO_RIGHTS.search(x) for x in sents)
+
     if "operators" in truth:
         operators = set(truth["operators"])
     else:   # transcripts scored before the field: the planted design says which decoy is which
@@ -707,12 +736,14 @@ def _score_access(answer: str, truth: dict, seen: set[str], store) -> dict:
         return bool(re.search(r"\bonly\b", text, re.I)
                     and not re.search(rf"\bonly\W+(?:\w+\W+)?{re.escape(name)}", text, re.I))
 
+    named = sorted(a for a in truth["admins"] if _mentions(answer, a) and credited(a))
+
     def put_forward(line: str, lead: str, name: str) -> bool:
         """An operator (rights, no admin) counts where it is put forward as an
         admin — "adm-rlopez, adm-pchen and jdoe-ops hold rights" is true and
         no finding; an idle admin (admin, no rights) where it is given rights."""
-        if _EXCLUDES.search(line) or _EXCLUDES.search(lead) or re.search(
-                r"\bnot (?:a |an )?(?:member of )?domain admin|non[- ]?admin|is not an admin", line, re.I):
+        if _EXCLUDES.search(line) or _EXCLUDES.search(lead) or _NOT_ADMIN.search(line) \
+                or (name not in operators and _NO_RIGHTS.search(line)):
             return False
         words = admin_words if name in operators else _ACCESS_WORDS
         if _BLOCK_LINE.match(line):     # a list item or table row: its lead-in or heading frames it
@@ -761,7 +792,11 @@ def _score_localadmin(answer: str, truth: dict, seen: set[str], store) -> dict:
                                r"captured by|available in|present in)\b[^.]{0,30}\b(?:the )?(?:data|export|"
                                r"dataset|directory|namespace|ad)\b", answer, re.I))
     claimed = any(_LOCAL_ADMIN_CLAIM.search(sent) and not _MODAL.search(sent) and not _NOT_COLLECTED.search(sent)
-                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b|\bby default\b",
+                  and not re.search(r"\bwho (?:has|have|is|are)\b|\bimpossible\b|\bno way\b|\bby default\b"
+                                    # "doesn't mean nobody is a local admin", "neither … is a local
+                                    # admin", "path to local admin: …" (seven runs failed on these)
+                                    r"|\b(?:does|do|did)(?:n't| not) mean\b|\bneither\b|\bnobody\b|\bno one\b"
+                                    r"|\bpath (?:to|toward)s? local admin|\b(?:become|gain|obtain|reach)\w* local admin",
                                     sent, re.I)
                   for line in asserted.splitlines() for sent in _SENTENCE.split(line))
     cites = _cited(answer, seen)

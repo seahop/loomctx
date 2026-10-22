@@ -467,6 +467,13 @@ class GraphStore(ABC):
         """Fetch a stored document by id."""
 
     @abstractmethod
+    def search_artifacts(self, namespace: str, terms: list[str], limit: int = 50) -> list[Artifact]:
+        """Documents whose text contains any of `terms` (lower-cased, matched
+        as substrings), newest first, at most `limit` (D-118): finding a
+        document by its words needs no embedder. A body offloaded to blob
+        storage is not searched."""
+
+    @abstractmethod
     def ping(self) -> bool:
         """Cheap liveness probe of the backing database (/readyz)."""
 

@@ -1634,6 +1634,7 @@
         "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
         "properties": {
           "predicate": {
+            "description": "the predicate compared; for within / not_within, the edge predicates walked, comma-separated for any mix of them (D-116): 'has_ace,member_of' within computer:X holds for every account with rights over X, directly or through its groups",
             "title": "Predicate",
             "type": "string"
           },
@@ -2120,6 +2121,51 @@
     "type": "object"
   },
   "QueryRequest": {
+    "$defs": {
+      "ListFilter": {
+        "description": "One condition on an entity's CURRENT value of a predicate: the newest\nvisible, unsuperseded, in-scope row (valid at `valid_at` when one is\nasked), compared case-insensitively on scalars. `ne` holds for an entity\nwith no value on record (D-107: \"accounts not disabled\" includes the\nones whose status was never collected \u2014 the page says how many).",
+        "properties": {
+          "predicate": {
+            "description": "the predicate compared; for within / not_within, the edge predicates walked, comma-separated for any mix of them (D-116): 'has_ace,member_of' within computer:X holds for every account with rights over X, directly or through its groups",
+            "title": "Predicate",
+            "type": "string"
+          },
+          "op": {
+            "default": "eq",
+            "enum": [
+              "eq",
+              "ne",
+              "in",
+              "contains",
+              "exists",
+              "absent",
+              "within",
+              "not_within"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "default": null,
+            "description": "the compared value: a scalar for eq / ne / contains, a list for in; an entity ('type:key') for within / not_within; ignored by exists / absent",
+            "title": "Value"
+          },
+          "depth": {
+            "default": 6,
+            "description": "within / not_within: the most `predicate` edges from the entity to `value` (nested membership: user -member_of-> group -member_of-> \u2026 -> value); clamped to the list depth cap",
+            "maximum": 32,
+            "minimum": 1,
+            "title": "Depth",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "predicate"
+        ],
+        "title": "ListFilter",
+        "type": "object"
+      }
+    },
     "description": "Run a namespace's named query (D-108); the answer is a ListPage.",
     "properties": {
       "namespace": {
@@ -2135,6 +2181,22 @@
         "additionalProperties": true,
         "title": "Params",
         "type": "object"
+      },
+      "where": {
+        "description": "more conditions, added to the query's own (D-116): enabled_members(Domain Admins) with kerberoastable=true is one call",
+        "items": {
+          "$ref": "#/$defs/ListFilter"
+        },
+        "title": "Where",
+        "type": "array"
+      },
+      "fields": {
+        "description": "more predicates to show per row (D-116)",
+        "items": {
+          "type": "string"
+        },
+        "title": "Fields",
+        "type": "array"
       },
       "limit": {
         "default": 50,
@@ -2875,6 +2937,233 @@
     "title": "SemanticSearchResponse",
     "type": "object"
   },
+  "DocumentSearchRequest": {
+    "description": "Find stored documents by their words (D-118): incident reports,\nadvisories, tickets \u2014 no embedder needed. Matches are ranked by how many\nof the query's terms a document holds and how often.",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "query": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Query",
+        "type": "string"
+      },
+      "limit": {
+        "default": 10,
+        "exclusiveMinimum": 0,
+        "maximum": 50,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "budget": {
+        "default": 1500,
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "title": "DocumentSearchRequest",
+    "type": "object"
+  },
+  "DocumentPage": {
+    "$defs": {
+      "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
+        "properties": {
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "DocumentHit": {
+        "description": "One matching document: the passage that matched best, cited to its\nspan, and the entities the document names (its `mentioned_in` links).",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          },
+          "citation": {
+            "$ref": "#/$defs/Citation"
+          },
+          "mentions": {
+            "items": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "title": "Mentions",
+            "type": "array"
+          },
+          "score": {
+            "default": 0.0,
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "source",
+          "observed_at",
+          "snippet",
+          "citation"
+        ],
+        "title": "DocumentHit",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "hits": {
+        "items": {
+          "$ref": "#/$defs/DocumentHit"
+        },
+        "title": "Hits",
+        "type": "array"
+      },
+      "matched": {
+        "default": 0,
+        "description": "documents holding any query term (searched up to a cap)",
+        "minimum": 0,
+        "title": "Matched",
+        "type": "integer"
+      },
+      "charged_tokens": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Charged Tokens",
+        "type": "integer"
+      },
+      "notes": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Notes",
+        "type": "array"
+      }
+    },
+    "required": [
+      "namespace",
+      "query"
+    ],
+    "title": "DocumentPage",
+    "type": "object"
+  },
   "SchemaRegistration": {
     "$defs": {
       "EntityTypeDef": {
@@ -2893,6 +3182,14 @@
               "type": "string"
             },
             "title": "Facets",
+            "type": "array"
+          },
+          "aliases": {
+            "description": "other names a question or an agent uses for this type (an LDAP 'computer' is a 'machine' or 'workstation', a 'user' an 'account'): a request naming an alias that is not itself a registered type reads it as this type, with a note (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Aliases",
             "type": "array"
           }
         },
@@ -2925,6 +3222,14 @@
             "default": "",
             "title": "Source",
             "type": "string"
+          },
+          "mistaken_for": {
+            "description": "predicates whose facts are commonly taken for this gap (an LDAP export's has_ace, rights over the directory object, read as local admin): a result carrying them notes the difference (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Mistaken For",
+            "type": "array"
           }
         },
         "required": [
@@ -2970,6 +3275,14 @@
             "description": "a scalar that names its subject (a sAMAccountName, displayName, UPN, login): entity search matches its values as well as keys, so an entity keyed by an opaque id (a SID, a GUID) can be found by name (D-091)",
             "title": "Label",
             "type": "boolean"
+          },
+          "aliases": {
+            "description": "the source's own attribute names and plain words for this predicate (servicePrincipalName, sAMAccountName, operatingSystem): a request naming one that is not itself a registered predicate reads it as this predicate, with a note (D-116)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Aliases",
+            "type": "array"
           },
           "display": {
             "default": false,

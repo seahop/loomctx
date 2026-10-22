@@ -33,11 +33,16 @@ def test_load_twice_does_not_double_the_corpus(tmp_path):
     """H-F2: a rehearsal that re-runs `seed load` keeps every documented number."""
     db = tmp_path / "seed.db"
     cmd_load(str(db), seed=42)
+    store = SqliteStore(db)
+    linked = sum(1 for o in store.iter_observations() if o.source.endswith(":mentions"))
+    store.close()
     cmd_load(str(db), seed=42)
     store = SqliteStore(db)
     claims, docs = generate(seed=42)
-    total = sum(1 for _ in store.iter_observations())
-    assert total == len(claims)
+    observations = list(store.iter_observations())
+    # the seed's claims once, and the documents' mention links (D-118) once
+    assert sum(1 for o in observations if not o.source.endswith(":mentions")) == len(claims)
+    assert linked > 0 and sum(1 for o in observations if o.source.endswith(":mentions")) == linked
     assert sum(1 for _ in store.iter_artifacts()) == len(docs)
     store.close()
 

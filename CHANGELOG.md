@@ -5,6 +5,86 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Fixes (2026-10-22)
+
+- Text `where` conditions: a `within` value may be a name with spaces
+  (`member_of within group:Domain Admins`, quoted or not), and conditions
+  written before a `within` with commas (`enabled=true, member_of within …`)
+  are their own conditions; only the bare names are the walk's predicates.
+- The retrieval scorecard's `vector`/`recency` baselines leave out mention
+  links on the same terms as packs (D-118).
+- Gateway and Go SDK images build on Go 1.27.3 (GO-2026-6809, crypto/x509).
+
+### Adoption docs and SDK packaging (2026-10-22)
+
+- New guides: `docs/bring-your-own-data.md` (connectors, load commands,
+  coverage checks, a custom domain through the Python SDK, documents and
+  what they need), `docs/mcp-clients.md` (Claude Code, Claude Desktop,
+  Cursor, VS Code, generic stdio and streamable HTTP with the key header)
+  and `docs/recipes.md` (one question per team, as MCP calls and HTTP).
+- Python SDK: `register_schema` takes `queries` and `not_collected`, so
+  the whole registration (aliases, named queries, not-collected topics
+  with `mistaken_for`) goes through the SDK.
+- `LOOMCTX_MCP_WRITES` and `LOOMCTX_MCP_QUERIES` are passed through
+  compose to the stdio and `mcp` services, so `.env` can set them.
+- SDK packaging metadata (license files, URLs, keywords, classifiers) and
+  Install sections; none is published yet. `docs/releasing.md` is the
+  maintainer checklist for PyPI, npm and `sdk/go/v*` tags.
+
+### Held-out and hybrid agent tasks (D-119, 2026-10-22)
+
+- Eight free-form `flex_*` tasks over the AD forest, worded unlike the audits,
+  and three `hyb_*` tasks that need an incident report and the directory.
+  `python -m loomctx.agent_eval_flex prepare DIR` writes the reports. Not yet
+  measured.
+
+### Documents tied to structured data (D-118, 2026-10-22)
+
+- Documents are linked to the entities they name at ingest, with no LLM:
+  `entity mentioned_in document:<id>`, cited to the span, plus a `title`
+  label. A pack about an account carries the reports that name it, and a
+  listing of a document's `mentioned_in` edges names everything in it.
+- `search_documents` (MCP) and `POST /v1/documents/search` find documents by
+  their words, with no embedder needed. Each hit carries its best passage,
+  cited, and the entities it names.
+
+### AD scorer fixes and re-score (D-117, 2026-10-22)
+
+- The access and local-admin scorers read negations ("non-DA", "didn't",
+  "**not**", "doesn't mean nobody is a local admin"). An admin counts only
+  where a sentence puts it forward. Provider blanks (zero output tokens)
+  are not run. Re-scored from saved runs: 500k standard 92%, harder 81%;
+  10k standard 93%, harder 82%. The Postgres access, local-admin and
+  delegation cells are flagged as not clean (agent-written claims on the
+  shared database).
+
+### Flexible asks (D-115, D-116, 2026-10-22)
+
+- `find_path` follows one account through two groups: an admin through
+  Tier0 who holds rights through WS-Operators is a route. Co-membership is
+  still not followed, and the response says how many such steps it skipped.
+- Aliases: connectors declare other names for types and predicates
+  (`account` → `user`, `servicePrincipalName` → `spn`), and requests read
+  them as the registered names, with a note. Spellings that differ only by
+  case or separators map too.
+- `has_ace,member_of within computer:X`: several edge predicates in one
+  within filter. "Which Domain Admins have rights over X" is one listing.
+- Named queries take `where` and `fields`, added to their own.
+- Notes instead of silent empties: unknown types list the real ones, values
+  no entity carries show values that do, a permission walk without
+  membership names the groups it did not open, and facts commonly mistaken
+  for a not-collected topic (`has_ace` for local admin) are flagged.
+- Text conditions split on `AND` in any case, `&&` and `;`, inside list
+  items too. Failed tool calls say how to recover.
+
+### Faithfulness check: quoted source names are not citations (D-114, 2026-10-22)
+
+- The agent scorecard no longer reads hex inside a source name the agent was
+  shown (an NVD scorer's org UUID) as a citation. Re-scored from saved
+  answers: no run in the 2026-09-28 scorecard cited an unseen observation
+  (it reported 2), and `gemini-3.5-flash` is 19/20 (was 18/20).
+- CISA's CWE entries are sourced `cisa-adp`, like its CVSS.
+
 ### License files (2026-10-15)
 
 - A `NOTICE` with the copyright line. `LICENSE` and `NOTICE` are copied into

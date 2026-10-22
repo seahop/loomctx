@@ -44,7 +44,7 @@ without touching LoomCtx's code.
 | Postgres + SQL | exact answers to questions you already know how to phrase; the agent writes a query and gets however many rows come back | a mandatory token budget on every read, ranked slices, expansion handles for what was cut, and `truncated` when the engine did not look at everything |
 | A graph database | traversal power, but the agent talks to the graph and gets whatever the query returns | the graph is the index, not the payload: the agent gets a question-scoped pack, and a multi-hop question is one `ask_scope` call |
 | SIEM search | fast search over events; entities are a pivot, not a memory | entity-centric memory across sources with provenance, conflict detection and time travel built into every read |
-| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that fails an invented one: in 686 scored task-runs on 35 models, 2 cited an id the model was not shown, and both failed, as did every run that named a CVE that does not exist (`docs/models.md`) |
+| "Give the agent the database" | full access, a context window full of rows, and no record of what the model actually saw | per-key data scoping, budgets, handles, and per-item citations — and a check that fails an invented one: in 686 scored task-runs on 35 models, none cited an id the model was not shown, and every run that named a CVE that does not exist failed (`docs/models.md`) |
 
 ## Repository layout
 
@@ -52,6 +52,9 @@ without touching LoomCtx's code.
 | --- | --- |
 | `docs/quickstart.md` | 5-minute run: seeded demo, a cited pack, an answer |
 | `docs/tutorial.md` | 30-minute build of your own security domain, end to end |
+| `docs/bring-your-own-data.md` | Your exports into LoomCtx: which connector, the load commands, checking coverage, a custom domain with the SDK, documents |
+| `docs/mcp-clients.md` | MCP setup for Claude Code, Claude Desktop, Cursor, VS Code and any other client; stdio and streamable HTTP with a key |
+| `docs/recipes.md` | One end-to-end question per team (red, blue / IR, vuln management, identity), as MCP calls and HTTP requests |
 | `docs/demo.md` | The conference demo script: night-before prep, three acts, fallbacks, rehearsal checklist |
 | `examples/` | Runnable sender, agent-query and STIX-import scripts (stdlib only) |
 | `demo/` | Saved agent transcripts (Claude Code over MCP, `agent_eval`) rendered as fallback pages, and an MCP config |
@@ -62,6 +65,7 @@ without touching LoomCtx's code.
 | `docs/hardening.md` | The verified issue lists from the 2026-09-08 and 2026-09-23 reviews (and later ones), with status |
 | `docs/administration.md` | Running it for a team: users, scopes, rotation, retention |
 | `docs/roadmap.md` | Phased execution plan with current status |
+| `docs/releasing.md` | Maintainer checklist: image tags, and how the SDKs would be published (PyPI, npm, Go module tags) |
 | `docs/sdk.md` | How consumers tap in: MCP, HTTP (+ batch ingest), Python / TypeScript / Go SDKs, OpenAPI for everything else, bulk loader |
 | `docs/infrastructure.md` | Detailed diagrams: the one-container shape, the fully scaled shape, the read and write flows |
 | `docs/real-data.md` | Loading real public data (vulnerability feeds) and what the first run showed |
@@ -81,6 +85,14 @@ without touching LoomCtx's code.
 New here? **[docs/quickstart.md](docs/quickstart.md)** (5 min) → then
 **[docs/tutorial.md](docs/tutorial.md)** builds your own security domain from
 scratch. Full index: **[docs/README.md](docs/README.md)**.
+
+Putting it to work:
+**[docs/bring-your-own-data.md](docs/bring-your-own-data.md)** loads your
+own exports (LDIF, nmap, KEV/NVD, documents, or claims from the SDK when
+no connector fits), **[docs/mcp-clients.md](docs/mcp-clients.md)** connects
+Claude Code, Claude Desktop, Cursor or VS Code, and
+**[docs/recipes.md](docs/recipes.md)** has one worked question per team:
+red, blue / IR, vulnerability management, identity governance.
 
 ## Quickstart (Docker only — nothing installs on the host)
 
@@ -190,7 +202,7 @@ gateway, Kafka, shippers), context packs with scopes, relation chains and
 coverage reporting (`/v1/ask`, `/v1/expand`), exact paged listings and
 named queries for set-valued questions, cited reachability paths
 (`/v1/path`, D-067), provider-flexible answering
-(`/v1/answer`), an MCP server for agents (14 tools), async enrichment,
+(`/v1/answer`), an MCP server for agents (15 tools), async enrichment,
 opt-in Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV,
 NVD, EPSS — `docs/real-data.md`); with 35 LLM agents over MCP, five runs
 each (`docs/models.md`); and on synthetic Active Directory forests of
@@ -207,3 +219,6 @@ Agents connect natively over MCP:
 ```bash
 claude mcp add loomctx -- docker compose --project-directory "$PWD" run --rm -T loomctx python -m loomctx.mcp_server
 ```
+
+Other clients, the HTTP transport with an API key, and read-only setups:
+[docs/mcp-clients.md](docs/mcp-clients.md).

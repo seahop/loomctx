@@ -154,6 +154,32 @@ def schema(namespace: str) -> SchemaRegistration:
 
 # ------------------------------------------------------------------- fetch #
 
+
+# Other names the types and predicates go by (D-116): a request naming one
+# reads it as the registered name, with a note.
+_PREDICATE_ALIASES = {
+    "cvss_score": ["cvss", "base_score", "baseScore", "cvss_base_score", "cvss3", "cvssV3", "severity_score"],
+    "has_severity": ["severity", "baseSeverity", "cvss_severity"],
+    "exploited_in_wild": ["kev", "known_exploited", "cisa_kev", "in_kev", "exploited", "actively_exploited"],
+    "epss_score": ["epss", "exploit_probability"],
+    "epss_percentile": ["epss_rank"],
+    "affects": ["affected_product", "vulnerable_product", "impacts"],
+    "made_by": ["vendor", "manufacturer"],
+    "has_weakness": ["cwe", "weakness"],
+    "runs_software": ["software", "installed_software", "installed", "runs"],
+    "ransomware_campaign_use": ["ransomware", "knownRansomwareCampaignUse"],
+    "status": ["vuln_status", "vulnStatus"]}
+_TYPE_ALIASES = {
+    "cve": ["vulnerability", "vuln", "cve_id"],
+    "product": ["software", "package", "application", "app"],
+    "host": ["machine", "server", "device", "asset", "endpoint", "computer"]}
+_schema_definitions = schema
+
+
+def schema(namespace: str) -> SchemaRegistration:  # noqa: F811 — the definitions above, with their aliases
+    from ..registry import with_aliases
+    return with_aliases(_schema_definitions(namespace), _PREDICATE_ALIASES, _TYPE_ALIASES)
+
 def _http_date(ts: float) -> str:
     return email.utils.formatdate(ts, usegmt=True)
 
@@ -391,7 +417,7 @@ def nvd_envelopes(item: dict, namespace: str) -> Iterator[ClaimIn]:
             if value.startswith("CWE-") and value not in seen_cwe:
                 seen_cwe.add(value)
                 yield claim("has_weakness", EntityRef(type="cwe", key=value), tag=f":{value}",
-                            source=f"{SOURCE_NVD}:{weakness.get('source', 'unknown')}")
+                            source=scorer_source(str(weakness.get("source", "unknown"))))
     seen_products: set[str] = set()
     for config in cve.get("configurations", []) or []:
         for node in config.get("nodes", []) or []:

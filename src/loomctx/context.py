@@ -392,6 +392,26 @@ def _citation(obs: Observation) -> Citation:
     )
 
 
+def _is_mention(obs: Observation) -> bool:
+    """A document's deterministic mention link (D-118)."""
+    return bool(obs.attrs.get("mention")) or obs.source.endswith(":mentions")
+
+
+_DOCUMENT_WORDS = re.compile(r"\b(?:report|reports|document|documents|doc|docs|mention\w*|named in|names it|"
+                             r"incident|incidents|advisory|advisories|ticket|tickets|write-?ups?|notes|memo|"
+                             r"article|articles|wiki|runbook|case|cases)\b", re.I)
+
+
+def _wants_documents(req: AskRequest) -> bool:
+    """Whether a pack may carry mention links: the question asks about
+    documents, or the scope walks `mentioned_in` on purpose — and the read is
+    not pinned to a moment in the world (`valid_at`), which a document's
+    mention does not describe."""
+    if req.scope is not None and "mentioned_in" in (req.scope.expand or []):
+        return True
+    return req.valid_at is None and bool(req.question and _DOCUMENT_WORDS.search(req.question))
+
+
 def _is_extracted(obs: Observation) -> bool:
     """LLM-mined from a document (D-018) rather than asserted by a sender.
     Such claims are data that came *through* an untrusted text, so they
@@ -1574,6 +1594,19 @@ def _turns(before: Observation, after: Observation, pivot: EntityRef) -> bool:
             and _is_subject(before, pivot) == _is_subject(after, pivot))
 
 
+def _co_members(before: Observation, after: Observation, pivot: EntityRef) -> bool:
+    """The turn a path search refuses (D-115): two consecutive edges on one
+    predicate that both POINT AT `pivot` — user -member_of-> group
+    <-member_of- other user, a shared group, not a route; through Domain
+    Users it is every account. The other turn of `_turns`, `pivot` the
+    subject of both — group <-member_of- user -member_of-> other group, one
+    account in two groups — is a route: it is how an admin through Tier0
+    holds rights through WS-Operators, and refusing it hid that admin from
+    22 access audits."""
+    return (before.predicate == after.predicate
+            and not _is_subject(before, pivot) and not _is_subject(after, pivot))
+
+
 def _hub_carriers(store: GraphStore, namespace: str, hubs: list[EntityRef], expand: set[str],
                   topic: frozenset[str], seen: set[tuple[str, str]], as_of: datetime | None,
                   valid_at: datetime | None, allowed_types: tuple[str, ...] | None,
@@ -1821,27 +1854,48 @@ def build_pack(
 ) -> ContextPack:
     """The pack for one ask (see `_build_pack`); display names (D-093) are
     set for this build only and always cleared after it."""
+    from .registry import canonical_predicates, lookalike_notes
+    schema = _schema(store, req.namespace)
+    renamed: list[str] = []
+    if req.scope is not None and req.scope.expand:
+        # `expand=["memberOf"]` is member_of here (D-116)
+        expand, renamed = canonical_predicates(schema, list(req.scope.expand))
+        if renamed:
+            req = req.model_copy(update={"scope": req.scope.model_copy(update={"expand": expand})})
     token = _NAMES.set(None)
     walks = _WALKS.set({})
     try:
-        pack = _build_pack(store, req, embedder, allowed_types)
-        current = _NAMES.get()
-        names = current[0] if current else {}
-        cost = _names_cost(pack, names)
-        if cost:
-            # its items name entities it has names for: keep room for them
-            # (at most a fifth of the budget) and fill that room with names
-            # and a walked-to entity's name facts ride as those names
-            reserve = min(cost, req.budget // _NAME_RESERVE_SHARE)
-            _NAMES.set(None)
-            pack = _build_pack(store, req.model_copy(update={"budget": req.budget - reserve}),
-                               embedder, allowed_types, absorb_names=True)
-            current = _NAMES.get()
-            names = current[0] if current else {}
-        return _with_names(pack, names, req.budget)
+        pack = _finish_pack(store, req, embedder, allowed_types)
+        if renamed or (schema is not None and schema.not_collected):
+            shown = {p for d in (schema.predicates if schema is not None else [])
+                     for p in [d.name] if any(re.search(rf"\b{re.escape(p)}\b", i.text) for i in pack.items)}
+            extra = renamed + [n for n in lookalike_notes(schema, shown) if n not in pack.notes]
+            if extra:
+                pack = pack.model_copy(update={"notes": [*renamed, *pack.notes,
+                                                         *[n for n in extra if n not in renamed]]})
+        return pack
     finally:
         _NAMES.reset(token)
         _WALKS.reset(walks)
+
+
+def _finish_pack(store: GraphStore, req: AskRequest, embedder, allowed_types) -> ContextPack:
+    """`build_pack`'s body: the pack, rebuilt with room for display names."""
+    pack = _build_pack(store, req, embedder, allowed_types)
+    current = _NAMES.get()
+    names = current[0] if current else {}
+    cost = _names_cost(pack, names)
+    if cost:
+        # its items name entities it has names for: keep room for them
+        # (at most a fifth of the budget) and fill that room with names
+        # and a walked-to entity's name facts ride as those names
+        reserve = min(cost, req.budget // _NAME_RESERVE_SHARE)
+        _NAMES.set(None)
+        pack = _build_pack(store, req.model_copy(update={"budget": req.budget - reserve}),
+                           embedder, allowed_types, absorb_names=True)
+        current = _NAMES.get()
+        names = current[0] if current else {}
+    return _with_names(pack, names, req.budget)
 
 
 # One build_pack call builds a pack twice (the second with room for names,
@@ -1966,6 +2020,13 @@ def _build_pack(
 ) -> ContextPack:
     (req, subjects, paths, truncated, gathered, examined, core, widened,
      observations) = _walk_and_gather(store, req, allowed_types)
+    if not _wants_documents(req):
+        # a document's mention links (D-118) are a way to the report, not a fact
+        # about the world: they ride only when the question is about documents.
+        # Two reports naming web-01 read as a runs-of-mentioned_in conflict, and
+        # a September report sat in "who held the IP on 20 August"
+        observations = [o for o in observations if not _is_mention(o)]
+        core = [o for o in core if not _is_mention(o)] if isinstance(core, list) else core
     asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     topic = (scope_topic(store, req.namespace, req.scope, req.question, observations)
              if req.scope is not None else frozenset())
@@ -2371,11 +2432,16 @@ def find_paths(
     materializes no partial path. `stats`, when given, receives the work
     counters (for tests)."""
     from .config import max_budget, max_scope_entities, max_scope_observations
-    from .registry import containment_predicates
+    from .registry import canonical_predicates, containment_predicates, lookalike_notes
 
     ns = req.namespace
     notes: list[str] = []
     truncated: Truncations = {}
+    if req.via:
+        via, renamed = canonical_predicates(_schema(store, ns), list(req.via))   # memberOf -> member_of (D-116)
+        if renamed:
+            req = req.model_copy(update={"via": via})
+            notes.extend(renamed)
 
     # endpoints, canonical (a merged-away alias asks about the entity it
     # became, D-058); absence from the mapping means the name is unknown. A
@@ -2486,12 +2552,14 @@ def find_paths(
                     return
                 if nodes & o_nodes != {end_key}:
                     continue   # the halves share an entity besides the join: not simple
-                if not req.siblings and edges and o_edges and _turns(edges[-1], o_edges[-1], pivot):
-                    continue   # the halves turn back on each other at the join
+                if not req.siblings and edges and o_edges and _co_members(edges[-1], o_edges[-1], pivot):
+                    turned[0] += 1
+                    continue   # the halves meet through a group both sides belong to
                 path = (edges + tuple(reversed(o_edges)) if side == "src"
                         else o_edges + tuple(reversed(edges)))
                 found.setdefault(tuple(e.id for e in path), path)
 
+        turned = [0]   # sideways steps through a shared group, not followed (D-115)
         total = 0   # edges the two sides' frontiers span together
         while total < depth and len(found) < _PATH_ENUM_CAP:
             if not levels["src"][-1] or not levels["dst"][-1]:
@@ -2517,7 +2585,8 @@ def find_paths(
                     ekey = (end.type, end.key)
                     if ekey in nodes:
                         continue   # already on this path (no cycles)
-                    if not req.siblings and edges and _turns(edges[-1], obs, node):
+                    if not req.siblings and edges and _co_members(edges[-1], obs, node):
+                        turned[0] += 1
                         continue
                     if ekey == stop[side]:
                         meet(side, ekey, edges + (obs,), nodes | {ekey})
@@ -2569,7 +2638,7 @@ def find_paths(
                         break
                     adj = adjacency()
                 onward = [(o, e) for o, e in adj(k) if (e.type, e.key) not in nodes
-                          and (req.siblings or came is None or not _turns(came, o, node))]
+                          and (req.siblings or came is None or not _co_members(came, o, node))]
                 if left == 0:
                     depth_open = bool(onward)
                     continue
@@ -2589,6 +2658,10 @@ def find_paths(
                          "enumerated")
         if cut_at is not None:
             _record_scope_cap(truncated, cut_at, len(entities_seen), len(entities_seen) + 1)
+        if turned[0] and not req.siblings:
+            notes.append(f"{turned[0]} step(s) sideways through a group two entities share (A -member_of-> G "
+                         "<-member_of- B) were not followed: co-membership is not a route. siblings=true "
+                         "follows them")
 
     if stats is not None:
         stats.update(work=work, partials=materialized)
@@ -2760,6 +2833,8 @@ def find_paths(
             notes.append(f"the {label} entity '{named.type}:{named.key}' is not in namespace "
                          f"'{ns}'" + (f"; entities with that key or name: {', '.join(similar)}"
                                       if similar else ""))
+    notes.extend(n for n in lookalike_notes(_schema(store, ns), {e.predicate for p in returned for e in p})
+                 if n not in notes)
 
     return PathPack(
         namespace=ns, from_=src, to=dst,
