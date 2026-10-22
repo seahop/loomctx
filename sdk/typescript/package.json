@@ -7,7 +7,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "src"],
+  "files": ["dist", "src", "NOTICE"],
   "engines": { "node": ">=18" },
   "scripts": {
     "gen": "node scripts/gen.mjs ${LOOMCTX_SCHEMAS:-../../contracts/schemas.json} src/contracts.ts",

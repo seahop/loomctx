@@ -18,9 +18,26 @@ RUN go vet ./... && go test ./...
 ARG GOVULNCHECK_VERSION=v1.8.0
 RUN go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
 RUN CGO_ENABLED=0 go build -trimpath -o /gateway .
+# The binary statically links its dependencies and the Go runtime, whose
+# licenses ask for their notices to travel with it: copy the license files
+# of every module linked in (not test-only ones); a module without one fails
+# the build.
+RUN mkdir -p /licenses/go && cp "$(go env GOROOT)/LICENSE" /licenses/go/ \
+ && go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}@{{.Version}} {{.Dir}}{{end}}{{end}}' . \
+    | sort -u | while read -r mod dir; do \
+        mkdir -p "/licenses/$mod"; \
+        for f in "$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE*; do \
+          [ -f "$f" ] && cp "$f" "/licenses/$mod/"; \
+        done; \
+        [ -n "$(ls -A "/licenses/$mod")" ] || { echo "no license file for $mod" >&2; exit 1; }; \
+      done
 
 FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+LABEL org.opencontainers.image.source="https://github.com/seahop/loomctx" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /gateway /usr/local/bin/gateway
+COPY LICENSE NOTICE /usr/share/licenses/loomctx/
+COPY --from=build /licenses /usr/share/licenses/third-party
 COPY contracts/schemas.json /etc/loomctx/schemas.json
 # non-root (H-F8): the gateway reads only its schema and a mounted keys file
 USER 10001:10001
