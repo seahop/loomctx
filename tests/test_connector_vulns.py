@@ -503,7 +503,8 @@ def _kev_cache(cache, released, **changes):
 def _counts(db):
     store = SqliteStore(db)
     try:
-        return (sum(1 for _ in store.iter_observations("netsec")),
+        # source data only: a document's mention links (D-118) are derived from it
+        return (sum(1 for o in store.iter_observations("netsec") if not o.source.endswith(":mentions")),
                 sum(1 for _ in store.iter_artifacts("netsec")))
     finally:
         store.close()

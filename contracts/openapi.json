@@ -534,6 +534,63 @@
         "title": "ContextPack",
         "type": "object"
       },
+      "DocumentHit": {
+        "description": "One matching document: the passage that matched best, cited to its\nspan, and the entities the document names (its `mentioned_in` links).",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "citation": {
+            "$ref": "#/components/schemas/Citation"
+          },
+          "mentions": {
+            "items": {
+              "$ref": "#/components/schemas/EntityRef"
+            },
+            "title": "Mentions",
+            "type": "array"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "score": {
+            "default": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "source",
+          "observed_at",
+          "snippet",
+          "citation"
+        ],
+        "title": "DocumentHit",
+        "type": "object"
+      },
       "DocumentIn": {
         "description": "Unstructured ingestion payload. Stored verbatim as an artifact, mined async.",
         "properties": {
@@ -620,6 +677,86 @@
           "observed_at"
         ],
         "title": "DocumentIn",
+        "type": "object"
+      },
+      "DocumentPage": {
+        "properties": {
+          "charged_tokens": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Charged Tokens",
+            "type": "integer"
+          },
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentHit"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "matched": {
+            "default": 0,
+            "description": "documents holding any query term (searched up to a cap)",
+            "minimum": 0.0,
+            "title": "Matched",
+            "type": "integer"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "query"
+        ],
+        "title": "DocumentPage",
+        "type": "object"
+      },
+      "DocumentSearchRequest": {
+        "description": "Find stored documents by their words (D-118): incident reports,\nadvisories, tickets \u2014 no embedder needed. Matches are ranked by how many\nof the query's terms a document holds and how often.",
+        "properties": {
+          "budget": {
+            "default": 1500,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000000.0,
+            "title": "Budget",
+            "type": "integer"
+          },
+          "limit": {
+            "default": 10,
+            "exclusiveMinimum": 0.0,
+            "maximum": 50.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "namespace": {
+            "default": "default",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "DocumentSearchRequest",
         "type": "object"
       },
       "EntityRef": {
@@ -2159,6 +2296,45 @@
           }
         },
         "summary": "Ask"
+      }
+    },
+    "/v1/documents/search": {
+      "post": {
+        "description": "Find stored documents by their words (D-118): no embedder needed; each\nhit carries its best passage, cited, and the entities it names.",
+        "operationId": "documents_search_route_v1_documents_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Documents Search Route"
       }
     },
     "/v1/entities/search": {

@@ -224,6 +224,40 @@ class Citation(BaseModel):
         return self
 
 
+class DocumentSearchRequest(BaseModel):
+    """Find stored documents by their words (D-118): incident reports,
+    advisories, tickets — no embedder needed. Matches are ranked by how many
+    of the query's terms a document holds and how often."""
+
+    namespace: str = DEFAULT_NAMESPACE
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=10, gt=0, le=50)
+    budget: int = Field(default=1500, gt=0, le=1_000_000)
+
+
+class DocumentHit(BaseModel):
+    """One matching document: the passage that matched best, cited to its
+    span, and the entities the document names (its `mentioned_in` links)."""
+
+    artifact_id: str
+    title: str | None = None
+    source: str
+    observed_at: datetime
+    snippet: str
+    citation: Citation
+    mentions: list[EntityRef] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class DocumentPage(BaseModel):
+    namespace: str
+    query: str
+    hits: list[DocumentHit] = Field(default_factory=list)
+    matched: int = Field(default=0, ge=0, description="documents holding any query term (searched up to a cap)")
+    charged_tokens: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
 class ContextItem(BaseModel):
     """Every item is cited (hard constraint 3): facts and conflicts cite
     observations, briefs cite the observations they were synthesized from,

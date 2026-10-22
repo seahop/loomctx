@@ -456,7 +456,10 @@ def observations_to_bundle(observations: Iterable[Observation], namespace: str,
     version was superseded by something that is not a version of it (a
     correction into a scalar) ends in a `revoked: true` version too."""
     m = mapping if isinstance(mapping, Mapping) else Mapping(mapping)
-    rows = [o for o in observations if not o.attrs.get("redacted")]
+    # a document's mention links (D-118) are derived from the stored text, not
+    # intelligence a source asserted: they stay out of the bundle
+    rows = [o for o in observations if not o.attrs.get("redacted") and not o.attrs.get("mention")
+            and not o.source.endswith(":mentions")]
     by_id = {o.id: o for o in rows}
     superseded_by = supersession(rows)
     entities: dict[str, dict] = {}            # stix id -> object

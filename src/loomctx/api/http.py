@@ -38,6 +38,8 @@ from ..contracts import (
     AskRequest,
     ClaimIn,
     ContextPack,
+    DocumentPage,
+    DocumentSearchRequest,
     EntityRef,
     ExpandRequest,
     IngestEnvelope,
@@ -63,6 +65,7 @@ from ..prov import observation_prov
 from ..registry import RegistryCache, validate_claim
 from ..ratelimit import SCOPE_KEY as RATE_LIMITER, RateLimitMiddleware, RateLimitSettings
 from ..consumer import resolve_provenance
+from ..mentions import link_quietly
 from ..store.factory import store_from_env
 from ..webguard import BrowserGuard
 
@@ -311,12 +314,14 @@ def ingest(envelope: IngestEnvelope, request: Request):
         raise HTTPException(status_code=422, detail=stamped)
     metrics.INGEST.labels(kind=envelope.kind).inc()
     artifact = request.app.state.store.store_artifact(stamped)
+    linked = link_quietly(request.app.state.store, artifact, stamped.text)   # D-118
     return JSONResponse(
         status_code=202,
         content={
             "status": "accepted",
             "artifact_id": artifact.id,
             "extraction": artifact.extraction_status,
+            "mentions": linked,
         },
     )
 
@@ -421,6 +426,7 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
             return exc.detail
         return None
 
+    documents: list = []   # linked once the batch's claims are recorded (D-118)
     for i, item in enumerate(items):
         try:
             envelope = _ENVELOPE.validate_python(item)
@@ -442,6 +448,7 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
                 results.append(IngestItemResult(index=i, status="rejected", detail=stamped))
                 continue
             artifact = store.store_artifact(stamped)
+            documents.append((artifact, stamped.text))
             metrics.INGEST.labels(kind="document").inc()
             results.append(IngestItemResult(index=i, status="accepted", artifact_id=artifact.id))
     if claims:
@@ -449,6 +456,8 @@ def _ingest_batch_sync(request: Request, items: list) -> IngestBatchResponse:
         for (i, _), obs in zip(claims, observations):
             metrics.INGEST.labels(kind="claim").inc()
             results.append(IngestItemResult(index=i, status="recorded", observation_id=obs.id))
+    for artifact, text in documents:
+        link_quietly(store, artifact, text)   # after the claims: a batch names what it brings (D-118)
     results.sort(key=lambda r: r.index)
     counts = {"recorded": 0, "accepted": 0, "rejected": 0}
     for r in results:
@@ -642,6 +651,16 @@ def query_route(req: QueryRequest, request: Request) -> ListPage:
         _gate_entity_type(grant, listed.type)
     with metrics.PACK_SECONDS.time():
         return run_query(store, req, allowed_types=allowed)
+
+
+@app.post("/v1/documents/search", response_model=DocumentPage)
+def documents_search_route(req: DocumentSearchRequest, request: Request) -> DocumentPage:
+    """Find stored documents by their words (D-118): no embedder needed; each
+    hit carries its best passage, cited, and the entities it names."""
+    from ..docsearch import search_documents
+    grant = _authorize(request, req.namespace, "r")
+    with metrics.PACK_SECONDS.time():
+        return search_documents(request.app.state.store, req, allowed_types=_allowed_types(grant))
 
 
 @app.post("/v1/expand", response_model=ContextPack)

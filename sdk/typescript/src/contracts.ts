@@ -25,6 +25,8 @@ export interface LoomCtxContracts {
   AnswerRequest?: AnswerRequest;
   AnswerResponse?: AnswerResponse;
   SemanticSearchResponse?: SemanticSearchResponse;
+  DocumentSearchRequest?: DocumentSearchRequest;
+  DocumentPage?: DocumentPage;
   SchemaRegistration?: SchemaRegistration;
   IngestBatchResponse?: IngestBatchResponse;
 }
@@ -611,6 +613,45 @@ export interface SemanticMatch {
   entity: EntityRef;
   score: number;
   evidence: ContextItem;
+}
+/**
+ * Find stored documents by their words (D-118): incident reports,
+ * advisories, tickets — no embedder needed. Matches are ranked by how many
+ * of the query's terms a document holds and how often.
+ */
+export interface DocumentSearchRequest {
+  namespace?: string;
+  query: string;
+  limit?: number;
+  budget?: number;
+}
+export interface DocumentPage {
+  namespace: string;
+  query: string;
+  hits?: DocumentHit[];
+  /**
+   * documents holding any query term (searched up to a cap)
+   */
+  matched?: number;
+  charged_tokens?: number;
+  notes?: string[];
+}
+/**
+ * One matching document: the passage that matched best, cited to its
+ * span, and the entities the document names (its `mentioned_in` links).
+ *
+ * This interface was referenced by `LoomCtxContracts`'s JSON-Schema
+ * via the `definition` "DocumentHit".
+ */
+export interface DocumentHit {
+  artifact_id: string;
+  title?: string | null;
+  source: string;
+  observed_at: string;
+  snippet: string;
+  citation: Citation;
+  mentions?: EntityRef[];
+  score?: number;
 }
 /**
  * Per-namespace registry (D-024). Registering is additive (a later POST

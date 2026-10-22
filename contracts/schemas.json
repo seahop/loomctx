@@ -2937,6 +2937,233 @@
     "title": "SemanticSearchResponse",
     "type": "object"
   },
+  "DocumentSearchRequest": {
+    "description": "Find stored documents by their words (D-118): incident reports,\nadvisories, tickets \u2014 no embedder needed. Matches are ranked by how many\nof the query's terms a document holds and how often.",
+    "properties": {
+      "namespace": {
+        "default": "default",
+        "title": "Namespace",
+        "type": "string"
+      },
+      "query": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Query",
+        "type": "string"
+      },
+      "limit": {
+        "default": 10,
+        "exclusiveMinimum": 0,
+        "maximum": 50,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "budget": {
+        "default": 1500,
+        "exclusiveMinimum": 0,
+        "maximum": 1000000,
+        "title": "Budget",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "title": "DocumentSearchRequest",
+    "type": "object"
+  },
+  "DocumentPage": {
+    "$defs": {
+      "Citation": {
+        "description": "What backs a context item: an observation (facts, conflicts, briefs)\nor a span of a stored document (excerpts). At least one of\nobservation_id / artifact_id is set (D-023).",
+        "properties": {
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "span_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Start"
+          },
+          "span_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span End"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "observed_at"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "DocumentHit": {
+        "description": "One matching document: the passage that matched best, cited to its\nspan, and the entities the document names (its `mentioned_in` links).",
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          },
+          "citation": {
+            "$ref": "#/$defs/Citation"
+          },
+          "mentions": {
+            "items": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "title": "Mentions",
+            "type": "array"
+          },
+          "score": {
+            "default": 0.0,
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "source",
+          "observed_at",
+          "snippet",
+          "citation"
+        ],
+        "title": "DocumentHit",
+        "type": "object"
+      },
+      "EntityRef": {
+        "description": "Address of an entity by natural key, e.g. host:web-01.",
+        "properties": {
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "title": "EntityRef",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "namespace": {
+        "title": "Namespace",
+        "type": "string"
+      },
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "hits": {
+        "items": {
+          "$ref": "#/$defs/DocumentHit"
+        },
+        "title": "Hits",
+        "type": "array"
+      },
+      "matched": {
+        "default": 0,
+        "description": "documents holding any query term (searched up to a cap)",
+        "minimum": 0,
+        "title": "Matched",
+        "type": "integer"
+      },
+      "charged_tokens": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Charged Tokens",
+        "type": "integer"
+      },
+      "notes": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Notes",
+        "type": "array"
+      }
+    },
+    "required": [
+      "namespace",
+      "query"
+    ],
+    "title": "DocumentPage",
+    "type": "object"
+  },
   "SchemaRegistration": {
     "$defs": {
       "EntityTypeDef": {

@@ -2162,6 +2162,18 @@ class PostgresStore(GraphStore):
         for row in self._pages(sql, params, ("created_at", "id")):
             yield common.row_to_entity(row)
 
+    def search_artifacts(self, namespace: str, terms: list[str], limit: int = 50) -> list[Artifact]:
+        terms = [t.lower() for t in terms if t][:16]
+        if not terms:
+            return []
+        with self._tx(read=True):
+            rows = self._q(
+                "SELECT * FROM artifacts WHERE namespace = %s AND text IS NOT NULL AND ("
+                + " OR ".join("strpos(lower(text), %s) > 0" for _ in terms)
+                + ") ORDER BY observed_at DESC, id LIMIT %s",
+                (namespace, *terms, limit))
+        return [common.row_to_artifact(r) for r in rows]
+
     def iter_artifacts(self, namespace: str | None = None) -> Iterator[Artifact]:
         sql = "SELECT * FROM artifacts WHERE 1=1" + (" AND namespace = %s" if namespace else "")
         for row in self._pages(sql, (namespace,) if namespace else (),

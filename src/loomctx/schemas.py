@@ -23,6 +23,8 @@ from .contracts import (
     Artifact,
     AskRequest,
     ContextPack,
+    DocumentPage,
+    DocumentSearchRequest,
     Entity,
     ExpandRequest,
     IngestBatchResponse,
@@ -53,6 +55,8 @@ ROOTS = {
     "AnswerRequest": AnswerRequest.model_json_schema,
     "AnswerResponse": AnswerResponse.model_json_schema,
     "SemanticSearchResponse": SemanticSearchResponse.model_json_schema,
+    "DocumentSearchRequest": DocumentSearchRequest.model_json_schema,
+    "DocumentPage": DocumentPage.model_json_schema,
     "SchemaRegistration": SchemaRegistration.model_json_schema,
     "IngestBatchResponse": IngestBatchResponse.model_json_schema,
 }

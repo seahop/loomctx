@@ -5,6 +5,16 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Documents tied to structured data (D-118, 2026-10-22)
+
+- Documents are linked to the entities they name at ingest, with no LLM:
+  `entity mentioned_in document:<id>`, cited to the span, plus a `title`
+  label. A pack about an account carries the reports that name it, and a
+  listing of a document's `mentioned_in` edges names everything in it.
+- `search_documents` (MCP) and `POST /v1/documents/search` find documents by
+  their words, with no embedder needed. Each hit carries its best passage,
+  cited, and the entities it names.
+
 ### AD scorer fixes and re-score (D-117, 2026-10-22)
 
 - The access and local-admin scorers read negations ("non-DA", "didn't",

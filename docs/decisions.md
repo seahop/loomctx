@@ -3971,6 +3971,46 @@ findings (`record_claim`) that later runs cited. They are flagged as not
 clean in `docs/models.md` and on the site, to be re-run on a fresh copy
 with writes off.
 
+## D-118 · Documents tied to structured data without an LLM (2026-10-22)
+
+Until now a document reached the graph only through LLM claim extraction,
+and was found only by `find_related`, which needs an embedder. With neither
+configured, an incident report was stored and invisible: no pack, listing
+or path could reach it, and no tool could find it by its words. Joining what
+a report says with what the directory, scans and feeds say is the point of
+holding both.
+
+- **Mention links at ingest.** When a document arrives, its identifier-like
+  tokens (account logins, hostnames, CVE ids, IPs, dashed or dotted names)
+  and capitalised two- or three-word names are looked up as entity keys
+  and as label values. Each entity found, if the token names no more than
+  two, gets one fact, `entity mentioned_in document:<artifact id>`. The fact
+  is cited to the span where the document first names it, with the source
+  `<document source>:mentions` and `attrs.mention`. The document gets a
+  `title` label (its title attribute, else its first line, else its
+  filename). It is deterministic and idempotent by event id, and it runs
+  after the batch's claims are recorded, so a connector that sends a document
+  with its facts links to entities in the same batch. A plain word never
+  links.
+- **The registry learns the document type.** On a namespace's first document,
+  `document`, `mentioned_in` and `title` (label) are merged into its registry
+  (additive, D-083). A strict namespace's other rules still apply.
+- **`search_documents` (MCP) and `POST /v1/documents/search` (contract:
+  `DocumentSearchRequest`, `DocumentPage`, `DocumentHit`).** Query terms
+  (quoted phrases whole, words of three or more letters minus stop words)
+  are matched as substrings in the store (`search_artifacts`, new on every
+  backend). Matches are ranked by term frequency, weighted by how few
+  matching documents hold each term, then by recency. A hit carries its
+  best passage, cited to its span, the title, and the entities it names. A
+  key without the `document` entity type gets nothing.
+- **Kept out of exports.** STIX export skips mention links: derived from the
+  text, not intelligence a source asserted.
+- **Limits.** Matching is lexical. Synonyms are `find_related`'s job when an
+  embedder is configured, and claim extraction (an LLM) still mines what a
+  document says about the entities it names. A body offloaded to blob
+  storage is not searched. A token naming more than two entities is too
+  vague to link.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

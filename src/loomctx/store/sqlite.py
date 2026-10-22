@@ -2416,6 +2416,18 @@ class SqliteStore(GraphStore):
         ).fetchone()
         return common.row_to_entity(row) if row else None
 
+    def search_artifacts(self, namespace: str, terms: list[str], limit: int = 50) -> list[Artifact]:
+        terms = [t.lower() for t in terms if t][:16]
+        if not terms:
+            return []
+        with self._tx(read=True):
+            rows = self._conn.execute(
+                "SELECT * FROM artifacts WHERE namespace = ? AND text IS NOT NULL AND ("
+                + " OR ".join("instr(lower(text), ?) > 0" for _ in terms)
+                + ") ORDER BY observed_at DESC, id LIMIT ?",
+                (namespace, *terms, limit)).fetchall()
+        return [common.row_to_artifact(r) for r in rows]
+
     def _get_artifact(self, namespace: str, artifact_id: str) -> Artifact | None:
         row = self._conn.execute(
             "SELECT * FROM artifacts WHERE namespace = ? AND id = ?",

@@ -19,6 +19,7 @@ from pydantic import TypeAdapter, ValidationError
 from .auth import AuthConfig
 from .contracts import ClaimIn, IngestEnvelope
 from .gates import check_citation, check_supersedes
+from .mentions import link_quietly
 from .registry import RegistryCache, validate_claim
 from .store.base import GraphStore
 from .store.factory import store_from_env
@@ -126,6 +127,7 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
     registry = registry or RegistryCache(store)
     counts = {"recorded": 0, "accepted": 0, "skipped": 0, "rejected": 0}
     parsed: list[tuple[int, ClaimIn]] = []
+    stored: list = []   # documents, linked once the batch's claims are in (D-118)
     for index, data in enumerate(payloads):
         try:
             envelope = _ENVELOPE.validate_json(data)
@@ -139,7 +141,7 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
         if isinstance(envelope, ClaimIn):
             parsed.append((index, envelope))
         else:
-            store.store_artifact(envelope)
+            stored.append((store.store_artifact(envelope), envelope.text))
             counts["accepted"] += 1
     claims: list[ClaimIn] = []
     for index, envelope in parsed:
@@ -169,6 +171,8 @@ def handle_batch(store: GraphStore, payloads: list[bytes],
     if claims:
         store.record_claims(claims)
         counts["recorded"] = len(claims)
+    for artifact, text in stored:
+        link_quietly(store, artifact, text)   # after the claims: a batch names what it brings (D-118)
     return counts
 
 
