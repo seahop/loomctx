@@ -190,7 +190,7 @@ gateway, Kafka, shippers), context packs with scopes, relation chains and
 coverage reporting (`/v1/ask`, `/v1/expand`), exact paged listings and
 named queries for set-valued questions, cited reachability paths
 (`/v1/path`, D-067), provider-flexible answering
-(`/v1/answer`), an MCP server for agents (14 tools), async enrichment,
+(`/v1/answer`), an MCP server for agents (15 tools), async enrichment,
 opt-in Kubernetes scale shapes, and SDKs. Validated on real data (CISA KEV,
 NVD, EPSS — `docs/real-data.md`); with 35 LLM agents over MCP, five runs
 each (`docs/models.md`); and on synthetic Active Directory forests of
