@@ -283,13 +283,20 @@ class LoomCtx:
         )
 
     def register_schema(self, entity_types: list[dict], predicates: list[dict],
-                        strict: bool = False) -> dict:
-        """Register the namespace's entity types / predicates (D-024).
-        e.g. predicates=[{"name": "member_of", "object_types": ["domain"],
-        "containment": True}]."""
-        return self._post("/v1/schemas", {
+                        strict: bool = False, queries: list[dict] | None = None,
+                        not_collected: list[dict] | None = None) -> dict:
+        """Register the namespace's entity types / predicates (D-024), and
+        optionally its named queries (D-108) and what its sources do not
+        carry (D-110). e.g. predicates=[{"name": "member_of", "object_types":
+        ["domain"], "containment": True, "aliases": ["memberOf"]}]."""
+        body: dict[str, Any] = {
             "namespace": self.namespace, "entity_types": entity_types,
-            "predicates": predicates, "strict": strict})
+            "predicates": predicates, "strict": strict}
+        if queries is not None:
+            body["queries"] = queries
+        if not_collected is not None:
+            body["not_collected"] = not_collected
+        return self._post("/v1/schemas", body)
 
     def schema(self) -> dict:
         return self._get("/v1/schemas")
