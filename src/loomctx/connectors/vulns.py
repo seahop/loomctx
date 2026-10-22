@@ -391,7 +391,7 @@ def nvd_envelopes(item: dict, namespace: str) -> Iterator[ClaimIn]:
             if value.startswith("CWE-") and value not in seen_cwe:
                 seen_cwe.add(value)
                 yield claim("has_weakness", EntityRef(type="cwe", key=value), tag=f":{value}",
-                            source=f"{SOURCE_NVD}:{weakness.get('source', 'unknown')}")
+                            source=scorer_source(str(weakness.get("source", "unknown"))))
     seen_products: set[str] = set()
     for config in cve.get("configurations", []) or []:
         for node in config.get("nodes", []) or []:

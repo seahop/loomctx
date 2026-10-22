@@ -5,6 +5,14 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Faithfulness check: quoted source names are not citations (D-114, 2026-10-22)
+
+- The agent scorecard no longer reads hex inside a source name the agent was
+  shown (an NVD scorer's org UUID) as a citation. Re-scored from saved
+  answers: no run in the 2026-09-28 scorecard cited an unseen observation
+  (it reported 2), and `gemini-3.5-flash` is 19/20 (was 18/20).
+- CISA's CWE entries are sourced `cisa-adp`, like its CVSS.
+
 ### License files (2026-10-15)
 
 - A `NOTICE` with the copyright line. `LICENSE` and `NOTICE` are copied into

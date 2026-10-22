@@ -206,6 +206,23 @@ def test_every_factual_task_needs_a_seen_citation_and_dates_are_not_cites():
     assert not ae._score_conflict("a says 17.5, b says 9.8 [abcdefab]", conflict, seen, None)["pass"]
 
 
+def test_hex_quoted_from_a_source_name_is_not_a_citation():
+    # the 2026-09-28 false positive: an answer quoting the NVD source label
+    # "nvd:134c704f-9b21-4f2e-91b3-4a467353bcc0" (CISA's org id), whole or cut
+    # short, was failed for citing ids the model had "never seen"
+    seen: set[str] = set()
+    ae._collect_ids('{"cite": "068b382cfb88", "source": "nvd:134c704f-9b21-4f2e-91b3-4a467353bcc0"}', seen)
+    ae._collect_ids('"0ca994117d4e nvd:0b0ca135-0b70-47e7-9f44-1890c2a1c46c 2026-08-01"', seen)
+    for answer in ("`nvd:134c704f-9b21-4f2e-91b3-4a467353bcc0` says CWE-669 [068b382cfb88], while "
+                   "`nvd:0b0ca135-0b70-47e7-9f44-1890c2a1c46c` says CWE-1288 [0ca994117d4e]",
+                   "nvd:134c704f says CWE-122 [068b382cfb88]"):
+        c = ae._cited(answer, seen)
+        assert c["citations_unseen"] == 0 and c["citations_seen"] >= 1, (answer, c)
+    # an invented id is still caught, and a name alone is no citation
+    assert ae._cited("CWE-122 [deadbeefcafe]", seen)["citations_unseen"] == 1
+    assert ae._cited("nvd:134c704f says CWE-122", seen)["citations"] == 0
+
+
 def test_lease_truth_comes_from_validity_windows_and_dotted_ips_do_not_end_sentences(seeded_db, tmp_path):
     import shutil
     shutil.copy(seeded_db, tmp_path / "copy.db")          # this test adds a lease; keep the shared seed pristine

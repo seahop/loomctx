@@ -3845,6 +3845,30 @@ travel with everything that ships:
   `go list -deps` (linked code only, not test-only modules) and fails on a
   module that has none.
 
+## D-114 · Hex quoted from a source name is not a citation (2026-10-22)
+
+The faithfulness check takes any 8–32 hex run in an answer as a citation and
+fails the run if it matches no observation id the agent was shown. Read by
+hand after the talk, the only two runs it failed in the 2026-09-28
+scorecard (`gemini-3.5-flash`, `minimax-m2.7`, both on exposure) cited
+nothing unseen: they quoted CWE source labels such as
+`nvd:134c704f-9b21-4f2e-91b3-4a467353bcc0`, CISA's NVD org id, whole or cut
+short, and the check read the UUID's segments as citations.
+
+- **What the agent was shown inside a name doesn't count either way.** While a run
+  is collected, every dashed UUID and every hex run in a `"source"` value
+  of a tool result is kept as a quoted name. An answer token that sits inside
+  one is neither a seen nor an unseen citation. Observation ids are 32
+  undashed hex, so no real citation is lost; an invented id is still caught.
+- **CISA's CWE entries read `cisa-adp`,** as its CVSS entries already did
+  (D-069's mapping now covers `has_weakness`), so agents see a readable
+  source name rather than the UUID.
+- **Re-scored, model-free, from the saved answers.** `gemini-3.5-flash` 18/20 →
+  19/20 (that run named all 32 KEV CVEs with full precision);
+  `minimax-m2.7` stays 18/20 (its run named 6 of the 16 required). Runs
+  citing an unseen observation: 0 of 686, not 2. Fixed in `docs/models.md`,
+  `README.md` and the site.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

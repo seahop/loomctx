@@ -61,6 +61,13 @@ LEASE_AT = datetime(2026, 8, 20, tzinfo=timezone.utc)    # the moment the lease 
 _CVE = re.compile(r"CVE-\d{4}-\d{4,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,32}\b")
 _HEX_LETTER = re.compile(r"[a-f]")
+# Hex the agent was shown inside a name, not as an id: a dashed UUID (an NVD
+# scorer's org id in a source label like "nvd:134c704f-9b21-...") or any hex
+# in a "source" value. Observation ids are 32 undashed hex, so these are
+# never citations; they are kept in `seen` under this prefix and ignored.
+_NAME_HEX = "name:"
+_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+_SOURCE_VALUE = re.compile(r'"source":\s*"([^"]*)"')
 # the exposure task passes on recall of the KEV set, not on one name: at
 # least this share of it (every one when the set has at most
 # _EXPOSURE_ALL_UNDER members), with no invented or non-KEV CVE (D-057)
@@ -354,8 +361,13 @@ def cite_tokens_in(text: str) -> list[str]:
 
 def _cited(answer: str, seen: set[str]) -> dict:
     """Every hex id the answer cites must be (a prefix of) an observation id
-    that appeared in a tool result during THIS run — the faithfulness check."""
-    cited = set(cite_tokens_in(answer))
+    that appeared in a tool result during THIS run — the faithfulness check.
+    Hex the agent was shown inside a name (a source label's UUID) is quoted,
+    not cited, and counts neither way: two 2026-09-28 runs were failed for
+    quoting `nvd:134c704f-…`, CISA's org id, as a source name."""
+    names = [s[len(_NAME_HEX):] for s in seen if s.startswith(_NAME_HEX)]
+    seen = {s for s in seen if not s.startswith(_NAME_HEX)}
+    cited = {c for c in cite_tokens_in(answer) if not any(c in n for n in names)}
     # a cite is seen when it prefixes a seen id, or a seen cite token (12
     # hex) prefixes it — the agent may quote either form
     unseen = sorted(c for c in cited
@@ -559,6 +571,12 @@ def _collect_ids(text: str, seen: set[str]) -> None:
         seen.add(m.group(1))
     for m in re.finditer(r'\[([0-9a-f]{12})\]', text):    # a coverage note's record (D-092)
         seen.add(m.group(1))
+    # hex inside names the agent was shown: quoted back, it is not a citation
+    for u in _UUID.findall(text):
+        seen.add(_NAME_HEX + u.replace("-", ""))
+    for v in _SOURCE_VALUE.findall(text):
+        for h in re.findall(r"[0-9a-f]{8,}", v.replace("-", "")):
+            seen.add(_NAME_HEX + h)
 
 
 @dataclass

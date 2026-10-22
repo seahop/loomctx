@@ -36,10 +36,13 @@ at 10k), is below ([Active Directory audits](#active-directory-audits)).
   stop, a CVE named from memory — not a pack change: every exposure walk
   returned the same chain at the same size. Four of the nineteen models that
   were 20/20 there lost one exposure run each here.
-- **The faithfulness check holds:** 5 citations to an unseen observation, in
-  2 of 686 task-runs (`gemini-3.5-flash` 4, `minimax-m2.7` 1), and both runs
-  failed. Six models named CVE ids that do not exist in the store; the check
-  failed those runs.
+- **The faithfulness check holds:** no run cited an observation the model was
+  not shown. Two runs were flagged at first (`gemini-3.5-flash`,
+  `minimax-m2.7`); read by hand, both were quoting an NVD source label that
+  contains CISA's org UUID, which the checker took for citations. Re-scored
+  under the fixed check (D-114), `gemini-3.5-flash` gains an exposure pass.
+  Six models named CVE ids that do not exist in the store; the check failed
+  those runs.
 
 ## Short answer
 
@@ -121,12 +124,12 @@ per four-task run. Sorted by pass rate, then cost.
 | `deepseek/deepseek-chat-v3.1` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 21 | 161,121/3,097 | 408 s | $0.04 | yes | 0 |
 | `qwen/qwen3.5-plus-20260420` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 17 | 144,009/14,277 | 301 s | $0.07 | yes | 0 |
 | `x-ai/grok-4.7` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 21.4 | 336,247/12,380 | 184 s | $0.33 | no (0 unseen cites, 2 invented) | 0 |
+| `google/gemini-3.5-flash` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 34.2 | 376,351/16,054 | 140 s | $0.40 | yes | 0 |
 | `qwen/qwen3.8-max-0902` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 22.8 | 475,177/19,982 | 486 s | $0.43 | no (0 unseen cites, 10 invented) | 0 |
 | `moonshotai/kimi-k3` | 19/20 | 4/5 | 5/5 | 5/5 | 5/5 | 18.6 | 343,393/18,851 | 448 s | $0.56 | no (0 unseen cites, 3 invented) | 0 |
-| `minimax/minimax-m2.7` | 18/20 | 4/5 | 5/5 | 5/5 | 4/5 | 15.4 | 120,685/5,795 | 126 s | $0.02 | no (1 unseen cites, 0 invented) | 0 |
+| `minimax/minimax-m2.7` | 18/20 | 4/5 | 5/5 | 5/5 | 4/5 | 15.4 | 120,685/5,795 | 126 s | $0.02 | yes | 0 |
 | `deepseek/deepseek-v4-pro-0813` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 21.6 | 515,725/12,636 | 379 s | $0.16 | yes | 0 |
 | `mistralai/mistral-medium-3-5` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 15 | 126,813/2,616 | 51 s | $0.21 | no (0 unseen cites, 1 invented) | 0 |
-| `google/gemini-3.5-flash` | 18/20 | 3/5 | 5/5 | 5/5 | 5/5 | 34.2 | 376,351/16,054 | 140 s | $0.40 | no (4 unseen cites, 0 invented) | 0 |
 | `z-ai/glm-4.6v` | 16/20 | 1/5 | 5/5 | 5/5 | 5/5 | 15.6 | 99,087/3,827 | 111 s | $0.02 | yes | 0 |
 | `cohere/command-a-plus` | 16/20 | 1/5 | 5/5 | 5/5 | 5/5 | 31.6 | 296,614/6,197 | 77 s | $0.10 | yes | 0 |
 | `qwen/qwen3-coder` | 15/20 | 0/5 | 5/5 | 5/5 | 5/5 | 19 | 145,563/2,371 | 37 s | $0.05 | yes | 0 |
