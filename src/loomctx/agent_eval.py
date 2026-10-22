@@ -689,7 +689,8 @@ def select_tasks(names: list[str] | None) -> list[Task]:
     pool = list(TASKS)
     if set(names) - {t.name for t in TASKS}:
         from .agent_eval_ext import EXTENDED_TASKS
-        pool += EXTENDED_TASKS
+        from .agent_eval_flex import FLEX_TASKS, HYBRID_TASKS   # held-out and documents + facts (D-119)
+        pool += EXTENDED_TASKS + FLEX_TASKS + HYBRID_TASKS
     unknown = set(names) - {t.name for t in pool}
     if unknown:
         raise SystemExit(f"unknown task(s): {', '.join(sorted(unknown))}")

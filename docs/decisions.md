@@ -4011,6 +4011,35 @@ holding both.
   storage is not searched. A token naming more than two entities is too
   vague to link.
 
+## D-119 · Held-out and hybrid agent tasks (2026-10-22)
+
+Eight AD audits measured what agents do with eight questions. Whether a
+person can ask LoomCtx about the data in their own words is a different
+measurement, and the one the product promises. Two task families join
+`agent_eval` (selectable by name, never part of a default run):
+
+- **Flexibility (`flex_*`, eight tasks)** over the same forest: worded unlike
+  the audits and asking for combinations they do not. Disabled Domain
+  Admins (nested); who controls a workstation without being an admin; the
+  Kerberoast audit in other words; delegation servers with each one's OS;
+  logon sessions (not collected); one account's membership chain; a yes/no
+  on nested membership three levels up; whether a partner domain's SID
+  history gets through its trust. Truths are walked in the store. The floor
+  to report is named queries off.
+- **Hybrid (`hyb_*`, three tasks)** need an incident report AND the
+  directory. The question names no entity. The agent finds the report by
+  its words (`search_documents`, D-118), takes the entity it names, and
+  answers from the facts: the Kerberoasted account's status and admin
+  path, the phished user's machines, and the attacked server's delegation
+  and OS. Four reports ship with the forest (`agent_eval_flex prepare`),
+  one a deliberate near miss (Kerberos clock skew).
+- **Scorers follow D-117's lessons:** negations and back-references ("It is
+  disabled") are read, a decoy counts only where a sentence puts it forward,
+  and citations must be faithful.
+
+Not yet measured. They run with the next paid sweep, beside the eight
+audits, named queries on and off.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

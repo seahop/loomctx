@@ -5,6 +5,13 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Held-out and hybrid agent tasks (D-119, 2026-10-22)
+
+- Eight free-form `flex_*` tasks over the AD forest, worded unlike the audits,
+  and three `hyb_*` tasks that need an incident report and the directory.
+  `python -m loomctx.agent_eval_flex prepare DIR` writes the reports. Not yet
+  measured.
+
 ### Documents tied to structured data (D-118, 2026-10-22)
 
 - Documents are linked to the entities they name at ingest, with no LLM:
