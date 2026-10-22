@@ -21,6 +21,7 @@ import type {
   QueryRequest,
   SchemaRegistration,
   SemanticSearchResponse,
+  DocumentPage,
 } from "./contracts.js";
 
 export type EntityTuple = [type: string, key: string];
@@ -257,16 +258,22 @@ export class LoomCtx {
     return this.post("/v1/list", body);
   }
 
-  /** Run one of the namespace's named queries (D-108); the answer is a list page. */
+  /** Run one of the namespace's named queries (D-108); `where` and `fields` add conditions
+   *  and columns to the query's own (D-116). The answer is a list page. */
   query(
     name: string,
     params: Record<string, unknown> = {},
-    opts: { limit?: number; offset?: number; budget?: number; as_of?: string | null; valid_at?: string | null } = {},
+    opts: {
+      where?: ListFilter[]; fields?: string[]; limit?: number; offset?: number; budget?: number;
+      as_of?: string | null; valid_at?: string | null;
+    } = {},
   ): Promise<ListPage> {
     const body: QueryRequest = {
       namespace: this.namespace,
       name,
       params,
+      where: opts.where ?? [],
+      fields: opts.fields ?? [],
       limit: opts.limit ?? 50,
       offset: opts.offset ?? 0,
       budget: opts.budget ?? 1500,
@@ -301,6 +308,12 @@ export class LoomCtx {
   /** Entities related to a question by meaning (D-025); 503 until the engine has an embedder. */
   semantic(question: string, limit = 10): Promise<SemanticSearchResponse> {
     return this.get("/v1/entities/semantic", { q: question, limit });
+  }
+
+  /** Stored documents found by their words, no embedder needed (D-118): each hit has
+   *  the best passage, cited, and the entities the document names. */
+  searchDocuments(query: string, limit = 10, budget = 1500): Promise<DocumentPage> {
+    return this.post("/v1/documents/search", { namespace: this.namespace, query, limit, budget });
   }
 
   schema(): Promise<SchemaRegistration> {

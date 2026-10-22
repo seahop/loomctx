@@ -48,7 +48,8 @@ test("typescript sdk round trip", { skip: !url && "LOOMCTX_URL not set" }, async
     predicates: [{ name: "logged_in_by", object_types: ["user"] }],
   });
   assert.equal(reg.strict, false);
-  assert.equal((await loomctx.schema()).predicates[0].name, "logged_in_by");
+  // a document ingested above registered mentioned_in and title first (D-118)
+  assert.ok((await loomctx.schema()).predicates.some((p) => p.name === "logged_in_by"));
   await assert.rejects(
     loomctx.claim({ subject: ["host", "x"], predicate: "logged_in_by", object: "scalar", observed_at: OBSERVED, source: "s" }),
     (e) => e instanceof LoomCtxError && e.status === 422 && /expects an entity object/.test(e.detail),

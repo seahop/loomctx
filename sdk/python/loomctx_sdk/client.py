@@ -175,8 +175,11 @@ class LoomCtx:
         """Every entity matching conditions, with an exact count (D-107):
         entities of `type`, or connected to `of` along `via` within `depth`
         edges, filtered on current values — `where` items are
-        {"predicate", "op" (eq|ne|in|contains|exists|absent), "value"}.
-        Rows are cited; page with `offset` / the response's `next_offset`."""
+        {"predicate", "op" (eq|ne|in|contains|exists|absent|within|not_within),
+        "value"}; a within filter may walk several edge predicates at once
+        ({"predicate": "has_ace,member_of", "op": "within", "value":
+        "computer:<key>"}). Rows are cited; page with `offset` / the
+        response's `next_offset`."""
         return self._post(
             "/v1/list",
             {
@@ -200,6 +203,8 @@ class LoomCtx:
         self,
         name: str,
         params: dict | None = None,
+        where: list[dict] | None = None,
+        fields: list[str] | None = None,
         limit: int = 50,
         offset: int = 0,
         budget: int = 1500,
@@ -207,13 +212,17 @@ class LoomCtx:
         valid_at: str | None = None,
     ) -> dict:
         """Run one of the namespace's named queries (D-108) — listed by its
-        schema registration — with `params`; the answer is a list page."""
+        schema registration — with `params`; `where` and `fields` add
+        conditions and columns to the query's own (D-116). The answer is a
+        list page."""
         return self._post(
             "/v1/query",
             {
                 "namespace": self.namespace,
                 "name": name,
                 "params": params or {},
+                "where": where or [],
+                "fields": fields or [],
                 "limit": limit,
                 "offset": offset,
                 "budget": budget,
@@ -221,6 +230,13 @@ class LoomCtx:
                 "valid_at": valid_at,
             },
         )
+
+    def search_documents(self, query: str, limit: int = 10, budget: int = 1500) -> dict:
+        """Stored documents (incident reports, advisories) found by their
+        words, no embedder needed (D-118): each hit has the best passage,
+        cited, and the entities the document names."""
+        return self._post("/v1/documents/search",
+                          {"namespace": self.namespace, "query": query, "limit": limit, "budget": budget})
 
     def path(
         self,
