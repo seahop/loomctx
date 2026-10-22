@@ -36,7 +36,7 @@ jobs:
       ENGINE: ghcr.io/${{ github.repository_owner }}/loomctx
       GATEWAY: ghcr.io/${{ github.repository_owner }}/loomctx-gateway
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         if: github.event_name == 'push'
@@ -137,7 +137,7 @@ jobs:
     # pyproject.toml [tool.ruff]. Ruff runs from its own image, pinned by digest.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: ruff check
         run: |
           docker run --rm -v "$PWD:/w:ro" -w /w \
@@ -155,7 +155,7 @@ jobs:
     # The scale shape end to end (D-045): lb -> 2 gateways -> JetStream -> consumer -> store -> engine.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: One claim through the queue and back out of the engine
         run: scripts/smoke-scale.sh
 
@@ -169,7 +169,7 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build on Python ${{ matrix.python }}
         run: docker build --build-arg PYTHON_VERSION=${{ matrix.python }} --build-arg PYTHON_DIGEST= -t loomctx-py${{ matrix.python }} .
       - name: Test on Python ${{ matrix.python }}
@@ -194,7 +194,7 @@ jobs:
     env:
       OWNER: ghcr.io/${{ github.repository_owner }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
