@@ -4010,6 +4010,19 @@ holding both.
   document says about the entities it names. A body offloaded to blob
   storage is not searched. A token naming more than two entities is too
   vague to link.
+- **Refined on the seed (same day).** The seed's incident report linked to
+  nothing: its namespace registers predicates but no entity types, and
+  `jdoe` is a plain word. A token is now looked up as every type the
+  namespace registers or carries, in batched key lookups. Plain words of
+  four letters or more that are not common words may match an entity key,
+  but never a label value. A document loaded before the entities it names
+  is linked by `python -m loomctx.mentions relink`.
+- **Mention links stay out of packs unless the question is about documents**
+  ("report", "incident", "advisory", "mentioned"…) or the scope walks
+  `mentioned_in`, and never under `valid_at`. Before this, two reports
+  naming web-01 read as a `mentioned_in` conflict, and the IP-lease answer
+  grew from 120 to 203 tokens with a September report in an August
+  question. Listings and find_path reach them when asked.
 
 ## D-119 · Held-out and hybrid agent tasks (2026-10-22)
 

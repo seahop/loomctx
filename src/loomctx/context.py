@@ -392,6 +392,26 @@ def _citation(obs: Observation) -> Citation:
     )
 
 
+def _is_mention(obs: Observation) -> bool:
+    """A document's deterministic mention link (D-118)."""
+    return bool(obs.attrs.get("mention")) or obs.source.endswith(":mentions")
+
+
+_DOCUMENT_WORDS = re.compile(r"\b(?:report|reports|document|documents|doc|docs|mention\w*|named in|names it|"
+                             r"incident|incidents|advisory|advisories|ticket|tickets|write-?ups?|notes|memo|"
+                             r"article|articles|wiki|runbook|case|cases)\b", re.I)
+
+
+def _wants_documents(req: AskRequest) -> bool:
+    """Whether a pack may carry mention links: the question asks about
+    documents, or the scope walks `mentioned_in` on purpose — and the read is
+    not pinned to a moment in the world (`valid_at`), which a document's
+    mention does not describe."""
+    if req.scope is not None and "mentioned_in" in (req.scope.expand or []):
+        return True
+    return req.valid_at is None and bool(req.question and _DOCUMENT_WORDS.search(req.question))
+
+
 def _is_extracted(obs: Observation) -> bool:
     """LLM-mined from a document (D-018) rather than asserted by a sender.
     Such claims are data that came *through* an untrusted text, so they
@@ -2000,6 +2020,13 @@ def _build_pack(
 ) -> ContextPack:
     (req, subjects, paths, truncated, gathered, examined, core, widened,
      observations) = _walk_and_gather(store, req, allowed_types)
+    if not _wants_documents(req):
+        # a document's mention links (D-118) are a way to the report, not a fact
+        # about the world: they ride only when the question is about documents.
+        # Two reports naming web-01 read as a runs-of-mentioned_in conflict, and
+        # a September report sat in "who held the IP on 20 August"
+        observations = [o for o in observations if not _is_mention(o)]
+        core = [o for o in core if not _is_mention(o)] if isinstance(core, list) else core
     asked = list(req.scope.subjects) if req.scope is not None else [req.subject]
     topic = (scope_topic(store, req.namespace, req.scope, req.question, observations)
              if req.scope is not None else frozenset())

@@ -329,7 +329,8 @@ curl -s -X POST localhost:8000/v1/ingest -H 'content-type: application/json' -d 
   "observed_at": "2026-09-02T09:00:00Z",
   "text": "Incident IR-4432. On 1 September an attacker used a reused SSH key to log in to web-01 and moved laterally to db-01 over port 5432. web-01 was rebuilt on 3 September; db-01 credentials were rotated."
 }'
-# {"status":"accepted","artifact_id":"23f9beda…","extraction":"pending"}
+# {"status":"accepted","artifact_id":"23f9beda…","extraction":"pending","mentions":0}
+# 0: nothing it names is loaded in "ir" yet; `python -m loomctx.mentions relink` links it later
 ```
 
 The envelope is `DocumentIn`: exactly one of `text` (up to 1,000,000
@@ -339,7 +340,30 @@ verbatim and answers `202`; `GET /v1/artifacts/{id}` returns it. Only
 `text` is ever mined or searched: a PDF sent as `content_b64` is kept but
 never read, so convert it to text first.
 
-A stored document connects to entities in three ways.
+A stored document connects to entities in four ways.
+
+**It is linked to the entities it names (automatic; no LLM, no embedder).**
+At ingest the engine looks up the document's identifier-like tokens
+(logins, hostnames, CVE ids, IPs, group names) as entity keys and label
+values, and records one cited fact per entity found:
+`host:web-01 mentioned_in document:<artifact id>`, its provenance the span
+where the report first names it. `mentions` in the response counts them.
+The document also gets a `title` (its `attrs.title`, else its first line),
+which `find_entity` matches. So a pack about web-01 carries "named in
+IR-4432", and `list_entities(of="document:<id>", via="mentioned_in")`
+lists everything the report names (D-118). Linking happens when the
+document arrives: if you load the report before the entities it names,
+run `python -m loomctx.mentions relink` once they are in.
+
+To find a report by what it says, use `search_documents` (MCP) or
+`POST /v1/documents/search`. It needs no embedder. Each hit has the
+report's title, the passage that matched best (cited to its span) and the
+entities it names, as handles to ask about:
+
+```bash
+curl -s -X POST localhost:8000/v1/documents/search -H 'content-type: application/json' \
+  -d '{"namespace": "ir", "query": "reused SSH key"}'
+```
 
 **You cite it from claims (no LLM, no embedder).** A claim's
 `provenance.artifact_event_id` names the document by its `event_id`; the
@@ -395,6 +419,7 @@ lists the variables).
 | You want | Needs |
 | --- | --- |
 | The document stored and readable (`GET /v1/artifacts/{id}`) | nothing |
+| Linked to the entities it names; found by its words (`search_documents`) | nothing |
 | Facts that cite it (`provenance.artifact_event_id`) | nothing |
 | Claims mined from the text, with spans | `LOOMCTX_LLM_*` on the worker |
 | `doc_excerpt` items in packs, `find_related` over passages | `LOOMCTX_EMBED_*` on the worker and the engine |

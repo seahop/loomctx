@@ -124,6 +124,18 @@ def test_mcp_and_http_surfaces(store, tmp_path, monkeypatch):
         mcp_server.configure(None)
 
 
+def test_a_document_ingested_before_its_entities_is_linked_on_relink(store):
+    from loomctx.mentions import relink
+    art, n = _ingest(store, "IR-2026-040: new-host-07 beaconed out on 20 September.", "ir-040")
+    assert n == 0                                        # new-host-07 is not loaded yet
+    store.record_claim(ClaimIn(namespace=NS, subject=EntityRef(type="computer", key="S-1-5-21-1-99999"),
+                               predicate="name", object="new-host-07", observed_at=T1, source="ldap"))
+    docs, links = relink(store, NS)
+    assert docs >= 1 and links >= 1
+    rows = store.lite_rows(NS, [EntityRef(type="document", key=art.id)], ["mentioned_in"], side="object")
+    assert {r.subject for r in rows} == {("computer", "S-1-5-21-1-99999")}
+
+
 def test_query_terms():
     assert terms_of('the "TGS requests" for svc-sqladm in a report') == ["tgs requests", "svc-sqladm"]
     assert terms_of("an of to") == []
@@ -147,3 +159,14 @@ def test_http_ingest_links_and_searches(tmp_path, monkeypatch):
         assert r.status_code == 200
         hit = r.json()["hits"][0]
         assert hit["title"] == "IR-2026-029: phishing" and hit["mentions"] == [{"type": "user", "key": JDOE.key}]
+
+
+def test_mentions_are_never_a_conflict_and_ride_only_for_document_questions(store):
+    _ingest(store, IR_KERB, "ir-031")
+    _ingest(store, IR_KERB.replace("IR-2026-031", "IR-2026-032"), "ir-032")    # a second report names svc-sqladm
+    pack = build_pack(store, AskRequest(namespace=NS, subject=SVC, question="which reports name this account?",
+                                        budget=1500))
+    assert sum("mentioned_in" in i.text for i in pack.items) == 2
+    assert not any(i.kind == "conflict" for i in pack.items)          # two reports are a set, not a disagreement
+    plain = build_pack(store, AskRequest(namespace=NS, subject=SVC, question="is it enabled?", budget=1500))
+    assert not any("mentioned_in" in i.text for i in plain.items)

@@ -46,25 +46,40 @@ _MAX_MATCHES = 2              # a token naming more entities than this is too va
 _TOKEN = re.compile(r"(?<![\w@$.-])[A-Za-z0-9][A-Za-z0-9._@$-]*[A-Za-z0-9$](?![\w@$-])")
 # capitalised names of two or three words (Domain Admins, Enterprise Key Admins)
 _PHRASE = re.compile(r"\b[A-Z][\w-]*(?:\s+[A-Z][\w-]*){1,2}\b")
-_PLAIN_WORD = re.compile(r"^[A-Za-z][a-z]+$")
 
 
-def _candidates(text: str) -> list[tuple[str, int]]:
-    """(token, first offset), in order of first appearance: tokens that look
-    like identifiers — a digit or inner punctuation, or all capitals — and
-    capitalised phrases. A plain word ("server", "Monday") is never one."""
-    seen: dict[str, int] = {}
+# common words that are never treated as names, even when an entity happens
+# to be keyed by one (a host called "server", a group called "users")
+_COMMON = frozenset("""about above access account accounts admin after again against alert alerts also analyst
+because been before being below between both cause change changes could credential credentials daily data
+during each email entered event events every failed first found from further have having here host hosts
+into itself just last later like login logins made many more most never next night none other outbound over
+password passwords pending report reports review rotated same scan server servers service should since some
+still such than that their them then there these they this those through time today under until user users
+very were what when where which while with within without would year""".split())
+
+
+def _candidates(text: str) -> list[tuple[str, int, bool]]:
+    """(token, first offset, plain), in order of first appearance: tokens that
+    look like identifiers — a digit or inner punctuation, or all capitals —
+    capitalised phrases, and plain words of four or more letters that are not
+    common words (`plain`: matched to entity keys only, never to label
+    values, so "Monday" cannot name an account by its display name)."""
+    seen: dict[str, tuple[int, bool]] = {}
     for m in _TOKEN.finditer(text):
         t = m.group(0)
         if len(t) < 3 or t in seen:
             continue
         if any(c.isdigit() for c in t) or any(c in t for c in "._-@$") or (t.isupper() and len(t) >= 3):
-            seen[t] = m.start()
+            seen[t] = (m.start(), False)
+        elif len(t) >= 4 and t.isalpha() and t.lower() not in _COMMON:
+            seen[t] = (m.start(), True)
     for m in _PHRASE.finditer(text):
         t = m.group(0)
         if t not in seen:
-            seen[t] = m.start()
-    return sorted(seen.items(), key=lambda kv: kv[1])[:_MAX_CANDIDATES]
+            seen[t] = (m.start(), False)
+    ranked = sorted(seen.items(), key=lambda kv: (kv[1][1], kv[1][0]))[:_MAX_CANDIDATES]   # identifiers first
+    return sorted(((t, o, plain) for t, (o, plain) in ranked), key=lambda x: x[1])
 
 
 def _title(artifact: Artifact, text: str) -> str:
@@ -114,31 +129,46 @@ def link_mentions(store: GraphStore, artifact: Artifact, text: str | None = None
     body = body[:_MAX_SCAN_CHARS]
     ns = artifact.namespace
     schema = _ensure_schema(store, ns)
-    types = [t.name for t in schema.entity_types if t.name != DOCUMENT]
+    # the types to look a token up as: registered, and any the data carries
+    # (a namespace may register predicates only)
+    types = list(dict.fromkeys([t.name for t in schema.entity_types]
+                               + [row[0] for row in store.relation_summary(ns)]
+                               + [row[2] for row in store.relation_summary(ns) if row[2]]))
+    types = [t for t in types if t != DOCUMENT]
     labels = [p for p in label_predicates(store, ns) if p != TITLE]
-    found: dict[tuple[str, str], int] = {}      # entity -> offset of the first mention
-    for token, offset in _candidates(body):
-        hits: set[tuple[str, str]] = set()
-        if types:
-            got = store.resolve_refs(ns, [EntityRef(type=t, key=token) for t in types])
-            hits |= {(r.type, r.key) for r in got.values() if r is not None}
-        if not hits and not _PLAIN_WORD.match(token):
-            for p in labels:
-                for variant in dict.fromkeys([token, token.lower()]):
-                    for r in store.subjects_with_value(ns, p, json.dumps(variant), _MAX_MATCHES + 1, None):
-                        hits.add((r.type, r.key))
+    cands = _candidates(body)
+    # entity keys: every candidate as every type, in a few batched lookups
+    by_token: dict[str, set[tuple[str, str]]] = {t: set() for t, _, _ in cands}
+    refs = [EntityRef(type=ty, key=tok) for tok, _, _ in cands for ty in types]
+    for i in range(0, len(refs), 500):
+        got = store.resolve_refs(ns, refs[i:i + 500])
+        for asked in refs[i:i + 500]:
+            r = got.get((asked.type, asked.key))
+            if r is not None:
+                by_token[asked.key].add((r.type, r.key))
+    # label values (a login, a cn, a UPN) for identifier-like tokens and phrases
+    for tok, _, plain in cands:
+        if by_token[tok] or plain:
+            continue
+        for p in labels:
+            for variant in dict.fromkeys([tok, tok.lower()]):
+                for r in store.subjects_with_value(ns, p, json.dumps(variant), _MAX_MATCHES + 1, None):
+                    by_token[tok].add((r.type, r.key))
+    found: dict[tuple[str, str], tuple[int, str]] = {}      # entity -> (first offset, token)
+    for tok, offset, _ in cands:
+        hits = by_token[tok]
         if 0 < len(hits) <= _MAX_MATCHES:
             for h in hits:
-                found.setdefault(h, offset)
+                if h not in found or offset < found[h][0]:
+                    found[h] = (offset, tok)
     doc = EntityRef(type=DOCUMENT, key=artifact.id)
     observed: datetime = artifact.observed_at
     source = f"{artifact.source}{SOURCE_SUFFIX}"
     claims = [ClaimIn(namespace=ns, event_id=f"doctitle:{artifact.id}", subject=doc, predicate=TITLE,
                       object=_title(artifact, body), observed_at=observed, source=source)]
-    for (t, k), offset in found.items():
+    for (t, k), (offset, token) in found.items():
         if (t, k) == (DOCUMENT, artifact.id):
             continue
-        token = next((c for c, o in _candidates(body) if o == offset), "")
         digest = hashlib.sha1(f"{artifact.id}|{t}|{k}".encode()).hexdigest()[:32]
         claims.append(ClaimIn(
             namespace=ns, event_id=f"mention:{digest}", subject=EntityRef(type=t, key=k),
@@ -166,3 +196,38 @@ def link_quietly(store: GraphStore, artifact: Artifact, text: str | None = None)
     except Exception:   # noqa: BLE001 — linking is an enrichment, not part of the write
         log.exception("document %s: mention linking failed", artifact.id)
         return 0
+
+
+def relink(store: GraphStore, namespace: str | None = None) -> tuple[int, int]:
+    """Link every stored document again (idempotent): a document ingested
+    before the entities it names gains its links once they are loaded.
+    Returns (documents, links)."""
+    docs = links = 0
+    for artifact in store.iter_artifacts(namespace):
+        if artifact.text:
+            docs += 1
+            links += link_mentions(store, artifact)
+    return docs, links
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    from .store.factory import store_from_env, store_from_url
+    parser = argparse.ArgumentParser(prog="loomctx.mentions", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    cmd = sub.add_parser("relink", help="link every stored document to the entities it names, again")
+    cmd.add_argument("--namespace", help="only this namespace (default: all)")
+    cmd.add_argument("--db", help="store URL/path (default: LOOMCTX_DB)")
+    args = parser.parse_args(argv)
+    store = store_from_url(args.db) if args.db else store_from_env()
+    try:
+        docs, links = relink(store, args.namespace)
+    finally:
+        store.close()
+    print(f"relinked {docs} document(s): {links} mention link(s)")
+
+
+if __name__ == "__main__":
+    main()
