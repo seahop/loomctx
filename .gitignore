@@ -9,6 +9,8 @@ __pycache__/
 .pytest_cache/
 dist/
 node_modules/
+# the TypeScript SDK tarball `npm pack` writes (sdk/typescript/README.md)
+/sdk/typescript/*.tgz
 *.egg-info/
 # contracts/schemas.json is TRACKED (the language-neutral contract the Go
 # gateway builds against; CI checks it stays in sync) — only ignore stray

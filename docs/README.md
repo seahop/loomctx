@@ -8,6 +8,18 @@ Read in this order depending on why you're here.
 2. **[tutorial.md](tutorial.md)** — 30 minutes: build your *own* security
    domain (vulnerability management) from an empty store, end to end, and
    connect an agent. Runnable scripts in [`../examples/`](../examples/).
+3. **[bring-your-own-data.md](bring-your-own-data.md)** — your own exports:
+   which connector matches what you export, the load commands (LDIF, nmap,
+   KEV/NVD/EPSS), checking what landed and what was not collected, a
+   custom domain with aliases and `not_collected` through the Python SDK,
+   and documents (what needs an LLM or an embedder).
+4. **[mcp-clients.md](mcp-clients.md)** — connecting agents: Claude Code,
+   Claude Desktop, Cursor, VS Code / Copilot and a generic config; stdio
+   and streamable HTTP with the API-key header; the
+   `LOOMCTX_MCP_WRITES` / `LOOMCTX_MCP_QUERIES` switches.
+5. **[recipes.md](recipes.md)** — one worked question per team (red team,
+   blue team / IR, vulnerability management, identity governance), each as
+   MCP tool calls and the equivalent HTTP request.
 
 ## Using it
 - **[sdk.md](sdk.md)** — the surfaces: MCP for agents, HTTP (single and batch
@@ -50,6 +62,10 @@ Read in this order depending on why you're here.
   senders, rotation, retention, the bearer security model, monitoring.
 - **[../deploy/README.md](../deploy/README.md)** — local Compose and the three
   Kubernetes shapes; what autoscales.
+- **[releasing.md](releasing.md)** — the maintainer checklist: version
+  tags for the images, and how the Python, TypeScript and Go SDKs would be
+  published (PyPI trusted publishing, npm with provenance, `sdk/go/v*`
+  tags).
 
 ## Understanding it
 - **[architecture.md](architecture.md)** — the write/read split, the pipeline,

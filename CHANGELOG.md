@@ -5,6 +5,22 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Adoption docs and SDK packaging (2026-10-22)
+
+- New guides: `docs/bring-your-own-data.md` (connectors, load commands,
+  coverage checks, a custom domain through the Python SDK, documents and
+  what they need), `docs/mcp-clients.md` (Claude Code, Claude Desktop,
+  Cursor, VS Code, generic stdio and streamable HTTP with the key header)
+  and `docs/recipes.md` (one question per team, as MCP calls and HTTP).
+- Python SDK: `register_schema` takes `queries` and `not_collected`, so
+  the whole registration (aliases, named queries, not-collected topics
+  with `mistaken_for`) goes through the SDK.
+- `LOOMCTX_MCP_WRITES` and `LOOMCTX_MCP_QUERIES` are passed through
+  compose to the stdio and `mcp` services, so `.env` can set them.
+- SDK packaging metadata (license files, URLs, keywords, classifiers) and
+  Install sections; none is published yet. `docs/releasing.md` is the
+  maintainer checklist for PyPI, npm and `sdk/go/v*` tags.
+
 ### AD scorer fixes and re-score (D-117, 2026-10-22)
 
 - The access and local-admin scorers read negations ("non-DA", "didn't",
