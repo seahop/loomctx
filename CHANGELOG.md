@@ -5,6 +5,16 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### Fixes (2026-10-22)
+
+- Text `where` conditions: a `within` value may be a name with spaces
+  (`member_of within group:Domain Admins`, quoted or not), and conditions
+  written before a `within` with commas (`enabled=true, member_of within …`)
+  are their own conditions; only the bare names are the walk's predicates.
+- The retrieval scorecard's `vector`/`recency` baselines leave out mention
+  links on the same terms as packs (D-118).
+- Gateway and Go SDK images build on Go 1.27.3 (GO-2026-6809, crypto/x509).
+
 ### Adoption docs and SDK packaging (2026-10-22)
 
 - New guides: `docs/bring-your-own-data.md` (connectors, load commands,

@@ -673,13 +673,16 @@ def candidate_observations(store, q: Question) -> list[Observation]:
     """Everything about the question's entities: the subject, or every
     entity the scope reaches, uncapped (no time axis applied — the
     baselines get the whole history and must read the dates themselves).
-    Newest first."""
+    Mention links stay out on the product's terms (D-118). Newest first."""
     refs = walk_scope(store, q.namespace, q.scope) if q.scope is not None else [q.subject]
     got = store.observations_for_many(q.namespace, refs, limit=_GATHER_ALL)
+    mentions = _context._wants_documents(q.ask(400))
     seen: set[str] = set()
     out: list[Observation] = []
     for ref in refs:
         for o in got.get((ref.type, ref.key), []):
+            if not mentions and _context._is_mention(o):
+                continue
             if o.id not in seen:
                 seen.add(o.id)
                 out.append(o)

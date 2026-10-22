@@ -106,6 +106,14 @@ def test_text_conditions_split_on_any_and_and_combined_within(store):
     f = mcp_server._filters("member_of within group:da AND has_ace, member_of within computer:ws-1")
     assert [(x.predicate, x.op, x.value) for x in f] == [
         ("member_of", "within", "group:da"), ("has_ace,member_of", "within", "computer:ws-1")]
+    # conditions before a within, comma-separated: only the bare names are its predicates
+    f = mcp_server._filters("kerberoastable=true, enabled=true, has_ace, member_of within group:da")
+    assert [(x.predicate, x.op) for x in f] == [("kerberoastable", "eq"), ("enabled", "eq"),
+                                                ("has_ace,member_of", "within")]
+    # a name with spaces as the within value, quoted or not, with a depth
+    for text in ("member_of within group:Domain Admins", "member_of within 'group:Domain Admins' depth 3"):
+        (w,) = mcp_server._filters(text)
+        assert (w.op, w.value) == ("within", "group:Domain Admins"), text
     # inside a list item too, and with && — an uppercase AND was read as part of the value
     f = mcp_server._filters(["enabled=true AND kerberoastable=true", "spn? && !os"])
     assert [(x.predicate, x.op) for x in f] == [("enabled", "eq"), ("kerberoastable", "eq"),

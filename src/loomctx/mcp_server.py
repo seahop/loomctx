@@ -1157,8 +1157,9 @@ def find_path(
 _FILTER_TEXT = re.compile(r"^\s*(!)?\s*([A-Za-z_][\w.-]*)\s*(?:(!=|~=|=)\s*(.*?)|(\?))?\s*$")
 
 
+# the value may be a name with spaces ("group:Domain Admins"), quoted or not
 _WITHIN_TEXT = re.compile(r"^\s*([A-Za-z_][\w.-]*(?:\s*,\s*[A-Za-z_][\w.-]*)*)\s+(not\s+within|within)\s+"
-                          r"(\S+?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
+                          r"(\"[^\"]+\"|'[^']+'|\S.*?)(?:\s+depth\s*=?\s*(\d+))?\s*$",
                           re.I)
 
 
@@ -1170,8 +1171,20 @@ def _split_conditions(text: str) -> list[str]:
     a separator, nor is one between the predicates of a within filter."""
     out: list[str] = []
     for piece in re.split(r"\s*(?:;|&&|\band\b)\s*", text.strip(), flags=re.I):
-        if _WITHIN_TEXT.match(piece):
-            out.append(piece)
+        kw = re.search(r"\s(?:not\s+)?within\s", piece, re.I)
+        if kw:
+            # the predicates before `within` may be a comma list; after its
+            # value, a comma starts another condition only where one begins
+            head, tail = piece[:kw.start()], piece[kw.start():]
+            names = re.split(r"\s*,\s*", head)
+            start = len(names) - 1
+            while start > 0 and re.fullmatch(r"[A-Za-z_][\w.-]*", names[start - 1]):
+                start -= 1
+            out += _split_conditions(", ".join(names[:start])) if start else []
+            rest = re.split(r"\s*,\s*(?=!?[A-Za-z_][\w.-]*\s*(?:!=|~=|=|\?|$|\s+(?:not\s+)?within\s))",
+                            tail[len(kw.group(0)):])
+            out.append(", ".join(names[start:]) + kw.group(0) + rest[0])
+            out += _split_conditions(", ".join(rest[1:])) if len(rest) > 1 else []
             continue
         parts = [p for p in re.split(r"\s*,\s*", piece) if p]
         out += parts if len(parts) > 1 and all(p.count("=") <= 1 for p in parts) else [piece]
