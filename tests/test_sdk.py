@@ -76,6 +76,32 @@ def test_sdk_round_trip_with_awkward_keys(engine_url):
     assert loomctx.artifact(doc["artifact_id"])["text"] == "report body"
 
 
+def test_sdk_registers_aliases_and_not_collected(engine_url):
+    """register_schema carries the whole registration: aliases on types and
+    predicates (D-116), named queries (D-108), and not_collected with
+    mistaken_for (D-110, D-116); omitted ones leave the registry alone."""
+    loomctx = LoomCtx(engine_url, api_key="writer")
+    reg = loomctx.register_schema(
+        entity_types=[{"name": "asset", "aliases": ["host", "machine"]}],
+        predicates=[{"name": "runs_os", "aliases": ["operating_system"]},
+                    {"name": "has_ace", "description": "a DACL grant"}],
+        queries=[{"name": "linux_assets", "description": "assets on Linux",
+                  "request": {"type": "asset", "where": [
+                      {"predicate": "runs_os", "op": "contains", "value": "linux"}]}}],
+        not_collected=[{"topic": "local_groups", "description": "local group membership",
+                        "words": ["local admin"], "mistaken_for": ["has_ace"]}])
+    assert reg["entity_types"][0]["aliases"] == ["host", "machine"]
+    assert [q["name"] for q in reg["queries"]] == ["linux_assets"]
+    assert reg["not_collected"][0]["mistaken_for"] == ["has_ace"]
+    again = loomctx.register_schema(entity_types=[], predicates=[{"name": "patched_for"}])
+    assert [q["name"] for q in again["queries"]] == ["linux_assets"]
+    assert again["not_collected"][0]["topic"] == "local_groups"
+    loomctx.claim(("asset", "web-01"), "runs_os", "Ubuntu Linux 22.04",
+                  observed_at=OBSERVED, source="inventory")
+    page = loomctx.run_query("linux_assets")
+    assert [r["entity"]["key"] for r in page["rows"]] == ["web-01"]
+
+
 def test_sdk_surfaces_server_errors(engine_url):
     reader = LoomCtx(engine_url, api_key="reader")
     with pytest.raises(LoomCtxError) as exc:

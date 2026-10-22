@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,11 +8,36 @@ version = "0.2.0"
 description = "Thin, stdlib-only Python client for the LoomCtx context engine"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "seahop" }]
+keywords = ["loomctx", "agents", "context", "mcp", "provenance", "security", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/seahop/loomctx"
+Homepage = "https://loomctx.dev"
+Repository = "https://github.com/seahop/loomctx"
+Documentation = "https://github.com/seahop/loomctx/blob/main/docs/sdk.md"
+Issues = "https://github.com/seahop/loomctx/issues"
+Changelog = "https://github.com/seahop/loomctx/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["loomctx_sdk"]
+
+[tool.hatch.build.targets.sdist]
+include = ["loomctx_sdk", "README.md", "LICENSE", "NOTICE"]

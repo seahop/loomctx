@@ -63,6 +63,9 @@ services:
       # loomctx.mcp_server`), `loomctx.agent_eval` and `loomctx.enrich resolve` all run
       # from THIS service via run/exec, so their dials ride along here.
       LOOMCTX_MCP_NAMESPACE: ${LOOMCTX_MCP_NAMESPACE:-}
+      # record_claim / run_query on the MCP surface; 0 hides the tool (docs/mcp-clients.md)
+      LOOMCTX_MCP_WRITES: ${LOOMCTX_MCP_WRITES:-}
+      LOOMCTX_MCP_QUERIES: ${LOOMCTX_MCP_QUERIES:-}
       LOOMCTX_AGENT_MODEL: ${LOOMCTX_AGENT_MODEL:-}
       LOOMCTX_AGENT_MAX_STEPS: ${LOOMCTX_AGENT_MAX_STEPS:-}
       LOOMCTX_ALIAS_TYPES: ${LOOMCTX_ALIAS_TYPES:-}
@@ -276,6 +279,9 @@ services:
     environment:
       LOOMCTX_DB: ${LOOMCTX_DB:-/data/loomctx.db}
       LOOMCTX_MCP_NAMESPACE: ${LOOMCTX_MCP_NAMESPACE:-}
+      # record_claim / run_query on the MCP surface; 0 hides the tool (docs/mcp-clients.md)
+      LOOMCTX_MCP_WRITES: ${LOOMCTX_MCP_WRITES:-}
+      LOOMCTX_MCP_QUERIES: ${LOOMCTX_MCP_QUERIES:-}
       LOOMCTX_LLM_MODEL: ${LOOMCTX_LLM_MODEL:-}
       LOOMCTX_LLM_PROVIDER: ${LOOMCTX_LLM_PROVIDER:-}
       LOOMCTX_LLM_BASE_URL: ${LOOMCTX_LLM_BASE_URL:-}
