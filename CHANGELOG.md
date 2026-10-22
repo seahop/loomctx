@@ -5,6 +5,16 @@ change to them is recorded in `docs/decisions.md` (D-numbers below).
 
 ## Unreleased
 
+### AD scorer fixes and re-score (D-117, 2026-10-22)
+
+- The access and local-admin scorers read negations ("non-DA", "didn't",
+  "**not**", "doesn't mean nobody is a local admin"). An admin counts only
+  where a sentence puts it forward. Provider blanks (zero output tokens)
+  are not run. Re-scored from saved runs: 500k standard 92%, harder 81%;
+  10k standard 93%, harder 82%. The Postgres access, local-admin and
+  delegation cells are flagged as not clean (agent-written claims on the
+  shared database).
+
 ### Flexible asks (D-115, D-116, 2026-10-22)
 
 - `find_path` follows one account through two groups: an admin through

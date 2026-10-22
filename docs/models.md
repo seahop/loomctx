@@ -261,10 +261,10 @@ on 2026-09-28.
 
 | Condition | Standard 5 | Perfect on the 5 (25/25) | Median audit (5) | Harder 3 | All 8 |
 | --- | --- | --- | --- | --- | --- |
-| 500k, named queries on | 795/860 (92%) | 24 | 23 s | 412/511 (81%) | 1207/1371 (88%) |
-| 10k, named queries on | 794/857 (93%) | 18 | 21 s | 413/513 (81%) | 1207/1370 (88%) |
-| 500k, named queries off | 770/855 (90%) | 16 | 27 s | 395/513 (77%) | 1165/1368 (85%) |
-| 10k, named queries off | 772/856 (90%) | 20 | 23 s | 390/510 (76%) | 1162/1366 (85%) |
+| 500k, named queries on | 795/860 (92%) | 24 | 23 s | 411/506 (81%) | 1206/1366 (88%) |
+| 10k, named queries on | 794/857 (93%) | 18 | 21 s | 414/506 (82%) | 1208/1363 (89%) |
+| 500k, named queries off | 770/855 (90%) | 16 | 27 s | 396/503 (79%) | 1166/1358 (86%) |
+| 10k, named queries off | 772/856 (90%) | 20 | 23 s | 391/501 (78%) | 1163/1357 (86%) |
 
 Perfect counts are complete runs only (`mistral-large` passed every run it
 got, 10 of 25). The whole sweep, all four conditions and all eight audits,
@@ -326,20 +326,29 @@ shape) against SQLite (a private copy per agent), one build, every model x5:
 
 | Condition | Standard 5 | Harder 3 | Median audit |
 | --- | --- | --- | --- |
-| Postgres, named queries on | 777/854 (91%) | 408/508 (80%) | 21 s |
-| SQLite, named queries on | 787/860 (92%) | 401/515 (78%) | 20 s |
-| Postgres, named queries off | 774/854 (91%) | 404/511 (79%) | 23 s |
-| SQLite, named queries off | 756/845 (89%) | 387/501 (77%) | 25 s |
+| Postgres, named queries on | 777/854 (91%) | 411/500 (82%) ¹ | 21 s |
+| SQLite, named queries on | 787/860 (92%) | 405/510 (79%) | 20 s |
+| Postgres, named queries off | 774/854 (91%) | 408/502 (81%) ¹ | 23 s |
+| SQLite, named queries off | 756/845 (89%) | 387/491 (79%) | 25 s |
 
 The backends return the same totals and listings (the model-free replay of
 643 recorded calls agreed on every one); per-audit differences go both ways
 (cross-domain admins 85% Postgres / 93% SQLite with named queries on;
-access 77% / 72%; local admin 84% / 78%) and sit in a few temperature-0
+access 78% / 73%; local admin 85% / 80%) and sit in a few temperature-0
 models that flip all five runs together. Their inputs differ only in what
 is arbitrary per store, observation ids and the tie-breaks that use them,
 so this is store-to-store variance, not Postgres. Full report and method:
 `docs/performance.md`; the cross-domain and Kerberoastable cells are a
 re-run on the build with the D-112 naming fix, both backends.
+
+¹ Not clean, read by hand on 2026-10-22: the Postgres database was shared
+with writes on, and two agents saved findings with `record_claim` (an
+access answer and a delegation count). Later runs on that database cited
+them: 22 access, 57 local-admin and about 88 delegation answers. The
+access, local-admin and delegation Postgres cells (delegation is one of the
+standard five) are therefore not a clean comparison. Scorecards now run with
+writes off (`LOOMCTX_MCP_WRITES=0`), and those cells will be re-run on a
+fresh copy. All AD figures here are re-scored under D-114 and D-117.
 
 **What the misses are.** On the first five, as before: a set stopped short
 (an admin or a nested group missed, the disabled account not flagged), and

@@ -3937,6 +3937,40 @@ specific to an audit question.
 - **Connectors ship aliases:** LDAP (types and every predicate with an LDAP
   attribute name), the vulnerability feeds, nmap, Entra and Okta.
 
+## D-117 · AD scorer misreadings fixed, provider blanks are not run, Postgres cells flagged (2026-10-22)
+
+A by-hand read of about 25 failing answers per harder audit found the
+scorer misjudging in both directions.
+
+- **Access: negations read.** "jdoe-ops (non-DA)", "I didn't find it among
+  the Domain Admins" and "is **not** a Domain Admin" rule the operator out.
+  Emphasis is stripped first, keeping `*` bullets so list items keep their
+  lead-ins. 8 runs were failed for a correct answer.
+- **Access: an admin counts only where a sentence puts it forward.** Naming
+  adm-rlopez to call it a "Non-Domain Admin", or to say it "holds no rights
+  through CORP-WS-Operators", is no finding. "No direct ACE" is not "no
+  rights". 4 runs passed that way and now fail. The other 3 suspected
+  passes are correct on rereading.
+- **Local admin: negated and conditional sentences are not claims.**
+  "Doesn't mean nobody is a local admin", "neither … is a local admin",
+  "GenericAll is a path to local admin". 9 runs were failed, all model
+  answers that name the gap and the has_ace caveat exactly.
+- **A provider's blank is not run, not a fail.** A run that ends on an empty
+  completion twice with zero output tokens (claude-fable-5.1 and
+  claude-opus-5.5 on the Kerberoast prompt: 94 runs across both sweeps, no
+  tool call made) is marked infra. `run_task` does the same from now on.
+- **D-114 applies to the AD audits** when every unseen example is a piece of a
+  UUID the answer quotes.
+
+Re-scored from saved transcripts, model-free; every flip was read. 500k,
+named queries on: standard five 92% (unchanged), harder three 81% (411/506;
+was 412/511). 10k: 93%, harder 82% (was 81%). The Postgres harder cells
+move up about two points, but the Postgres access, local-admin and
+delegation cells ran on a shared database where two agents had saved
+findings (`record_claim`) that later runs cited. They are flagged as not
+clean in `docs/models.md` and on the site, to be re-run on a fresh copy
+with writes off.
+
 ## Open questions (decide when the use case firms up)
 
 - **OQ-1:** ~~Real-time requirements on ingestion → do we need a queue sooner?~~

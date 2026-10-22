@@ -622,6 +622,12 @@ async def run_task(session, provider: Provider, task: Task, store,
                     result.answer = ""
                     result.error = (f"output cap ({AGENT_MAX_TOKENS} tokens) reached before an answer"
                                     if turn.stop in ("length", "max_tokens") else "empty completion twice")
+                    if turn.stop not in ("length", "max_tokens") and not turn.usage.get("out"):
+                        # zero output tokens, twice, at the same step: the provider
+                        # returned nothing (claude-fable-5.1 failed 20 of 20 Kerberoast
+                        # runs this way at step 2) — not run, never a model's fail (D-117)
+                        result.infra = True
+                        result.error = "provider returned an empty completion (0 output tokens) twice"
                     break
                 result.answer = turn.text
                 break

@@ -501,6 +501,13 @@ def test_an_empty_reply_twice_is_an_error_not_an_empty_answer(seeded_db):
     r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=capped)[0]
     assert r.error == f"output cap ({ae.AGENT_MAX_TOKENS} tokens) reached before an answer"
 
+    # nothing at all, twice — zero output tokens: the provider returned nothing,
+    # so the run is not run, not the model's fail (D-117)
+    def blank(provider, system, messages, tools):
+        return ae.Turn("", [], {"role": "assistant", "content": ""}, {"in": 10, "out": 0}, "stop")
+    r = ae.evaluate(seeded_db, ["lease"], model="fake", caller=blank)[0]
+    assert r.infra and "0 output tokens" in r.error
+
 
 def test_openai_path_leaves_room_for_reasoning_and_reads_why_the_reply_ended(monkeypatch):
     """D-089: on OpenRouter a reasoning model's thinking counts against
