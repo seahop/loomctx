@@ -2,7 +2,7 @@
 # carry contracts/schemas.json — the language-neutral contract the gateway
 # validates against. `go vet`, `govulncheck` and `go test` run as part of
 # every build. Base images are pinned by digest (Dependabot bumps them).
-FROM golang:1.27-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS build
+FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
 COPY gateway/go.mod gateway/go.sum ./
 RUN go mod download
