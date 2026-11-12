@@ -49,7 +49,7 @@ jobs:
       - name: Build + push the engine candidate (push events)
         id: engine-push
         if: github.event_name == 'push'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
@@ -65,7 +65,7 @@ jobs:
           docker tag "$ENGINE@${{ steps.engine-push.outputs.digest }}" loomctx-engine:local
       - name: Build the engine image locally (pull requests)
         if: github.event_name != 'push'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true
@@ -76,7 +76,7 @@ jobs:
       - name: Build + push the gateway candidate (push events; go vet/test/govulncheck run inside)
         id: gateway-push
         if: github.event_name == 'push'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: gateway/Dockerfile
@@ -93,7 +93,7 @@ jobs:
           docker tag "$GATEWAY@${{ steps.gateway-push.outputs.digest }}" loomctx-gateway:local
       - name: Build the gateway image locally (pull requests)
         if: github.event_name != 'push'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: gateway/Dockerfile
